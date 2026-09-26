@@ -1282,3 +1282,29 @@ fn optimization_run_takes_a_proposer_profile() {
     };
     assert_eq!(args.proposer_profile.as_deref(), Some("fast"));
 }
+
+#[test]
+fn optimization_run_takes_a_proposer_timeout() {
+    let parse = |extra: &[&str]| {
+        let mut argv = vec![
+            "gents",
+            "optimization",
+            "run",
+            "quality",
+            "--subject",
+            "pipeline",
+            "--proposer",
+            "behavior:prompt_proposer",
+        ];
+        argv.extend_from_slice(extra);
+        let Command::Optimization {
+            command: OptimizationCommand::Run(args),
+        } = Cli::try_parse_from(argv).unwrap().command
+        else {
+            panic!("expected optimization run");
+        };
+        args.proposer_timeout_secs
+    };
+    assert_eq!(parse(&[]), 600);
+    assert_eq!(parse(&["--proposer-timeout-secs", "30"]), 30);
+}
