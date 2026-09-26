@@ -1664,6 +1664,7 @@ mod tests {
         let stage = StageSpec {
             stage_id: "only".to_string(),
             prompt: "hello".to_string(),
+            seed: None,
             deadline_secs: 1,
             captures: vec![
                 Capture::Documents {

@@ -115,6 +115,9 @@ pub struct FixtureFile {
 pub struct StageSpec {
     pub stage_id: String,
     pub prompt: String,
+    /// Written instead of submitting `prompt`; the stage observes the request
+    /// the pack's trigger fires for it.
+    pub seed: Option<FixtureDocument>,
     pub deadline_secs: u64,
     /// What to read out of the home when this stage ends: the stage's own
     /// captures, or the run's request-level list when the stage declares none.

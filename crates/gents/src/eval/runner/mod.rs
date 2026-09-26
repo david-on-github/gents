@@ -722,6 +722,10 @@ fn stage_specs(case: &EvalCase, fallback: &[Capture]) -> Vec<StageSpec> {
         .map(|stage| StageSpec {
             stage_id: stage.stage_id.clone(),
             prompt: stage.prompt.clone(),
+            seed: stage.seed.as_ref().map(|seed| FixtureDocument {
+                collection: seed.collection.clone(),
+                document: seed.document.clone(),
+            }),
             deadline_secs: stage.deadline_secs,
             captures: if stage.capture.is_empty() {
                 fallback.to_vec()
