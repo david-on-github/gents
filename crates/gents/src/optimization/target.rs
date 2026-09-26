@@ -15,25 +15,34 @@ use crate::config_client::{
 };
 use crate::Collection;
 
-/// The one field an optimization job may change in v1 (ruling R2). A Task's
-/// `prompt_template` is deferred; adding it is a new variant and a new
-/// structural check, not a flag on this one.
+/// The one field of one document an optimization job may change (ruling
+/// R2): a context's system prompt, or the prompt template a seed stage
+/// renders when it fires a task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetField {
     AgentContextSystemPrompt,
+    TaskPromptTemplate,
 }
 
 impl TargetField {
     pub fn collection(&self) -> Collection {
         match self {
             Self::AgentContextSystemPrompt => Collection::AgentContext,
+            Self::TaskPromptTemplate => Collection::Task,
         }
     }
 
     pub fn field_name(&self) -> &'static str {
+        self.pack_slot().2
+    }
+
+    /// Where the field sits in a raw `pack_config.json`: the array, the
+    /// document id key and the field.
+    pub fn pack_slot(&self) -> (&'static str, &'static str, &'static str) {
         match self {
-            Self::AgentContextSystemPrompt => "system_prompt",
+            Self::AgentContextSystemPrompt => ("contexts", "context_id", "system_prompt"),
+            Self::TaskPromptTemplate => ("tasks", "task_id", "prompt_template"),
         }
     }
 }
