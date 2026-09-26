@@ -1,6 +1,6 @@
 //! `gents optimization`: thin commands over `gents::optimization`. A job is
-//! driven only by a scripted proposer supplied as a file until an LLM
-//! proposer exists.
+//! driven by a scripted proposer supplied as a file, or by a behavior of a
+//! pack asked once per round on the served home.
 //!
 //! Refusals the library returns are re-raised with exactly their text
 //! ([`surface_refusal`]); `main` prints them and exits 1. Clap exits 2 on a
@@ -26,13 +26,16 @@ use crate::cli::{
     OptimizationCommand, OptimizationDigestArgs, OptimizationRmArgs, OptimizationRunArgs,
     OptimizationShowArgs, PolicyArg, ProposerArg,
 };
+use crate::commands::eval::init::install_pack_slot;
+use crate::commands::eval::init::turn::LiveTurn;
 use crate::commands::eval::{
     cancel_on_ctrl_c, default_id, follow_progress, load_policy, source_commit, source_dirty,
     write_json, Deps, EvalContext, Progress,
 };
 use crate::commands::pack::resolve_subject_pack;
 
-#[allow(dead_code)]
+use behavior_proposer::BehaviorProposer;
+
 mod behavior_proposer;
 mod render;
 #[cfg(test)]
@@ -116,6 +119,57 @@ fn scripted_proposer(path: &Path, rounds: u32) -> Result<ScriptedProposer> {
     ))
 }
 
+/// The proposer behavior of a built-in pack, installed into the home with
+/// its one inference slot bound to `--proposer-profile` or the default
+/// profile, asked on a fresh session of the served home.
+async fn behavior_proposer(
+    ctx: &EvalContext,
+    args: &OptimizationRunArgs,
+    pack: &str,
+    behavior: Option<&str>,
+) -> Result<BehaviorProposer<LiveTurn>> {
+    let gents::ConfigAccess::Graphql(graphql) = &ctx.access else {
+        anyhow::bail!(
+            "start `gents server` for this home and retry: a behavior proposer runs on a served home"
+        );
+    };
+    crate::request_helpers::ensure_local_request_signer(args.scope.home.as_deref(), &ctx.owner)?;
+    let manifest = gents::pack::resolve_pack(pack)?.manifest;
+    let [slot] = manifest.metadata.inference_slots.as_slice() else {
+        anyhow::bail!(
+            "pack {pack} declares {} inference slots; a proposer pack declares one",
+            manifest.metadata.inference_slots.len()
+        );
+    };
+    let behavior_id = match behavior {
+        Some(behavior) => {
+            anyhow::ensure!(
+                slot.behaviors.iter().any(|known| known == behavior),
+                "pack {pack} has no inference-slot behavior {behavior:?}; it declares {:?}",
+                slot.behaviors
+            );
+            behavior.to_owned()
+        }
+        None => slot
+            .behaviors
+            .first()
+            .cloned()
+            .with_context(|| format!("pack {pack}: slot {} names no behavior", slot.name))?,
+    };
+    let profile = args.proposer_profile.clone().unwrap_or_else(|| {
+        default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
+    });
+    install_pack_slot(&ctx.access, &ctx.owner, pack, &slot.name, &profile).await?;
+    Ok(BehaviorProposer::new(LiveTurn {
+        graphql: graphql.clone(),
+        agent_did: ctx.owner.clone(),
+        behavior_id,
+        session_id: uuid::Uuid::new_v4().to_string(),
+        timeout_secs: crate::DEFAULT_INTERACTIVE_WAIT_TIMEOUT_SECS,
+        poll_secs: 1,
+    }))
+}
+
 async fn run(
     ctx: &EvalContext,
     args: &OptimizationRunArgs,
@@ -127,7 +181,9 @@ async fn run(
     )?;
     let proposer: Box<dyn Proposer> = match proposer_arg {
         ProposerArg::Scripted(script) => Box::new(scripted_proposer(script, args.rounds)?),
-        ProposerArg::Behavior { .. } => anyhow::bail!("the behavior proposer is not wired yet"),
+        ProposerArg::Behavior { pack, behavior } => {
+            Box::new(behavior_proposer(ctx, args, pack, behavior.as_deref()).await?)
+        }
     };
     let subject = resolve_subject_pack(
         &ctx.home_dir,

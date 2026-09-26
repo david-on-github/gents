@@ -321,7 +321,7 @@ pub(crate) async fn run(
             &ctx.owner,
         ))
     });
-    install_author(&ctx.access, &ctx.owner, &profile).await?;
+    install_pack_slot(&ctx.access, &ctx.owner, "eval_author", "author", &profile).await?;
 
     let init = InitContext {
         dossier,
@@ -341,6 +341,7 @@ pub(crate) async fn run(
     let mut turn = turn::LiveTurn {
         graphql: graphql.clone(),
         agent_did: ctx.owner.clone(),
+        behavior_id: turn::AUTHOR_BEHAVIOR.to_owned(),
         session_id: uuid::Uuid::new_v4().to_string(),
         timeout_secs: args.timeout_secs,
         poll_secs: args.poll_secs,
@@ -404,16 +405,18 @@ pub(crate) async fn run(
     result
 }
 
-/// Install the built-in `eval_author` pack into the home, its `author` slot
-/// bound to `profile`, through the owner `gents pack install` uses.
-/// Re-applying the same documents changes nothing. Returns the owner's
-/// apply counts (documents written, per collection).
-async fn install_author(
+/// Install the built-in pack `pack_name` into the home, its inference
+/// slot `slot` bound to `profile`, through the owner `gents pack install`
+/// uses. Re-applying the same documents changes nothing. Returns the
+/// owner's apply counts (documents written, per collection).
+pub(crate) async fn install_pack_slot(
     access: &gents::ConfigAccess,
     owner: &str,
+    pack_name: &str,
+    slot: &str,
     profile: &str,
 ) -> Result<gents::config_client::DesiredStateApplyCounts> {
-    let pack = gents::pack::resolve_pack("eval_author")?;
+    let pack = gents::pack::resolve_pack(pack_name)?;
     let config = gents::pack::load_pack_config(
         &pack.manifest,
         &gents::pack::PackInstallOptions {
@@ -422,14 +425,14 @@ async fn install_author(
         &|path| pack.asset(path).map(Vec::from),
         &|_name| None,
     )
-    .context("loading the eval_author pack")?;
-    let requested = std::collections::BTreeMap::from([("author".to_owned(), profile.to_owned())]);
+    .with_context(|| format!("loading the {pack_name} pack"))?;
+    let requested = std::collections::BTreeMap::from([(slot.to_owned(), profile.to_owned())]);
     let inference =
         gents::pack::preview_pack_inference_bindings(access, &pack.manifest, owner, &requested)
             .await?;
     let bound =
         gents::pack::bind_pack_install_config(&pack.manifest, &config, &inference.bindings)?;
-    // Re-installing the author pack replaces what an earlier run installed.
+    // Re-installing the pack replaces what an earlier run installed.
     let identity = gents::pack::PackIdentity::new(&pack.manifest, &pack.digest, Vec::new());
     gents::pack::install_pack_documents(
         access,
@@ -440,7 +443,7 @@ async fn install_author(
     )
     .await
     .map(|report| report.applied)
-    .context("installing the eval_author pack")
+    .with_context(|| format!("installing the {pack_name} pack"))
 }
 
 #[cfg(test)]
@@ -802,7 +805,9 @@ mod tests {
         let profile = gents::default_inference_profile_id_for_behavior(
             &gents::default_behavior_id_for_agent(&owner),
         );
-        install_author(&access, &owner, &profile).await.unwrap();
+        install_pack_slot(&access, &owner, "eval_author", "author", &profile)
+            .await
+            .unwrap();
 
         let root = tempfile::tempdir().unwrap();
         let ctx = InitContext {
@@ -824,6 +829,7 @@ mod tests {
         let mut turn = turn::LiveTurn {
             graphql: state.graphql,
             agent_did: owner,
+            behavior_id: turn::AUTHOR_BEHAVIOR.to_owned(),
             session_id: uuid::Uuid::new_v4().to_string(),
             timeout_secs: 300,
             poll_secs: 1,

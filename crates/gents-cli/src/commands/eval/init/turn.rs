@@ -23,11 +23,12 @@ pub(crate) trait Turn {
 }
 
 /// A turn on the served home, as `gents chat` sends one: submitted on the
-/// author's session with behavior `eval-author`, followed until the
-/// response lands. Its progress and the reply print as they arrive.
+/// session with `behavior_id`, followed until the response lands. Its
+/// progress and the reply print as they arrive.
 pub(crate) struct LiveTurn {
     pub(crate) graphql: String,
     pub(crate) agent_did: String,
+    pub(crate) behavior_id: String,
     pub(crate) session_id: String,
     pub(crate) timeout_secs: u64,
     pub(crate) poll_secs: u64,
@@ -42,7 +43,7 @@ impl Turn for LiveTurn {
             &self.agent_did,
             content,
             Some(&self.session_id),
-            Some(AUTHOR_BEHAVIOR),
+            Some(&self.behavior_id),
             RequestSubmitOptions::default(),
         )
         .await
