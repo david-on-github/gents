@@ -1243,9 +1243,18 @@ fn parse_proposer_accepts_scripted_and_behavior_forms_and_rejects_the_rest() {
             behavior: Some("prompt-proposer".into())
         }
     );
-    for bad in ["garbage", "scripted:", "behavior:", "behavior::x", "llm:foo"] {
+    for bad in [
+        "garbage",
+        "scripted:",
+        "behavior:",
+        "behavior::x",
+        "llm:foo",
+    ] {
         let error = parse_proposer(bad).unwrap_err();
-        assert!(error.contains("behavior:<pack>[:<behavior>]"), "{bad}: {error}");
+        assert!(
+            error.contains("behavior:<pack>[:<behavior>]"),
+            "{bad}: {error}"
+        );
         assert!(!error.contains("no model-driven"), "{bad}: {error}");
     }
 }

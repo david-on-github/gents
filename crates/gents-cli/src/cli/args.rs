@@ -4320,22 +4320,36 @@ pub(crate) fn parse_subject(raw: &str) -> Result<SubjectArg, String> {
     })
 }
 
-/// `--proposer scripted:<file>`: a script of proposals, the only proposer
-/// for now.
+/// `--proposer scripted:<file>` or `--proposer behavior:<pack>[:<behavior>]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProposerArg {
-    pub(crate) script: PathBuf,
+pub(crate) enum ProposerArg {
+    /// A script of proposals, one per round.
+    Scripted(PathBuf),
+    /// A behavior of an installed pack asked once per round; without a
+    /// behavior, the pack's only inference-slot behavior.
+    Behavior {
+        pack: String,
+        behavior: Option<String>,
+    },
 }
 
 pub(crate) fn parse_proposer(raw: &str) -> Result<ProposerArg, String> {
-    match raw.strip_prefix("scripted:") {
-        Some(path) if !path.trim().is_empty() => Ok(ProposerArg {
-            script: PathBuf::from(path.trim()),
-        }),
-        _ => Err(format!(
-            "unknown proposer {raw:?}; no model-driven proposer is available yet; pass --proposer scripted:<file>"
-        )),
+    let usage = || {
+        format!(
+            "unknown proposer {raw:?}; pass --proposer scripted:<file> or --proposer behavior:<pack>[:<behavior>]"
+        )
+    };
+    if let Some(path) = raw.strip_prefix("scripted:") {
+        return match path.trim() {
+            "" => Err(usage()),
+            path => Ok(ProposerArg::Scripted(PathBuf::from(path))),
+        };
     }
+    let Some(target) = raw.strip_prefix("behavior:") else {
+        return Err(usage());
+    };
+    let SubjectArg { pack, behavior } = parse_subject(target).map_err(|_| usage())?;
+    Ok(ProposerArg::Behavior { pack, behavior })
 }
 
 /// `gents optimization run`'s exit statuses: scripts must not read a job left
@@ -4399,9 +4413,15 @@ pub(crate) struct OptimizationRunArgs {
     pub(crate) job_id: Option<String>,
     /// `scripted:<file>`: a JSON array of `{"text", "rationale"}`, one per
     /// round; a file holding fewer than `--rounds` is refused before the job
-    /// is frozen.
+    /// is frozen. `behavior:<pack>[:<behavior>]`: a behavior of a pack
+    /// (`prompt_proposer` is built in), installed into the home and asked
+    /// once per round on the served home.
     #[arg(long, value_parser = parse_proposer)]
     pub(crate) proposer: Option<ProposerArg>,
+    /// The inference profile the proposer behavior runs on; the home's
+    /// default when absent.
+    #[arg(long)]
+    pub(crate) proposer_profile: Option<String>,
     /// The inference profile both arms run on; the home's default when absent.
     #[arg(long)]
     pub(crate) profile: Option<String>,

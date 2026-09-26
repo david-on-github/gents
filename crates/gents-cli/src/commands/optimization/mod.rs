@@ -16,7 +16,7 @@ use gents::eval::runner::embedded::EmbeddedExecutor;
 use gents::eval::runner::{run_dir, RunOptions};
 use gents::optimization::{
     derive_state, job_dir, job_refused, load_job, promote_refused, removable, run_job,
-    show as show_job, Budgets, JobOutcome, JobRequest, JobState, PolicyV2, Proposal,
+    show as show_job, Budgets, JobOutcome, JobRequest, JobState, PolicyV2, Proposal, Proposer,
     ScriptedProposer,
 };
 use gents::{default_behavior_id_for_agent, default_inference_profile_id_for_behavior};
@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cli::{
     OptimizationCommand, OptimizationDigestArgs, OptimizationRmArgs, OptimizationRunArgs,
-    OptimizationShowArgs, PolicyArg,
+    OptimizationShowArgs, PolicyArg, ProposerArg,
 };
 use crate::commands::eval::{
     cancel_on_ctrl_c, default_id, follow_progress, load_policy, source_commit, source_dirty,
@@ -123,9 +123,12 @@ async fn run(
     out: &mut dyn Write,
 ) -> Result<()> {
     let proposer_arg = args.proposer.as_ref().context(
-        "optimization run needs a proposer: no model-driven proposer is available yet; pass --proposer scripted:<file>",
+        "optimization run needs a proposer: pass --proposer scripted:<file> or --proposer behavior:<pack>[:<behavior>]",
     )?;
-    let proposer = scripted_proposer(&proposer_arg.script, args.rounds)?;
+    let proposer: Box<dyn Proposer> = match proposer_arg {
+        ProposerArg::Scripted(script) => Box::new(scripted_proposer(script, args.rounds)?),
+        ProposerArg::Behavior { .. } => anyhow::bail!("the behavior proposer is not wired yet"),
+    };
     let subject = resolve_subject_pack(
         &ctx.home_dir,
         &args.subject.pack,
@@ -198,7 +201,7 @@ async fn run(
             &ctx.access,
             &request,
             deps.executor,
-            &proposer,
+            proposer.as_ref(),
             deps.registry,
             &policy,
             deps.cancel.clone(),
@@ -418,7 +421,7 @@ mod tests {
     use crate::commands::eval::UNCALIBRATED_BANNER;
 
     #[tokio::test]
-    async fn run_refuses_without_a_proposer_and_parses_only_the_scripted_one() {
+    async fn run_refuses_without_a_proposer_and_an_unknown_proposer_is_a_usage_error() {
         let fixture = Fixture::new().await;
         let pack = fixture.pack_arg();
         let error = optimization(&fixture, &["run", DEFINITION, "--subject", pack.as_str()])
@@ -426,7 +429,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "optimization run needs a proposer: no model-driven proposer is available yet; pass --proposer scripted:<file>"
+            "optimization run needs a proposer: pass --proposer scripted:<file> or --proposer behavior:<pack>[:<behavior>]"
         );
         let usage = match Cli::try_parse_from([
             "gents",
@@ -443,7 +446,7 @@ mod tests {
         };
         assert!(
             usage.to_string().contains(
-                "no model-driven proposer is available yet; pass --proposer scripted:<file>"
+                "pass --proposer scripted:<file> or --proposer behavior:<pack>[:<behavior>]"
             ),
             "{usage}"
         );
