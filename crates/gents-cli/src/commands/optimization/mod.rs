@@ -277,7 +277,10 @@ async fn run(
             deps.cancel.clone(),
         ),
     )
-    .await?;
+    .await
+    .with_context(|| {
+        format!("job {job_id} stopped before it finished; run the same command with --job-id {job_id} to resume it")
+    })?;
     // A job left running is not a success: the view still renders, then the
     // command fails with the resume note, so a script never reads it as done.
     let stopped = (outcome.state == JobState::Running).then(|| {
