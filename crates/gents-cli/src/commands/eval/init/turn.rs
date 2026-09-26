@@ -110,3 +110,26 @@ impl Turn for ScriptedTurn {
         false
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{LiveTurn, Turn};
+
+    fn live(quiet: bool) -> LiveTurn {
+        LiveTurn {
+            graphql: "http://localhost:0/graphql".to_owned(),
+            agent_did: "did:key:owner".to_owned(),
+            behavior_id: "prompt-proposer".to_owned(),
+            session_id: "session".to_owned(),
+            timeout_secs: 1,
+            poll_secs: 1,
+            quiet,
+        }
+    }
+
+    #[test]
+    fn a_quiet_live_turn_shows_no_replies() {
+        assert!(live(false).shows_replies());
+        assert!(!live(true).shows_replies());
+    }
+}
