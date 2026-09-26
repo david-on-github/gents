@@ -134,12 +134,12 @@ fn failed(reason_code: &str, detail: String, rows: u64) -> CheckVerdict {
 }
 
 /// The check itself could not reach a verdict, which is no evidence about the
-/// subject.
+/// subject, so it carries no feedback: its detail names the check's params.
 fn grader(reason_code: &str, detail: String, rows: Option<u64>) -> CheckVerdict {
     CheckVerdict {
         kind: OutcomeKind::Grader,
         score_bp: None,
-        feedback: Some(detail.clone()),
+        feedback: None,
         raw: raw(reason_code, detail, rows),
     }
 }
@@ -194,17 +194,27 @@ mod tests {
             verdict.feedback.as_deref(),
             Some("items holds 0 rows, fewer than the 1 required")
         );
-        let verdict = CapturedRowsCount
-            .evaluate(&json!({"name": "other", "min": 1}), &stage(vec![json!({})]));
-        assert_eq!(
-            verdict.feedback.as_deref(),
-            Some("the stage produced no capture named other")
-        );
         let verdict = CapturedRowsCount.evaluate(
             &json!({"name": "items", "min": 0, "max": 0}),
             &stage(vec![]),
         );
         assert_eq!(verdict.raw["reason_code"], "in_range");
+        assert_eq!(verdict.feedback, None);
+    }
+
+    /// A grader verdict is no evidence about the subject, and its message
+    /// carries the check's params, so neither reaches the proposer.
+    #[test]
+    fn a_grader_verdict_carries_no_feedback() {
+        let verdict = CapturedRowsCount
+            .evaluate(&json!({"name": "other", "min": 1}), &stage(vec![json!({})]));
+        assert_eq!(verdict.raw["reason_code"], "missing_capture");
+        assert_eq!(verdict.feedback, None);
+        let verdict = CapturedRowsCount.evaluate(
+            &json!({"name": "items", "min": 2, "max": 1}),
+            &stage(vec![]),
+        );
+        assert_eq!(verdict.raw["reason_code"], "bad_params");
         assert_eq!(verdict.feedback, None);
     }
 
