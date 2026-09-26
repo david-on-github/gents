@@ -125,7 +125,7 @@ Answer briefly.
 ```
 
 Feedback from the train run:
-- captured_rows_count: 2500 - no feedback
+- captured_rows_count: 25.00% - no feedback
 - tone: no score - too curt
 
 Rejected so far:
@@ -148,6 +148,40 @@ Reply with exactly one fenced json block: {\"text\": ..., \"rationale\": ...}
     #[test]
     fn the_turn_is_rendered_deterministically() {
         assert_eq!(render(&input()), EXPECTED);
+    }
+
+    #[test]
+    fn a_fence_outgrows_the_longest_backtick_run_in_what_it_holds() {
+        let mut input = input();
+        input.current_text = "Reply in a ```json block.".into();
+        input.feedback[0].feedback = Some("first line\nsecond ````` line".into());
+        input.rejections[0].text = "Use ``` fences.".into();
+        let rendered = render(&input);
+        assert!(
+            rendered.contains("Current instruction:\n````\nReply in a ```json block.\n````\n"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "- tone: no score -\n``````\nfirst line\nsecond ````` line\n``````\n"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("duplicate of the checkpoint:\n````\nUse ``` fences.\n````\n"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn no_feedback_renders_none() {
+        let mut input = input();
+        input.feedback.clear();
+        assert!(
+            render(&input).contains("Feedback from the train run:\n- none\n\nRejected"),
+            "{}",
+            render(&input)
+        );
     }
 
     #[tokio::test]
@@ -191,6 +225,10 @@ Reply with exactly one fenced json block: {\"text\": ..., \"rationale\": ...}
         let proposer = BehaviorProposer::new(ScriptedTurn::new([missing, GOOD]));
         proposer.propose(input()).await.unwrap();
         let sent = proposer.turn.into_inner().sent;
-        assert!(sent[1].contains("rationale"), "{}", sent[1]);
+        assert!(
+            sent[1].contains("missing field `rationale`"),
+            "{}",
+            sent[1]
+        );
     }
 }
