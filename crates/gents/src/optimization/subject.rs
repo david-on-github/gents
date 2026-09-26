@@ -176,6 +176,7 @@ pub fn materialize_candidate(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::optimization::target::TargetField;
     use serde_json::json;
 
     const OWNER: &str = "did:key:subject-owner";
@@ -187,14 +188,142 @@ pub(crate) mod tests {
         crate::eval::runner::freeze::tests::write_fixture_pack(root, "Off");
     }
 
+    pub(crate) fn context_pack(dir: &Path) -> Result<MaterializedPack> {
+        materialize_pack(
+            dir,
+            OWNER,
+            "monitor",
+            TargetField::AgentContextSystemPrompt,
+            None,
+        )
+    }
+
+    pub(crate) const FIXTURE_TEMPLATE: &str = "Plan {{ args.goal }} for {{ doc.owner }}.\n";
+
+    /// The fixture pack with one task of the monitor behavior, its prompt
+    /// template in a sidecar or inline in `pack_config.json`.
+    pub(crate) fn write_task_fixture_pack(root: &Path, inline: bool) {
+        write_fixture_pack(root);
+        let manifest_path = root.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let template = if inline {
+            json!(FIXTURE_TEMPLATE)
+        } else {
+            std::fs::create_dir_all(root.join("tasks/plan")).unwrap();
+            std::fs::write(root.join("tasks/plan/prompt.md"), FIXTURE_TEMPLATE).unwrap();
+            manifest["assets"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!("tasks/plan/prompt.md"));
+            json!("./tasks/plan/prompt.md")
+        };
+        std::fs::write(
+            &manifest_path,
+            serde_json::to_vec_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+        let config_path = root.join("pack_config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["tasks"] = json!([{
+            "task_id": "plan",
+            "behavior_id": "monitor",
+            "prompt_template": template,
+        }]);
+        std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    }
+
+    fn task_pack(dir: &Path) -> Result<MaterializedPack> {
+        materialize_pack(
+            dir,
+            OWNER,
+            "monitor",
+            TargetField::TaskPromptTemplate,
+            Some("plan"),
+        )
+    }
+
+    #[test]
+    fn a_task_candidate_rewrites_the_task_sidecar_and_nothing_else() {
+        let dirs = tempfile::tempdir().unwrap();
+        let baseline_dir = dirs.path().join("baseline");
+        write_task_fixture_pack(&baseline_dir, false);
+        let baseline = task_pack(&baseline_dir).unwrap();
+        assert_eq!(baseline.target, TargetField::TaskPromptTemplate);
+        assert_eq!(baseline.target_id, "plan");
+        assert_eq!(
+            baseline.prompt_asset.as_deref(),
+            Some("tasks/plan/prompt.md")
+        );
+        assert_eq!(baseline_text(&baseline).unwrap(), FIXTURE_TEMPLATE);
+
+        let text = "Do {{ args.goal }} for {{ doc.owner }}.\n";
+        let candidate =
+            materialize_candidate(&baseline, OWNER, text, &dirs.path().join("candidate")).unwrap();
+        let differing: Vec<&String> = baseline
+            .files
+            .iter()
+            .filter(|(path, bytes)| candidate.files.get(*path) != Some(*bytes))
+            .map(|(path, _)| path)
+            .collect();
+        assert_eq!(differing, vec!["tasks/plan/prompt.md"]);
+        assert_eq!(baseline_text(&candidate).unwrap(), text);
+        assert_eq!(candidate.target_id, "plan");
+
+        // The same pack as a context subject leaves the task alone.
+        let context = context_pack(&baseline_dir).unwrap();
+        assert_eq!(context.target_id, "monitor-context");
+        assert_eq!(baseline_text(&context).unwrap(), FIXTURE_PROMPT);
+    }
+
+    #[test]
+    fn an_inline_task_template_is_rewritten_in_the_config() {
+        let dirs = tempfile::tempdir().unwrap();
+        write_task_fixture_pack(&dirs.path().join("baseline"), true);
+        let baseline = task_pack(&dirs.path().join("baseline")).unwrap();
+        assert_eq!(baseline.prompt_asset, None);
+        assert_eq!(baseline_text(&baseline).unwrap(), FIXTURE_TEMPLATE);
+        let candidate = materialize_candidate(
+            &baseline,
+            OWNER,
+            "New {{ args.goal }}.\n",
+            &dirs.path().join("c"),
+        )
+        .unwrap();
+        assert_eq!(baseline_text(&candidate).unwrap(), "New {{ args.goal }}.\n");
+        let loaded = load_pack(&CellSource::Directory(candidate.dir.clone()), OWNER).unwrap();
+        assert_eq!(
+            loaded.config.tasks[0].prompt_template,
+            "New {{ args.goal }}.\n"
+        );
+    }
+
+    #[test]
+    fn a_task_the_pack_does_not_declare_or_name_is_an_error() {
+        let dirs = tempfile::tempdir().unwrap();
+        write_fixture_pack(&dirs.path().join("baseline"));
+        let error = task_pack(&dirs.path().join("baseline")).unwrap_err();
+        assert!(format!("{error:#}").contains("plan"), "{error:#}");
+        let error = materialize_pack(
+            &dirs.path().join("baseline"),
+            OWNER,
+            "monitor",
+            TargetField::TaskPromptTemplate,
+            None,
+        )
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("task"), "{error:#}");
+    }
+
     #[test]
     fn a_candidate_is_the_baseline_pack_with_one_file_rewritten() {
         let dirs = tempfile::tempdir().unwrap();
         let baseline_dir = dirs.path().join("baseline");
         write_fixture_pack(&baseline_dir);
-        let baseline = materialize_pack(&baseline_dir, OWNER, "monitor").unwrap();
+        let baseline = context_pack(&baseline_dir).unwrap();
 
-        assert_eq!(baseline.context_id, "monitor-context");
+        assert_eq!(baseline.target_id, "monitor-context");
         assert_eq!(
             baseline.prompt_asset.as_deref(),
             Some("agent_behaviors/monitor/system_prompt.md")
@@ -239,7 +368,7 @@ pub(crate) mod tests {
         let dirs = tempfile::tempdir().unwrap();
         let baseline_dir = dirs.path().join("baseline");
         write_fixture_pack(&baseline_dir);
-        let baseline = materialize_pack(&baseline_dir, OWNER, "monitor").unwrap();
+        let baseline = context_pack(&baseline_dir).unwrap();
 
         let one = materialize_candidate(&baseline, OWNER, "New text.\n", &dirs.path().join("one"))
             .unwrap();
@@ -264,7 +393,14 @@ pub(crate) mod tests {
         let dirs = tempfile::tempdir().unwrap();
         let baseline_dir = dirs.path().join("baseline");
         write_fixture_pack(&baseline_dir);
-        let error = materialize_pack(&baseline_dir, OWNER, "no-such-behavior").unwrap_err();
+        let error = materialize_pack(
+            &baseline_dir,
+            OWNER,
+            "no-such-behavior",
+            TargetField::AgentContextSystemPrompt,
+            None,
+        )
+        .unwrap_err();
         assert!(
             format!("{error:#}").contains("no-such-behavior"),
             "{error:#}"
@@ -296,7 +432,7 @@ pub(crate) mod tests {
     fn an_inline_prompt_is_rewritten_in_the_config_and_nowhere_else() {
         let dirs = tempfile::tempdir().unwrap();
         write_inline_fixture_pack(&dirs.path().join("baseline"));
-        let baseline = materialize_pack(&dirs.path().join("baseline"), OWNER, "monitor").unwrap();
+        let baseline = context_pack(&dirs.path().join("baseline")).unwrap();
         assert_eq!(baseline.prompt_asset, None);
         assert_eq!(baseline_text(&baseline).unwrap(), FIXTURE_PROMPT);
         let candidate =
@@ -313,7 +449,7 @@ pub(crate) mod tests {
         assert!(std::env::var("GENTS_T21_SURELY_UNSET").is_err());
         let dirs = tempfile::tempdir().unwrap();
         write_inline_fixture_pack(&dirs.path().join("baseline"));
-        let baseline = materialize_pack(&dirs.path().join("baseline"), OWNER, "monitor").unwrap();
+        let baseline = context_pack(&dirs.path().join("baseline")).unwrap();
         let candidate =
             materialize_candidate(&baseline, OWNER, text, &dirs.path().join("c")).unwrap();
         assert_eq!(baseline_text(&candidate).unwrap(), text);
@@ -323,7 +459,7 @@ pub(crate) mod tests {
             .config
             .contexts
             .iter()
-            .find(|context| context.context_id == candidate.context_id)
+            .find(|context| context.context_id == candidate.target_id)
             .and_then(|context| context.system_prompt.clone());
         assert_eq!(prompt.as_deref(), Some(text));
     }
