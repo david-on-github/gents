@@ -121,6 +121,12 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Fixed
 
+- Compaction no longer summarizes history inside an open Claude tool round.
+  Summarizing rows before a turn whose thinking Claude still requires rewrote
+  that turn's prefix, so its thinking was dropped and the request failed with
+  `400 Expected thinking` — which stripping the reasoning also failed with.
+  Such a request now fails as a reduction that cannot fit, and the next message
+  compacts the history normally (#1918).
 - Title audits dispatch only through the runtime watcher, preventing duplicate
   claim attempts while retaining received reasoning (#1916).
 

@@ -1278,7 +1278,7 @@ fn generated_protected_replay_compaction_cases_bind_native_split_and_checkpoint(
     use gents_loop::compaction::history::protected_pair_safe_split_index;
 
     let cases = lean_protected_replay_compaction_cases();
-    assert_eq!(cases.len(), 5);
+    assert_eq!(cases.len(), 6);
     for case in cases {
         let messages =
             super::streaming_compaction::compaction_messages_for_count(case.message_count);
@@ -1288,7 +1288,58 @@ fn generated_protected_replay_compaction_cases_bind_native_split_and_checkpoint(
             .count();
         assert_eq!(case.rows.len(), assistant_count, "{}", case.name);
 
-        let split = protected_pair_safe_split_index(&messages, case.raw_index, case.max_prefix);
+        // The modeled tagged rows are the assistant projection of this same
+        // fixture, so the provider view carries their sources in order.
+        let mut modeled = case.rows.iter();
+        let provider_view = messages
+            .iter()
+            .map(|message| match message {
+                Message::Assistant { .. } => {
+                    let row = modeled.next().expect("one modeled row per assistant");
+                    gents_loop::loop_stream::TaggedMessage {
+                        message: message.clone(),
+                        source: row.source.as_ref().map(native_replay_tag),
+                        physical_header: row.physical_header.clone(),
+                        block_indices: row.block_indices.clone(),
+                    }
+                }
+                _ => gents_loop::loop_stream::TaggedMessage::unassociated(message.clone()),
+            })
+            .collect::<Vec<_>>();
+        let required = case
+            .required
+            .iter()
+            .map(native_replay_tag)
+            .collect::<Vec<_>>();
+
+        let ceiling = match gents_loop::loop_stream::replay_compaction_prefix_bound(
+            &provider_view,
+            &required,
+        ) {
+            Err(error) => {
+                assert_eq!(
+                    replay_checkpoint_outcome(&error),
+                    case.ceiling_error,
+                    "{}: refused ceiling",
+                    case.name
+                );
+                assert_eq!(case.outcome, "ceiling_refused", "{}", case.name);
+                continue;
+            }
+            Ok(ceiling) => ceiling,
+        };
+        assert!(
+            case.ceiling_error.is_empty(),
+            "{}: the model refused this ceiling",
+            case.name
+        );
+        assert_eq!(ceiling, case.ceiling, "{}: derived ceiling", case.name);
+        let Some(ceiling) = ceiling else {
+            assert_eq!(case.outcome, "unbounded", "{}", case.name);
+            continue;
+        };
+
+        let split = protected_pair_safe_split_index(&messages, case.raw_index, ceiling);
         assert_eq!(
             split, case.selected_split,
             "{}: pair-safe protected split",

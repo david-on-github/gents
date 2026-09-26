@@ -1648,7 +1648,7 @@ def caseCoverage : List CoverageEntry :=
       "protected_replay_compaction_cases"
       "ProtectedReplayCompactionCases"
       "conformance::prompt_assembly::generated_protected_replay_compaction_cases_bind_native_split_and_checkpoint"
-      "Native selection and checkpoint validation retain every independently required signed Claude row before summary. A long required chain may still end in CannotFit at the rebuilt full-request guard; retirement of older requirements is deferred to #1693, not inferred from the retention target. The generated cases do not themselves invoke the summary provider.")
+      "The native reduction ceiling is derived from the required Claude coordinates: an open tool round admits no summarized prefix at all, so the reduction refuses with CannotFit, and a closed round leaves the retention target alone to bound the split. Refusing is the accepted failure mode: an over-threshold request inside an open round fails as CannotFit rather than dispatching an input whose required thinking the provider would reject. Retirement of older requirements remains deferred and is not inferred from the retention target. The generated cases do not themselves invoke the summary provider.")
       "compaction" [Surface.agentFacing]
   , tagged (followUpCoverage
       "compaction_cursor_cases"

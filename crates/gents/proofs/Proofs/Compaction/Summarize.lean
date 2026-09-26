@@ -171,6 +171,84 @@ theorem preparedProtectedReplayCheckpoint_uses_replay_owner
               protectedPairSafeBoundary_bounded msgs rawIndex maxPrefix split hs,
               by simpa only [bne_iff_ne, ne_eq, not_not] using haligned, hp⟩
 
+/-! ## The reduction ceiling while a tool round is open -/
+
+/-- The reduction prefix ceiling for one provider view, derived from the tool
+round's independently required replay coordinates. `none` means no round is open,
+so the retention target alone bounds the split.
+
+External premises. Replay acceptance is the one recorded on
+`ReplayFrontier.turnOk`: a replayed block is accepted only when the ordinary
+prefix before it equals the prefix that produced it. The second is observed
+Anthropic behavior: an assistant turn carrying `tool_use` whose `thinking` is
+absent is answered `400 Expected thinking`, and so is the repair that removes
+every reasoning block instead, so a rejected replay fails the request rather
+than degrading it.
+
+Summarizing any leading run replaces ordinary items *before* every required
+turn, which `ReplayFrontier.turnOk_false_of_summarized_prefix` shows that rule
+rejects. So while a round is open the only admissible ceiling is zero, which
+`protectedPairSafeBoundary` reports as no admissible split. Bounding the split
+short of the required row is not enough: the rows it summarizes are still in
+that row's prefix.
+
+The association check runs first and at split zero, so an invalid, duplicated or
+absent required coordinate is reported as itself rather than masked by the
+ceiling. -/
+def replayReductionCeiling (required : List PromptAssembly.ClaudeMap.ReplayTag)
+    (rows : List PromptAssembly.ClaudeMap.TaggedReplayRow) :
+    Except PromptAssembly.ClaudeMap.MapError (Option Nat) :=
+  match PromptAssembly.ClaudeMap.prepareReplayCheckpoint required rows 0 with
+  | .error error => .error error
+  | .ok _ => .ok (if required.isEmpty then none else some 0)
+
+theorem replayReductionCeiling_open_round_is_zero
+    (required : List PromptAssembly.ClaudeMap.ReplayTag)
+    (rows : List PromptAssembly.ClaudeMap.TaggedReplayRow) (ceiling : Option Nat)
+    (hopen : required ≠ [])
+    (h : replayReductionCeiling required rows = .ok ceiling) :
+    ceiling = some 0 := by
+  have hnonempty : required.isEmpty = false := by
+    cases required with
+    | nil => exact absurd rfl hopen
+    | cons _ _ => rfl
+  unfold replayReductionCeiling at h
+  split at h
+  · simp at h
+  · simp only [hnonempty, Bool.false_eq_true, if_false, Except.ok.injEq] at h
+    exact h.symm
+
+theorem replayReductionCeiling_closed_round_is_unbounded
+    (required : List PromptAssembly.ClaudeMap.ReplayTag)
+    (rows : List PromptAssembly.ClaudeMap.TaggedReplayRow) (ceiling : Option Nat)
+    (hclosed : required = [])
+    (h : replayReductionCeiling required rows = .ok ceiling) :
+    ceiling = none := by
+  subst hclosed
+  unfold replayReductionCeiling at h
+  split at h
+  · simp at h
+  · simp only [List.isEmpty_nil, if_true, Except.ok.injEq] at h
+    exact h.symm
+
+/-- A zero ceiling admits no split at all, whatever the retention target picks. -/
+theorem protectedPairSafeBoundary_zero (msgs : List MessageRow) (rawIndex : Nat) :
+    protectedPairSafeBoundary msgs rawIndex 0 = none := by
+  have h : pairSafeBoundary msgs 0 = 0 := Nat.le_zero.mp (pairSafeBoundary_le msgs 0)
+  simp [protectedPairSafeBoundary, h]
+
+/-- The composed owner refuses an open round instead of summarizing a prefix the
+required turns depend on. -/
+theorem openRoundReduction_cannot_fit (msgs : List MessageRow) (rawIndex : Nat)
+    (required : List PromptAssembly.ClaudeMap.ReplayTag)
+    (rows : List PromptAssembly.ClaudeMap.TaggedReplayRow)
+    (haligned : rows.length = (msgs.filter (fun row => row.role == .assistant)).length) :
+    prepareProtectedReplayCheckpoint msgs rawIndex 0 required rows =
+      .error .cannotFit := by
+  have hne : (rows.length != (msgs.filter (fun row => row.role == .assistant)).length)
+      = false := by simp [haligned]
+  simp [prepareProtectedReplayCheckpoint, hne, protectedPairSafeBoundary_zero]
+
 /-! ## Pair closure of the retained tail -/
 
 theorem announcementsAreAssistant_drop {msgs : List MessageRow} (n : Nat)

@@ -254,6 +254,16 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                             crate::agent::loop_stream::replay_compaction_prefix_bound(
                                 &provider_view, &compaction_request.required,
                             )?;
+                        if options.max_compacted_prefix_messages == Some(0) {
+                            tracing::info!(
+                                request_id = %request.request_id,
+                                session_id = %request.session_id,
+                                turn = compaction_request.turn_index,
+                                required_turns = compaction_request.required.len(),
+                                "reduction admits no summarized prefix: an open tool round's \
+                                 required reasoning binds the whole provider-input prefix"
+                            );
+                        }
                         let native_messages = provider_view
                             .iter()
                             .map(|row| row.message.clone())

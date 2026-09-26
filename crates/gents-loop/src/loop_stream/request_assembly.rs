@@ -9,9 +9,22 @@ pub(super) fn message_values(rows: &[TaggedMessage]) -> Vec<Message> {
     rows.iter().map(|row| row.message.clone()).collect()
 }
 
-/// Translate the checkpoint owner's independently required assistant sources
-/// into the reducer's exact provider-view row coordinates. No native payload
-/// equality or provider-assigned message ID participates in this association.
+/// Derive this provider view's reduction prefix ceiling from the checkpoint
+/// owner's independently required assistant sources, per Lean
+/// `Compaction.replayReductionCeiling`.
+///
+/// An open tool round admits no summarized prefix at all. A summary replaces
+/// ordinary items that sit inside every required turn's producing prefix, which
+/// `ReplayFrontier.turnOk_false_of_summarized_prefix` shows the acceptance rule
+/// rejects, and the provider then refuses a turn whose required thinking is
+/// missing rather than continuing without it. Bounding the
+/// prefix short of the required row is not enough: the rows it would summarize
+/// are still in that row's prefix. `None` means no round is open, leaving the
+/// retention target alone to bound the split.
+///
+/// The association is validated first and at split zero, so an invalid,
+/// duplicated or absent required coordinate is reported as itself. No native
+/// payload equality or provider-assigned message ID participates in it.
 pub fn replay_compaction_prefix_bound(
     rows: &[TaggedMessage],
     required: &[ReplayTag],
@@ -31,11 +44,7 @@ pub fn replay_compaction_prefix_bound(
         }
     }
     prepare_replay_checkpoint(required.to_vec(), assistants, 0)?;
-    Ok(rows.iter().position(|row| {
-        row.source
-            .as_ref()
-            .is_some_and(|tag| required.contains(tag))
-    }))
+    Ok((!required.is_empty()).then_some(0))
 }
 
 fn replay_input_error(message: impl Into<String>) -> StreamingError {
@@ -112,7 +121,7 @@ mod replay_error_tests {
     }
 
     #[test]
-    fn replay_prefix_bound_uses_full_provider_view_row_index() {
+    fn replay_prefix_bound_refuses_every_prefix_while_a_round_is_open() {
         let earlier = provider_tag(0);
         let required = provider_tag(1);
         let rows = vec![
@@ -125,8 +134,28 @@ mod replay_error_tests {
         ];
         assert_eq!(
             replay_compaction_prefix_bound(&rows, &[required]).unwrap(),
-            Some(5),
-            "the bound is the whole provider-view index, not assistant ordinal 2"
+            Some(0),
+            "an open round admits no summarized prefix, not the five rows before it"
+        );
+    }
+
+    #[test]
+    fn open_round_ceiling_leaves_no_summarizable_split() {
+        let required = provider_tag(0);
+        let rows = vec![
+            TaggedMessage::unassociated(Message::user("first")),
+            TaggedMessage::unassociated(Message::assistant("reply")),
+            TaggedMessage::unassociated(Message::user("second")),
+            associated_assistant(&required),
+        ];
+        let bound = replay_compaction_prefix_bound(&rows, &[required])
+            .expect("valid required association")
+            .expect("an open round bounds the reduction");
+        let messages = message_values(&rows);
+        assert_eq!(
+            crate::compaction::history::protected_pair_safe_split_index(&messages, 3, bound),
+            None,
+            "a retention target that wanted three rows summarized must be refused"
         );
     }
 
