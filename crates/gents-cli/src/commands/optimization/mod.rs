@@ -488,7 +488,7 @@ mod tests {
         accepted_job, delete_definition, optimization, optimization_command, optimization_with,
         proposer_file,
     };
-    use super::{execute, proposer_behavior_id};
+    use super::{execute, proposer_behavior_id, subject_preamble};
     use crate::cli::Cli;
     use crate::commands::eval::testing::{deps, eval, executor, Fixture, DEFINITION};
     use crate::commands::eval::UNCALIBRATED_BANNER;
@@ -552,6 +552,22 @@ mod tests {
             ..slot
         };
         assert_eq!(proposer_behavior_id("p", &one, None).unwrap(), "terse");
+    }
+
+    #[test]
+    fn the_subject_preamble_is_the_dossier_naming_the_subject_tools() {
+        let pipeline =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
+        let preamble = subject_preamble(&pipeline, "exp-stage1").unwrap();
+        assert!(preamble.starts_with("# Subject\n\n"), "{preamble}");
+        assert!(preamble.contains("write_experiment_finding"), "{preamble}");
+        assert!(
+            preamble.ends_with(
+                "The instruction you will rewrite is this behavior's system prompt. \
+                 Every later turn carries the current instruction and the training feedback."
+            ),
+            "{preamble}"
+        );
     }
 
     #[tokio::test]
