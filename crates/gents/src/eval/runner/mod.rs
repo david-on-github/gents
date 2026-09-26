@@ -2338,7 +2338,12 @@ mod tests {
                         {"kind": "file", "name": "notes", "glob": "**/*.txt"}
                     ]
                 },
-                {"stage_id": "bare", "prompt": "p", "deadline_secs": 60}
+                {"stage_id": "bare", "prompt": "p", "deadline_secs": 60},
+                {
+                    "stage_id": "seeded",
+                    "seed": {"collection": "Event", "document": {"kind": "signup"}},
+                    "deadline_secs": 60
+                }
             ]
         }))
         .unwrap();
@@ -2371,6 +2376,14 @@ mod tests {
             ]
         );
         assert_eq!(stages[1].captures, fallback);
+        assert_eq!(stages[0].seed, None);
+        assert_eq!(
+            stages[2].seed,
+            Some(FixtureDocument {
+                collection: "Event".into(),
+                document: json!({"kind": "signup"}),
+            })
+        );
     }
 
     /// A slot cancelled mid-trial under `max_infra_retries: 0` is planned
