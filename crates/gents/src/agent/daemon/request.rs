@@ -68,12 +68,6 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
         mut shutdown: tokio::sync::watch::Receiver<bool>,
         mut interrupt_rx: tokio::sync::watch::Receiver<Option<crate::interrupt::InterruptIntent>>,
     ) -> Result<HandleRequestOutcome> {
-        if let Some(guard) = &self.root_execution_guard {
-            guard
-                .validate(&self.node)
-                .await
-                .context("validating current WorkspaceRoot policy for fresh request")?;
-        }
         let request_token = tokio_util::sync::CancellationToken::new();
         let request = lifecycle.request().clone();
         let effective_sampling = self.behavior.sampling;
@@ -82,11 +76,32 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
             self.behavior.openai_wire_api,
         )?;
         let effective_seed = effective_sampling.seed;
-        let aggregate_token_budget = crate::completion_factory::aggregate_token_budget_for_request(
-            self.node.as_ref(),
-            &request,
-        )
-        .await?;
+        // Durable reads that can retry, so they are raced against the latch
+        // like the rest of the pre-provider window.
+        let admitted = async {
+            if let Some(guard) = &self.root_execution_guard {
+                guard
+                    .validate(&self.node)
+                    .await
+                    .context("validating current WorkspaceRoot policy for fresh request")?;
+            }
+            crate::completion_factory::aggregate_token_budget_for_request(
+                self.node.as_ref(),
+                &request,
+            )
+            .await
+        };
+        let aggregate_token_budget =
+            match crate::interrupt::prepare_unless_interrupted(&mut interrupt_rx, admitted).await {
+                crate::interrupt::InterruptiblePreparation::Ready(admitted) => admitted?,
+                crate::interrupt::InterruptiblePreparation::Interrupted => {
+                    // No request admission scope is installed yet, so no
+                    // provider call can have been attempted.
+                    return Ok(HandleRequestOutcome::Interrupted(
+                        super::InterruptEvidence::observed(),
+                    ));
+                }
+            };
         let trace_attrs = RequestTraceAttrs::from_request(&request);
         let behavior_name = self.behavior.behavior_id.clone();
         let admission_context = AdmissionCallContext::for_request(
@@ -168,312 +183,134 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
             let skill_reminders = self
                 .prompt_builder
                 .selected_skill_reminders(selected_skill_ids);
-            let overlay = crate::workspace::resolve_request_workspace_overlay(
-                &self.node,
-                &request,
-                lifecycle.execution_generation()?,
-                self.behavior.tools.static_policy().bash.execution_mode
-                    == crate::toolset::CommandExecutionMode::ArtifactWrite,
-                self.operator_tool_root.as_deref(),
-            )
-            .await?;
-            // Some even when empty: bound requests must not fall through to a live walk.
-            let frozen_instruction_manifest =
-                crate::workspace::frozen_instruction_manifest_from_overlay(overlay.as_ref())
-                    .map(str::to_owned);
-            let request_context_message = super::inference::render_request_context_message(
-                self.node.as_ref(),
-                &self.behavior,
-                &request,
-                frozen_instruction_manifest.as_deref(),
-            )?;
-            let workspace = match overlay {
-                Some(overlay) => crate::tool_call_lifecycle::runtime::ToolWorkspaceScope {
-                    workspace_cwd: Some(overlay.cwd),
-                    workspace_root: Some(overlay.root),
-                    workspace_authority: Some(overlay.authority),
-                    workspace_artifact: overlay.workspace_artifact,
-                },
-                None => crate::tool_call_lifecycle::runtime::ToolWorkspaceScope::cwd_only(
-                    crate::workspace::request_workspace_cwd(&request),
-                ),
-            };
-            let (mut built, replay) = async {
-                for assembly_attempt in 0..=1 {
-                    let background_cutoff =
-                        lifecycle.background_completion_input_through_sequence();
-                    let compaction_state =
-                        session::load_prompt_compaction_state(
-                            &self.node,
-                            &request.session_id,
-                            &request.agent_did,
-                            request.requester_did.as_deref(),
-                            background_cutoff,
-                        )
-                            .instrument(tracing::info_span!(
-                                "request.load_prompt_compaction_state",
-                                request_id = %request.request_id,
-                                session_id = %request.session_id,
-                                behavior_id = %behavior_name,
-                                compaction_entry_count = tracing::field::Empty,
-                                compacted_message_count = tracing::field::Empty,
-                                summary_count = tracing::field::Empty,
-                            ))
-                            .await?;
-                    let prior_cursor = compaction_state.compacted_through_sequence;
-                    let total_compacted_messages = compaction_state.total_messages_compacted;
-                    let compaction_generation = compaction_state.generation.clone();
-                    let compaction_generation_is_latest = compaction_state.is_latest_generation;
-                    let provider_profile = crate::provider_input::ProviderInputProfile::resolve(
-                        self.behavior.backend_provider_kind,
-                        self.behavior.openai_wire_api,
-                    );
-                    let sequenced_history = session::load_sequenced_history_for_request(
-                        &self.node,
-                        &request,
-                        background_cutoff,
-                        prior_cursor,
-                        provider_profile,
-                    )
-                    .instrument(tracing::info_span!(
-                        "request.load_active_history",
-                        request_id = %request.request_id,
-                        session_id = %request.session_id,
-                        behavior_id = %behavior_name,
-                        compacted_through_sequence = prior_cursor.map(i64::from),
-                        compacted_provider_messages_skipped = total_compacted_messages as i64,
-                        cursor_hit = prior_cursor.is_some(),
-                        history_message_count = tracing::field::Empty,
-                    ))
-                    .await?;
-                    let durable_history = sequenced_history
-                        .iter()
-                        .map(|row| row.message.clone())
-                        .collect::<Vec<_>>();
-                    // Check the exact reconstructed canonical rows before the
-                    // provider projection is allowed to remove an unfinished
-                    // tail. The projected view is intentionally a fixpoint;
-                    // checking only that view would make this gate vacuous.
-                    let canonical_prefix_is_stable =
-                        compaction::safe_to_reduce(provider_profile, &durable_history);
-                    // The sourced projection below performs this same file
-                    // activity extraction before stripping tool results.
-                    let file_activity = compaction::history::extract_file_activity(&durable_history);
-                    if !file_activity.is_empty() {
-                        tracing::debug!(
-                            behavior_id = %self.behavior.behavior_id,
-                            session_id = %request.session_id,
-                            files_read = ?file_activity.files_read,
-                            files_modified = ?file_activity.files_modified,
-                            "files referenced in stripped history"
+            // Everything up to the first provider call is raced against the
+            // durable latch. `run_inference` observes it for itself after
+            // this point; before it, nothing else watches the claim.
+            let preparation = async {
+                let overlay = crate::workspace::resolve_request_workspace_overlay(
+                    &self.node,
+                    &request,
+                    lifecycle.execution_generation()?,
+                    self.behavior.tools.static_policy().bash.execution_mode
+                        == crate::toolset::CommandExecutionMode::ArtifactWrite,
+                    self.operator_tool_root.as_deref(),
+                )
+                .await?;
+                // Some even when empty: bound requests must not fall through to a live walk.
+                let frozen_instruction_manifest =
+                    crate::workspace::frozen_instruction_manifest_from_overlay(overlay.as_ref())
+                        .map(str::to_owned);
+                let request_context_message = super::inference::render_request_context_message(
+                    self.node.as_ref(),
+                    &self.behavior,
+                    &request,
+                    frozen_instruction_manifest.as_deref(),
+                )?;
+                let workspace = match overlay {
+                    Some(overlay) => crate::tool_call_lifecycle::runtime::ToolWorkspaceScope {
+                        workspace_cwd: Some(overlay.cwd),
+                        workspace_root: Some(overlay.root),
+                        workspace_authority: Some(overlay.authority),
+                        workspace_artifact: overlay.workspace_artifact,
+                    },
+                    None => crate::tool_call_lifecycle::runtime::ToolWorkspaceScope::cwd_only(
+                        crate::workspace::request_workspace_cwd(&request),
+                    ),
+                };
+                let (built, replay) = async {
+                    for assembly_attempt in 0..=1 {
+                        let background_cutoff =
+                            lifecycle.background_completion_input_through_sequence();
+                        let compaction_state =
+                            session::load_prompt_compaction_state(
+                                &self.node,
+                                &request.session_id,
+                                &request.agent_did,
+                                request.requester_did.as_deref(),
+                                background_cutoff,
+                            )
+                                .instrument(tracing::info_span!(
+                                    "request.load_prompt_compaction_state",
+                                    request_id = %request.request_id,
+                                    session_id = %request.session_id,
+                                    behavior_id = %behavior_name,
+                                    compaction_entry_count = tracing::field::Empty,
+                                    compacted_message_count = tracing::field::Empty,
+                                    summary_count = tracing::field::Empty,
+                                ))
+                                .await?;
+                        let prior_cursor = compaction_state.compacted_through_sequence;
+                        let total_compacted_messages = compaction_state.total_messages_compacted;
+                        let compaction_generation = compaction_state.generation.clone();
+                        let compaction_generation_is_latest = compaction_state.is_latest_generation;
+                        let provider_profile = crate::provider_input::ProviderInputProfile::resolve(
+                            self.behavior.backend_provider_kind,
+                            self.behavior.openai_wire_api,
                         );
-                    }
-                    // One canonical reduction, shared with the compaction writer:
-                    // `messages_compacted` is measured against this list, so the
-                    // prefix drop below must index the same one (#993).
-                    let mut replay = crate::provider_input::replay::owned_replay_input(
-                        self.node.clone(), request.clone(), request_commit_cid.clone(),
-                        gents_protocol::rendered_request::CaptureScopeKind::Inference,
-                        self.replay_issuer.clone(), provider_profile,
-                    );
-                    let tagged = crate::provider_input::replay::tag_canonical_history(
-                        &sequenced_history,
-                    );
-                    let provider_history = provider_view_tagged(provider_profile, tagged)?;
-
-                    // The database query already excludes the exact raw prefix
-                    // named by the required compaction cursor.
-                    let prior_provider_prefix = 0;
-                    let mut history = provider_history;
-                    let mut summaries = compaction_state
-                        .summaries
-                        .into_iter()
-                        .map(compaction::bounded_summary)
-                        .collect::<Vec<_>>();
-
-                    let mut built = self
-                        .prompt_builder
-                        .build(&history, &summaries)
+                        let sequenced_history = session::load_sequenced_history_for_request(
+                            &self.node,
+                            &request,
+                            background_cutoff,
+                            prior_cursor,
+                            provider_profile,
+                        )
                         .instrument(tracing::info_span!(
-                            "request.build_prompt",
+                            "request.load_active_history",
                             request_id = %request.request_id,
                             session_id = %request.session_id,
                             behavior_id = %behavior_name,
-                            history_messages = history.len(),
-                            summary_count = summaries.len(),
+                            compacted_through_sequence = prior_cursor.map(i64::from),
+                            compacted_provider_messages_skipped = total_compacted_messages as i64,
+                            cursor_hit = prior_cursor.is_some(),
+                            history_message_count = tracing::field::Empty,
                         ))
                         .await?;
-                    let complete_input_tokens = self
-                        .estimate_initial_provider_input(
-                            &request,
-                            built.preamble.clone(),
-                            &built.messages,
-                            &skill_reminders,
-                            request_context_message.as_ref(),
-                            aggregate_token_budget.clone(),
-                            &replay,
-                        )
-                        .await?;
-                    let reduction_admission = compaction::ReductionAdmission::for_input(
-                        complete_input_tokens,
-                        self.behavior.context_window,
-                        self.behavior.compaction_threshold(),
-                    );
-                    let over_threshold = reduction_admission.is_some();
-                    let may_reduce = if over_threshold {
-                        let gate_open = canonical_prefix_is_stable;
-                        if !gate_open {
-                            tracing::info!(
-                                request_id = %request.request_id,
+                        let durable_history = sequenced_history
+                            .iter()
+                            .map(|row| row.message.clone())
+                            .collect::<Vec<_>>();
+                        // Check the exact reconstructed canonical rows before the
+                        // provider projection is allowed to remove an unfinished
+                        // tail. The projected view is intentionally a fixpoint;
+                        // checking only that view would make this gate vacuous.
+                        let canonical_prefix_is_stable =
+                            compaction::safe_to_reduce(provider_profile, &durable_history);
+                        // The sourced projection below performs this same file
+                        // activity extraction before stripping tool results.
+                        let file_activity = compaction::history::extract_file_activity(&durable_history);
+                        if !file_activity.is_empty() {
+                            tracing::debug!(
+                                behavior_id = %self.behavior.behavior_id,
                                 session_id = %request.session_id,
-                                behavior_id = %behavior_name,
-                                "compaction skipped: canonical provider prefix is not a stable turn boundary"
+                                files_read = ?file_activity.files_read,
+                                files_modified = ?file_activity.files_modified,
+                                "files referenced in stripped history"
                             );
                         }
-                        gate_open
-                    } else {
-                        false
-                    };
-                    if may_reduce {
-                        let admission = reduction_admission
-                            .expect("may_reduce is true only for an admitted reduction");
-                        let mut options = self.compaction_options_for_request(
-                            lifecycle.claimed_deadline_at(),
-                            aggregate_token_budget.clone(),
-                            effective_seed,
+                        // One canonical reduction, shared with the compaction writer:
+                        // `messages_compacted` is measured against this list, so the
+                        // prefix drop below must index the same one (#993).
+                        let mut replay = crate::provider_input::replay::owned_replay_input(
+                            self.node.clone(), request.clone(), request_commit_cid.clone(),
+                            gents_protocol::rendered_request::CaptureScopeKind::Inference,
+                            self.replay_issuer.clone(), provider_profile,
                         );
-                        let projected = provider_view_tagged(provider_profile, history)?;
-                        options.max_compacted_prefix_messages =
-                            crate::agent::loop_stream::replay_compaction_prefix_bound(
-                                &projected, &replay.required,
-                            )?;
-                        let projected_native = projected.iter().map(|row| row.message.clone()).collect::<Vec<_>>();
-                        options.keep_recent_tokens = self.compactor.retention_target(
-                            options.keep_recent_tokens,
-                            &projected_native,
-                            admission,
-                        )?;
-                        let result = admission::scope_call(
-                            CallKind::Compaction,
-                            1,
-                            self.compactor.reduce(
-                                projected_native.clone(),
-                                self.behavior.context_window,
-                                &options,
-                                admission,
-                            ),
-                        )
-                        .await?;
+                        let tagged = crate::provider_input::replay::tag_canonical_history(
+                            &sequenced_history,
+                        );
+                        let provider_history = provider_view_tagged(provider_profile, tagged)?;
 
-                        // The reducer exposes an exact split of its input; use
-                        // that split to carry associations, never a byte search.
-                        history = if let Some(exact) = result.exact_reduction() {
-                            anyhow::ensure!(projected_native == exact.compacted_prefix.iter().chain(exact.retained_suffix).cloned().collect::<Vec<_>>(),
-                                "session reduction changed its exact provider source");
-                            let (prefix, suffix) = projected.split_at(exact.compacted_prefix.len());
-                            let associations = crate::provider_context_reduction::ReplayAssociations::from_tagged_split(
-                                replay.required.clone(), prefix, suffix,
-                            );
-                            crate::provider_context_reduction::validate_replay_associations(
-                                &associations, exact.compacted_prefix, exact.retained_suffix, &request.doc_id,
-                            )?;
-                            suffix.to_vec()
-                        } else {
-                            anyhow::ensure!(projected_native == result.provider_messages()?,
-                                "provider repair changed its sourced projection");
-                            projected
-                        };
-                        if let Some(exact) = result.exact_reduction() {
-                            let summary = exact.checkpoint;
-                            let sequence_rows = sequenced_history
-                                .iter()
-                                .map(|row| (row.sequence, row.message.clone()))
-                                .collect::<Vec<_>>();
-                            let compacted_through_sequence =
-                                compaction::session_cursor_for_reduction(
-                                    provider_profile,
-                                    &sequence_rows,
-                                    prior_provider_prefix,
-                                    exact,
-                                )?;
-                            if compaction_generation_is_latest
-                                && compacted_through_sequence.is_some()
-                            {
-                                let compacted_through_sequence = compacted_through_sequence
-                                    .expect("the persistence branch requires a proven cursor");
-                                match session::save_exact_compaction_entry(
-                                    &self.node,
-                                    session::NewExactSessionCompaction {
-                                        session_id: &request.session_id,
-                                        agent_did: &request.agent_did,
-                                        requester_did: request.requester_did.as_deref(),
-                                        request_id: &request.request_id,
-                                        request_doc_id: &request.doc_id,
-                                        files_read: &result.files_read,
-                                        files_modified: &result.files_modified,
-                                        compacted_through_sequence,
-                                        original_tokens: result.original_token_estimate,
-                                        compacted_tokens: result.compacted_token_estimate,
-                                        expected_generation: &compaction_generation,
-                                    },
-                                    exact,
-                                )
-                                .await
-                                {
-                                    Ok(entry) => {
-                                        summaries.push(compaction::bounded_summary(entry.summary));
-                                    }
-                                    Err(error)
-                                        if is_stale_compaction_generation(&error)
-                                            && assembly_attempt == 0 =>
-                                    {
-                                        tracing::info!(
-                                            request_id = %request.request_id,
-                                            session_id = %request.session_id,
-                                            "compaction generation advanced during prompt assembly; rebuilding from the winner"
-                                        );
-                                        continue;
-                                    }
-                                    Err(error) if is_stale_compaction_generation(&error) => {
-                                        tracing::warn!(
-                                            request_id = %request.request_id,
-                                            session_id = %request.session_id,
-                                            "compaction generation advanced twice; using the verified request-local compaction without appending it"
-                                        );
-                                        summaries.push(compaction::bounded_summary(summary.to_string()));
-                                    }
-                                    Err(error) => return Err(error),
-                                }
-                            } else if compacted_through_sequence.is_none() {
-                                // A session checkpoint and its raw transcript
-                                // cursor are one atomic durable fact. If the
-                                // exact provider prefix cannot be denoted in
-                                // raw sequence space, use the reduction only
-                                // for this request and leave the generation
-                                // untouched so a later request can retry.
-                                tracing::warn!(
-                                    request_id = %request.request_id,
-                                    session_id = %request.session_id,
-                                    provider_prefix = prior_provider_prefix
-                                        .saturating_add(exact.compacted_prefix.len()),
-                                    "using non-durable request-local compaction because no canonical session cursor could be proven"
-                                );
-                                summaries.push(compaction::bounded_summary(summary.to_string()));
-                            } else {
-                                // A background request may be bound to an older
-                                // compatible transcript/compaction generation. Its
-                                // reduction is valid for this request's provider
-                                // input but must not mutate the live session chain.
-                                tracing::info!(
-                                    request_id = %request.request_id,
-                                    session_id = %request.session_id,
-                                    "using request-local compaction for an older background snapshot"
-                                );
-                                summaries.push(compaction::bounded_summary(summary.to_string()));
-                            }
-                        }
+                        // The database query already excludes the exact raw prefix
+                        // named by the required compaction cursor.
+                        let prior_provider_prefix = 0;
+                        let mut history = provider_history;
+                        let mut summaries = compaction_state
+                            .summaries
+                            .into_iter()
+                            .map(compaction::bounded_summary)
+                            .collect::<Vec<_>>();
 
-                        built = self
+                        let mut built = self
                             .prompt_builder
                             .build(&history, &summaries)
                             .instrument(tracing::info_span!(
@@ -483,29 +320,224 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                                 behavior_id = %behavior_name,
                                 history_messages = history.len(),
                                 summary_count = summaries.len(),
-                                compacted = true,
                             ))
                             .await?;
-                    }
+                        let complete_input_tokens = self
+                            .estimate_initial_provider_input(
+                                &request,
+                                built.preamble.clone(),
+                                &built.messages,
+                                &skill_reminders,
+                                request_context_message.as_ref(),
+                                aggregate_token_budget.clone(),
+                                &replay,
+                            )
+                            .await?;
+                        let reduction_admission = compaction::ReductionAdmission::for_input(
+                            complete_input_tokens,
+                            self.behavior.context_window,
+                            self.behavior.compaction_threshold(),
+                        );
+                        let over_threshold = reduction_admission.is_some();
+                        let may_reduce = if over_threshold {
+                            let gate_open = canonical_prefix_is_stable;
+                            if !gate_open {
+                                tracing::info!(
+                                    request_id = %request.request_id,
+                                    session_id = %request.session_id,
+                                    behavior_id = %behavior_name,
+                                    "compaction skipped: canonical provider prefix is not a stable turn boundary"
+                                );
+                            }
+                            gate_open
+                        } else {
+                            false
+                        };
+                        if may_reduce {
+                            let admission = reduction_admission
+                                .expect("may_reduce is true only for an admitted reduction");
+                            let mut options = self.compaction_options_for_request(
+                                lifecycle.claimed_deadline_at(),
+                                aggregate_token_budget.clone(),
+                                effective_seed,
+                            );
+                            let projected = provider_view_tagged(provider_profile, history)?;
+                            options.max_compacted_prefix_messages =
+                                crate::agent::loop_stream::replay_compaction_prefix_bound(
+                                    &projected, &replay.required,
+                                )?;
+                            let projected_native = projected.iter().map(|row| row.message.clone()).collect::<Vec<_>>();
+                            options.keep_recent_tokens = self.compactor.retention_target(
+                                options.keep_recent_tokens,
+                                &projected_native,
+                                admission,
+                            )?;
+                            let result = admission::scope_call(
+                                CallKind::Compaction,
+                                1,
+                                self.compactor.reduce(
+                                    projected_native.clone(),
+                                    self.behavior.context_window,
+                                    &options,
+                                    admission,
+                                ),
+                            )
+                            .await?;
 
-                    return Ok::<_, anyhow::Error>((built, replay));
+                            // The reducer exposes an exact split of its input; use
+                            // that split to carry associations, never a byte search.
+                            history = if let Some(exact) = result.exact_reduction() {
+                                anyhow::ensure!(projected_native == exact.compacted_prefix.iter().chain(exact.retained_suffix).cloned().collect::<Vec<_>>(),
+                                    "session reduction changed its exact provider source");
+                                let (prefix, suffix) = projected.split_at(exact.compacted_prefix.len());
+                                let associations = crate::provider_context_reduction::ReplayAssociations::from_tagged_split(
+                                    replay.required.clone(), prefix, suffix,
+                                );
+                                crate::provider_context_reduction::validate_replay_associations(
+                                    &associations, exact.compacted_prefix, exact.retained_suffix, &request.doc_id,
+                                )?;
+                                suffix.to_vec()
+                            } else {
+                                anyhow::ensure!(projected_native == result.provider_messages()?,
+                                    "provider repair changed its sourced projection");
+                                projected
+                            };
+                            if let Some(exact) = result.exact_reduction() {
+                                let summary = exact.checkpoint;
+                                let sequence_rows = sequenced_history
+                                    .iter()
+                                    .map(|row| (row.sequence, row.message.clone()))
+                                    .collect::<Vec<_>>();
+                                let compacted_through_sequence =
+                                    compaction::session_cursor_for_reduction(
+                                        provider_profile,
+                                        &sequence_rows,
+                                        prior_provider_prefix,
+                                        exact,
+                                    )?;
+                                if compaction_generation_is_latest
+                                    && compacted_through_sequence.is_some()
+                                {
+                                    let compacted_through_sequence = compacted_through_sequence
+                                        .expect("the persistence branch requires a proven cursor");
+                                    match session::save_exact_compaction_entry(
+                                        &self.node,
+                                        session::NewExactSessionCompaction {
+                                            session_id: &request.session_id,
+                                            agent_did: &request.agent_did,
+                                            requester_did: request.requester_did.as_deref(),
+                                            request_id: &request.request_id,
+                                            request_doc_id: &request.doc_id,
+                                            files_read: &result.files_read,
+                                            files_modified: &result.files_modified,
+                                            compacted_through_sequence,
+                                            original_tokens: result.original_token_estimate,
+                                            compacted_tokens: result.compacted_token_estimate,
+                                            expected_generation: &compaction_generation,
+                                        },
+                                        exact,
+                                    )
+                                    .await
+                                    {
+                                        Ok(entry) => {
+                                            summaries.push(compaction::bounded_summary(entry.summary));
+                                        }
+                                        Err(error)
+                                            if is_stale_compaction_generation(&error)
+                                                && assembly_attempt == 0 =>
+                                        {
+                                            tracing::info!(
+                                                request_id = %request.request_id,
+                                                session_id = %request.session_id,
+                                                "compaction generation advanced during prompt assembly; rebuilding from the winner"
+                                            );
+                                            continue;
+                                        }
+                                        Err(error) if is_stale_compaction_generation(&error) => {
+                                            tracing::warn!(
+                                                request_id = %request.request_id,
+                                                session_id = %request.session_id,
+                                                "compaction generation advanced twice; using the verified request-local compaction without appending it"
+                                            );
+                                            summaries.push(compaction::bounded_summary(summary.to_string()));
+                                        }
+                                        Err(error) => return Err(error),
+                                    }
+                                } else if compacted_through_sequence.is_none() {
+                                    // A session checkpoint and its raw transcript
+                                    // cursor are one atomic durable fact. If the
+                                    // exact provider prefix cannot be denoted in
+                                    // raw sequence space, use the reduction only
+                                    // for this request and leave the generation
+                                    // untouched so a later request can retry.
+                                    tracing::warn!(
+                                        request_id = %request.request_id,
+                                        session_id = %request.session_id,
+                                        provider_prefix = prior_provider_prefix
+                                            .saturating_add(exact.compacted_prefix.len()),
+                                        "using non-durable request-local compaction because no canonical session cursor could be proven"
+                                    );
+                                    summaries.push(compaction::bounded_summary(summary.to_string()));
+                                } else {
+                                    // A background request may be bound to an older
+                                    // compatible transcript/compaction generation. Its
+                                    // reduction is valid for this request's provider
+                                    // input but must not mutate the live session chain.
+                                    tracing::info!(
+                                        request_id = %request.request_id,
+                                        session_id = %request.session_id,
+                                        "using request-local compaction for an older background snapshot"
+                                    );
+                                    summaries.push(compaction::bounded_summary(summary.to_string()));
+                                }
+                            }
+
+                            built = self
+                                .prompt_builder
+                                .build(&history, &summaries)
+                                .instrument(tracing::info_span!(
+                                    "request.build_prompt",
+                                    request_id = %request.request_id,
+                                    session_id = %request.session_id,
+                                    behavior_id = %behavior_name,
+                                    history_messages = history.len(),
+                                    summary_count = summaries.len(),
+                                    compacted = true,
+                                ))
+                                .await?;
+                        }
+
+                        return Ok::<_, anyhow::Error>((built, replay));
+                    }
+                    unreachable!("bounded prompt assembly retry returns")
                 }
-                unreachable!("bounded prompt assembly retry returns")
-            }
-            .instrument(tracing::info_span!(
-                "request.prepare_prompt",
-                request_id = %request.request_id,
-                session_id = %request.session_id,
-                agent_did = %request.agent_did,
-                behavior_id = %behavior_name,
-                deadline_at = %trace_attrs.deadline_at,
-                has_deadline = trace_attrs.has_deadline,
-                subagent_depth = trace_attrs.subagent_depth,
-                is_subagent = trace_attrs.is_subagent,
-                selected_skill_count = trace_attrs.selected_skill_count,
-                workspace_cwd_set = trace_attrs.workspace_cwd_set,
-            ))
-            .await?;
+                .instrument(tracing::info_span!(
+                    "request.prepare_prompt",
+                    request_id = %request.request_id,
+                    session_id = %request.session_id,
+                    agent_did = %request.agent_did,
+                    behavior_id = %behavior_name,
+                    deadline_at = %trace_attrs.deadline_at,
+                    has_deadline = trace_attrs.has_deadline,
+                    subagent_depth = trace_attrs.subagent_depth,
+                    is_subagent = trace_attrs.is_subagent,
+                    selected_skill_count = trace_attrs.selected_skill_count,
+                    workspace_cwd_set = trace_attrs.workspace_cwd_set,
+                ))
+                .await?;
+
+                Ok::<_, anyhow::Error>((workspace, request_context_message, built, replay))
+            };
+            let prepared =
+                crate::interrupt::prepare_unless_interrupted(&mut interrupt_rx, preparation).await;
+            let (workspace, request_context_message, mut built, replay) = match prepared {
+                crate::interrupt::InterruptiblePreparation::Ready(prepared) => prepared?,
+                crate::interrupt::InterruptiblePreparation::Interrupted => {
+                    return Ok(HandleRequestOutcome::Interrupted(
+                        super::InterruptEvidence::observed(),
+                    ));
+                }
+            };
 
             if !skill_reminders.is_empty() {
                 let mut reminders = skill_reminders
@@ -616,7 +648,9 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                 }
                 .instrument(flow_span)
                 .await?;
-                return Ok(HandleRequestOutcome::Interrupted);
+                return Ok(HandleRequestOutcome::Interrupted(
+                    super::InterruptEvidence::observed(),
+                ));
             }
 
             result
