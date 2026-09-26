@@ -31,7 +31,8 @@ proposer one user turn per round: the current instruction, every feedback
 line from the train run, the candidates already rejected, the rules, and the
 reply shape. A reply that contains exactly one fenced `json` block holding
 `text` and `rationale` is the round's proposal; a reply that does not gets
-one corrective turn, and a second failure fails the round. The driver's
+one corrective turn, and a second failure fails the run; rerun with the
+same `--job-id` to resume. The driver's
 structural gate, not the proposer, enforces the byte cap and the
 no-repeat rule. `--proposer scripted:<file>` replays a fixed list of
 proposals instead and installs nothing.
