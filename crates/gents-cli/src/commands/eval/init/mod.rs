@@ -643,15 +643,11 @@ mod tests {
         let fixture = crate::commands::eval::testing::Fixture::new().await;
         let access = &fixture.ctx.access;
         let owner = fixture.ctx.owner.as_str();
-        // Each document the pack installs, as the home holds it: its
+        // Each document a pack installs, as the home holds it: its
         // DefraDB document id and its fields.
-        let installed = || async move {
+        let read = |ids: [(gents::Collection, &'static str); 3]| async move {
             let mut documents = Vec::new();
-            for (collection, id) in [
-                (gents::Collection::AgentBehavior, turn::AUTHOR_BEHAVIOR),
-                (gents::Collection::AgentContext, "eval-author-context"),
-                (gents::Collection::Tools, "eval-author-tools"),
-            ] {
+            for (collection, id) in ids {
                 let found = access
                     .transact("cli.eval.init.test_read_author", |txn| {
                         Box::pin(async move {
@@ -668,23 +664,46 @@ mod tests {
             }
             documents
         };
-        let first_counts = install_author(access, owner, "local").await.unwrap();
+        let installed = || {
+            read([
+                (gents::Collection::AgentBehavior, turn::AUTHOR_BEHAVIOR),
+                (gents::Collection::AgentContext, "eval-author-context"),
+                (gents::Collection::Tools, "eval-author-tools"),
+            ])
+        };
+        let first_counts = install_pack_slot(access, owner, "eval_author", "author", "local")
+            .await
+            .unwrap();
         assert_eq!(first_counts.get(gents::Collection::AgentBehavior), 1);
         let first = installed().await;
-        install_author(access, owner, "local").await.unwrap();
+        install_pack_slot(access, owner, "eval_author", "author", "local")
+            .await
+            .unwrap();
         // Re-applying rewrites each document in place with what it holds:
         // no new document, no changed field.
         assert_eq!(installed().await, first);
         let behavior = &first[0].1;
         assert_eq!(behavior["inference_profile_id"], "local");
 
-        let error = install_author(access, owner, "no-such-profile")
+        let error = install_pack_slot(access, owner, "eval_author", "author", "no-such-profile")
             .await
             .unwrap_err();
         assert!(
             format!("{error:#}").contains("no-such-profile"),
             "{error:#}"
         );
+
+        // The optimization proposer's pack installs through the same owner.
+        install_pack_slot(access, owner, "prompt_proposer", "proposer", "local")
+            .await
+            .unwrap();
+        let proposer = read([
+            (gents::Collection::AgentBehavior, "prompt-proposer"),
+            (gents::Collection::AgentContext, "prompt-proposer-context"),
+            (gents::Collection::Tools, "prompt-proposer-tools"),
+        ])
+        .await;
+        assert_eq!(proposer[0].1["inference_profile_id"], "local");
     }
 
     #[tokio::test]

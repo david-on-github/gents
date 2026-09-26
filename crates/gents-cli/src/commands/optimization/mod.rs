@@ -454,6 +454,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_behavior_proposer_needs_a_served_home() {
+        let fixture = Fixture::new().await;
+        let pack = fixture.pack_arg();
+        let error = optimization(
+            &fixture,
+            &[
+                "run",
+                DEFINITION,
+                "--subject",
+                pack.as_str(),
+                "--proposer",
+                "behavior:prompt_proposer",
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("start `gents server`"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
     async fn a_scripted_job_runs_to_ready_to_promote_and_show_recomputes_its_decisions() {
         let fixture = Fixture::new().await;
         let output = accepted_job(&fixture, "job-1").await;
