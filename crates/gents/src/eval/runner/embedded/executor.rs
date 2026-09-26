@@ -14,13 +14,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use gents_protocol::request_lifecycle::RequestLifecycleState;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::config_client::{
@@ -28,14 +29,14 @@ use crate::config_client::{
 };
 use crate::defra_node::EmbeddedNode;
 use crate::document_config::{InferenceSampling, PackConfig};
-use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome};
+use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome, RUNTIME_READY_TIMEOUT};
 use crate::eval::runner::embedded::observe::{
     await_terminal, classify_request_outcome, collect_request_evidence, RequestEvidence,
     TerminalObservation,
 };
 use crate::eval::runner::executor::{
-    Capture, CaptureResult, FileRef, InferenceBinding, Isolation, StageEvidence, StageSpec,
-    TrialEvidence, TrialExecutor, TrialFixtures, TrialLocator, TrialSpec,
+    Capture, CaptureResult, FileRef, FixtureDocument, InferenceBinding, Isolation, StageEvidence,
+    StageSpec, TrialEvidence, TrialExecutor, TrialFixtures, TrialLocator, TrialSpec,
 };
 use crate::eval::{Anchor, OutcomeKind, ProviderReason, TrialUsage};
 use crate::graphql::{
@@ -49,7 +50,7 @@ use crate::pack::{
     bind_pack_install_config, declared_paths, digest_declared_assets, load_pack_config,
     PackInferenceBindings, PackInstallOptions, PackManifest,
 };
-use crate::{Collection, ConfigAccess, DocumentRuntimeOptions};
+use crate::{Collection, ConfigAccess, DocumentRuntimeOptions, RuntimeSnapshotObserver};
 
 /// How long a request is watched after it has been interrupted, on the stage
 /// deadline or on cancellation, before the observation gives up on it settling.
@@ -165,18 +166,22 @@ impl EmbeddedExecutor {
             close(home).await;
             return infrastructure(&spec.trial_id, locator, &error);
         }
+        // The trial's own latch on its event sources, so a seed stage writes
+        // only once the pack's triggers can see the write.
+        let (event_sources_ready, ready) = watch::channel(false);
+        let mut options = self.runtime_options.clone();
+        options.runtime_snapshot_observer = Some(Arc::new(EventSourcesReady(event_sources_ready)));
         // A failed boot has already stopped whatever it spawned, so the home is
         // ours to close.
-        let runtime =
-            match boot_runtime(&home, home.identity.clone(), self.runtime_options.clone()).await {
-                Ok((runtime, _agent)) => runtime,
-                Err(error) => {
-                    close(home).await;
-                    return infrastructure(&spec.trial_id, locator, &error);
-                }
-            };
+        let runtime = match boot_runtime(&home, home.identity.clone(), options).await {
+            Ok((runtime, _agent)) => runtime,
+            Err(error) => {
+                close(home).await;
+                return infrastructure(&spec.trial_id, locator, &error);
+            }
+        };
 
-        let stages = run_stages(spec, &cancel, &home, &locator, &workspace).await;
+        let stages = run_stages(spec, &cancel, &home, &locator, &workspace, &ready).await;
 
         if let Err(error) = runtime.shutdown().await {
             tracing::warn!(
@@ -188,6 +193,19 @@ impl EmbeddedExecutor {
         close(home).await;
         let (usage, anchor) = (usage(&stages), anchor(&stages));
         TrialEvidence::new(locator, stages, usage, anchor)
+    }
+}
+
+/// Latches the first clean reconcile of the trial runtime's event sources.
+struct EventSourcesReady(watch::Sender<bool>);
+
+impl RuntimeSnapshotObserver for EventSourcesReady {
+    fn on_generation_published(&self, _: u64, _: &str, _: &[String]) {}
+
+    fn on_event_sources_reconciled(&self, generation: u64, _: &str, result: Result<(), &str>) {
+        if generation >= 1 && result.is_ok() {
+            let _ = self.0.send(true);
+        }
     }
 }
 
@@ -614,25 +632,7 @@ async fn install_fixtures(
             .context("adding a fixture schema")?;
     }
     for fixture in &fixtures.documents {
-        let collection = &fixture.collection;
-        validate_collection_identifier(collection)?;
-        // The document is arbitrary authored JSON, so it travels as a variable
-        // and is never interpolated into the mutation.
-        let mutation = format!(
-            "mutation($input: {collection}MutationInputArg!) {{ create_{collection}(input: $input) {{ _docID }} }}"
-        );
-        let variables = json!({ "input": fixture.document });
-        access
-            .transact("eval.trial.fixture_document", |txn| {
-                let (mutation, variables) = (&mutation, &variables);
-                Box::pin(async move {
-                    txn.execute_with_variables(mutation, variables)
-                        .await
-                        .map(|_| ())
-                })
-            })
-            .await
-            .with_context(|| format!("creating a {collection} fixture document"))?;
+        create_document(access, &fixture.collection, &fixture.document).await?;
     }
     for file in &fixtures.files {
         let path = workspace_path(workspace, &file.path)?;
@@ -644,6 +644,39 @@ async fn install_fixtures(
             .with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Writes one authored row and returns its `_docID`. The document is arbitrary
+/// authored JSON, so it travels as a variable and is never interpolated into
+/// the mutation.
+async fn create_document(
+    access: &ConfigAccess,
+    collection: &str,
+    document: &Value,
+) -> Result<String> {
+    validate_collection_identifier(collection)?;
+    let mutation = format!(
+        "mutation($input: {collection}MutationInputArg!) {{ create_{collection}(input: $input) {{ _docID }} }}"
+    );
+    let variables = json!({ "input": document });
+    access
+        .transact("eval.trial.fixture_document", |txn| {
+            let (mutation, variables) = (&mutation, &variables);
+            Box::pin(async move {
+                let response = txn.execute_with_variables(mutation, variables).await?;
+                // The node answers under `add_<collection>`, as a list.
+                let created = response["data"]
+                    .as_object()
+                    .and_then(|data| data.values().next());
+                created
+                    .and_then(|created| created.get(0).unwrap_or(created).get("_docID"))
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .with_context(|| format!("create_{collection} returned no _docID: {response}"))
+            })
+        })
+        .await
+        .with_context(|| format!("creating a {collection} document"))
 }
 
 /// A fixture path names a file inside the trial's workspace, never a path out
@@ -667,11 +700,17 @@ async fn run_stages(
     home: &EmbeddedHome,
     locator: &TrialLocator,
     workspace: &Path,
+    ready: &watch::Receiver<bool>,
 ) -> Vec<StageEvidence> {
-    let mut stages = Vec::new();
+    let mut stages: Vec<StageEvidence> = Vec::new();
     for stage in &spec.stages {
         spec.progress.stage_started(&stage.stage_id);
-        let evidence = run_stage(spec, cancel, home, locator, workspace, stage).await;
+        // A seed stage takes the earliest fired request no earlier stage did.
+        let seen: Vec<String> = stages
+            .iter()
+            .filter_map(|stage| stage.request_id.clone())
+            .collect();
+        let evidence = run_stage(spec, cancel, home, locator, workspace, stage, ready, &seen).await;
         spec.progress.stage_ended(&stage.stage_id);
         let failed = evidence.failure_kind.is_some();
         stages.push(evidence);
@@ -689,8 +728,10 @@ async fn run_stage(
     locator: &TrialLocator,
     workspace: &Path,
     stage: &StageSpec,
+    ready: &watch::Receiver<bool>,
+    seen: &[String],
 ) -> StageEvidence {
-    let observed = submit_and_observe(spec, cancel, home, locator, stage).await;
+    let observed = submit_and_observe(spec, cancel, home, locator, stage, ready, seen).await;
     StageEvidence {
         stage_id: stage.stage_id.clone(),
         request_id: observed.request_id,
@@ -746,19 +787,39 @@ async fn submit_and_observe(
     home: &EmbeddedHome,
     locator: &TrialLocator,
     stage: &StageSpec,
+    ready: &watch::Receiver<bool>,
+    seen: &[String],
 ) -> ObservedStage {
-    let request_id = uuid::Uuid::new_v4().to_string();
-    if let Err(error) =
-        submit_stage(&home.node, locator, &spec.behavior_id, stage, &request_id).await
-    {
-        tracing::warn!(
-            error = %format!("{error:#}"),
-            trial_id = %spec.trial_id,
-            stage_id = %stage.stage_id,
-            "eval stage could not be submitted"
-        );
-        return ObservedStage::unsubmitted();
-    }
+    let submitted = match &stage.seed {
+        Some(seed) => {
+            seed_and_await_fire(
+                home,
+                ready,
+                seen,
+                seed,
+                Duration::from_secs(stage.deadline_secs),
+            )
+            .await
+        }
+        None => {
+            let request_id = uuid::Uuid::new_v4().to_string();
+            submit_stage(&home.node, locator, &spec.behavior_id, stage, &request_id)
+                .await
+                .map(|()| request_id)
+        }
+    };
+    let request_id = match submitted {
+        Ok(request_id) => request_id,
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                trial_id = %spec.trial_id,
+                stage_id = %stage.stage_id,
+                "eval stage could not be submitted"
+            );
+            return ObservedStage::unsubmitted();
+        }
+    };
 
     let cancelled;
     let observed = tokio::select! {
@@ -921,6 +982,66 @@ async fn submit_stage(
         .map_err(|error| anyhow!("building the stage request mutation: {error}"))?;
     ConfigAccess::write_local(node, "eval.trial.submit_stage", &mutation).await?;
     Ok(())
+}
+
+/// A seed stage: once the runtime's event sources are reconciled, write the
+/// document and take the request the pack's trigger fires for it. The wait for
+/// the event sources shares the runtime-ready budget; the wait for the fire is
+/// the stage's own deadline.
+async fn seed_and_await_fire(
+    home: &EmbeddedHome,
+    ready: &watch::Receiver<bool>,
+    seen: &[String],
+    seed: &FixtureDocument,
+    deadline: Duration,
+) -> Result<String> {
+    tokio::time::timeout(
+        RUNTIME_READY_TIMEOUT,
+        ready.clone().wait_for(|ready| *ready),
+    )
+    .await
+    .context("waiting for the trial runtime's event sources")?
+    .context("the trial runtime stopped before its event sources were reconciled")?;
+    let access = ConfigAccess::Local(home.node.clone());
+    let doc_id = create_document(&access, &seed.collection, &seed.document).await?;
+    tracing::debug!(collection = %seed.collection, doc_id = %doc_id, "eval seed document written");
+    let started = Instant::now();
+    loop {
+        if let Some(request_id) = fired_request(&home.node, seen).await? {
+            return Ok(request_id);
+        }
+        anyhow::ensure!(
+            started.elapsed() < deadline,
+            "no trigger fired a request within {deadline:?} of seeding {}",
+            seed.collection
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// The earliest trigger-fired request in the home that `seen` does not name.
+/// A trial home holds a handful of requests, so the trigger filter is applied
+/// here rather than asked of a nullable column.
+async fn fired_request(node: &EmbeddedNode, seen: &[String]) -> Result<Option<String>> {
+    let query =
+        r#"{ AgentRequest(order: { created_at: ASC }) { request_id caused_by_trigger_id } }"#;
+    let response = graphql_with_transaction_retry(node, query, "eval trial fired request").await?;
+    Ok(response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("AgentRequest"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|row| {
+            row.get("caused_by_trigger_id")
+                .and_then(Value::as_str)
+                .is_some_and(|trigger_id| !trigger_id.is_empty())
+        })
+        .filter_map(|row| row.get("request_id")?.as_str())
+        .find(|request_id| !seen.iter().any(|seen| seen == request_id))
+        .map(ToOwned::to_owned))
 }
 
 /// Step 5: what the trial left behind, read out of its own home and workspace.
@@ -1691,6 +1812,8 @@ mod tests {
             &locator,
             &workspace,
             &stage,
+            &watch::channel(false).1,
+            &[],
         )
         .await;
 
