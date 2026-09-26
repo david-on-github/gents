@@ -26,8 +26,10 @@ datastore or self-config tools.
 gents optimization run <definition_id> --subject <pack>[:<behavior>] --proposer behavior:prompt_proposer[:<behavior>] [--proposer-profile <profile_id>]
 ```
 
-The command opens a fresh session against the served home and sends the
-proposer one user turn per round: the current instruction, every feedback
+The command opens a fresh session against the served home, sends the
+subject's dossier (its prompt, tools, surfaces, tasks and schemas) as the
+first user turn, and then sends the proposer one user turn per round: the
+current instruction, every feedback
 line from the train run, the candidates already rejected, the rules, and the
 reply shape. A reply that contains exactly one fenced `json` block holding
 `text` and `rationale` is the round's proposal; a reply that does not gets

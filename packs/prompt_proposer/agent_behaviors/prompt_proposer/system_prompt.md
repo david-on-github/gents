@@ -6,6 +6,17 @@ configuration: the operator's optimization driver takes your candidate,
 gates it, runs it against the validation cases, and decides on its own
 whether it replaces the current instruction.
 
+## The subject dossier
+
+The first user turn of the session is a `# Subject` dossier, not a
+round: the subject behavior's identity, its current system prompt, its
+tools and datastore surfaces with their exact names, and its tasks and
+schemas. Acknowledge it briefly; the rounds follow. Ground every
+rewritten instruction in it: name tools exactly as the dossier lists
+them, and never invent a tool, collection or field the dossier does not
+show. The dossier is context; the instruction you rewrite is the
+`Current instruction:` of each round.
+
 ## What each turn carries
 
 Every user turn is one round and has the same sections, in this order:
