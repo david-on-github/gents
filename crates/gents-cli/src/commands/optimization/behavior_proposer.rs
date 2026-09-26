@@ -1,6 +1,91 @@
 //! A proposer that asks a behavior on the served home: one rendered turn
 //! per round, answered with exactly one fenced json block.
 
+use anyhow::{anyhow, Result};
+use gents::optimization::{Proposal, ProposalInput, Proposer};
+use tokio::sync::Mutex;
+
+use crate::commands::eval::init::draft::json_blocks;
+use crate::commands::eval::init::turn::Turn;
+
+pub(crate) struct BehaviorProposer<T> {
+    turn: Mutex<T>,
+}
+
+impl<T: Turn + Send> BehaviorProposer<T> {
+    pub(crate) fn new(turn: T) -> Self {
+        Self {
+            turn: Mutex::new(turn),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<T: Turn + Send> Proposer for BehaviorProposer<T> {
+    async fn propose(&self, input: ProposalInput) -> Result<Proposal> {
+        let mut turn = self.turn.lock().await;
+        let reply = turn.send(&render(&input)).await?;
+        let problem = match parse_reply(&reply) {
+            Ok(proposal) => return Ok(proposal),
+            Err(problem) => problem,
+        };
+        let reply = turn
+            .send(&format!(
+                "Reply with exactly one fenced json block with text and rationale; {problem}"
+            ))
+            .await?;
+        parse_reply(&reply)
+            .map_err(|problem| anyhow!("the behavior's second reply is not a proposal: {problem}"))
+    }
+}
+
+/// One user turn for a round, in a fixed order so a transcript is comparable
+/// across rounds.
+pub(crate) fn render(input: &ProposalInput) -> String {
+    let mut out = format!(
+        "Current instruction:\n```\n{}\n```\n\nFeedback from the train run:\n",
+        input.current_text
+    );
+    let mut feedback: Vec<_> = input.feedback.iter().collect();
+    feedback.sort_by(|a, b| a.check.cmp(&b.check));
+    for item in feedback {
+        let score = item
+            .score_bp
+            .map_or_else(|| "no score".to_owned(), |score| score.to_string());
+        let text = item.feedback.as_deref().unwrap_or("no feedback");
+        out.push_str(&format!("- {}: {score} - {text}\n", item.check));
+    }
+    if !input.rejections.is_empty() {
+        out.push_str("\nRejected so far:\n");
+        for rejection in &input.rejections {
+            out.push_str(&format!(
+                "- round {}, {}:\n```\n{}\n```\n",
+                rejection.round, rejection.reason, rejection.text
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "\nRules:\n\
+         - The text must differ from the current one.\n\
+         - The text must be at most {} bytes.\n\
+         - Keep the same audience and job.\n\
+         - Do not add tools or claims the feedback does not support.\n\n\
+         Reply with exactly one fenced json block: {{\"text\": ..., \"rationale\": ...}}\n",
+        input.max_text_bytes
+    ));
+    out
+}
+
+fn parse_reply(reply: &str) -> Result<Proposal, String> {
+    let blocks = json_blocks(reply);
+    let block = match blocks.as_slice() {
+        [block] => block,
+        blocks => return Err(format!("the reply has {} fenced json blocks", blocks.len())),
+    };
+    serde_json::from_str(block)
+        .map_err(|error| format!("the json block is not {{\"text\", \"rationale\"}}: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
     use gents::optimization::{CheckFeedback, ProposalInput, Proposer, Rejection};

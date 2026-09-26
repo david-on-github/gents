@@ -57,7 +57,7 @@ pub(crate) fn parse_reply(reply: &str) -> Result<Option<Draft>, String> {
 /// ```` ```json ```` (any case, spaces allowed around `json`) up to the next
 /// line that is exactly ```` ``` ````. An unterminated block runs to the end
 /// of the reply.
-fn json_blocks(reply: &str) -> Vec<String> {
+pub(crate) fn json_blocks(reply: &str) -> Vec<String> {
     let mut blocks = Vec::new();
     let mut current: Option<Vec<&str>> = None;
     for line in reply.lines() {

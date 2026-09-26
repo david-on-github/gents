@@ -27,9 +27,9 @@ use crate::cli::EvalInitArgs;
 
 mod contract;
 mod dossier;
-mod draft;
+pub(crate) mod draft;
 mod pilot;
-mod turn;
+pub(crate) mod turn;
 mod validate;
 mod write;
 

@@ -337,7 +337,7 @@ pub(crate) fn load_policy(arg: &crate::cli::PolicyArg) -> Result<gents::optimiza
 
 mod checks;
 mod compare;
-mod init;
+pub(crate) mod init;
 mod inspect;
 pub(crate) mod manage;
 pub(crate) mod render;
