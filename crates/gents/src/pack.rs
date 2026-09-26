@@ -667,7 +667,10 @@ mod tests {
         assert!(resolve_pack("code-review").is_err());
         assert!(resolve_pack("../code_review").is_err());
         let proposer = resolve_pack("prompt_proposer").unwrap();
-        assert_eq!(proposer.manifest.metadata.inference_slots[0].name, "proposer");
+        assert_eq!(
+            proposer.manifest.metadata.inference_slots[0].name,
+            "proposer"
+        );
     }
 
     #[test]
