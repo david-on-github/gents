@@ -471,6 +471,45 @@ mod tests {
     }
 
     #[test]
+    fn a_stage_seeds_a_document_or_sends_a_prompt_never_both() {
+        let seed = json!({"collection": "Event", "document": {"kind": "signup"}});
+        invalid(
+            |v| v["cases"][0]["stages"][0]["seed"] = seed.clone(),
+            "exactly one of seed or prompt",
+        );
+        invalid(
+            |v| {
+                v["cases"][0]["stages"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("prompt");
+            },
+            "exactly one of seed or prompt",
+        );
+        invalid(
+            |v| {
+                v["cases"][0]["stages"][0]["prompt"] = "".into();
+                v["cases"][0]["stages"][0]["seed"] =
+                    json!({"collection": " ", "document": {}});
+            },
+            "seed collection",
+        );
+
+        let mut value = definition();
+        let stage = value["cases"][0]["stages"][0].as_object_mut().unwrap();
+        stage.remove("prompt");
+        stage.insert("seed".into(), seed.clone());
+        let parsed = parse(value);
+        parsed.validate().unwrap();
+        let serialized = serde_json::to_value(&parsed.cases[0].stages[0]).unwrap();
+        assert_eq!(serialized["seed"], seed);
+        assert_eq!(serialized["prompt"], "");
+
+        let prompt_only = serde_json::to_value(&parse(definition()).cases[0].stages[0]).unwrap();
+        assert!(prompt_only.get("seed").is_none(), "{prompt_only}");
+    }
+
+    #[test]
     fn a_case_needs_an_acceptance_check_and_judges_stay_development() {
         invalid(
             |v| v["cases"][0]["stages"][0]["checks"][0]["tier"] = "development".into(),
