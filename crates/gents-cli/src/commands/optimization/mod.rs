@@ -127,6 +127,8 @@ async fn behavior_proposer(
     args: &OptimizationRunArgs,
     pack: &str,
     behavior: Option<&str>,
+    subject_dir: &Path,
+    subject_behavior: &str,
 ) -> Result<BehaviorProposer<LiveTurn>> {
     let gents::ConfigAccess::Graphql(graphql) = &ctx.access else {
         anyhow::bail!(
@@ -134,6 +136,7 @@ async fn behavior_proposer(
         );
     };
     crate::request_helpers::ensure_local_request_signer(args.scope.home.as_deref(), &ctx.owner)?;
+    let preamble = subject_preamble(subject_dir, subject_behavior)?;
     let manifest = gents::pack::resolve_pack(pack)?.manifest;
     let [slot] = manifest.metadata.inference_slots.as_slice() else {
         anyhow::bail!(
@@ -146,15 +149,29 @@ async fn behavior_proposer(
         default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
     });
     install_pack_slot(&ctx.access, &ctx.owner, pack, &slot.name, &profile).await?;
-    Ok(BehaviorProposer::new(LiveTurn {
-        graphql: graphql.clone(),
-        agent_did: ctx.owner.clone(),
-        behavior_id,
-        session_id: uuid::Uuid::new_v4().to_string(),
-        timeout_secs: args.proposer_timeout_secs,
-        poll_secs: 1,
-        quiet: args.json,
-    }))
+    Ok(BehaviorProposer::with_preamble(
+        LiveTurn {
+            graphql: graphql.clone(),
+            agent_did: ctx.owner.clone(),
+            behavior_id,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            timeout_secs: args.proposer_timeout_secs,
+            poll_secs: 1,
+            quiet: args.json,
+        },
+        preamble,
+    ))
+}
+
+/// The session's first user turn: the subject's dossier, so a proposal
+/// names the subject's real tools and surfaces rather than guessing them.
+fn subject_preamble(subject_dir: &Path, behavior_id: &str) -> Result<String> {
+    let dossier = crate::commands::eval::init::dossier::render(subject_dir, Some(behavior_id))?;
+    Ok(format!(
+        "# Subject\n\n{}\n\nThe instruction you will rewrite is this behavior's system prompt. \
+         Every later turn carries the current instruction and the training feedback.",
+        dossier.text
+    ))
 }
 
 /// The behavior `--proposer behavior:<pack>[:<behavior>]` asks: the named
@@ -193,12 +210,6 @@ async fn run(
     let proposer_arg = args.proposer.as_ref().context(
         "optimization run needs a proposer: pass --proposer scripted:<file> or --proposer behavior:<pack>[:<behavior>]",
     )?;
-    let proposer: Box<dyn Proposer> = match proposer_arg {
-        ProposerArg::Scripted(script) => Box::new(scripted_proposer(script, args.rounds)?),
-        ProposerArg::Behavior { pack, behavior } => {
-            Box::new(behavior_proposer(ctx, args, pack, behavior.as_deref()).await?)
-        }
-    };
     let subject = resolve_subject_pack(
         &ctx.home_dir,
         &args.subject.pack,
@@ -213,6 +224,21 @@ async fn run(
     let behavior_id = match &args.subject.behavior {
         Some(behavior) => behavior.clone(),
         None => subject.default_behavior()?,
+    };
+    let proposer: Box<dyn Proposer> = match proposer_arg {
+        ProposerArg::Scripted(script) => Box::new(scripted_proposer(script, args.rounds)?),
+        ProposerArg::Behavior { pack, behavior } => {
+            let proposer = behavior_proposer(
+                ctx,
+                args,
+                pack,
+                behavior.as_deref(),
+                &baseline_pack,
+                &behavior_id,
+            )
+            .await?;
+            Box::new(proposer)
+        }
     };
     // Bonferroni: the divisor must be the number of candidates the budget
     // allows, and the driver refuses a policy that disagrees.

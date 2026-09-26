@@ -26,7 +26,7 @@ use super::{Deps, EvalContext};
 use crate::cli::EvalInitArgs;
 
 mod contract;
-mod dossier;
+pub(crate) mod dossier;
 pub(crate) mod draft;
 mod pilot;
 pub(crate) mod turn;
