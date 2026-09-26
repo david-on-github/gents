@@ -154,6 +154,7 @@ Answer.
 
 Rules:
 - The text must differ from the current one.
+- The text must not repeat a rejected candidate.
 - The text must be at most 4096 bytes.
 - Keep the same audience and job.
 - Do not add tools or claims the feedback does not support.
