@@ -128,8 +128,8 @@ fn failed(reason_code: &str, detail: String, rows: u64) -> CheckVerdict {
     CheckVerdict {
         kind: OutcomeKind::ModelAcceptance,
         score_bp: Some(0),
+        feedback: Some(detail.clone()),
         raw: raw(reason_code, detail, Some(rows)),
-        feedback: None,
     }
 }
 
@@ -139,8 +139,8 @@ fn grader(reason_code: &str, detail: String, rows: Option<u64>) -> CheckVerdict 
     CheckVerdict {
         kind: OutcomeKind::Grader,
         score_bp: None,
+        feedback: Some(detail.clone()),
         raw: raw(reason_code, detail, rows),
-        feedback: None,
     }
 }
 
