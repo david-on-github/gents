@@ -187,6 +187,28 @@ mod tests {
     }
 
     #[test]
+    fn a_non_passing_verdict_carries_its_reason_as_feedback() {
+        let verdict =
+            CapturedRowsCount.evaluate(&json!({"name": "items", "min": 1}), &stage(vec![]));
+        assert_eq!(
+            verdict.feedback.as_deref(),
+            Some("items holds 0 rows, fewer than the 1 required")
+        );
+        let verdict = CapturedRowsCount
+            .evaluate(&json!({"name": "other", "min": 1}), &stage(vec![json!({})]));
+        assert_eq!(
+            verdict.feedback.as_deref(),
+            Some("the stage produced no capture named other")
+        );
+        let verdict = CapturedRowsCount.evaluate(
+            &json!({"name": "items", "min": 0, "max": 0}),
+            &stage(vec![]),
+        );
+        assert_eq!(verdict.raw["reason_code"], "in_range");
+        assert_eq!(verdict.feedback, None);
+    }
+
+    #[test]
     fn too_many_rows_fail_the_model() {
         let verdict = CapturedRowsCount.evaluate(
             &json!({"name": "items", "min": 0, "max": 1}),
