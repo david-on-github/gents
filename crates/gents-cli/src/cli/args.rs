@@ -4422,7 +4422,7 @@ pub(crate) struct OptimizationRunArgs {
     /// default when absent.
     #[arg(long)]
     pub(crate) proposer_profile: Option<String>,
-    /// Seconds to wait for each proposer reply; default 600
+    /// Seconds without progress before a proposer reply times out.
     #[arg(long, default_value_t = 600)]
     pub(crate) proposer_timeout_secs: u64,
     /// The inference profile both arms run on; the home's default when absent.
