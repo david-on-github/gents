@@ -206,6 +206,7 @@ mod tests {
                 .map(|(id, checks)| EvalStage {
                     stage_id: id.to_string(),
                     prompt: "p".into(),
+                    seed: None,
                     deadline_secs: 60,
                     capture: vec![],
                     checks: checks

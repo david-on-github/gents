@@ -173,7 +173,13 @@ impl EvalCapture {
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub struct EvalStage {
     pub stage_id: String,
+    #[serde(default)]
     pub prompt: String,
+    /// A document written instead of a prompt: the stage's request is whatever
+    /// the pack's own EventTrigger fires for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
+    pub seed: Option<EvalFixtureDocument>,
     pub deadline_secs: u64,
     #[serde(
         default,
@@ -297,6 +303,16 @@ impl EvalDefinition {
                     stage.deadline_secs > 0,
                     "eval definition {id} case {case_id} stage {stage_id} deadline_secs must be positive"
                 );
+                ensure!(
+                    stage.seed.is_some() != !stage.prompt.trim().is_empty(),
+                    "eval definition {id} case {case_id} stage {stage_id} needs exactly one of seed or prompt"
+                );
+                if let Some(seed) = &stage.seed {
+                    ensure!(
+                        !seed.collection.trim().is_empty(),
+                        "eval definition {id} case {case_id} stage {stage_id} seed collection must be named"
+                    );
+                }
                 let mut check_names = BTreeSet::new();
                 for check in &stage.checks {
                     ensure!(
@@ -489,8 +505,7 @@ mod tests {
         invalid(
             |v| {
                 v["cases"][0]["stages"][0]["prompt"] = "".into();
-                v["cases"][0]["stages"][0]["seed"] =
-                    json!({"collection": " ", "document": {}});
+                v["cases"][0]["stages"][0]["seed"] = json!({"collection": " ", "document": {}});
             },
             "seed collection",
         );
