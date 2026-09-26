@@ -17,6 +17,7 @@ pub(crate) struct BehaviorProposer<T> {
 }
 
 impl<T: Turn + Send> BehaviorProposer<T> {
+    #[cfg(test)]
     pub(crate) fn new(turn: T) -> Self {
         Self {
             turn: Mutex::new(turn),
