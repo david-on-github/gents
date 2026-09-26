@@ -49,7 +49,7 @@ impl Turn for LiveTurn {
             RequestSubmitOptions::default(),
         )
         .await
-        .context("submitting the author's turn")?;
+        .with_context(|| format!("submitting the {} turn", self.behavior_id))?;
         let response = if self.quiet {
             wait_for_terminal_response(
                 &self.graphql,
@@ -73,7 +73,8 @@ impl Turn for LiveTurn {
         let text = chat_turn_text_content(&response);
         anyhow::ensure!(
             !text.trim().is_empty(),
-            "the author's turn ended without a reply; `gents response show {}` shows why",
+            "the {} turn ended without a reply; `gents response show {}` shows why",
+            self.behavior_id,
             submitted.request_id
         );
         Ok(text.to_owned())
