@@ -468,7 +468,7 @@ mod tests {
     use gents::eval::checks::CheckRegistry;
     use tokio_util::sync::CancellationToken;
 
-    use super::execute;
+    use super::{execute, proposer_behavior_id};
     use super::testing::{
         accepted_job, delete_definition, optimization, optimization_command, optimization_with,
         proposer_file,
@@ -508,6 +508,31 @@ mod tests {
             "{usage}"
         );
         assert_eq!(usage.exit_code(), 2);
+    }
+
+    #[test]
+    fn a_slot_with_several_behaviors_needs_the_behavior_named() {
+        let slot = gents::pack::PackInferenceSlot {
+            name: "proposer".to_owned(),
+            description: String::new(),
+            behaviors: vec!["terse".to_owned(), "verbose".to_owned()],
+        };
+        let error = proposer_behavior_id("p", &slot, None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "pack p declares 2 inference-slot behaviors; pass --proposer behavior:p:<behavior> with one of [\"terse\", \"verbose\"]"
+        );
+        assert_eq!(
+            proposer_behavior_id("p", &slot, Some("verbose")).unwrap(),
+            "verbose"
+        );
+        let unknown = proposer_behavior_id("p", &slot, Some("other")).unwrap_err();
+        assert!(unknown.to_string().contains("no inference-slot behavior"), "{unknown}");
+        let one = gents::pack::PackInferenceSlot {
+            behaviors: vec!["terse".to_owned()],
+            ..slot
+        };
+        assert_eq!(proposer_behavior_id("p", &one, None).unwrap(), "terse");
     }
 
     #[tokio::test]
