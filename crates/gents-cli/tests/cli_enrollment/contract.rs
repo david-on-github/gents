@@ -854,9 +854,15 @@ async fn local_transcript_keys(
         .await?;
         for message in &page.store.transcript_messages {
             keys.insert(message.message.message_key.clone());
-            cursor = Some(message.message.message_key.clone());
         }
-        if page.source_exhausted {
+        // The store orders a page ascending by sequence while the walk descends,
+        // so the next cursor is the page's lowest key, not its last.
+        cursor = page
+            .store
+            .transcript_messages
+            .first()
+            .map(|message| message.message.message_key.clone());
+        if page.source_exhausted || cursor.is_none() {
             return Ok(keys);
         }
     }
