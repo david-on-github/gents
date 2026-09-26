@@ -161,6 +161,31 @@ impl Drop for BlockedChild {
 /// until the child execs.
 #[cfg(unix)]
 #[test]
+fn a_store_outside_the_home_does_not_exclude_the_home_default_store() {
+    let _exclusive = exclusive();
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join(".gents");
+    fs::create_dir_all(&home).unwrap();
+    let outside = temp.path().join("elsewhere-data");
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(default_data_dir(&home)).unwrap();
+
+    // A server on `--data-dir <outside>` claims that directory's lock, so
+    // nothing about the home's own store may be concluded from it. Reclaiming
+    // or clearing a lock keyed on the home would act on a live server's state.
+    let held = lock_store(&home, &outside).unwrap();
+    assert_eq!(
+        held.path(),
+        fs::canonicalize(temp.path())
+            .unwrap()
+            .join("elsewhere-data.lock")
+    );
+    let home_store = lock_store(&home, &default_data_dir(&home))
+        .expect("a store outside the home leaves the home store free");
+    assert_ne!(held.path(), home_store.path());
+}
+
+#[test]
 fn a_forked_child_holds_the_store_lock_until_it_execs() {
     use std::ffi::CString;
 
