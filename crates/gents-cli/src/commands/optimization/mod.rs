@@ -151,7 +151,7 @@ async fn behavior_proposer(
         agent_did: ctx.owner.clone(),
         behavior_id,
         session_id: uuid::Uuid::new_v4().to_string(),
-        timeout_secs: crate::DEFAULT_INTERACTIVE_WAIT_TIMEOUT_SECS,
+        timeout_secs: args.proposer_timeout_secs,
         poll_secs: 1,
         quiet: args.json,
     }))
