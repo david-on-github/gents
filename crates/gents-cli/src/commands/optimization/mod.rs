@@ -141,21 +141,7 @@ async fn behavior_proposer(
             manifest.metadata.inference_slots.len()
         );
     };
-    let behavior_id = match behavior {
-        Some(behavior) => {
-            anyhow::ensure!(
-                slot.behaviors.iter().any(|known| known == behavior),
-                "pack {pack} has no inference-slot behavior {behavior:?}; it declares {:?}",
-                slot.behaviors
-            );
-            behavior.to_owned()
-        }
-        None => slot
-            .behaviors
-            .first()
-            .cloned()
-            .with_context(|| format!("pack {pack}: slot {} names no behavior", slot.name))?,
-    };
+    let behavior_id = proposer_behavior_id(pack, slot, behavior)?;
     let profile = args.proposer_profile.clone().unwrap_or_else(|| {
         default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
     });
@@ -169,6 +155,33 @@ async fn behavior_proposer(
         poll_secs: 1,
         quiet: args.json,
     }))
+}
+
+/// The behavior `--proposer behavior:<pack>[:<behavior>]` asks: the named
+/// one when the slot declares it, else the slot's only behavior.
+fn proposer_behavior_id(
+    pack: &str,
+    slot: &gents::pack::PackInferenceSlot,
+    behavior: Option<&str>,
+) -> Result<String> {
+    match behavior {
+        Some(behavior) => {
+            anyhow::ensure!(
+                slot.behaviors.iter().any(|known| known == behavior),
+                "pack {pack} has no inference-slot behavior {behavior:?}; it declares {:?}",
+                slot.behaviors
+            );
+            Ok(behavior.to_owned())
+        }
+        None => match slot.behaviors.as_slice() {
+            [only] => Ok(only.clone()),
+            [] => anyhow::bail!("pack {pack}: slot {} names no behavior", slot.name),
+            many => anyhow::bail!(
+                "pack {pack} declares {} inference-slot behaviors; pass --proposer behavior:{pack}:<behavior> with one of {many:?}",
+                many.len()
+            ),
+        },
+    }
 }
 
 async fn run(
@@ -468,11 +481,11 @@ mod tests {
     use gents::eval::checks::CheckRegistry;
     use tokio_util::sync::CancellationToken;
 
-    use super::{execute, proposer_behavior_id};
     use super::testing::{
         accepted_job, delete_definition, optimization, optimization_command, optimization_with,
         proposer_file,
     };
+    use super::{execute, proposer_behavior_id};
     use crate::cli::Cli;
     use crate::commands::eval::testing::{deps, eval, executor, Fixture, DEFINITION};
     use crate::commands::eval::UNCALIBRATED_BANNER;
@@ -527,7 +540,10 @@ mod tests {
             "verbose"
         );
         let unknown = proposer_behavior_id("p", &slot, Some("other")).unwrap_err();
-        assert!(unknown.to_string().contains("no inference-slot behavior"), "{unknown}");
+        assert!(
+            unknown.to_string().contains("no inference-slot behavior"),
+            "{unknown}"
+        );
         let one = gents::pack::PackInferenceSlot {
             behaviors: vec!["terse".to_owned()],
             ..slot
