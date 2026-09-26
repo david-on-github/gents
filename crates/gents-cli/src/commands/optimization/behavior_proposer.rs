@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 
 use crate::commands::eval::init::draft::json_blocks;
 use crate::commands::eval::init::turn::Turn;
+use crate::commands::eval::render::percent;
 
 pub(crate) struct BehaviorProposer<T> {
     turn: Mutex<T>,
@@ -43,24 +44,33 @@ impl<T: Turn + Send> Proposer for BehaviorProposer<T> {
 /// across rounds.
 pub(crate) fn render(input: &ProposalInput) -> String {
     let mut out = format!(
-        "Current instruction:\n```\n{}\n```\n\nFeedback from the train run:\n",
-        input.current_text
+        "Current instruction:\n{}\n\nFeedback from the train run:\n",
+        fenced(&input.current_text)
     );
     let mut feedback: Vec<_> = input.feedback.iter().collect();
     feedback.sort_by(|a, b| a.check.cmp(&b.check));
+    if feedback.is_empty() {
+        out.push_str("- none\n");
+    }
     for item in feedback {
         let score = item
             .score_bp
-            .map_or_else(|| "no score".to_owned(), |score| score.to_string());
-        let text = item.feedback.as_deref().unwrap_or("no feedback");
-        out.push_str(&format!("- {}: {score} - {text}\n", item.check));
+            .map_or_else(|| "no score".to_owned(), |bp| percent(Some(bp)));
+        match item.feedback.as_deref().unwrap_or("no feedback") {
+            text if text.contains('\n') => {
+                out.push_str(&format!("- {}: {score} -\n{}\n", item.check, fenced(text)));
+            }
+            text => out.push_str(&format!("- {}: {score} - {text}\n", item.check)),
+        }
     }
     if !input.rejections.is_empty() {
         out.push_str("\nRejected so far:\n");
         for rejection in &input.rejections {
             out.push_str(&format!(
-                "- round {}, {}:\n```\n{}\n```\n",
-                rejection.round, rejection.reason, rejection.text
+                "- round {}, {}:\n{}\n",
+                rejection.round,
+                rejection.reason,
+                fenced(&rejection.text)
             ));
         }
     }
@@ -74,6 +84,14 @@ pub(crate) fn render(input: &ProposalInput) -> String {
         input.max_text_bytes
     ));
     out
+}
+
+/// `text` in a fence one backtick longer than its longest backtick run, so
+/// a text holding its own fence cannot end the block early.
+fn fenced(text: &str) -> String {
+    let longest = text.split(|c| c != '`').map(str::len).max().unwrap_or(0);
+    let fence = "`".repeat(longest.max(2) + 1);
+    format!("{fence}\n{text}\n{fence}")
 }
 
 fn parse_reply(reply: &str) -> Result<Proposal, String> {
@@ -162,9 +180,8 @@ Reply with exactly one fenced json block: {\"text\": ..., \"rationale\": ...}
             "{rendered}"
         );
         assert!(
-            rendered.contains(
-                "- tone: no score -\n``````\nfirst line\nsecond ````` line\n``````\n"
-            ),
+            rendered
+                .contains("- tone: no score -\n``````\nfirst line\nsecond ````` line\n``````\n"),
             "{rendered}"
         );
         assert!(
@@ -225,10 +242,6 @@ Reply with exactly one fenced json block: {\"text\": ..., \"rationale\": ...}
         let proposer = BehaviorProposer::new(ScriptedTurn::new([missing, GOOD]));
         proposer.propose(input()).await.unwrap();
         let sent = proposer.turn.into_inner().sent;
-        assert!(
-            sent[1].contains("missing field `rationale`"),
-            "{}",
-            sent[1]
-        );
+        assert!(sent[1].contains("missing field `rationale`"), "{}", sent[1]);
     }
 }
