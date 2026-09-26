@@ -11,12 +11,23 @@ use crate::commands::eval::render::percent;
 
 pub(crate) struct BehaviorProposer<T> {
     turn: Mutex<T>,
+    /// Sent as the session's first user turn, before the first round; its
+    /// reply is required but not read.
+    preamble: Mutex<Option<String>>,
 }
 
 impl<T: Turn + Send> BehaviorProposer<T> {
     pub(crate) fn new(turn: T) -> Self {
         Self {
             turn: Mutex::new(turn),
+            preamble: Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn with_preamble(turn: T, preamble: String) -> Self {
+        Self {
+            turn: Mutex::new(turn),
+            preamble: Mutex::new(Some(preamble)),
         }
     }
 }
@@ -25,6 +36,9 @@ impl<T: Turn + Send> BehaviorProposer<T> {
 impl<T: Turn + Send> Proposer for BehaviorProposer<T> {
     async fn propose(&self, input: ProposalInput) -> Result<Proposal> {
         let mut turn = self.turn.lock().await;
+        if let Some(preamble) = self.preamble.lock().await.take() {
+            turn.send(&preamble).await?;
+        }
         let reply = turn.send(&render(&input)).await?;
         let problem = match parse_reply(&reply) {
             Ok(proposal) => return Ok(proposal),
@@ -224,7 +238,11 @@ Reply with exactly one fenced json block: {\"text\": ..., \"rationale\": ...}
         let sent = proposer.turn.into_inner().sent;
         assert_eq!(
             sent,
-            vec!["# Subject\n\nthe dossier".to_owned(), EXPECTED.to_owned(), EXPECTED.to_owned()]
+            vec![
+                "# Subject\n\nthe dossier".to_owned(),
+                EXPECTED.to_owned(),
+                EXPECTED.to_owned()
+            ]
         );
     }
 
