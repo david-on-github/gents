@@ -46,6 +46,11 @@ const CONFIRM_MARKER: &str = "canary-confirm";
 /// The app collection a case's fixtures seed and the `items` capture reads.
 const CANARY_ITEM_SDL: &str = "type CanaryItem {\n  item_id: String\n  label: String\n}\n";
 
+/// What the trigger pack's task renders for the seeded row, so it is both the
+/// scripted backend's marker and the content the fired request must carry.
+const SEED_MARKER: &str = "Seeded item: wh-1";
+const SEED_ITEM_SDL: &str = "type SeedItem {\n  label: String\n}\n";
+
 #[tokio::test]
 async fn the_canary_runs_two_cases_end_to_end_on_an_embedded_home_with_a_scripted_model() {
     let backend = MockStreamingBackend::start_with_plans(MODEL, answering_plans()).unwrap();
@@ -177,6 +182,72 @@ async fn the_canary_runs_two_cases_end_to_end_on_an_embedded_home_with_a_scripte
             "the digest follows what the trial observed: {recorded:#?}"
         );
     }
+}
+
+/// A seed stage writes a document instead of a prompt: the pack's own
+/// EventTrigger fires its task, and the stage observes that request, which is
+/// the pack's real trigger chain under evaluation rather than a prompt to it.
+#[tokio::test]
+async fn a_seed_stage_fires_the_pack_trigger_and_observes_the_task_request() {
+    let backend = MockStreamingBackend::start_with_plans(
+        MODEL,
+        vec![StreamPlan::new(
+            SEED_MARKER,
+            vec![StreamResponse::completes(SEED_MARKER, ["noted"])],
+        )],
+    )
+    .unwrap();
+    let (canary, mut request) = canary_request(backend.endpoint(), "run-seed").await;
+    canary
+        .install(vec![(
+            Collection::EvalDefinition,
+            seed_definition_document(&canary.owner),
+        )])
+        .await;
+    request.definition_id = "seed".into();
+    request.cells[0].source = CellSource::Directory(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval_runner/trigger_pack"),
+    );
+    request.cells[0].behavior_id = "seeded".into();
+    let executor = EmbeddedExecutor::new(DocumentRuntimeOptions::default(), canary.runs_dir());
+
+    let outcome = run(
+        &canary.access,
+        &request,
+        &executor,
+        &CheckRegistry::builtin(),
+        CancellationToken::new(),
+        &RunOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((outcome.completed, outcome.not_evidence), (1, 0));
+
+    let trials = load_trials(&canary.access, &request.owner, &request.run_id)
+        .await
+        .unwrap();
+    let completion = trial(&trials, "seeded").completion.clone().unwrap();
+    assert_eq!(completion.anchor.requests, 1, "{completion:#?}");
+    assert_eq!(
+        completion.anchor.terminal_states,
+        vec![gents_protocol::request_lifecycle::RequestLifecycleState::Completed],
+        "{completion:#?}"
+    );
+    assert_eq!(
+        backend.observed_requests(SEED_MARKER),
+        1,
+        "the fired task's rendered prompt reached the provider: {:?}",
+        backend.observed_completion_bodies()
+    );
+    let verdicts = load_verdicts(&canary.access, &request.owner, &request.run_id)
+        .await
+        .unwrap();
+    assert_eq!(verdicts.len(), 1, "{verdicts:#?}");
+    assert_eq!(
+        (verdicts[0].kind, &verdicts[0].raw["count"]),
+        (OutcomeKind::Passed, &json!(1)),
+        "the fired request is the stage's evidence: {verdicts:#?}"
+    );
 }
 
 #[tokio::test]
@@ -623,6 +694,40 @@ fn definition_document(owner: &str) -> Value {
                 ],
             },
         ],
+    })
+}
+
+/// One case whose stage seeds a `SeedItem` row and reads back the request the
+/// trigger pack fired for it.
+fn seed_definition_document(owner: &str) -> Value {
+    json!({
+        "definition_id": "seed",
+        "agent_did": owner,
+        "comparability_version": 1,
+        "title": "Eval runner seed stage",
+        "subject": {"kind": "behavior", "inference_slots": ["primary"]},
+        "fixtures": {"schemas": [SEED_ITEM_SDL]},
+        "cases": [{
+            "case_id": "seeded",
+            "split": "validation",
+            "stages": [{
+                "stage_id": "fire",
+                "seed": {"collection": "SeedItem", "document": {"label": "wh-1"}},
+                "deadline_secs": 120,
+                "capture": [{
+                    "kind": "documents",
+                    "name": "fired",
+                    "collection": "AgentRequest",
+                    "filter": {"caused_by_trigger_id": {"_eq": "seed-trigger"}},
+                    "fields": ["content"]
+                }],
+                "checks": [{
+                    "check": "captured_rows_count",
+                    "params": {"name": "fired", "min": 1},
+                    "tier": "acceptance",
+                }],
+            }],
+        }],
     })
 }
 

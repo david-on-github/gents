@@ -1,0 +1,60 @@
+{
+  "agent_principal": {
+    "default_behavior_id": "seeded"
+  },
+  "agent_behaviors": [
+    {
+      "behavior_id": "seeded",
+      "display_name": "Eval seed subject",
+      "context_id": "seeded-context",
+      "inference_profile_id": "gents:inference-slot:primary"
+    }
+  ],
+  "contexts": [
+    {
+      "context_id": "seeded-context",
+      "display_name": "Eval seed subject",
+      "system_prompt": "./agent_behaviors/seeded/system_prompt.md",
+      "tools_id": "seeded-tools"
+    }
+  ],
+  "tools": [
+    {
+      "tools_id": "seeded-tools",
+      "display_name": "Eval seed subject tools",
+      "host": {
+        "files": {
+          "mode": "ReadOnly"
+        }
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "task_id": "seed-task",
+      "display_name": "Report a seeded item",
+      "behavior_id": "seeded",
+      "prompt_template": "Seeded item: {{ doc.label }}"
+    }
+  ],
+  "event_sources": [
+    {
+      "event_source_id": "seed-source",
+      "display_name": "seed-source",
+      "source_collection": "SeedItem",
+      "event_kind": "created"
+    }
+  ],
+  "triggers": [
+    {
+      "trigger_id": "seed-trigger",
+      "display_name": "seed-trigger",
+      "task_id": "seed-task",
+      "source": {
+        "kind": "event",
+        "event_source_id": "seed-source"
+      },
+      "concurrency": "serial"
+    }
+  ]
+}
