@@ -157,9 +157,13 @@ async fn load_mcp_services(
     access: &ConfigAccess,
     service_id: Option<&str>,
 ) -> Result<Vec<McpHealthCheckService>> {
+    // The exact `service_id` read carries no `order`: DefraDB plans an ordered
+    // read as a `service_id` index scan and applies `limit` to the scanned
+    // document list before the scan's `status` filter, so an offline row
+    // sharing the id would hide the online one.
     let registry_args = match service_id {
         Some(service_id) => format!(
-            r#"filter: {{ _and: [{{ status: {{ _eq: "online" }} }}, {{ service_id: {{ _eq: "{}" }} }}] }}, limit: 1, order: {{ service_id: ASC }}"#,
+            r#"filter: {{ _and: [{{ status: {{ _eq: "online" }} }}, {{ service_id: {{ _eq: "{}" }} }}] }}, limit: 1"#,
             escape_graphql_string(service_id)
         ),
         None => r#"filter: { status: { _eq: "online" } }, order: { service_id: ASC }"#.to_string(),
@@ -385,4 +389,82 @@ struct McpProbeSnapshot {
     latency_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Seed three registry rows that share one `service_id`, then mark the row
+    /// with the lowest public document id offline and the highest online. The
+    /// ordering is what makes the read observable: an ordered read collapses to
+    /// the lowest document id, which is the offline row.
+    async fn registry_with_an_offline_twin() -> (ConfigAccess, String) {
+        let node = Arc::new(
+            gents::defra_node::EmbeddedNode::builder()
+                .build()
+                .await
+                .unwrap(),
+        );
+        gents::ensure_runtime_schemas(node.as_ref()).await.unwrap();
+        let access = ConfigAccess::Local(node);
+        for host in ["twin-a", "twin-b", "twin-c"] {
+            access
+                .write(
+                    "test.mcp.seed",
+                    &format!(
+                        r#"mutation {{ create_ToolServiceRegistry(input: {{ service_id: "svc-1", agent_did: "did:key:{host}", hostname: "{host}", status: "pending", mcp_port: 1, mcp_path: "/mcp", enabled: true }}) {{ _docID }} }}"#
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let response = access
+            .execute(
+                r#"{ ToolServiceRegistry(filter: { service_id: { _eq: "svc-1" } }) { _docID hostname } }"#,
+            )
+            .await
+            .unwrap();
+        let mut rows: Vec<(String, String)> = response["data"]["ToolServiceRegistry"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| {
+                (
+                    row["_docID"].as_str().unwrap().to_string(),
+                    row["hostname"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        rows.sort();
+        assert_eq!(rows.len(), 3);
+        for (doc_id, status) in [
+            (rows.first().unwrap().0.clone(), "offline"),
+            (rows.last().unwrap().0.clone(), "online"),
+        ] {
+            access
+                .write(
+                    "test.mcp.status",
+                    &format!(
+                        r#"mutation {{ update_ToolServiceRegistry(docID: "{doc_id}", input: {{ status: "{status}" }}) {{ _docID }} }}"#
+                    ),
+                )
+                .await
+                .unwrap();
+        }
+        let online_hostname = rows.last().unwrap().1.clone();
+        (access, online_hostname)
+    }
+
+    #[tokio::test]
+    async fn exact_service_read_finds_the_online_row_behind_an_offline_twin() {
+        let (access, online_hostname) = registry_with_an_offline_twin().await;
+        let services = load_mcp_services(&access, Some("svc-1")).await.unwrap();
+        let hostnames: Vec<&str> = services
+            .iter()
+            .map(|service| service.hostname.as_str())
+            .collect();
+        assert_eq!(hostnames, [online_hostname.as_str()]);
+    }
 }
