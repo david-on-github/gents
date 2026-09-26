@@ -497,7 +497,7 @@ fn admission_defers_a_name_a_later_argument_puts_out_of_reach() {
 }
 
 #[test]
-fn admission_reads_a_long_argument_expression_once() {
+fn admission_reads_one_program_pass_for_a_long_argument_expression() {
     // The parser caps a call at 2000 arguments, but not the size of one
     // argument's expression: a list literal filling the template size cap
     // compiles to tens of thousands of instructions, every task carries two
@@ -508,11 +508,14 @@ fn admission_reads_a_long_argument_expression_once() {
         ",1".repeat(elements)
     );
     assert!(template.len() <= MAX_TEMPLATE_BYTES, "{}", template.len());
-    check_template_vocabulary(&template).expect("long argument expression");
+    let counted =
+        work::measure(|| check_template_vocabulary(&template).expect("long argument expression"));
+    assert_eq!(counted.program_passes, 1, "{counted:?}");
+    assert!(counted.candidates <= 2 * counted.indices, "{counted:?}");
 }
 
 #[test]
-fn admission_reads_a_long_run_of_branching_arguments_once() {
+fn admission_reads_one_program_pass_for_a_long_run_of_branching_arguments() {
     // A conditional argument compiles to jumps whose targets the walk has to
     // join, so a run of them costs it the branches as well as the length. The
     // parser caps a call at 2000 arguments, the name taking the first.
@@ -521,5 +524,22 @@ fn admission_reads_a_long_run_of_branching_arguments_once() {
         ",1 if doc.flag else 2".repeat(1_999)
     );
     assert!(template.len() <= MAX_TEMPLATE_BYTES, "{}", template.len());
-    check_template_vocabulary(&template).expect("branching argument run");
+    let counted =
+        work::measure(|| check_template_vocabulary(&template).expect("branching argument run"));
+    assert_eq!(counted.program_passes, 1, "{counted:?}");
+    assert!(counted.candidates <= 2 * counted.indices, "{counted:?}");
+}
+
+#[test]
+fn admission_reads_one_program_pass_for_many_name_carrying_filters() {
+    // Nothing caps how many filters a template spells out but its size, and a
+    // filter carrying a name needs the whole program's jumps and heights even
+    // with no argument after the name.
+    let filter = "{{ doc.x|map('lower') }}";
+    let template = filter.repeat(MAX_TEMPLATE_BYTES / filter.len());
+    assert!(template.len() <= MAX_TEMPLATE_BYTES, "{}", template.len());
+    let counted =
+        work::measure(|| check_template_vocabulary(&template).expect("many name-carrying filters"));
+    assert_eq!(counted.program_passes, 1, "{counted:?}");
+    assert!(counted.candidates <= 2 * counted.indices, "{counted:?}");
 }

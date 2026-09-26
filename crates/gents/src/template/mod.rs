@@ -7,7 +7,7 @@ use minijinja::{
     machinery::{self, Instruction, Instructions},
     AutoEscape, Environment, ErrorKind, UndefinedBehavior,
 };
-use std::collections::HashSet;
+use std::{cmp::Reverse, collections::BinaryHeap, collections::HashSet};
 
 pub mod catalog;
 
@@ -168,12 +168,13 @@ pub fn check_template_vocabulary(template: &str) -> Result<(), TemplateError> {
     let mut used: Vec<(NameUse, String)> = Vec::new();
     let mut bound = callable_scope_names();
     let instructions = &machinery::get_compiled_template(&compiled).instructions;
+    let mut analysis = None;
     let mut index = 0u32;
     while let Some(instruction) = instructions.get(index) {
         match instruction {
             Instruction::ApplyFilter(name, arguments, _) => {
                 let name = engine_name(name);
-                let argument = name_argument(instructions, index, &name, *arguments);
+                let argument = name_argument(instructions, &mut analysis, index, &name, *arguments);
                 used.push((NameUse::Filter, name));
                 used.extend(argument);
             }
@@ -299,6 +300,7 @@ pub fn check_template_vocabulary(template: &str) -> Result<(), TemplateError> {
 /// and the name is left to fire time.
 fn name_argument(
     instructions: &Instructions<'_>,
+    analysis: &mut Option<ProgramAnalysis>,
     filter_index: u32,
     filter: &str,
     arguments: Option<u16>,
@@ -311,146 +313,254 @@ fn name_argument(
     };
     let arguments = u32::from(arguments?).checked_sub(1)?;
     let trailing = arguments.checked_sub(position)?;
-    let landings = outside_landings(instructions, filter_index);
-    // A jump from outside `region..filter_index` landing at or after `first`
-    // lets control reach the filter without running the region in order.
-    // A region the landings do not cover is one this walk cannot judge, so it
-    // reads as entered and leaves the name to fire time.
-    let entered_from_outside = |region: u32, first: u32| {
-        landings.get(region as usize).copied().unwrap_or(i64::MAX) >= i64::from(first)
-    };
-    let heights = expression_heights(instructions, filter_index);
-    let trailing_start = (0..=filter_index).rev().find(|&start| {
-        !entered_from_outside(start, start + 1) && heights.values(start) == Some(trailing)
-    })?;
-    let name_index = trailing_start.checked_sub(1)?;
+    let analysis = analysis.get_or_insert_with(|| ProgramAnalysis::read(instructions));
+    let run = analysis.trailing_run(instructions, filter_index, trailing)?;
+    let name_index = run.start.checked_sub(1)?;
     let Some(Instruction::LoadConst(value)) = instructions.get(name_index) else {
         return None;
     };
-    if entered_from_outside(name_index, name_index) {
+    // A jump from outside `name_index..filter_index` landing on the name or
+    // after it lets control reach the filter without reading the name.
+    if run.re_entered >= i64::from(filter_index) || analysis.entered(name_index, filter_index) {
         return None;
     }
     let name = value.as_str()?.to_string();
     Some((use_site, name))
 }
 
-/// The furthest index at or before `filter_index` that a jump from outside
-/// `region..filter_index` lands on, for every `region` in `0..=filter_index`,
-/// and `-1` for a region no jump from outside lands after.
-fn outside_landings(instructions: &Instructions<'_>, filter_index: u32) -> Vec<i64> {
-    let landing = |index: u32| match instructions.get(index).and_then(jump_target) {
-        Some(target) if target <= filter_index => i64::from(target),
-        _ => -1,
+/// Counts what admission's analysis reads, so that a cost regression fails a
+/// test instead of only lengthening the suite.
+#[cfg(test)]
+mod work {
+    use std::cell::Cell;
+
+    #[derive(Clone, Copy, Debug)]
+    pub(super) struct Work {
+        pub(super) program_passes: u64,
+        pub(super) indices: u64,
+        pub(super) candidates: u64,
+    }
+
+    const NOTHING: Work = Work {
+        program_passes: 0,
+        indices: 0,
+        candidates: 0,
     };
-    let mut furthest = -1i64;
-    let mut after = filter_index;
-    while instructions.get(after).is_some() {
-        furthest = furthest.max(landing(after));
-        after += 1;
+
+    thread_local! {
+        static WORK: Cell<Work> = const { Cell::new(NOTHING) };
     }
-    let mut landings = vec![furthest; filter_index as usize + 1];
-    for region in 0..filter_index {
-        furthest = furthest.max(landing(region));
-        landings[region as usize + 1] = furthest;
+
+    pub(super) fn record_program_pass(indices: u64) {
+        WORK.with(|work| {
+            let mut counted = work.get();
+            counted.program_passes += 1;
+            counted.indices += indices;
+            work.set(counted);
+        });
     }
-    landings
+
+    pub(super) fn record_candidate() {
+        WORK.with(|work| {
+            let mut counted = work.get();
+            counted.candidates += 1;
+            work.set(counted);
+        });
+    }
+
+    /// The counts are per thread, so a caller must hold the thread for the whole
+    /// admission it measures.
+    pub(super) fn measure(admit: impl FnOnce()) -> Work {
+        WORK.with(|work| work.set(NOTHING));
+        admit();
+        WORK.with(|work| work.get())
+    }
 }
 
-/// Where a run of self-contained expression code can begin, and how deep the
-/// stack is along it.
-struct ExpressionHeights {
-    /// The stack height at every index of the pass, counted from the start of
-    /// the run the index belongs to.
+/// Where the arguments after the name begin, and the furthest index at or after
+/// the filter that jumps back into that run or onto the name before it.
+struct TrailingRun {
+    start: u32,
+    re_entered: i64,
+}
+
+/// The whole program read once, as expression code and as a jump graph, so that
+/// every filter judges its candidate runs by comparison instead of by a pass of
+/// its own. A template spells a filter out in a few instructions, so the number
+/// of filters grows with the program and a pass per filter costs the square of
+/// its length.
+struct ProgramAnalysis {
+    /// The stack height at every index, counted from the start of the run the
+    /// index belongs to.
     height: Vec<i64>,
-    /// The lowest height any instruction in `index..end` leaves after its pops.
-    floor: Vec<i64>,
-    /// The first index a run reaching the end of the pass can begin at.
-    first: u32,
+    /// The height every index leaves after its pops, and `i64::MAX` where the
+    /// instruction has no fixed stack effect.
+    post_pop: Vec<i64>,
+    /// The first index the run reaching every index can begin at.
+    run_start: Vec<u32>,
+    /// The nearest index after every index that a jump from before it lands on,
+    /// and `u32::MAX` where no jump passes over it.
+    crossing: Vec<u32>,
+    /// Whether a jump from before every index lands on it.
+    landed_on: Vec<bool>,
+    /// The furthest index at or after every index that jumps back to it, and
+    /// `-1` where none does.
+    jumps_back_from: Vec<i64>,
 }
 
-impl ExpressionHeights {
-    /// How many values `start..end` leaves on the stack when it runs as
-    /// self-contained expression code: `None` when it consumes a value pushed
-    /// before `start`, when an instruction in it has no fixed stack effect or
-    /// jumps outside `start..=end`, or when branches in it join on disagreeing
-    /// stack heights.
+impl ProgramAnalysis {
+    /// An instruction with no fixed stack effect and a jump leaving the program
+    /// both begin a new run after themselves, because control leaves the run
+    /// there. An index nothing reaches and a join on disagreeing heights begin
+    /// one at themselves: a run covering such an index is not reading a single
+    /// expression, while a run beginning at it carries neither the jump that
+    /// skipped it nor the joins that disagree.
     ///
-    /// These heights are one run's, so they answer for a `start` no jump from
-    /// outside `start..end` lands after: such a jump carries into the run a join
-    /// that `start..end` does not have. The caller rules one out itself.
-    fn values(&self, start: u32) -> Option<u32> {
-        if start < self.first {
-            return None;
-        }
-        let index = usize::try_from(start).ok()?;
-        let base = *self.height.get(index)?;
-        if *self.floor.get(index)? < base {
-            return None;
-        }
-        u32::try_from(self.height.last().copied()? - base).ok()
-    }
-}
-
-/// Reads `0..=end` as expression code in one forward pass, so that judging a
-/// candidate start costs a comparison instead of a rescan.
-///
-/// An instruction with no fixed stack effect and a jump leaving `index..=end`
-/// both begin a new run after themselves, because control leaves the run there.
-/// An index nothing reaches and a join on disagreeing heights begin one at
-/// themselves: a run covering such an index is not reading a single expression,
-/// while a run beginning at it carries neither the jump that skipped it nor the
-/// joins that disagree.
-fn expression_heights(instructions: &Instructions<'_>, end: u32) -> ExpressionHeights {
-    let span = end as usize + 1;
-    let mut height = Vec::with_capacity(span);
-    let mut post_pop = Vec::with_capacity(span);
-    let mut arriving = vec![Arriving::Nothing; span];
-    let mut fall_through = Some(0i64);
-    let mut first = 0u32;
-    for index in 0..=end {
-        let depth = match join_height(fall_through, arriving[index as usize]) {
-            Some(Some(depth)) => depth,
-            _ => {
-                first = index;
-                0
-            }
-        };
-        height.push(depth);
-        if index == end {
-            break;
-        }
-        match instructions
-            .get(index)
-            .and_then(|instruction| expression_step(instruction, depth, index, end))
-        {
-            Some(step) => {
-                post_pop.push(depth - step.pops);
-                if let Some((target, kept)) = step.keeps {
-                    record_arrival(&mut arriving[target as usize], kept);
+    /// A jump landing past a filter would have ended the run in a pass reading
+    /// only the indices up to that filter. This pass keeps such a run going, so
+    /// `trailing_run` rules that jump out of the run it judges instead.
+    fn read(instructions: &Instructions<'_>) -> Self {
+        let span = u32::try_from(instructions.len()).unwrap_or(u32::MAX);
+        let capacity = span as usize;
+        let end = span.saturating_sub(1);
+        let mut height = Vec::with_capacity(capacity);
+        let mut post_pop = Vec::with_capacity(capacity);
+        let mut run_start = Vec::with_capacity(capacity);
+        let mut crossing = Vec::with_capacity(capacity);
+        let mut landed_on = vec![false; capacity];
+        let mut jumps_back_from = vec![-1i64; capacity];
+        let mut arriving = vec![Arriving::Nothing; capacity];
+        // Every target of a jump from an earlier index that no index so far has
+        // reached, nearest first.
+        let mut pending: BinaryHeap<Reverse<u32>> = BinaryHeap::new();
+        let mut fall_through = Some(0i64);
+        let mut first = 0u32;
+        for index in 0..span {
+            while let Some(Reverse(target)) = pending.peek().copied() {
+                if target > index {
+                    break;
                 }
-                fall_through = step
-                    .falls_through
-                    .then_some(depth - step.pops + step.pushes);
+                pending.pop();
+                landed_on[index as usize] = true;
             }
-            None => {
-                first = index + 1;
-                post_pop.push(i64::MAX);
-                fall_through = Some(0);
+            crossing.push(pending.peek().map_or(u32::MAX, |Reverse(target)| *target));
+            let depth = match join_height(fall_through, arriving[index as usize]) {
+                Some(Some(depth)) => depth,
+                _ => {
+                    first = index;
+                    0
+                }
+            };
+            height.push(depth);
+            run_start.push(first);
+            match instructions
+                .get(index)
+                .and_then(|instruction| expression_step(instruction, depth, index, end))
+            {
+                Some(step) => {
+                    post_pop.push(depth - step.pops);
+                    if let Some((target, kept)) = step.keeps {
+                        record_arrival(&mut arriving[target as usize], kept);
+                    }
+                    fall_through = step
+                        .falls_through
+                        .then_some(depth - step.pops + step.pushes);
+                }
+                None => {
+                    first = index + 1;
+                    post_pop.push(i64::MAX);
+                    fall_through = Some(0);
+                }
+            }
+            if let Some(target) = instructions.get(index).and_then(jump_target) {
+                if target > index {
+                    pending.push(Reverse(target));
+                } else {
+                    jumps_back_from[target as usize] = i64::from(index);
+                }
             }
         }
+        #[cfg(test)]
+        work::record_program_pass(u64::from(span));
+        Self {
+            height,
+            post_pop,
+            run_start,
+            crossing,
+            landed_on,
+            jumps_back_from,
+        }
     }
-    let mut floor = vec![i64::MAX; span];
-    for index in (0..post_pop.len()).rev() {
-        floor[index] = floor[index + 1].min(post_pop[index]);
+
+    /// The last index at or before `filter_index` from which the instructions up
+    /// to the filter run as self-contained expression code leaving exactly
+    /// `trailing` values on the stack: `None` when every candidate consumes a
+    /// value pushed before it, holds an instruction with no fixed stack effect,
+    /// joins branches on disagreeing heights or leaves a different count.
+    ///
+    /// The heights are the whole program's one running count, so they answer for
+    /// a run only where no jump enters `start..filter_index` from outside it and
+    /// none leaves it: an arriving jump carries into the run a join the run does
+    /// not have, and a jump out of it leaves the run altogether where a pass
+    /// reading only up to the filter would have restarted the count. Both are
+    /// ruled out here rather than read off the heights.
+    fn trailing_run(
+        &self,
+        instructions: &Instructions<'_>,
+        filter_index: u32,
+        trailing: u32,
+    ) -> Option<TrailingRun> {
+        let filter = usize::try_from(filter_index).ok()?;
+        let filter_height = *self.height.get(filter)?;
+        let mut floor = i64::MAX;
+        let mut leaves = 0u32;
+        let mut re_entered = -1i64;
+        let mut start = filter_index;
+        loop {
+            #[cfg(test)]
+            work::record_candidate();
+            let base = self.height[start as usize];
+            if floor >= base
+                && leaves <= filter_index
+                && re_entered < i64::from(filter_index)
+                && !self.crossed(start, filter_index)
+                && u32::try_from(filter_height - base).is_ok_and(|values| values == trailing)
+            {
+                re_entered = re_entered.max(self.jumps_back_from[start as usize]);
+                if let Some(name) = start.checked_sub(1) {
+                    re_entered = re_entered.max(self.jumps_back_from[name as usize]);
+                }
+                return Some(TrailingRun { start, re_entered });
+            }
+            if start == 0 || start <= self.run_start[filter] {
+                return None;
+            }
+            start -= 1;
+            floor = floor.min(self.post_pop[start as usize]);
+            if let Some(target) = instructions.get(start).and_then(jump_target) {
+                leaves = leaves.max(target);
+            }
+            re_entered = re_entered.max(self.jumps_back_from[start as usize + 1]);
+        }
     }
-    ExpressionHeights {
-        height,
-        floor,
-        first,
+
+    /// Whether a jump from before `index` lands after it, at or before
+    /// `filter_index`. An index the pass did not cover reads as crossed, because
+    /// this walk cannot judge it.
+    fn crossed(&self, index: u32, filter_index: u32) -> bool {
+        self.crossing
+            .get(index as usize)
+            .is_none_or(|&crossing| crossing <= filter_index)
+    }
+
+    /// Whether a jump from before `index` lands on it or after it, at or before
+    /// `filter_index`.
+    fn entered(&self, index: u32, filter_index: u32) -> bool {
+        self.landed_on.get(index as usize).copied().unwrap_or(true)
+            || self.crossed(index, filter_index)
     }
 }
 
-/// What one instruction does to the stack.
 struct Step {
     pops: i64,
     pushes: i64,
@@ -531,7 +641,6 @@ fn expression_step(
     })
 }
 
-/// What the jumps into one index keep on the stack.
 #[derive(Clone, Copy)]
 enum Arriving {
     Nothing,
