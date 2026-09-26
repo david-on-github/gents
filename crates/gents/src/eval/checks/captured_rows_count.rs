@@ -32,7 +32,7 @@ impl Check for CapturedRowsCount {
     }
 
     fn version(&self) -> &'static str {
-        "1"
+        "2"
     }
 
     fn describe(&self) -> CheckDescription {

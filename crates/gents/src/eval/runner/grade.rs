@@ -261,7 +261,7 @@ mod tests {
                 rows[0].weight,
                 rows[0].check_version.as_str()
             ),
-            (OutcomeKind::Passed, Some(10000), 2, "1")
+            (OutcomeKind::Passed, Some(10000), 2, "2")
         );
     }
 
