@@ -214,6 +214,21 @@ Reply with exactly one fenced json block: {\"text\": ..., \"rationale\": ...}
     }
 
     #[tokio::test]
+    async fn a_preamble_is_sent_once_before_the_first_round() {
+        let proposer = BehaviorProposer::with_preamble(
+            ScriptedTurn::new(["noted", GOOD, GOOD]),
+            "# Subject\n\nthe dossier".to_owned(),
+        );
+        proposer.propose(input()).await.unwrap();
+        proposer.propose(input()).await.unwrap();
+        let sent = proposer.turn.into_inner().sent;
+        assert_eq!(
+            sent,
+            vec!["# Subject\n\nthe dossier".to_owned(), EXPECTED.to_owned(), EXPECTED.to_owned()]
+        );
+    }
+
+    #[tokio::test]
     async fn a_reply_without_a_block_gets_one_corrective_turn() {
         let proposer = BehaviorProposer::new(ScriptedTurn::new(["Which tone?", GOOD]));
         let proposal = proposer.propose(input()).await.unwrap();
