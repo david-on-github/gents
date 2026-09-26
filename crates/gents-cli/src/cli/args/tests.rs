@@ -1222,3 +1222,54 @@ fn subagent_target_entry_distinguishes_owner_from_destination() {
         _ => panic!("expected target document builder"),
     }
 }
+
+#[test]
+fn parse_proposer_accepts_scripted_and_behavior_forms_and_rejects_the_rest() {
+    assert_eq!(
+        parse_proposer("scripted:proposals.json").unwrap(),
+        ProposerArg::Scripted(PathBuf::from("proposals.json"))
+    );
+    assert_eq!(
+        parse_proposer("behavior:prompt_proposer").unwrap(),
+        ProposerArg::Behavior {
+            pack: "prompt_proposer".into(),
+            behavior: None
+        }
+    );
+    assert_eq!(
+        parse_proposer("behavior:prompt_proposer:prompt-proposer").unwrap(),
+        ProposerArg::Behavior {
+            pack: "prompt_proposer".into(),
+            behavior: Some("prompt-proposer".into())
+        }
+    );
+    for bad in ["garbage", "scripted:", "behavior:", "behavior::x", "llm:foo"] {
+        let error = parse_proposer(bad).unwrap_err();
+        assert!(error.contains("behavior:<pack>[:<behavior>]"), "{bad}: {error}");
+        assert!(!error.contains("no model-driven"), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn optimization_run_takes_a_proposer_profile() {
+    let cli = Cli::try_parse_from([
+        "gents",
+        "optimization",
+        "run",
+        "quality",
+        "--subject",
+        "pipeline",
+        "--proposer",
+        "behavior:prompt_proposer",
+        "--proposer-profile",
+        "fast",
+    ])
+    .unwrap();
+    let Command::Optimization {
+        command: OptimizationCommand::Run(args),
+    } = cli.command
+    else {
+        panic!("expected optimization run");
+    };
+    assert_eq!(args.proposer_profile.as_deref(), Some("fast"));
+}
