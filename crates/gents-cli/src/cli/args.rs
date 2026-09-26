@@ -4325,7 +4325,7 @@ pub(crate) fn parse_subject(raw: &str) -> Result<SubjectArg, String> {
 pub(crate) enum ProposerArg {
     /// A script of proposals, one per round.
     Scripted(PathBuf),
-    /// A behavior of an installed pack asked once per round; without a
+    /// A behavior of a built-in pack asked once per round; without a
     /// behavior, the pack's only inference-slot behavior.
     Behavior {
         pack: String,
