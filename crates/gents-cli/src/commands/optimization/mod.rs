@@ -168,7 +168,7 @@ async fn behavior_proposer(
 fn subject_preamble(subject_dir: &Path, behavior_id: &str) -> Result<String> {
     let dossier = crate::commands::eval::init::dossier::render(subject_dir, Some(behavior_id))?;
     Ok(format!(
-        "# Subject\n\n{}\n\nThe instruction you will rewrite is this behavior's system prompt. \
+        "{}\n\nThe instruction you will rewrite is this behavior's system prompt. \
          Every later turn carries the current instruction and the training feedback.",
         dossier.text
     ))
@@ -585,7 +585,11 @@ mod tests {
         let pipeline =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
         let preamble = subject_preamble(&pipeline, "exp-stage1").unwrap();
-        assert!(preamble.starts_with("# Subject\n\n"), "{preamble}");
+        assert!(
+            preamble.starts_with("# Subject\n\n## Identity"),
+            "{preamble}"
+        );
+        assert_eq!(preamble.matches("# Subject").count(), 1, "{preamble}");
         assert!(preamble.contains("write_experiment_finding"), "{preamble}");
         assert!(
             preamble.ends_with(
