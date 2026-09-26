@@ -32,6 +32,7 @@ use crate::commands::eval::{
 };
 use crate::commands::pack::resolve_subject_pack;
 
+#[allow(dead_code)]
 mod behavior_proposer;
 mod render;
 #[cfg(test)]
