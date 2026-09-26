@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use crate::commands::chat::{
     chat_turn_text_content, load_existing_tool_call_keys, stream_turn_progress,
 };
+use crate::request_helpers::wait_for_terminal_response;
 use crate::{create_agent_request, RequestSubmitOptions};
 
 /// The behavior the `eval_author` pack installs.
@@ -24,7 +25,8 @@ pub(crate) trait Turn {
 
 /// A turn on the served home, as `gents chat` sends one: submitted on the
 /// session with `behavior_id`, followed until the response lands. Its
-/// progress and the reply print as they arrive.
+/// progress and the reply print as they arrive, unless `quiet`: then the
+/// turn is followed without writing to stdout, as `gents chat --json` does.
 pub(crate) struct LiveTurn {
     pub(crate) graphql: String,
     pub(crate) agent_did: String,
@@ -32,12 +34,12 @@ pub(crate) struct LiveTurn {
     pub(crate) session_id: String,
     pub(crate) timeout_secs: u64,
     pub(crate) poll_secs: u64,
+    pub(crate) quiet: bool,
 }
 
 #[async_trait::async_trait]
 impl Turn for LiveTurn {
     async fn send(&mut self, content: &str) -> Result<String> {
-        let known = load_existing_tool_call_keys(&self.graphql, &self.session_id).await?;
         let submitted = create_agent_request(
             &self.graphql,
             &self.agent_did,
@@ -48,15 +50,26 @@ impl Turn for LiveTurn {
         )
         .await
         .context("submitting the author's turn")?;
-        let response = stream_turn_progress(
-            &self.graphql,
-            &submitted,
-            known,
-            self.timeout_secs,
-            self.poll_secs,
-            false,
-        )
-        .await?;
+        let response = if self.quiet {
+            wait_for_terminal_response(
+                &self.graphql,
+                &submitted.request_id,
+                self.timeout_secs,
+                self.poll_secs,
+            )
+            .await?
+        } else {
+            let known = load_existing_tool_call_keys(&self.graphql, &self.session_id).await?;
+            stream_turn_progress(
+                &self.graphql,
+                &submitted,
+                known,
+                self.timeout_secs,
+                self.poll_secs,
+                false,
+            )
+            .await?
+        };
         let text = chat_turn_text_content(&response);
         anyhow::ensure!(
             !text.trim().is_empty(),
@@ -71,7 +84,7 @@ impl Turn for LiveTurn {
     }
 
     fn shows_replies(&self) -> bool {
-        true
+        !self.quiet
     }
 }
 

@@ -167,6 +167,7 @@ async fn behavior_proposer(
         session_id: uuid::Uuid::new_v4().to_string(),
         timeout_secs: crate::DEFAULT_INTERACTIVE_WAIT_TIMEOUT_SECS,
         poll_secs: 1,
+        quiet: args.json,
     }))
 }
 

@@ -345,6 +345,7 @@ pub(crate) async fn run(
         session_id: uuid::Uuid::new_v4().to_string(),
         timeout_secs: args.timeout_secs,
         poll_secs: args.poll_secs,
+        quiet: false,
     };
     let mut lines = operator_lines(|line| std::io::stdin().read_line(line));
     let result = async {
@@ -833,6 +834,7 @@ mod tests {
             session_id: uuid::Uuid::new_v4().to_string(),
             timeout_secs: 300,
             poll_secs: 1,
+            quiet: false,
         };
         // The author's first replies are questions; the operator asks for
         // the draft each time.
