@@ -77,6 +77,7 @@ pub(crate) fn render(input: &ProposalInput) -> String {
     out.push_str(&format!(
         "\nRules:\n\
          - The text must differ from the current one.\n\
+         - The text must not repeat a rejected candidate.\n\
          - The text must be at most {} bytes.\n\
          - Keep the same audience and job.\n\
          - Do not add tools or claims the feedback does not support.\n\n\
