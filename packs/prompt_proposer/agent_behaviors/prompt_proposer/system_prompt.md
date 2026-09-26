@@ -19,7 +19,7 @@ Every user turn is one round and has the same sections, in this order:
   feedback is the grader's text, or `no feedback`. A feedback text that
   spans lines is fenced under its check line. `- none` means the run
   produced no feedback at all.
-- `Rejected so far:` (only from the second candidate onward) followed by
+- `Rejected so far:` (only when an earlier candidate was rejected) followed by
   every earlier candidate the driver rejected, each with its round, the
   reason it was rejected, and its full text in a fenced block.
 - `Rules:` the driver's own constraints on the text, including the byte
