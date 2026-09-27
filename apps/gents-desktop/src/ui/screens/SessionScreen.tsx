@@ -94,13 +94,7 @@ import {
 import { Markdown } from "./Markdown";
 import { ToolBody } from "./tool-views";
 import { SubagentList, WorkerStep, isWorkerStep } from "./WorkerStep";
-import {
-  NO_WORKERS,
-  listedSession,
-  useSessionProvenance,
-  useWorkers,
-  type Workers,
-} from "./workers";
+import { NO_WORKERS, useSessionProvenance, useWorkers, type Workers } from "./workers";
 import { useParentWork, type ParentWork } from "./parentWork";
 import { WorkerActionsContext, type WorkerActions } from "./WorkerActions";
 import { ArrowUpRight } from "lucide-react";
@@ -645,15 +639,6 @@ const TranscriptItem = memo(function TranscriptItem({
   }
 });
 
-/* what a kill outcome needs said; a stopped row says it by settling */
-const KILL_OUTCOMES: Record<string, string> = {
-  already_terminal: "That had already finished.",
-  lost: "Stopped; its process could not be found to confirm.",
-  unverified: "Asked it to stop; a process is still observed running.",
-  not_found: "Couldn't stop: the runtime does not know that call.",
-  not_background: "Couldn't stop: that call is not running in the background.",
-};
-
 const STOP_SOURCES: Record<string, string> = {
   requestInterrupt: "a stop request on this request",
   requestLifecycle: "the request's lifecycle state",
@@ -976,38 +961,11 @@ export function SessionScreen({ shell }: { shell: Shell }) {
       window.removeEventListener("resize", publish);
     };
   }, []);
-  /* a person stopping running work from here. A native process row is
-     killed by the runtime that owns it, within this session's exact scope.
-     A session-message row stops by interrupting the one request its call
-     caused; the row settles when that request is terminal. */
-  const sessionScope = listedSession(
-    deployment?.sessions,
-    deployment?.agentDid ?? null,
-    session?.sessionId ?? null,
-  );
+  /* a person stopping a subagent from here: the canonical interrupt of the
+     one request that row's call caused; the row settles when that request
+     is terminal */
   const workerActions = useMemo<WorkerActions>(
     () => ({
-      kill: (tool) => {
-        if (!sessionScope || !tool.toolCallId) {
-          toast("Couldn't stop: this session's scope is not known yet.");
-          return;
-        }
-        void shell.api
-          .cancelBackgroundProcess({
-            agentDid: sessionScope.agentDid,
-            sessionId: sessionScope.sessionId,
-            requesterDid: sessionScope.requesterDid,
-            toolCallId: tool.toolCallId,
-          })
-          .then(
-            (r) => {
-              const said = KILL_OUTCOMES[r.outcome];
-              if (said) toast(said);
-            },
-            (e: unknown) =>
-              toast(`Couldn't stop: ${e instanceof Error ? e.message : String(e)}`),
-          );
-      },
       interrupt: (request) => {
         void shell.api
           .interruptRequest({
@@ -1020,7 +978,7 @@ export function SessionScreen({ shell }: { shell: Shell }) {
           );
       },
     }),
-    [shell.api, sessionScope],
+    [shell.api],
   );
   const agentName = deployment?.agentPrincipal.displayName ?? "the agent";
   /* the snapshot says what happened in a session; the summary says where it

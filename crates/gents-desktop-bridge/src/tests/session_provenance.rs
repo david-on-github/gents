@@ -1,100 +1,131 @@
 use gents::session_origin::SessionScope;
 
 use crate::provenance::session_provenance;
-use crate::tests::support::seed_provenance_fixture;
-use crate::types::CausedRequestView;
+use crate::tests::support::{seed_provenance_fixture, OPERATOR};
+use crate::types::LinkedSessionView;
 
 fn scope(session_id: &str) -> SessionScope {
     SessionScope {
-        agent_did: "did:test:operator".into(),
+        agent_did: OPERATOR.into(),
         session_id: session_id.into(),
-        requester_did: None,
+        requester_did: Some(OPERATOR.into()),
     }
 }
 
-fn ids(rows: &[CausedRequestView]) -> Vec<&str> {
-    let mut ids: Vec<_> = rows.iter().map(|row| row.request_id.as_str()).collect();
+fn sessions(links: &[LinkedSessionView]) -> Vec<&str> {
+    let mut ids: Vec<_> = links.iter().map(|link| link.session_id.as_str()).collect();
     ids.sort_unstable();
     ids
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn subagents_are_only_the_sessions_this_one_started() {
+async fn maps_the_lineage_owner_and_each_call_to_its_caused_request() {
     let (core, _tmp, parent_doc_id) = seed_provenance_fixture().await;
     let view = session_provenance(&core, scope("sess_parent"))
         .await
         .expect("provenance");
 
     assert_eq!(view.session_id, "sess_parent");
-    assert!(view.started_by.is_none());
-    assert!(view.received.is_empty());
+    assert!(view.started_by.is_none() && view.received.is_empty());
     assert_eq!(
-        ids(&view.started),
-        ["req_child", "req_peer"],
-        "a message into an existing session never makes it a subagent"
+        sessions(&view.started),
+        ["sess_child", "sess_peer"],
+        "subagents are the sessions whose stored provenance names this session"
     );
     assert_eq!(
-        ids(&view.sent),
-        ["req_child", "req_child_2", "req_existing_2", "req_peer"],
-        "every request this session caused is still joined to its call"
+        sessions(&view.sent),
+        ["sess_existing"],
+        "a message into a session the person started is not a start"
     );
-    for row in view.sent.iter().chain(&view.started) {
-        assert_eq!(row.caused_by_request_id.as_deref(), Some("req_parent"));
-        assert_eq!(
-            row.caused_by_request_doc_id.as_deref(),
-            Some(parent_doc_id.as_str())
-        );
-        assert_eq!(row.caused_by_session_id.as_deref(), Some("sess_parent"));
-        assert_eq!(row.hop, Some(1));
-    }
-    let peer = view
+    assert!(view
         .started
         .iter()
-        .find(|row| row.request_id == "req_peer")
+        .all(|link| link.cause_request_doc_id == parent_doc_id));
+
+    let mut calls: Vec<_> = view
+        .calls
+        .iter()
+        .map(|call| {
+            (
+                call.tool_call_id.as_str(),
+                call.request_id.as_str(),
+                call.caused.request_id.as_str(),
+                call.caused.session_id.as_str(),
+                call.caused.lifecycle_state.as_deref(),
+            )
+        })
+        .collect();
+    calls.sort_unstable();
+    assert_eq!(
+        calls,
+        [
+            (
+                "tc_existing",
+                "req_parent",
+                "req_existing_2",
+                "sess_existing",
+                Some("processing")
+            ),
+            (
+                "tc_message",
+                "req_parent",
+                "req_child_2",
+                "sess_child",
+                Some("processing")
+            ),
+            (
+                "tc_peer",
+                "req_parent",
+                "req_peer",
+                "sess_peer",
+                Some("processing")
+            ),
+            (
+                "tc_start",
+                "req_parent",
+                "req_child",
+                "sess_child",
+                Some("completed")
+            ),
+        ]
+    );
+    let peer = view
+        .calls
+        .iter()
+        .find(|call| call.tool_call_id == "tc_peer")
         .unwrap();
-    assert_eq!(peer.agent_did.as_deref(), Some("did:test:other"));
-    assert_eq!(peer.caused_by_tool_call_id.as_deref(), Some("tc_peer"));
+    assert_eq!(peer.caused.agent_did, "did:test:other");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn another_requester_scope_under_the_same_label_is_not_this_session() {
+async fn a_started_session_names_its_starter_and_the_sender_of_each_turn() {
     let (core, _tmp, _) = seed_provenance_fixture().await;
-    let view = session_provenance(&core, scope("sess_parent"))
-        .await
-        .expect("provenance");
-    assert!(!ids(&view.sent).contains(&"req_leak"));
-
-    let other = session_provenance(
-        &core,
-        SessionScope {
-            requester_did: Some("did:test:someone-else".into()),
-            ..scope("sess_parent")
-        },
-    )
-    .await
-    .expect("provenance");
-    assert_eq!(ids(&other.started), ["req_leak"]);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn a_started_session_names_the_session_that_started_it() {
-    let (core, _tmp, _) = seed_provenance_fixture().await;
+    for request_id in ["req_parent", "req_child", "req_child_2"] {
+        core.refresh_local_request(OPERATOR, request_id)
+            .await
+            .expect("refresh request");
+    }
     let view = session_provenance(&core, scope("sess_child"))
         .await
         .expect("provenance");
 
-    assert!(view.sent.is_empty() && view.started.is_empty());
-    let started_by = view.started_by.expect("caused origin");
-    assert_eq!(started_by.request_id, "req_child");
     assert_eq!(
-        started_by.caused_by_session_id.as_deref(),
+        view.started_by
+            .as_ref()
+            .map(|link| link.session_id.as_str()),
         Some("sess_parent")
     );
-    assert_eq!(ids(&view.received), ["req_child", "req_child_2"]);
-    assert!(view
-        .received
+    assert!(view.started.is_empty() && view.sent.is_empty() && view.calls.is_empty());
+    let mut senders: Vec<_> = view
+        .senders
         .iter()
-        .all(|row| row.caused_by_session_id.as_deref() == Some("sess_parent")));
+        .map(|turn| (turn.request_id.as_str(), turn.sender.session_id.as_str()))
+        .collect();
+    senders.sort_unstable();
+    assert_eq!(
+        senders,
+        [("req_child", "sess_parent"), ("req_child_2", "sess_parent")]
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -103,13 +134,8 @@ async fn a_messaged_session_was_not_started_by_its_sender() {
     let view = session_provenance(&core, scope("sess_existing"))
         .await
         .expect("provenance");
-
     assert!(view.started_by.is_none());
-    assert_eq!(ids(&view.received), ["req_existing_2"]);
-    assert_eq!(
-        view.received[0].caused_by_session_id.as_deref(),
-        Some("sess_parent")
-    );
+    assert_eq!(sessions(&view.received), ["sess_parent"]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -120,4 +146,5 @@ async fn a_root_session_has_no_provenance() {
         .expect("provenance");
     assert!(view.started_by.is_none());
     assert!(view.received.is_empty() && view.sent.is_empty() && view.started.is_empty());
+    assert!(view.calls.is_empty() && view.senders.is_empty());
 }

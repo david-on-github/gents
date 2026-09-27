@@ -41,178 +41,198 @@ pub async fn seed_standalone_fixture() -> (Arc<ClientCore>, TempDir) {
     (core, tmp)
 }
 
-/// `req_parent` in `sess_parent` (null requester) caused, through its calls:
-/// - `sess_child`: started (`req_child`, its origin), then messaged again
-///   (`req_child_2`);
-/// - `sess_peer` on another agent: started (`req_peer`);
-/// - `sess_existing`: only messaged (`req_existing_2`); its origin
-///   `req_existing_1` is the person's own.
+pub const OPERATOR: &str = "did:test:operator";
+
+/// `req_parent` in `sess_parent` made four agents-tool calls:
+/// - `tc_start` (`agent_new`) started `sess_child` (`req_child`), then
+///   `tc_message` (`agent_message`) messaged it again (`req_child_2`);
+/// - `tc_peer` (`agent_new`) started `sess_peer` on another agent (`req_peer`);
+/// - `tc_existing` (`agent_message`) messaged `sess_existing`, which the
+///   person started (`req_existing_1`), as `req_existing_2`.
 ///
-/// `req_other_scope` shares the label `sess_parent` under another requester
-/// and started `sess_leak`; it is not part of the null-requester scope.
-/// Returns the core and `req_parent`'s document id.
+/// Every session's requester is the operator principal, as the runtime writes
+/// a started session. Returns the core and `req_parent`'s document id.
 pub async fn seed_provenance_fixture() -> (Arc<ClientCore>, TempDir, String) {
     let (core, tmp) = boot_core().await;
-
-    let parent_doc_id = create_request(
+    let parent = create_request(
         &core,
         "req_parent",
-        "did:test:operator",
+        OPERATOR,
         "sess_parent",
-        None,
-        "lead",
         "processing",
         "2026-05-20T00:00:00Z",
         None,
     )
     .await;
+    create_session(&core, OPERATOR, "sess_parent", None).await;
     create_request(
         &core,
         "req_existing_1",
-        "did:test:operator",
+        OPERATOR,
         "sess_existing",
-        None,
-        "lead",
         "completed",
         "2026-05-20T00:00:30Z",
         None,
     )
     .await;
-    let other_doc_id = create_request(
-        &core,
-        "req_other_scope",
-        "did:test:operator",
-        "sess_parent",
-        Some("did:test:someone-else"),
-        "lead",
-        "processing",
-        "2026-05-20T00:00:40Z",
-        None,
-    )
-    .await;
-    let cause = Some(("req_parent", parent_doc_id.as_str()));
-    create_request(
-        &core,
-        "req_child",
-        "did:test:operator",
-        "sess_child",
-        None,
-        "researcher",
-        "completed",
-        "2026-05-20T00:01:00Z",
-        cause.map(|(r, d)| (r, d, "tc_start")),
-    )
-    .await;
-    create_request(
-        &core,
-        "req_child_2",
-        "did:test:operator",
-        "sess_child",
-        None,
-        "researcher",
-        "processing",
-        "2026-05-20T00:02:00Z",
-        cause.map(|(r, d)| (r, d, "tc_message")),
-    )
-    .await;
-    create_request(
-        &core,
-        "req_peer",
-        "did:test:other",
-        "sess_peer",
-        None,
-        "reviewer",
-        "processing",
-        "2026-05-20T00:03:00Z",
-        cause.map(|(r, d)| (r, d, "tc_peer")),
-    )
-    .await;
-    create_request(
-        &core,
-        "req_existing_2",
-        "did:test:operator",
-        "sess_existing",
-        None,
-        "lead",
-        "processing",
-        "2026-05-20T00:04:00Z",
-        cause.map(|(r, d)| (r, d, "tc_existing")),
-    )
-    .await;
-    create_request(
-        &core,
-        "req_leak",
-        "did:test:operator",
-        "sess_leak",
-        None,
-        "researcher",
-        "processing",
-        "2026-05-20T00:05:00Z",
-        Some(("req_other_scope", other_doc_id.as_str(), "tc_leak")),
-    )
-    .await;
+    create_session(&core, OPERATOR, "sess_existing", None).await;
+    create_session(&core, OPERATOR, "sess_unrelated", None).await;
     create_request(
         &core,
         "req_unrelated",
-        "did:test:operator",
+        OPERATOR,
         "sess_unrelated",
-        None,
-        "lead",
         "processing",
         "2026-05-20T00:06:00Z",
         None,
     )
     .await;
 
-    (core, tmp, parent_doc_id)
+    for (call, tool, request_id, agent_did, session_id, state, created_at, started) in [
+        (
+            "tc_start",
+            "agent_new",
+            "req_child",
+            OPERATOR,
+            "sess_child",
+            "completed",
+            "2026-05-20T00:01:00Z",
+            true,
+        ),
+        (
+            "tc_message",
+            "agent_message",
+            "req_child_2",
+            OPERATOR,
+            "sess_child",
+            "processing",
+            "2026-05-20T00:02:00Z",
+            false,
+        ),
+        (
+            "tc_peer",
+            "agent_new",
+            "req_peer",
+            "did:test:other",
+            "sess_peer",
+            "processing",
+            "2026-05-20T00:03:00Z",
+            true,
+        ),
+        (
+            "tc_existing",
+            "agent_message",
+            "req_existing_2",
+            OPERATOR,
+            "sess_existing",
+            "processing",
+            "2026-05-20T00:04:00Z",
+            false,
+        ),
+    ] {
+        let call_doc = create_tool_call(&core, call, tool).await;
+        create_request(
+            &core,
+            request_id,
+            agent_did,
+            session_id,
+            state,
+            created_at,
+            Some((&parent, call, &call_doc)),
+        )
+        .await;
+        if started {
+            create_session(&core, agent_did, session_id, Some(&parent)).await;
+        }
+    }
+    (core, tmp, parent)
 }
 
-/// Create one public request and return its document id. `cause` is the
-/// causing request id, its document id and the causing call.
+async fn created_doc_id(core: &Arc<ClientCore>, mutation: &str, collection: &str) -> String {
+    let response = core.node().execute(mutation).await;
+    assert!(
+        !response.has_errors(),
+        "seed {collection}: {:?}",
+        response.errors
+    );
+    gents::graphql::single_mutation_document(&response, &format!("create_{collection}"))
+        .expect("created document")
+        .and_then(|document| document["_docID"].as_str())
+        .expect("created document id")
+        .to_owned()
+}
+
+/// Create one public request of the operator; `cause` is the causing
+/// request's document id, and the causing call's logical and physical ids.
 #[allow(clippy::too_many_arguments)]
 async fn create_request(
     core: &Arc<ClientCore>,
     request_id: &str,
     agent_did: &str,
     session_id: &str,
-    requester_did: Option<&str>,
-    behavior_id: &str,
     lifecycle_state: &str,
     created_at: &str,
     cause: Option<(&str, &str, &str)>,
 ) -> String {
-    let requester = requester_did
-        .map(|did| format!(r#"requester_did: "{did}","#))
-        .unwrap_or_default();
     let caused = cause
-        .map(|(request, doc, call)| {
+        .map(|(doc, call, call_doc)| {
             format!(
-                r#"subagent_depth: 1, caused_by_parent_request_id: "{request}", caused_by_parent_request_doc_id: "{doc}", caused_by_parent_tool_call_id: "{call}","#
+                r#"subagent_depth: 1, caused_by_parent_request_id: "req_parent", caused_by_parent_request_doc_id: "{doc}", caused_by_parent_tool_call_id: "{call}", caused_by_parent_tool_call_doc_id: "{call_doc}","#
             )
         })
         .unwrap_or_default();
-    let mutation = format!(
-        r#"mutation {{ create_AgentRequest(input: {{ purpose: "normal", request_id: "{request_id}", agent_did: "{agent_did}", {requester} behavior_id: "{behavior_id}", session_id: "{session_id}", {caused} content: "work", lifecycle_state: "{lifecycle_state}", backend_id: "", created_at: "{created_at}", retry_count: 0 }}) {{ _docID }} }}"#
-    );
-    let response = core.node().execute(&mutation).await;
-    assert!(
-        !response.has_errors(),
-        "seed {request_id} failed: {:?}",
-        response.errors
-    );
-    let response = core
-        .node()
-        .execute(&format!(
-            r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{request_id}" }} }}) {{ _docID }} }}"#
-        ))
-        .await;
-    response
-        .data
-        .as_ref()
-        .and_then(|data| data.pointer("/AgentRequest/0/_docID"))
-        .and_then(|value| value.as_str())
-        .unwrap_or_else(|| panic!("{request_id} doc id"))
-        .to_owned()
+    created_doc_id(
+        core,
+        &format!(
+            r#"mutation {{ create_AgentRequest(input: {{ purpose: "normal", request_id: "{request_id}", agent_did: "{agent_did}", requester_did: "{OPERATOR}", behavior_id: "worker", session_id: "{session_id}", {caused} content: "work", lifecycle_state: "{lifecycle_state}", backend_id: "", created_at: "{created_at}", retry_count: 0 }}) {{ _docID }} }}"#
+        ),
+        "AgentRequest",
+    )
+    .await
+}
+
+async fn create_session(
+    core: &Arc<ClientCore>,
+    agent_did: &str,
+    session_id: &str,
+    started_by: Option<&str>,
+) {
+    let session = gents_protocol::session::AgentSession {
+        session_id: session_id.into(),
+        agent_did: agent_did.into(),
+        requester_did: Some(OPERATOR.into()),
+        behavior_id: "worker".into(),
+        created_at: "2026-05-20T00:00:00Z".into(),
+        closed_at: None,
+        title: None,
+        tags: Vec::new(),
+        provenance: started_by.map(|doc_id| gents_protocol::session::SessionProvenance {
+            parent_request_doc_id: Some(doc_id.into()),
+            ..Default::default()
+        }),
+        observation: None,
+    };
+    let input = gents_protocol::graphql::graphql_input_literal(
+        &serde_json::to_value(&session).expect("session json"),
+    )
+    .expect("session input");
+    created_doc_id(
+        core,
+        &format!("mutation {{ create_AgentSession(input: {input}) {{ _docID }} }}"),
+        "AgentSession",
+    )
+    .await;
+}
+
+async fn create_tool_call(core: &Arc<ClientCore>, call: &str, tool: &str) -> String {
+    created_doc_id(
+        core,
+        &format!(
+            r#"mutation {{ create_AgentToolCall(input: {{ tool_call_key: "sess_parent:{call}", agent_did: "{OPERATOR}", requester_did: "{OPERATOR}", session_id: "sess_parent", request_id: "req_parent", message_sequence: 1, tool_name: "{tool}", tool_call_id: "{call}", args: "{{}}", result: "", status: "called", lifecycle_state: "running", await_mode: "background" }}) {{ _docID }} }}"#
+        ),
+        "AgentToolCall",
+    )
+    .await
 }
 
 pub async fn fetch_request_row(core: &Arc<ClientCore>, request_id: &str) -> AgentRequestRow {

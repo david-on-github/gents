@@ -9,7 +9,6 @@
 //!
 //! Invoke paths: `plugin:gents-desktop-bridge|<command>`.
 
-pub mod background_cancel;
 pub mod cause_derivation;
 pub mod commands;
 pub mod config;

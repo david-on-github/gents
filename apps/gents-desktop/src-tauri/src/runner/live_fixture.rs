@@ -63,15 +63,6 @@ impl LiveBridgeFixture {
         self.init_summary.clone()
     }
 
-    /// The running agent runtime, which owns its live background executions.
-    pub(crate) async fn agent_runtime(&self) -> Option<gents::Gents> {
-        self.running_agent
-            .lock()
-            .await
-            .as_ref()
-            .map(|agent| agent.runtime.clone())
-    }
-
     pub(crate) fn desktop_core(&self) -> &Arc<ClientCore> {
         &self.desktop_core
     }

@@ -24,7 +24,7 @@ use gents_desktop_bridge::commands::{
     set_default_behavior, test_tool_service_config,
 };
 use gents_desktop_bridge::interrupt::interrupt_request;
-use gents_desktop_bridge::provenance::session_provenance;
+use gents_desktop_bridge::provenance::session_provenance_request;
 use gents_desktop_bridge::snapshot::build_session_live_delta;
 use gents_desktop_bridge::snapshot::operations_snapshot::{
     project_backgrounded_tools, stuck_diagnostics_from_tool_calls, ToolCallRow,
@@ -36,14 +36,13 @@ use gents_desktop_bridge::tauri_commands::inference_setup::{
 };
 use gents_desktop_bridge::tauri_commands::operations::list_backends_with_health_for_core;
 use gents_desktop_bridge::types::{
-    AgentConfigSaveRequest, BackendSaveRequest, BackgroundCancelResultView, BehaviorSaveRequest,
-    ChatSendRequest, DefaultBehaviorSetRequest, DesktopCancelBackgroundProcessRequest,
-    DesktopInterruptRequest, DesktopOperationsSnapshot, DesktopOperationsSnapshotRequest,
-    DesktopProbeMcpServiceRequest, DesktopSessionProvenanceRequest, EnrollmentRequestView,
-    EnrollmentStatusRequest, EventSourceDeleteRequest, EventSourceSaveRequest,
-    InferenceProfileSaveRequest, NativeExecutorStatusView, PeerStatusFetchRequest,
-    RuntimeLivenessView, ScheduleDeleteRequest, ScheduleRunRequest, ScheduleSaveRequest,
-    SessionProvenanceView, SessionRenameRequest, TaskRunRequest, TaskSaveRequest,
+    AgentConfigSaveRequest, BackendSaveRequest, BehaviorSaveRequest, ChatSendRequest,
+    DefaultBehaviorSetRequest, DesktopInterruptRequest, DesktopOperationsSnapshot,
+    DesktopOperationsSnapshotRequest, DesktopProbeMcpServiceRequest,
+    DesktopSessionProvenanceRequest, EnrollmentRequestView, EnrollmentStatusRequest,
+    EventSourceDeleteRequest, EventSourceSaveRequest, InferenceProfileSaveRequest,
+    NativeExecutorStatusView, PeerStatusFetchRequest, RuntimeLivenessView, ScheduleDeleteRequest,
+    ScheduleRunRequest, ScheduleSaveRequest, SessionRenameRequest, TaskRunRequest, TaskSaveRequest,
     ToolServiceSaveRequest, ToolServiceTestRequest, ToolsDeleteRequest, ToolsSaveRequest,
     TriggerDeleteRequest, TriggerSaveRequest,
 };
@@ -396,8 +395,9 @@ pub(super) fn handle_request(
                 &request.body,
                 "decoding session provenance request",
             )?;
-            let view =
-                runtime.block_on(session_provenance_response(fixture.desktop_core(), request))?;
+            let view = runtime
+                .block_on(session_provenance_request(fixture.desktop_core(), request))
+                .map_err(|e| anyhow!("{e}"))?;
             Ok(HttpResponse::json_ok(serde_json::to_string(&view)?))
         }
         ("GET", "/desktop/backend-health") => {
@@ -729,31 +729,6 @@ pub(super) fn handle_request(
                 runtime.block_on(run_task_config(fixture.desktop_core().as_ref(), request))?;
             Ok(HttpResponse::json_ok(serde_json::to_string(&result)?))
         }
-        ("POST", "/desktop/background/cancel") => {
-            let request = decode::<DesktopCancelBackgroundProcessRequest>(
-                &request.body,
-                "decoding background cancel request",
-            )?;
-            let result = runtime.block_on(async {
-                let agent = fixture
-                    .agent_runtime()
-                    .await
-                    .context("live bridge runner has no running agent")?;
-                agent
-                    .cancel_session_background_process(
-                        request.requester_did.as_deref(),
-                        &request.session_id,
-                        &request.tool_call_id,
-                    )
-                    .await
-            })?;
-            Ok(HttpResponse::json_ok(serde_json::to_string(
-                &BackgroundCancelResultView {
-                    outcome: result.label().to_string(),
-                    state: result.terminal_state().map(str::to_owned),
-                },
-            )?))
-        }
         ("POST", "/desktop/interrupt/request") => {
             let request =
                 decode::<DesktopInterruptRequest>(&request.body, "decoding interrupt request")?;
@@ -1001,30 +976,6 @@ async fn fetch_background_tool_calls(core: &Arc<ClientCore>) -> Result<Vec<ToolC
                 .map(str::to_string),
         })
         .collect())
-}
-
-async fn session_provenance_response(
-    core: &Arc<ClientCore>,
-    request: DesktopSessionProvenanceRequest,
-) -> Result<SessionProvenanceView> {
-    let agent_did = request
-        .agent_did
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| core.selected_agent_did())
-        .context("no agent selected; pass agentDid explicitly")?;
-    session_provenance(
-        core,
-        gents::session_origin::SessionScope {
-            agent_did,
-            session_id: request.session_id,
-            requester_did: request.requester_did,
-        },
-    )
-    .await
-    .map_err(|error| anyhow!("{error}"))
 }
 
 fn decode<T: serde::de::DeserializeOwned>(body: &str, context: &str) -> Result<T> {

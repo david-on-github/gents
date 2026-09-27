@@ -1,8 +1,9 @@
 import { renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
-  CausedRequestView,
+  CausedCallView,
   DesktopSessionProvenanceRequest,
+  LinkedSessionView,
   RenderedTimelineItem,
   RenderedToolCallView,
   SessionProvenanceView,
@@ -10,7 +11,6 @@ import type {
 import type { Shell } from "@/hooks/useShell";
 
 import {
-  LINEAGE_REFRESH_MS,
   subagentsOf,
   useSessionProvenance,
   useWorkers,
@@ -51,42 +51,45 @@ const group = (...tools: RenderedToolCallView[]): RenderedTimelineItem =>
     tools,
   }) as RenderedTimelineItem;
 
+/* call `byToolCall` of request `byRequest` caused `requestId` in `sessionId` */
 const caused = (
   requestId: string,
   sessionId: string,
   lifecycleState: string,
   byRequest: string,
   byToolCall: string,
-  createdAt: string,
-): CausedRequestView => ({
-  requestId,
-  requestDocId: `doc-${requestId}`,
-  sessionId,
-  agentDid: AGENT,
-  requesterDid: null,
-  behaviorId: "crew-explorer",
-  lifecycleState,
-  interruptRequestedAt: null,
-  createdAt,
-  hop: 1,
-  causedByRequestId: byRequest,
-  causedByRequestDocId: `doc-${byRequest}`,
-  causedByToolCallId: byToolCall,
-  causedByToolCallDocId: `doc-${byToolCall}`,
-  causedBySessionId: "parent-session",
+): CausedCallView => ({
+  requestId: byRequest,
+  toolCallId: byToolCall,
+  caused: {
+    requestId,
+    agentDid: AGENT,
+    sessionId,
+    requesterDid: null,
+    lifecycleState,
+    createdAt: null,
+  },
 });
 
-/* `started` is what the bridge's origin owner returns: only the requests
-   that began their session */
+const link = (sessionId: string): LinkedSessionView => ({
+  agentDid: AGENT,
+  sessionId,
+  requesterDid: null,
+  causeRequestDocId: "doc-req-1",
+});
+
+/* `started` is the lineage owner's answer: only sessions this one began */
 const view = (
-  sent: CausedRequestView[],
-  started: CausedRequestView[] = sent,
+  calls: CausedCallView[],
+  started: string[] = calls.map((c) => c.caused.sessionId),
 ): SessionProvenanceView => ({
   sessionId: "parent-session",
   startedBy: null,
+  started: started.map(link),
+  sent: [],
   received: [],
-  started,
-  sent,
+  senders: [],
+  calls,
 });
 
 function shellFor(
@@ -126,50 +129,25 @@ function useBoth(shell: Shell) {
 }
 
 describe("subagents of a session", () => {
-  it("are the sessions this one started, with every request it caused there", () => {
-    const origin = caused("r-a1", "session-a", "completed", "req-1", "call-a1", "1");
-    const all = subagentsOf(
-      view(
-        [
-          caused("r-a2", "session-a", "processing", "req-2", "call-a2", "3"),
-          caused("r-m", "session-messaged", "processing", "req-1", "call-m", "2"),
-          origin,
-        ],
-        [origin],
-      ),
-      [
-        {
-          agentDid: AGENT,
-          sessionId: "session-a",
-          requesterDid: null,
-          title: "Explorer",
-        },
-        /* the same label under another requester is another session */
-        {
-          agentDid: AGENT,
-          sessionId: "session-a",
-          requesterDid: PERSON,
-          title: "Other",
-        },
-      ] as never,
-    );
+  it("are the lineage owner's started sessions, matched to summaries by full scope", () => {
+    const all = subagentsOf(view([], ["session-a"]), [
+      {
+        agentDid: AGENT,
+        sessionId: "session-a",
+        requesterDid: null,
+        title: "Explorer",
+      },
+      /* the same label under another requester is another session */
+      { agentDid: AGENT, sessionId: "session-a", requesterDid: PERSON, title: "Other" },
+    ] as never);
     expect(all.map((s) => s.sessionId)).toEqual(["session-a"]);
-    expect(all[0]!.requests.map((r) => r.requestId)).toEqual(["r-a1", "r-a2"]);
-    expect(all[0]!.origin.requestId).toBe("r-a1");
     expect(all[0]!.summary?.title).toBe("Explorer");
   });
 
   it("joins each call to the request it caused, subagent or not", async () => {
-    const started = caused(
-      "r-done",
-      "session-done",
-      "completed",
-      "req-1",
-      "call-done",
-      "1",
-    );
-    const messaged = caused("r-m", "session-old", "processing", "req-1", "call-m", "2");
-    const api = apiWith(async () => view([started, messaged], [started]));
+    const started = caused("r-done", "session-done", "completed", "req-1", "call-done");
+    const messaged = caused("r-m", "session-old", "processing", "req-1", "call-m");
+    const api = apiWith(async () => view([started, messaged], ["session-done"]));
     const start = call("req-1", "call-done");
     const message = call("req-1", "call-m", "running", "message");
     const { result } = renderHook(() =>
@@ -225,6 +203,19 @@ describe("subagents of a session", () => {
     expect(api.sessionProvenance).not.toHaveBeenCalled();
   });
 
+  it("never makes a steering message into a started session a start", async () => {
+    /* agent_message into a session this one started, while it works */
+    const steer = caused("r-steer", "session-a", "processing", "req-2", "call-steer");
+    const api = apiWith(async () => view([steer], ["session-a"]));
+    const message = call("req-2", "call-steer", "running", "message");
+    const { result } = renderHook(() => useBoth(shellFor(api, [group(message)])));
+    await waitFor(() => expect(result.current.byToolCall(message)).toBeTruthy());
+    expect(result.current.byToolCall(message)!.subagent?.sessionId).toBe("session-a");
+    expect(
+      message.presentation.kind === "subagent" && message.presentation.action,
+    ).toBe("message");
+  });
+
   it("joins a call only through the lineage, never through a summary's latest request", async () => {
     const api = apiWith(async () => view([]));
     const unknown = call("req-1", "call-unknown", "running");
@@ -245,7 +236,7 @@ describe("subagents of a session", () => {
 
   it("does not join a call from another request with the same call id", async () => {
     const api = apiWith(async () =>
-      view([caused("r-1", "session-1", "completed", "req-1", "call-1", "1")]),
+      view([caused("r-1", "session-1", "completed", "req-1", "call-1")]),
     );
     const other = call("req-2", "call-1");
     const { result } = renderHook(() => useBoth(shellFor(api, [group(other)])));
@@ -255,7 +246,7 @@ describe("subagents of a session", () => {
 
   it("does not keep another session's provenance for the render that switches", async () => {
     const api = apiWith(async () =>
-      view([caused("r-a", "session-a", "completed", "req-1", "call-a", "1")]),
+      view([caused("r-a", "session-a", "completed", "req-1", "call-a")]),
     );
     const items = [group(call("req-1", "call-a"))];
     const { result, rerender } = renderHook(
@@ -274,7 +265,7 @@ describe("subagent lineage freshness", () => {
   it("asks again on a session-list change and keeps the last view on a failed ask", async () => {
     let state = "processing";
     const api = apiWith(async () =>
-      view([caused("r-1", "session-1", state, "req-1", "call-1", "1")]),
+      view([caused("r-1", "session-1", state, "req-1", "call-1")]),
     );
     const tool = call("req-1", "call-1", "success");
     const items = [group(tool)];
@@ -302,28 +293,38 @@ describe("subagent lineage freshness", () => {
     );
   });
 
-  it("polls while a caused request runs with no local cue, and stops once it settles", async () => {
+  it("asks again when the store observation moves, with no timer of its own", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       let state = "processing";
       const api = apiWith(async () =>
-        view([caused("r-remote", "session-remote", state, "req-1", "call-1", "1")]),
+        view([caused("r-remote", "session-remote", state, "req-1", "call-1")]),
       );
       const tool = call("req-1", "call-1", "success");
-      const shell = shellFor(api, [group(tool)]);
-      const { result } = renderHook(() => useBoth(shell));
+      const at = (storeVersion: number) =>
+        ({
+          ...shellFor(api, [group(tool)]),
+          selectedSession: {
+            sessionId: "parent-session",
+            timelineItems: [group(tool)],
+            projectionRevision: { storeVersion, reconcileVersion: 1 },
+          },
+        }) as unknown as Shell;
+      const { result, rerender } = renderHook(
+        ({ version }: { version: number }) => useBoth(at(version)),
+        { initialProps: { version: 1 } },
+      );
       await waitFor(() => expect(api.sessionProvenance).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(api.sessionProvenance).toHaveBeenCalledTimes(1);
 
       state = "completed";
-      await vi.advanceTimersByTimeAsync(LINEAGE_REFRESH_MS + 1_000);
+      rerender({ version: 2 });
       await waitFor(() =>
         expect(result.current.byToolCall(tool)?.request.lifecycleState).toBe(
           "completed",
         ),
       );
-      const asked = api.sessionProvenance.mock.calls.length;
-      await vi.advanceTimersByTimeAsync(LINEAGE_REFRESH_MS * 3);
-      expect(api.sessionProvenance).toHaveBeenCalledTimes(asked);
     } finally {
       vi.useRealTimers();
     }

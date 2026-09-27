@@ -126,11 +126,8 @@ permissions = [
 
 [[set]]
 identifier = "interrupt-control"
-description = "Interrupt a request or kill a background process"
-permissions = [
-  "allow-desktop-interrupt-request",
-  "allow-desktop-cancel-background-process",
-]
+description = "Interrupt request execution"
+permissions = ["allow-desktop-interrupt-request"]
 
 [[set]]
 identifier = "runtime-admin"

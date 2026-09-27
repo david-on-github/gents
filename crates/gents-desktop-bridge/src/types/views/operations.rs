@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -91,56 +91,67 @@ pub struct StuckWorkDiagnosticView {
     pub stuck_since: Option<String>,
 }
 
-/// Session-message provenance for one session scope, read from the immutable
-/// `AgentRequest.caused_by_parent_*` lineage under the `gents::session_origin`
-/// rule. It is provenance only: no hierarchy, cascade or authority follows.
+/// One session's agent-message lineage, mapped from the
+/// `gents::session_origin::lineage` owner. It is provenance only: no
+/// hierarchy, cascade or authority follows.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionProvenanceView {
     pub session_id: String,
-    /// This session's origin, when another session's call caused it.
-    pub started_by: Option<CausedRequestView>,
-    /// Requests in this session that another session's call caused.
-    pub received: Vec<CausedRequestView>,
-    /// The origins of the sessions this session's calls started: its
-    /// subagents. A message into an existing session is not one.
-    pub started: Vec<CausedRequestView>,
-    /// Every request this session's calls caused, starts and messages alike.
-    pub sent: Vec<CausedRequestView>,
+    /// The session whose request started this one.
+    pub started_by: Option<LinkedSessionView>,
+    /// Sessions this session's requests started: its subagents.
+    pub started: Vec<LinkedSessionView>,
+    /// Other sessions this session messaged without starting them.
+    pub sent: Vec<LinkedSessionView>,
+    /// Other sessions, besides its starter, that messaged this one.
+    pub received: Vec<LinkedSessionView>,
+    /// The sender of each of this session's requests another session caused,
+    /// where that sender is one of the linked sessions.
+    pub senders: Vec<TurnSenderView>,
+    /// This session's `agent_new`/`agent_message` calls and the request each
+    /// caused.
+    pub calls: Vec<CausedCallView>,
 }
 
-/// One caused request and the call that caused it. `caused_by_session_id` is
-/// null when the causing request is not visible on this node.
+/// Another session and the request that links it to this one.
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedSessionView {
+    pub agent_did: String,
+    pub session_id: String,
+    pub requester_did: Option<String>,
+    /// The causing request: in the other session for `started_by` and
+    /// `received`, in this session for `started` and `sent`.
+    pub cause_request_doc_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TurnSenderView {
+    pub request_id: String,
+    pub sender: LinkedSessionView,
+}
+
+/// A call of this session and the one request it caused.
+#[derive(Debug, Clone, Serialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct CausedCallView {
+    /// The calling request and the call's logical id in this session.
+    pub request_id: String,
+    pub tool_call_id: String,
+    pub caused: CausedRequestView,
+}
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct CausedRequestView {
     pub request_id: String,
-    pub request_doc_id: String,
-    pub session_id: Option<String>,
-    pub agent_did: Option<String>,
+    pub agent_did: String,
+    pub session_id: String,
     pub requester_did: Option<String>,
-    pub behavior_id: Option<String>,
     pub lifecycle_state: Option<String>,
-    pub interrupt_requested_at: Option<String>,
     pub created_at: Option<String>,
-    /// `subagent_depth`: the causal hop.
-    pub hop: Option<i64>,
-    pub caused_by_request_id: Option<String>,
-    pub caused_by_request_doc_id: Option<String>,
-    pub caused_by_tool_call_id: Option<String>,
-    pub caused_by_tool_call_doc_id: Option<String>,
-    pub caused_by_session_id: Option<String>,
-}
-
-/// The runtime owner's outcome for a background kill: `cancelled`, `lost`,
-/// `unverified`, `already_terminal` (with `state`), `not_background` or
-/// `not_found`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct BackgroundCancelResultView {
-    pub outcome: String,
-    #[serde(default)]
-    pub state: Option<String>,
 }
 
 /// Result envelope for `desktop_interrupt_request`:

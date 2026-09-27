@@ -284,32 +284,6 @@ Denies the desktop_claude_login_cancel command without any pre-configured scope.
 <tr>
 <td>
 
-`gents-desktop-bridge:allow-desktop-cancel-background-process`
-
-</td>
-<td>
-
-Enables the desktop_cancel_background_process command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
-`gents-desktop-bridge:deny-desktop-cancel-background-process`
-
-</td>
-<td>
-
-Denies the desktop_cancel_background_process command without any pre-configured scope.
-
-</td>
-</tr>
-
-<tr>
-<td>
-
 `gents-desktop-bridge:allow-desktop-client-shutdown`
 
 </td>
@@ -2772,7 +2746,7 @@ Operations snapshot, health, session provenance, MCP probe
 </td>
 <td>
 
-Interrupt a request or kill a background process
+Interrupt request execution
 
 </td>
 </tr>

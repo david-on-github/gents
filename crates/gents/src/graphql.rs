@@ -73,7 +73,7 @@ async fn graphql_response_with_policy(
 /// errors. Most callers should use [`graphql_with_transaction_retry`].
 /// Render a GraphQL string-list literal, emitting `null` for an empty list
 /// (never `[]`, which types as `JsonArray` and corrupts nillable array columns).
-pub(crate) fn graphql_string_list_literal<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+pub fn graphql_string_list_literal<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
     let items = values
         .into_iter()
         .map(|value| format!(r#""{}""#, escape_graphql_string(value)))

@@ -136,7 +136,6 @@ pub fn init<R: Runtime>(config: BridgeConfig) -> TauriPlugin<R> {
             tauri_commands::operations::desktop_operations_snapshot,
             tauri_commands::operations::desktop_session_provenance,
             tauri_commands::operations::desktop_interrupt_request,
-            tauri_commands::operations::desktop_cancel_background_process,
             tauri_commands::operations::desktop_list_backends_with_health,
             tauri_commands::operations::desktop_list_mcp_services_with_health,
             tauri_commands::operations::desktop_probe_mcp_service,

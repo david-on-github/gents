@@ -25,28 +25,6 @@ pub enum CancelBackgroundToolCallOutcome {
     NotFound,
 }
 
-impl CancelBackgroundToolCallOutcome {
-    /// The wire label clients see for this outcome.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Cancelled { .. } => "cancelled",
-            Self::Lost => "lost",
-            Self::Unverified => "unverified",
-            Self::AlreadyTerminal { .. } => "already_terminal",
-            Self::NotBackground => "not_background",
-            Self::NotFound => "not_found",
-        }
-    }
-
-    /// The terminal state an already-terminal row reported.
-    pub fn terminal_state(&self) -> Option<&str> {
-        match self {
-            Self::AlreadyTerminal { state } => Some(state),
-            _ => None,
-        }
-    }
-}
-
 /// Session-principal boundary for client process controls. Keep authorization
 /// identical to the model-facing process tools; the operator API below is
 /// deliberately broader and must not be exposed directly to client IDs.

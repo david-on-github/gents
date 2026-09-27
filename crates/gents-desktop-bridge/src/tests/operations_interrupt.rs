@@ -1,37 +1,54 @@
-use crate::interrupt::{interrupt_request, latch_request_interrupt};
+use crate::interrupt::interrupt_request;
 use crate::tests::support::{fetch_request_row, seed_provenance_fixture, seed_standalone_fixture};
 use crate::types::DesktopInterruptRequest;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn latch_writes_interrupt_requested_at_when_absent() {
-    let (core, _tmp) = seed_standalone_fixture().await;
-    let before = fetch_request_row(&core, "req_solo").await;
-    assert!(before.interrupt_requested_at.is_none());
-
-    let latched = latch_request_interrupt(&core, "req_solo", None)
-        .await
-        .expect("latch ok");
-    assert!(latched.was_first);
-    assert!(!latched.interrupt_requested_at.is_empty());
-
-    let after = fetch_request_row(&core, "req_solo").await;
-    assert_eq!(
-        after.interrupt_requested_at.as_deref(),
-        Some(latched.interrupt_requested_at.as_str())
-    );
+fn user_cancel(request_id: &str) -> DesktopInterruptRequest {
+    DesktopInterruptRequest {
+        request_id: request_id.into(),
+        agent_did: None,
+        cause: "userCancelled".into(),
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn latch_is_noop_when_already_interrupted() {
+async fn interrupt_writes_the_owner_latch_and_reports_its_timestamp() {
     let (core, _tmp) = seed_standalone_fixture().await;
-    let first = latch_request_interrupt(&core, "req_solo", None)
+    assert!(fetch_request_row(&core, "req_solo")
         .await
-        .expect("first latch");
-    let second = latch_request_interrupt(&core, "req_solo", None)
+        .interrupt_requested_at
+        .is_none());
+
+    let result = interrupt_request(&core, &user_cancel("req_solo"))
         .await
-        .expect("second latch");
-    assert!(!second.was_first);
-    assert_eq!(second.interrupt_requested_at, first.interrupt_requested_at);
+        .expect("interrupt");
+    let stored = fetch_request_row(&core, "req_solo").await;
+    assert!(stored.interrupt_requested_at.is_some());
+    assert_eq!(result.interrupt_requested_at, stored.interrupt_requested_at);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn interrupt_refuses_a_logical_id_carried_by_two_physical_requests() {
+    let (core, _tmp) = seed_standalone_fixture().await;
+    let duplicate = r#"mutation {
+        create_AgentRequest(input: { purpose: "normal",
+            request_id: "req_solo",
+            agent_did: "did:test:operator",
+            behavior_id: "test-behavior",
+            session_id: "sess_other",
+            content: "duplicate logical root",
+            lifecycle_state: "processing",
+            backend_id: "",
+            created_at: "2026-05-20T00:00:01Z",
+            retry_count: 0
+        }) { _docID }
+    }"#;
+    let response = core.node().execute(duplicate).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+
+    let error = interrupt_request(&core, &user_cancel("req_solo"))
+        .await
+        .expect_err("ambiguous logical root");
+    assert!(error.contains("ambiguous"), "{error}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

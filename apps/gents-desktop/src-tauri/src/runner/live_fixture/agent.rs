@@ -31,8 +31,6 @@ pub(crate) struct LiveAgentDocs {
 
 pub(crate) struct RunningAgent {
     pub(crate) did: String,
-    /// The running runtime, which owns the live background executions.
-    pub(crate) runtime: Gents,
     shutdown_tx: watch::Sender<bool>,
     run_task: tokio::task::JoinHandle<anyhow::Result<()>>,
 }
@@ -78,7 +76,6 @@ pub(super) async fn spawn_live_agent(
     .await?;
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let runtime = agent.clone();
     let run_task = tokio::spawn(agent.run(shutdown_rx).instrument(tracing::info_span!(
         "live_bridge_agent",
         deployment_label = %DEFAULT_DEPLOYMENT_LABEL,
@@ -89,7 +86,6 @@ pub(super) async fn spawn_live_agent(
     Ok((
         RunningAgent {
             did,
-            runtime,
             shutdown_tx,
             run_task,
         },

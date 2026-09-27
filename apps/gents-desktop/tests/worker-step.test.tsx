@@ -54,28 +54,23 @@ const summary = (turnState: string | null): SessionSummary =>
 
 const caused = (requestId: string, lifecycleState: string): CausedRequestView => ({
   requestId,
-  requestDocId: `doc-${requestId}`,
-  sessionId: "child-session",
   agentDid: "did:key:reviewer",
+  sessionId: "child-session",
   requesterDid: null,
-  behaviorId: null,
   lifecycleState,
-  interruptRequestedAt: null,
   createdAt: null,
-  hop: 1,
-  causedByRequestId: "parent-req",
-  causedByRequestDocId: "doc-parent-req",
-  causedByToolCallId: "call-1",
-  causedByToolCallDocId: "doc-call-1",
-  causedBySessionId: "parent-session",
 });
 
 const subagent = (turnState: string | null): Subagent => ({
   sessionId: "child-session",
   agentDid: "did:key:reviewer",
   summary: summary(turnState),
-  origin: caused("child-req", "completed"),
-  requests: [caused("child-req", "completed"), caused("child-req-2", "processing")],
+  link: {
+    agentDid: "did:key:reviewer",
+    sessionId: "child-session",
+    requesterDid: null,
+    causeRequestDocId: "doc-parent-req",
+  },
 });
 
 /* this row's call caused `request`; the session may be working on others */
@@ -96,7 +91,7 @@ function workersWith(r: Reached | null): Workers {
 function renderStep(
   tool: RenderedToolCallView,
   r: Reached | null,
-  actions = { kill: vi.fn(), interrupt: vi.fn() },
+  actions = { interrupt: vi.fn() },
 ) {
   render(
     <WorkerActionsContext.Provider value={actions}>
@@ -154,10 +149,6 @@ describe("a subagent row", () => {
     screen.getByRole("button", { name: "Stop Reviewer" }).click();
     expect(actions.interrupt).toHaveBeenCalledTimes(1);
     expect(actions.interrupt).toHaveBeenCalledWith(request);
-    expect(
-      actions.kill,
-      "a session-message row is never process-killed",
-    ).not.toBeCalled();
   });
 
   it("offers no Stop once the caused request is terminal, even while the row runs", () => {
@@ -229,13 +220,13 @@ describe("a subagent row", () => {
 });
 
 describe("a background process row", () => {
-  const process = (statusKind: string) =>
-    ({
+  it("offers no desktop Stop: killing a native process is not a desktop control", () => {
+    const process = {
       itemKey: "proc-1",
       toolName: "spawn_process",
       toolCallId: "call-proc",
       requestId: "parent-req",
-      statusKind,
+      statusKind: "running",
       awaitMode: "background",
       presentation: {
         kind: "process",
@@ -244,18 +235,9 @@ describe("a background process row", () => {
         description: null,
         output: null,
       },
-    }) as unknown as RenderedToolCallView;
-
-  it("offers Stop while it runs and kills that row", () => {
-    const tool = process("running");
-    const actions = renderStep(tool, null);
-    screen.getByRole("button", { name: "Stop cargo test" }).click();
-    expect(actions.kill).toHaveBeenCalledWith(tool);
-    expect(actions.interrupt).not.toBeCalled();
-  });
-
-  it("offers no Stop once it has settled", () => {
-    renderStep(process("success"), null);
+    } as unknown as RenderedToolCallView;
+    renderStep(process, null);
+    expect(screen.getByText("cargo test")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
   });
 });

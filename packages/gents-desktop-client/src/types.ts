@@ -120,10 +120,9 @@ export type {
 export type {
   ActiveRequestView,
   ActiveToolCallView,
-  BackgroundCancelResultView,
   BackgroundedToolView,
+  CausedCallView,
   CausedRequestView,
-  DesktopCancelBackgroundProcessRequestRequest,
   DesktopInterruptRequestRequest,
   DesktopOperationsSnapshot,
   DesktopOperationsSnapshotRequest,
@@ -135,8 +134,10 @@ export type {
   McpServiceProbeResult,
   NativeExecutorStatusView,
   RuntimeLivenessView,
+  LinkedSessionView,
   SessionProvenanceView,
   StuckWorkDiagnosticView,
+  TurnSenderView,
   WorkspaceEntryView,
   WorkspaceListingView,
 } from "./types/operations.js";

@@ -1,16 +1,16 @@
-/* Which sessions sent work into this one: the session whose call started it
-   (its origin, under the runtime's session-origin rule),
-   and the sender of each turn another session's call caused. Read from the
-   durable request lineage; a turn's request names the call that caused it,
-   so nothing is matched by text. Senders are ordinary sessions, and none of
-   this confers hierarchy. */
+/* Which sessions sent work into this one: the session that started it, and
+   the sender of each turn another session caused, both from the runtime's
+   lineage owner as the bridge maps it. Nothing is matched by text. Senders
+   are ordinary sessions, and none of this confers hierarchy. */
 import { useMemo } from "react";
 import type {
+  LinkedSessionView,
   SessionProvenanceView,
   SessionSummary,
 } from "@source-inc/gents-desktop-client";
 import type { Shell } from "@/hooks/useShell";
 import { behaviorName } from "./behavior";
+import { scopeKey, summariesByScope } from "./workers";
 
 export type Sender = {
   sessionId: string;
@@ -21,9 +21,9 @@ export type Sender = {
 };
 
 export type ParentWork = {
-  /* the session whose call started this one */
+  /* the session that started this one */
   parent: Sender | null;
-  /* the session whose call caused a turn's request; null for the person's own */
+  /* the session that sent a turn's request; null for the person's own */
   sentBy: (requestId: string | null | undefined) => Sender | null;
   /* whether any turn here was sent by another session */
   hasSenders: boolean;
@@ -41,40 +41,23 @@ export function useParentWork(
 ): ParentWork {
   const deployment = shell.selectedDeployment;
   return useMemo(() => {
-    const received = [...(provenance?.received ?? [])].sort(
-      (a, b) =>
-        (a.createdAt ?? "").localeCompare(b.createdAt ?? "") ||
-        a.requestId.localeCompare(b.requestId),
-    );
-    if (received.length === 0) return NO_PARENT;
-    const sessions = new Map((deployment?.sessions ?? []).map((s) => [s.sessionId, s]));
-    const senders = new Map<string, Sender>();
-    const sender = (sessionId: string | null): Sender | null => {
-      if (!sessionId) return null;
-      let known = senders.get(sessionId);
-      if (!known) {
-        const summary = sessions.get(sessionId) ?? null;
-        known = {
-          sessionId,
-          summary,
-          behaviorName: summary ? behaviorName(summary.behaviorId, deployment) : null,
-        };
-        senders.set(sessionId, known);
-      }
-      return known;
+    if (!provenance?.startedBy && !provenance?.senders.length) return NO_PARENT;
+    const summaries = summariesByScope(deployment?.sessions);
+    const sender = (link: LinkedSessionView): Sender => {
+      const summary = summaries.get(scopeKey(link)) ?? null;
+      return {
+        sessionId: link.sessionId,
+        summary,
+        behaviorName: summary ? behaviorName(summary.behaviorId, deployment) : null,
+      };
     };
     const byRequest = new Map(
-      received.map((r) => [r.requestId, r.causedBySessionId] as const),
+      provenance.senders.map((turn) => [turn.requestId, sender(turn.sender)] as const),
     );
-    /* the session another one started names that session through its
-       origin; a session a person started and another session later messaged
-       has none */
-    const parent = sender(provenance?.startedBy?.causedBySessionId ?? null);
     return {
-      parent,
-      hasSenders: true,
-      sentBy: (requestId) =>
-        requestId ? sender(byRequest.get(requestId) ?? null) : null,
+      parent: provenance.startedBy ? sender(provenance.startedBy) : null,
+      hasSenders: byRequest.size > 0,
+      sentBy: (requestId) => (requestId ? (byRequest.get(requestId) ?? null) : null),
     };
   }, [provenance, deployment]);
 }

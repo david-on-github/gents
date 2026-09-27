@@ -303,20 +303,6 @@ pub struct DesktopSessionProvenanceRequest {
     pub requester_did: Option<String>,
 }
 
-/// Kills one native background process row in the session scope the row
-/// belongs to. A session-message row is stopped by interrupting the request
-/// its call caused (`DesktopInterruptRequest`), never through this kill.
-#[derive(Debug, Clone, Deserialize, TS)]
-#[serde(rename_all = "camelCase")]
-pub struct DesktopCancelBackgroundProcessRequest {
-    #[serde(default)]
-    pub agent_did: Option<String>,
-    pub session_id: String,
-    #[serde(default)]
-    pub requester_did: Option<String>,
-    pub tool_call_id: String,
-}
-
 /// Interrupts exactly `request_id`. Other requests, including those it caused
 /// in other sessions, keep running.
 #[derive(Debug, Clone, Deserialize, TS)]

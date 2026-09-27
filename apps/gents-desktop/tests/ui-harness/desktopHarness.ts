@@ -2251,14 +2251,13 @@ export function createDesktopUiHarness(
       const view: SessionProvenanceView = {
         sessionId: request.sessionId,
         startedBy: null,
-        received: [],
         started: [],
         sent: [],
+        received: [],
+        senders: [],
+        calls: [],
       };
       return view;
-    },
-    async cancelBackgroundProcess() {
-      return { outcome: "cancelled", state: null };
     },
     async listBackendsWithHealth() {
       if (scenario === "backend-health-error") {

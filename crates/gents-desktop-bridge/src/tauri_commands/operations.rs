@@ -16,11 +16,11 @@ use crate::snapshot::operations_snapshot::{
 };
 use crate::state::{current_core, DesktopAppState};
 use crate::types::{
-    BackendHealthView, BackgroundCancelResultView, DesktopCancelBackgroundProcessRequest,
-    DesktopInterruptRequest, DesktopOperationsSnapshot, DesktopOperationsSnapshotRequest,
-    DesktopProbeMcpServiceRequest, DesktopSessionProvenanceRequest, InferenceCallSummaryView,
-    InterruptRequestResult, MCPServiceHealthView, McpServiceProbeResult, NativeExecutorStatusView,
-    RuntimeLivenessView, SessionProvenanceView,
+    BackendHealthView, DesktopInterruptRequest, DesktopOperationsSnapshot,
+    DesktopOperationsSnapshotRequest, DesktopProbeMcpServiceRequest,
+    DesktopSessionProvenanceRequest, InferenceCallSummaryView, InterruptRequestResult,
+    MCPServiceHealthView, McpServiceProbeResult, NativeExecutorStatusView, RuntimeLivenessView,
+    SessionProvenanceView,
 };
 
 const BACKGROUND_TOOL_CALL_LIMIT: usize = 256;
@@ -197,42 +197,7 @@ pub async fn desktop_session_provenance(
 ) -> Result<SessionProvenanceView, BridgeError> {
     let core = current_core(&state)
         .ok_or_else(|| BridgeError::untyped("desktop bridge has not finished bootstrapping"))?;
-    let agent_did = request
-        .agent_did
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| core.selected_agent_did())
-        .ok_or_else(|| BridgeError::untyped("no agent selected; pass agentDid explicitly"))?;
-    crate::provenance::session_provenance(
-        &core,
-        gents::session_origin::SessionScope {
-            agent_did,
-            session_id: request.session_id,
-            requester_did: request.requester_did,
-        },
-    )
-    .await
-    .map_err(BridgeError::untyped)
-}
-
-#[tauri::command]
-pub async fn desktop_cancel_background_process(
-    state: State<'_, DesktopAppState>,
-    request: DesktopCancelBackgroundProcessRequest,
-) -> Result<BackgroundCancelResultView, BridgeError> {
-    let core = current_core(&state)
-        .ok_or_else(|| BridgeError::untyped("desktop bridge has not finished bootstrapping"))?;
-    let agent_did = request
-        .agent_did
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_owned)
-        .or_else(|| core.selected_agent_did())
-        .ok_or_else(|| BridgeError::untyped("no agent selected; pass agentDid explicitly"))?;
-    crate::background_cancel::cancel_background_process(&core, &agent_did, &request)
+    crate::provenance::session_provenance_request(&core, request)
         .await
         .map_err(BridgeError::untyped)
 }

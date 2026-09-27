@@ -1,7 +1,7 @@
 import { renderHook } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 import type {
-  CausedRequestView,
+  LinkedSessionView,
   SessionProvenanceView,
   SessionSummary,
 } from "@source-inc/gents-desktop-client";
@@ -10,7 +10,6 @@ import type { Shell } from "@/hooks/useShell";
 import { useParentWork } from "../src/ui/screens/parentWork";
 
 const AGENT = "did:key:parent";
-const PARENT_DOC = "bae-parent-request-doc";
 
 const session = (overrides: Partial<SessionSummary>): SessionSummary =>
   ({
@@ -43,42 +42,29 @@ const parent = session({
   turnState: "completed",
 });
 const other = session({ sessionId: "session-other", title: "Reviewer" });
-const child = session({
-  sessionId: "session-child",
-  provenance: { parent_request_doc_id: PARENT_DOC } as SessionSummary["provenance"],
-});
+const child = session({ sessionId: "session-child" });
 
-const received = (
-  requestId: string,
-  causedByRequestDocId: string,
-  causedBySessionId: string | null,
-  createdAt: string,
-): CausedRequestView => ({
-  requestId,
-  requestDocId: `doc-${requestId}`,
-  sessionId: "session-child",
+const link = (
+  sessionId: string,
+  requesterDid: string | null = null,
+): LinkedSessionView => ({
   agentDid: AGENT,
-  requesterDid: null,
-  behaviorId: "crew-explorer",
-  lifecycleState: "completed",
-  interruptRequestedAt: null,
-  createdAt,
-  hop: 1,
-  causedByRequestId: "req-parent",
-  causedByRequestDocId,
-  causedByToolCallId: "call-1",
-  causedByToolCallDocId: "doc-call-1",
-  causedBySessionId,
+  sessionId,
+  requesterDid,
+  causeRequestDocId: `doc-${sessionId}`,
 });
 
-/* `startedBy` is what the bridge's origin owner returns: the received row
-   that began the session, when another session's call caused it */
-const view = (rows: CausedRequestView[]): SessionProvenanceView => ({
+const view = (
+  startedBy: LinkedSessionView | null,
+  senders: [string, LinkedSessionView][] = [],
+): SessionProvenanceView => ({
   sessionId: "session-child",
-  startedBy: rows.find((r) => r.causedByRequestDocId === PARENT_DOC) ?? null,
-  received: rows,
+  startedBy,
   started: [],
   sent: [],
+  received: [],
+  senders: senders.map(([requestId, sender]) => ({ requestId, sender })),
+  calls: [],
 });
 
 function shellFor(sessions: SessionSummary[] = [parent, other, child]) {
@@ -94,31 +80,25 @@ function shellFor(sessions: SessionSummary[] = [parent, other, child]) {
 }
 
 describe("the sessions that sent work into this one", () => {
-  it("names the session whose call caused its origin", () => {
+  it("names the session the lineage owner says started it", () => {
     const { result } = renderHook(() =>
-      useParentWork(
-        shellFor(),
-        view([
-          received("req-child-2", "doc-other", "session-other", "2"),
-          received("req-child", PARENT_DOC, "session-parent", "1"),
-        ]),
-      ),
+      useParentWork(shellFor(), view(link("session-parent"))),
     );
     expect(result.current.parent?.sessionId).toBe("session-parent");
     expect(result.current.parent?.summary?.title).toBe("Lead");
-    expect(result.current.hasSenders).toBe(true);
   });
 
-  it("marks each turn by the session whose call caused its request", () => {
+  it("marks each turn by the session that sent it", () => {
     const { result } = renderHook(() =>
       useParentWork(
         shellFor(),
-        view([
-          received("req-child", PARENT_DOC, "session-parent", "1"),
-          received("req-child-2", "doc-other", "session-other", "2"),
+        view(link("session-parent"), [
+          ["req-child", link("session-parent")],
+          ["req-child-2", link("session-other")],
         ]),
       ),
     );
+    expect(result.current.hasSenders).toBe(true);
     expect(result.current.sentBy("req-child")?.sessionId).toBe("session-parent");
     expect(result.current.sentBy("req-child-2")?.summary?.title).toBe("Reviewer");
     /* the person's own turn, and a turn with no request, have no sender */
@@ -127,26 +107,19 @@ describe("the sessions that sent work into this one", () => {
   });
 
   it("does not guess a parent when the session was not started by another", () => {
-    const root = session({ sessionId: "session-child" });
     const { result } = renderHook(() =>
-      useParentWork(
-        shellFor([parent, root]),
-        view([received("req-child", "doc-x", "session-parent", "1")]),
-      ),
+      useParentWork(shellFor(), view(null, [["req-child", link("session-parent")]])),
     );
     expect(result.current.parent).toBeNull();
     expect(result.current.sentBy("req-child")?.sessionId).toBe("session-parent");
   });
 
-  it("keeps a sender it cannot list as a bare session, without a title", () => {
+  it("matches a sender's summary by its full scope", () => {
     const { result } = renderHook(() =>
-      useParentWork(
-        shellFor([child]),
-        view([received("req-child", PARENT_DOC, "session-elsewhere", "1")]),
-      ),
+      useParentWork(shellFor(), view(link("session-parent", "did:key:someone-else"))),
     );
     expect(result.current.parent).toEqual({
-      sessionId: "session-elsewhere",
+      sessionId: "session-parent",
       summary: null,
       behaviorName: null,
     });

@@ -342,27 +342,6 @@ impl Gents {
         self.background_execution_registry.clone()
     }
 
-    /// Operator kill of one background tool row in a session this runtime
-    /// serves, through the session-principal boundary the model-facing
-    /// process tools use. Only the process that owns the live executions can
-    /// stop them, so remote clients reach this through the runtime.
-    pub async fn cancel_session_background_process(
-        &self,
-        requester_did: Option<&str>,
-        session_id: &str,
-        tool_call_id: &str,
-    ) -> anyhow::Result<crate::tool_control::CancelBackgroundToolCallOutcome> {
-        crate::tool_control::cancel_session_background_process(
-            self.node.clone(),
-            &self.background_execution_registry,
-            self.agent_did(),
-            requester_did,
-            session_id,
-            tool_call_id,
-        )
-        .await
-    }
-
     /// Keep durable records of spawned background processes in `dir`, which
     /// must belong to this runtime's exclusively locked store, so a restarted
     /// runtime can prove ownership of a surviving process and stop it. Call

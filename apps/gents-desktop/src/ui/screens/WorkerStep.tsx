@@ -22,8 +22,8 @@ import { ToolBody } from "./tool-views";
 import { duration } from "./tool-summary";
 import { when } from "./time";
 import { isLive } from "@/lib/live";
-import type { Reached, Subagent, Workers } from "./workers";
-import { ProcessStop, RequestStop } from "./WorkerActions";
+import { scopeKey, type Reached, type Subagent, type Workers } from "./workers";
+import { RequestStop } from "./WorkerActions";
 
 type Tone = "running" | "done" | "failed" | "stopped" | "unknown";
 
@@ -248,7 +248,6 @@ export function WorkerStep({
         }
         detail={bg?.nativeExecutor ? `pid ${bg.nativeExecutor.pid}` : null}
         sessionId={null}
-        menu={<ProcessStop name={p.target ?? tool.toolName} tool={tool} />}
       >
         <ToolBody tool={tool} />
       </Row>
@@ -332,12 +331,12 @@ export function SubagentList({ workers }: { workers: Workers }) {
       {workers.all.map((subagent) => {
         const name = subagentName(subagent);
         const behaviorId = subagent.summary?.behaviorId ?? null;
-        const state =
-          subagent.summary?.turnState ??
-          subagent.requests[subagent.requests.length - 1]?.lifecycleState ??
-          null;
+        const state = subagent.summary?.turnState ?? null;
         return (
-          <span key={subagent.sessionId} className="flex min-w-0 items-center gap-1">
+          <span
+            key={scopeKey(subagent.link)}
+            className="flex min-w-0 items-center gap-1"
+          >
             <a
               href={href({ name: "session", sessionId: subagent.sessionId })}
               className="flex min-w-0 items-center gap-1 hover:text-foreground hover:underline"

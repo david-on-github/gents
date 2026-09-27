@@ -1,7 +1,6 @@
 import type { DesktopApiAdapter } from "@source-inc/gents-desktop-client";
 import type { BackendHealth } from "@source-inc/gents-desktop-client";
 import type {
-  BackgroundCancelResultView,
   BehaviorSaveRequest,
   ChatSendResult,
   DesktopClientSnapshot,
@@ -189,11 +188,6 @@ export function createBridgeHttpAdapter(
       ),
     interruptRequest: async (request) =>
       client.postJson<InterruptRequestResult>("/desktop/interrupt/request", request),
-    cancelBackgroundProcess: async (request) =>
-      client.postJson<BackgroundCancelResultView>(
-        "/desktop/background/cancel",
-        request,
-      ),
   };
 }
 

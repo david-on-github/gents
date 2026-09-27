@@ -1,8 +1,7 @@
 #![cfg(test)]
 
 use super::operations::{
-    desktop_cancel_background_process, desktop_interrupt_request, desktop_operations_snapshot,
-    desktop_session_provenance,
+    desktop_interrupt_request, desktop_operations_snapshot, desktop_session_provenance,
 };
 
 #[allow(dead_code)]
@@ -12,6 +11,5 @@ fn _assert_command_signatures() {
     // in a synthetic one we don't reference here.
     let _ = desktop_operations_snapshot;
     let _ = desktop_session_provenance;
-    let _ = desktop_cancel_background_process;
     let _ = desktop_interrupt_request;
 }
