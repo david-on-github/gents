@@ -448,8 +448,8 @@ pub(crate) struct SessionMessageReceipt {
     pub status: String,
 }
 
-/// Persist a planned session-message request and, in the same transaction
-/// where the writer allows, the running row's receipt naming it.
+/// Persist a planned session-message request and, in the same transaction,
+/// the running row's receipt naming it.
 pub(crate) async fn commit(
     node: &EmbeddedNode,
     cause: &SessionMessageCause,
@@ -535,21 +535,35 @@ pub(crate) async fn commit(
         } => {
             let actor = ::identity::Did::new(cause.caller_agent_did.clone())
                 .context("caller DID is not ACP-addressable")?;
-            let enqueued = crate::goal::submit_goal_backed_request_local(
+            let (create, objective, session_id, binding, receipt_for) =
+                (&create, &objective, &session_id, &binding, &receipt_for);
+            crate::config_client::ConfigAccess::transact_local(
                 node,
-                actor,
-                &create.agent_did,
-                &session_id,
-                &objective,
-                token_budget,
-                &create,
+                Some(actor),
+                "session_message.commit_goal",
+                move |txn| {
+                    Box::pin(async move {
+                        let enqueued = crate::goal::stage_goal_backed_request_in_txn(
+                            txn,
+                            &create.agent_did,
+                            session_id,
+                            objective,
+                            token_budget,
+                            create,
+                        )
+                        .await?;
+                        let receipt = receipt_for(&enqueued);
+                        crate::tool_call_lifecycle::publish_background_receipt_in_txn(
+                            txn,
+                            binding,
+                            &serde_json::to_string(&receipt)?,
+                        )
+                        .await?;
+                        Ok(receipt)
+                    })
+                },
             )
-            .await?;
-            let receipt = receipt_for(&enqueued);
-            lifecycle
-                .publish_background_receipt(&serde_json::to_string(&receipt)?)
-                .await?;
-            Ok(receipt)
+            .await
         }
     }
 }
