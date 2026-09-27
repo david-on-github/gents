@@ -310,6 +310,8 @@ struct Extents<'s, 'a> {
     records: &'s [ObservedSegment<'a>],
     denied: &'s [String],
     dependency_denials: &'s [DependencyDenial],
+    /// Tests disable reuse to evaluate the per-reference definition.
+    #[cfg(test)]
     reuse: bool,
     index: OnceCell<ObservationIndex<'a>>,
     closings: RefCell<HashMap<&'a str, ObservedSegment<'a>>>,
@@ -330,6 +332,7 @@ impl<'s, 'a> Extents<'s, 'a> {
             records,
             denied,
             dependency_denials,
+            #[cfg(test)]
             reuse: true,
             index: OnceCell::new(),
             closings: RefCell::default(),
@@ -341,20 +344,27 @@ impl<'s, 'a> Extents<'s, 'a> {
         }
     }
 
+    fn reuses(&self) -> bool {
+        #[cfg(test)]
+        return self.reuse;
+        #[cfg(not(test))]
+        true
+    }
+
     fn index(&self) -> &ObservationIndex<'a> {
         self.index
             .get_or_init(|| ObservationIndex::new(self.records))
     }
 
     fn closing(&self, reference: &PayloadRef) -> Result<ObservedSegment<'a>, ReconstructionError> {
-        if self.reuse {
+        if self.reuses() {
             if let Some(closing) = self.closings.borrow().get(reference.close_doc_id.as_str()) {
                 return Ok(*closing);
             }
         }
         #[cfg(test)]
         self.closing_scans.set(self.closing_scans.get() + 1);
-        let candidates = if self.reuse {
+        let candidates = if self.reuses() {
             self.index()
                 .by_doc
                 .get(reference.close_doc_id.as_str())
@@ -364,7 +374,7 @@ impl<'s, 'a> Extents<'s, 'a> {
         };
         let closing =
             closing_for_reference(candidates, self.denied, self.dependency_denials, reference)?;
-        if self.reuse {
+        if self.reuses() {
             self.closings.borrow_mut().insert(closing.doc_id, closing);
         }
         Ok(closing)
@@ -373,7 +383,7 @@ impl<'s, 'a> Extents<'s, 'a> {
     /// Equal to `reconstruct_extent_streams(.., reference)`, with `reference.stream`
     /// guaranteed in bounds on success.
     fn extent(&self, reference: &PayloadRef) -> Result<Rc<SealedExtent>, ReconstructionError> {
-        let reused = if self.reuse {
+        let reused = if self.reuses() {
             self.extents
                 .borrow()
                 .get(reference.close_doc_id.as_str())
@@ -387,7 +397,7 @@ impl<'s, 'a> Extents<'s, 'a> {
                 let closing = self.closing(reference)?;
                 #[cfg(test)]
                 self.extent_builds.set(self.extent_builds.get() + 1);
-                let same_source = if self.reuse {
+                let same_source = if self.reuses() {
                     self.index()
                         .by_source
                         .get(&(
@@ -404,7 +414,7 @@ impl<'s, 'a> Extents<'s, 'a> {
                     closing,
                     reference,
                 )?));
-                if self.reuse {
+                if self.reuses() {
                     self.extents
                         .borrow_mut()
                         .insert(closing.doc_id, Rc::clone(&extent));
@@ -1313,7 +1323,6 @@ mod tests {
         let per_reference = reconstruct_stream(&observed, denied, dependency_denials, reference);
         let extents = Extents::new(&observed, denied, dependency_denials);
         assert_eq!(extents.stream(reference), per_reference);
-        // A second resolution through the same invocation reuses the extent.
         assert_eq!(extents.stream(reference), per_reference);
         per_reference
     }
