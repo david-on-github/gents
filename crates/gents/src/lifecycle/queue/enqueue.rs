@@ -56,9 +56,9 @@ pub(crate) struct PreparedSteering {
 }
 
 /// Build and sign one unkeyed user- or steering-sourced append at `hop`. A
-/// user append is external input and keeps the parent's hop; a steering append
-/// is agent-authored by another session and climbs past its caller (Lean
-/// `DurableLineage.ContinuationKind`).
+/// user append is a same-session continuation at the session's current hop; a
+/// steering append is agent-authored by another session and climbs past its
+/// caller (Lean `DurableLineage.ContinuationKind`).
 pub(crate) async fn prepare_steering_append(
     parent: &AgentRequest,
     content: &str,
