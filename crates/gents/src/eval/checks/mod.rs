@@ -173,7 +173,10 @@ fn graded_reason_codes(extra: &[(&str, &str)]) -> Vec<(String, String)> {
             "unmet",
             "some requirement failed; score is satisfied / total in basis points",
         ),
-        ("bad_params", "grader: params did not parse or require nothing"),
+        (
+            "bad_params",
+            "grader: params did not parse or require nothing",
+        ),
     ]
     .iter()
     .chain(extra)
