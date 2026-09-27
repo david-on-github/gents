@@ -119,7 +119,7 @@ async fn generated_native_missing_parent_restart_cases_defer() {
             await_mode: AwaitMode::Background,
             tool_name: case
                 .session_message
-                .then(|| crate::toolset::CREATE_SESSION_TOOL_NAME.to_owned()),
+                .then(|| crate::toolset::AGENT_NEW_TOOL_NAME.to_owned()),
             ..Default::default()
         })
         .await
@@ -151,7 +151,7 @@ async fn generated_native_missing_parent_restart_cases_defer() {
     }
 }
 
-/// A `create_session`/`send_message` row ends only on the terminal of the
+/// An `agent_new`/`agent_message` row ends only on the terminal of the
 /// request it caused. The Lean row carries the observed
 /// cause; the fixture builds exactly that premise on an accepted call whose
 /// caused request was materialized by the session-message owner.
@@ -179,7 +179,7 @@ async fn generated_session_message_recovery_cases_use_accepted_call() {
                 name: format!("recovery-closeout-{name}"),
                 real_identity: true,
                 await_mode: AwaitMode::Background,
-                tool_name: Some(crate::toolset::CREATE_SESSION_TOOL_NAME.to_owned()),
+                tool_name: Some(crate::toolset::AGENT_NEW_TOOL_NAME.to_owned()),
                 start_running: true,
                 ..Default::default()
             })
@@ -386,7 +386,7 @@ async fn kill_cancels_a_row_that_names_no_caused_request() {
         name: "kill-unresolved-session-message".to_owned(),
         real_identity: true,
         await_mode: AwaitMode::Background,
-        tool_name: Some(crate::toolset::CREATE_SESSION_TOOL_NAME.to_owned()),
+        tool_name: Some(crate::toolset::AGENT_NEW_TOOL_NAME.to_owned()),
         start_running: true,
         ..Default::default()
     })

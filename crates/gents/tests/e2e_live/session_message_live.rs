@@ -1,4 +1,4 @@
-//! Live end-to-end `create_session`/`send_message` tests against a real
+//! Live end-to-end `agent_new`/`agent_message` tests against a real
 //! inference target. An orchestrator agent, driven by the live model, starts a
 //! session on an allowlisted agent; the started session runs its own behavior
 //! (live model) and its result reaches the caller only as a background
@@ -46,7 +46,7 @@ use gents::document_config::{
 };
 use gents::graphql::escape_graphql_string;
 use gents::run_timeline_fetch::load_run_timeline_rows;
-use gents::toolset::{CREATE_SESSION_TOOL_NAME, SEND_MESSAGE_TOOL_NAME};
+use gents::toolset::{AGENT_MESSAGE_TOOL_NAME, AGENT_NEW_TOOL_NAME};
 use gents::{
     default_behavior_id_for_agent, default_inference_profile_id_for_behavior,
     ensure_agent_principal, AgentIdentity, BashMode, Collection, DocumentRuntimeOptions, Gents,
@@ -103,14 +103,14 @@ fn completion_marker(tool_call_id: &str, tool_name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: local create_session (orchestrator + target on one node / one DID)
+// Test 1: local agent_new (orchestrator + target on one node / one DID)
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live: set GENTS_LIVE_SESSION_MESSAGE=1 and pass --ignored"]
 async fn live_local_create_session() -> Result<()> {
     if !live_enabled() {
-        eprintln!("GENTS_LIVE_SESSION_MESSAGE is not 1; skipping live local create_session");
+        eprintln!("GENTS_LIVE_SESSION_MESSAGE is not 1; skipping live local agent_new");
         return Ok(());
     }
 
@@ -179,7 +179,7 @@ async fn live_local_create_session() -> Result<()> {
         &db.node,
         request_id,
         session_id,
-        CREATE_SESSION_TOOL_NAME,
+        AGENT_NEW_TOOL_NAME,
         Duration::from_secs(180),
     )
     .await;
@@ -187,7 +187,7 @@ async fn live_local_create_session() -> Result<()> {
         wait_for_caused_request(db.node.as_ref(), request_id, Duration::from_secs(120)).await
     else {
         dump_session_diagnostics(db.node.as_ref(), session_id).await;
-        panic!("create_session must cause an AgentRequest linked to the orchestrator request");
+        panic!("agent_new must cause an AgentRequest linked to the orchestrator request");
     };
     eprintln!("[live-local] caused request = {caused:?}");
     assert_eq!(
@@ -197,7 +197,7 @@ async fn live_local_create_session() -> Result<()> {
     assert_eq!(
         caused.caused_by_parent_tool_call_id.as_deref(),
         Some(row.tool_call_id.as_str()),
-        "the caused request must name the exact create_session call"
+        "the caused request must name the exact agent_new call"
     );
     assert_eq!(caused.behavior_id, RESEARCHER_BEHAVIOR_ID);
     assert_eq!(caused.agent_did, agent_did);
@@ -205,7 +205,7 @@ async fn live_local_create_session() -> Result<()> {
     assert_eq!(caused.subagent_depth, Some(1));
     assert_ne!(
         caused.session_id, session_id,
-        "create_session must start a new session"
+        "agent_new must start a new session"
     );
 
     let caused_terminal = wait_for_request_terminal(
@@ -242,11 +242,11 @@ async fn live_local_create_session() -> Result<()> {
     assert_eq!(
         settled.child_request_id.as_deref(),
         Some(caused.request_id.as_str()),
-        "the run timeline must link the create_session row to the request it caused"
+        "the run timeline must link the agent_new row to the request it caused"
     );
     let messages = load_session_messages(&db.node, request_id, session_id).await;
     let receipt = session_receipt(&messages, &caused.request_id)
-        .unwrap_or_else(|| panic!("create_session receipt missing; transcript={messages:#?}"));
+        .unwrap_or_else(|| panic!("agent_new receipt missing; transcript={messages:#?}"));
     assert_eq!(receipt["session_id"], caused.session_id.as_str());
     assert_eq!(receipt["tool_call_id"], row.tool_call_id.as_str());
     assert_eq!(receipt["await_mode"], "background");
@@ -254,7 +254,7 @@ async fn live_local_create_session() -> Result<()> {
         &db.node,
         request_id,
         session_id,
-        &completion_marker(&row.tool_call_id, CREATE_SESSION_TOOL_NAME),
+        &completion_marker(&row.tool_call_id, AGENT_NEW_TOOL_NAME),
         Duration::from_secs(60),
     )
     .await;
@@ -284,14 +284,14 @@ async fn live_local_create_session() -> Result<()> {
 
 /// Exercise both background-work lanes through the production owned loop:
 ///
-/// 1. The resolved model-facing surface contains `create_session`,
-///    `send_message` and every spawn/list/read/wait/cancel process tool.
+/// 1. The resolved model-facing surface contains `agent_new`,
+///    `agent_message` and every spawn/list/read/wait/cancel process tool.
 /// 2. Fire-and-continue: the parent request completes while the session it
 ///    started (or the process it spawned) is still blocked; releasing it
 ///    settles the row and produces the completion notification and a
 ///    real-inference wake.
 /// 3. Managed session: the model starts a session, sees its running row with
-///    `list_processes`, and steers it with `send_message` while it is busy.
+///    `list_processes`, and steers it with `agent_message` while it is busy.
 /// 4. Managed process: the model spawns a blocked process, lists it, reads
 ///    partial output while it runs, waits for it, and reads the terminal
 ///    output.
@@ -349,17 +349,17 @@ async fn live_standard_backgrounding_uses_real_inference() -> Result<()> {
         r#"You are the deterministic orchestrator in an integration test.
 
 Apply these rules to the LATEST request:
-- If the latest request begins RUN_BACKGROUND_AGENT:, call create_session exactly once with agent "background-worker" and prompt exactly "RUN_CHILD_BACKGROUND_JOB". As soon as the tool returns its running receipt, do not call send_message, list_processes, read_process, wait_process, cancel_process, or any other tool. Reply exactly PARENT_RETURNED_AGENT_BACKGROUND.
+- If the latest request begins RUN_BACKGROUND_AGENT:, call agent_new exactly once with agent "background-worker" and prompt exactly "RUN_CHILD_BACKGROUND_JOB". As soon as the tool returns its running receipt, do not call agent_message, list_processes, read_process, wait_process, cancel_process, or any other tool. Reply exactly PARENT_RETURNED_AGENT_BACKGROUND.
 - If it is exactly RUN_BACKGROUND_TOOL, call spawn_process exactly once with tool_name "bash_unrestricted" and args exactly {native_tool_args}. As soon as the tool returns its running receipt, do not call wait_process, read_process, list_processes, cancel_process, bash_unrestricted, or any other tool. Reply exactly PARENT_RETURNED_TOOL_BACKGROUND.
-- If the latest request begins MANAGE_BACKGROUND_AGENT_CREATE:, obey its explicit create_session instruction, then reply exactly AGENT_BACKGROUND_CREATED.
+- If the latest request begins MANAGE_BACKGROUND_AGENT_CREATE:, obey its explicit agent_new instruction, then reply exactly AGENT_BACKGROUND_CREATED.
 - If the latest request begins MANAGE_BACKGROUND_AGENT_LIST:, obey its explicit list_processes instruction, then reply exactly AGENT_BACKGROUND_LISTED.
-- If the latest request begins MANAGE_BACKGROUND_AGENT_MESSAGE:, obey its explicit send_message instruction, then reply exactly AGENT_BACKGROUND_MESSAGED.
+- If the latest request begins MANAGE_BACKGROUND_AGENT_MESSAGE:, obey its explicit agent_message instruction, then reply exactly AGENT_BACKGROUND_MESSAGED.
 - If the latest request begins MANAGE_BACKGROUND_TOOL_SPAWN:, obey its explicit spawn_process instruction, then reply exactly TOOL_BACKGROUND_SPAWNED.
 - If the latest request begins MANAGE_BACKGROUND_TOOL_LIST:, obey its explicit list_processes instruction, then reply exactly TOOL_BACKGROUND_LISTED.
 - If the latest request begins MANAGE_BACKGROUND_TOOL_READ_RUNNING:, obey its explicit read_process instruction. After inspecting output containing NATIVE_MANAGED_STARTED with exited false, reply exactly TOOL_BACKGROUND_READ_RUNNING.
 - If the latest request begins MANAGE_BACKGROUND_TOOL_WAIT:, obey its explicit wait_process instruction. After it completes, reply exactly TOOL_BACKGROUND_WAITED.
 - If the latest request begins MANAGE_BACKGROUND_TOOL_READ_TERMINAL:, obey its explicit read_process instruction. After inspecting NATIVE_MANAGED_STARTED and NATIVE_MANAGED_DONE, reply exactly TOOL_BACKGROUND_REPORT NATIVE_MANAGED_STARTED NATIVE_MANAGED_DONE.
-- If the latest request asks you to review pending background completion notifications, never repeat create_session, send_message or spawn_process. Reply exactly BACKGROUND_COMPLETION_OBSERVED.
+- If the latest request asks you to review pending background completion notifications, never repeat agent_new, agent_message or spawn_process. Reply exactly BACKGROUND_COMPLETION_OBSERVED.
 
 Never call bash_unrestricted directly from this behavior."#
     );
@@ -429,7 +429,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
     );
     let agent = boot_loaded_document_agent(&db, loaded_agent).await;
 
-    // Lane 1: create_session fire-and-continue.
+    // Lane 1: agent_new fire-and-continue.
     let agent_request_id = "req-live-standard-background-agent";
     let agent_session_id = "session-live-standard-background-agent";
     create_runtime_request(
@@ -438,7 +438,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &orchestrator_behavior_id,
         agent_request_id,
         agent_session_id,
-        "RUN_BACKGROUND_AGENT: invoke create_session now for background-worker with prompt RUN_CHILD_BACKGROUND_JOB. Do not answer until its running receipt arrives.",
+        "RUN_BACKGROUND_AGENT: invoke agent_new now for background-worker with prompt RUN_CHILD_BACKGROUND_JOB. Do not answer until its running receipt arrives.",
     )
     .await;
 
@@ -446,7 +446,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &db.node,
         agent_request_id,
         agent_session_id,
-        CREATE_SESSION_TOOL_NAME,
+        AGENT_NEW_TOOL_NAME,
         Duration::from_secs(180),
     )
     .await;
@@ -459,12 +459,12 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
             .await;
     assert!(
         parent_answer.contains("PARENT_RETURNED_AGENT_BACKGROUND"),
-        "parent did not acknowledge the create_session receipt: {parent_answer:?}"
+        "parent did not acknowledge the agent_new receipt: {parent_answer:?}"
     );
     let caused =
         wait_for_caused_request(db.node.as_ref(), agent_request_id, Duration::from_secs(60))
             .await
-            .expect("create_session must cause a request");
+            .expect("agent_new must cause a request");
     assert_eq!(caused.behavior_id, BACKGROUND_WORKER_BEHAVIOR_ID);
     assert_eq!(
         caused.caused_by_parent_tool_call_id.as_deref(),
@@ -493,21 +493,21 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &session_row.tool_call_id,
     )
     .await
-    .expect("create_session row after parent completion");
+    .expect("agent_new row after parent completion");
     assert_eq!(
         running_row.lifecycle_state, "running",
-        "the create_session row must stay running until its caused request terminalizes"
+        "the agent_new row must stay running until its caused request terminalizes"
     );
     let messages = load_session_messages(&db.node, agent_request_id, agent_session_id).await;
     let receipt = session_receipt(&messages, &caused.request_id)
-        .unwrap_or_else(|| panic!("create_session receipt missing; transcript={messages:#?}"));
+        .unwrap_or_else(|| panic!("agent_new receipt missing; transcript={messages:#?}"));
     assert_eq!(receipt["status"], "running");
     assert_eq!(receipt["session_id"], caused.session_id.as_str());
     assert_no_tool_call(
         db.node.as_ref(),
         agent_session_id,
         &[
-            SEND_MESSAGE_TOOL_NAME,
+            AGENT_MESSAGE_TOOL_NAME,
             "wait_process",
             "read_process",
             "cancel_process",
@@ -543,7 +543,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &db.node,
         agent_request_id,
         agent_session_id,
-        &completion_marker(&session_row.tool_call_id, CREATE_SESSION_TOOL_NAME),
+        &completion_marker(&session_row.tool_call_id, AGENT_NEW_TOOL_NAME),
         Duration::from_secs(60),
     )
     .await;
@@ -650,14 +650,14 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &orchestrator_behavior_id,
         managed_create_request_id,
         managed_agent_session_id,
-        "MANAGE_BACKGROUND_AGENT_CREATE: Call create_session exactly once now with agent background-worker and prompt RUN_MANAGED_CHILD_BACKGROUND_JOB. Do not call any other tool.",
+        "MANAGE_BACKGROUND_AGENT_CREATE: Call agent_new exactly once now with agent background-worker and prompt RUN_MANAGED_CHILD_BACKGROUND_JOB. Do not call any other tool.",
     )
     .await;
     let managed_row = wait_for_background_tool_call(
         &db.node,
         managed_create_request_id,
         managed_agent_session_id,
-        CREATE_SESSION_TOOL_NAME,
+        AGENT_NEW_TOOL_NAME,
         Duration::from_secs(180),
     )
     .await;
@@ -676,7 +676,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         Duration::from_secs(60),
     )
     .await
-    .expect("managed create_session must cause a request");
+    .expect("managed agent_new must cause a request");
     // The started session is busy once its foreground bash call is accepted.
     wait_for_model_tool_call(
         &db.node,
@@ -701,7 +701,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &db.node,
         managed_list_request_id,
         managed_agent_session_id,
-        &[managed_row.tool_call_id.as_str(), CREATE_SESSION_TOOL_NAME],
+        &[managed_row.tool_call_id.as_str(), AGENT_NEW_TOOL_NAME],
         Duration::from_secs(180),
     )
     .await;
@@ -717,7 +717,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
 
     let managed_message_request_id = "req-live-managed-background-agent-message";
     let managed_message_prompt = format!(
-        "MANAGE_BACKGROUND_AGENT_MESSAGE: Call send_message exactly once now with session_id {:?} and prompt \"STEERING_NOTE\". Do not call any other tool.",
+        "MANAGE_BACKGROUND_AGENT_MESSAGE: Call agent_message exactly once now with session_id {:?} and message \"STEERING_NOTE\". Do not call any other tool.",
         managed_caused.session_id
     );
     create_runtime_request(
@@ -733,7 +733,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &db.node,
         managed_message_request_id,
         managed_agent_session_id,
-        SEND_MESSAGE_TOOL_NAME,
+        AGENT_MESSAGE_TOOL_NAME,
         Duration::from_secs(180),
     )
     .await;
@@ -755,7 +755,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
     let message_receipt = session_receipts(&messages)
         .into_iter()
         .find(|receipt| receipt["tool_call_id"] == message_row.tool_call_id.as_str())
-        .unwrap_or_else(|| panic!("send_message receipt missing; transcript={messages:#?}"));
+        .unwrap_or_else(|| panic!("agent_message receipt missing; transcript={messages:#?}"));
     assert_eq!(
         message_receipt["session_id"],
         managed_caused.session_id.as_str()
@@ -770,7 +770,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
                 .await
                 .expect("managed caused lifecycle")
         ),
-        "send_message must have been exercised against a live session"
+        "agent_message must have been exercised against a live session"
     );
     assert_eq!(
         fetch_tool_call(
@@ -780,7 +780,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
             &managed_row.tool_call_id,
         )
         .await
-        .expect("managed create_session row")
+        .expect("managed agent_new row")
         .lifecycle_state,
         "running"
     );
@@ -827,7 +827,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &db.node,
         managed_create_request_id,
         managed_agent_session_id,
-        &completion_marker(&managed_row.tool_call_id, CREATE_SESSION_TOOL_NAME),
+        &completion_marker(&managed_row.tool_call_id, AGENT_NEW_TOOL_NAME),
         Duration::from_secs(60),
     )
     .await;
@@ -835,7 +835,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &db.node,
         managed_create_request_id,
         managed_agent_session_id,
-        &completion_marker(&message_row.tool_call_id, SEND_MESSAGE_TOOL_NAME),
+        &completion_marker(&message_row.tool_call_id, AGENT_MESSAGE_TOOL_NAME),
         Duration::from_secs(60),
     )
     .await;
@@ -843,7 +843,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &db.node,
         managed_create_request_id,
         managed_agent_session_id,
-        CREATE_SESSION_TOOL_NAME,
+        AGENT_NEW_TOOL_NAME,
         1,
     )
     .await;
@@ -859,7 +859,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         &db.node,
         managed_message_request_id,
         managed_agent_session_id,
-        SEND_MESSAGE_TOOL_NAME,
+        AGENT_MESSAGE_TOOL_NAME,
         1,
     )
     .await;
@@ -1084,14 +1084,14 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: cross-node create_session (orchestrator on A -> agent on B)
+// Test 3: cross-node agent_new (orchestrator on A -> agent on B)
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live: set GENTS_LIVE_SESSION_MESSAGE=1 and pass --ignored"]
 async fn live_cross_node_create_session() -> Result<()> {
     if !live_enabled() {
-        eprintln!("GENTS_LIVE_SESSION_MESSAGE is not 1; skipping live cross-node create_session");
+        eprintln!("GENTS_LIVE_SESSION_MESSAGE is not 1; skipping live cross-node agent_new");
         return Ok(());
     }
 
@@ -1228,13 +1228,13 @@ async fn live_cross_node_create_session() -> Result<()> {
         &db_a.node,
         request_id,
         session_id,
-        CREATE_SESSION_TOOL_NAME,
+        AGENT_NEW_TOOL_NAME,
         Duration::from_secs(180),
     )
     .await;
     let caused_a = wait_for_caused_request(db_a.node.as_ref(), request_id, Duration::from_secs(60))
         .await
-        .expect("create_session on A must author the caused request");
+        .expect("agent_new on A must author the caused request");
     eprintln!("[live-cross] caused request on A = {caused_a:?}");
     assert_eq!(caused_a.agent_did, did_b);
     assert_eq!(caused_a.requester_did.as_deref(), Some(did_a.as_str()));
@@ -1324,7 +1324,7 @@ async fn live_cross_node_create_session() -> Result<()> {
         &db_a.node,
         request_id,
         session_id,
-        &completion_marker(&row.tool_call_id, CREATE_SESSION_TOOL_NAME),
+        &completion_marker(&row.tool_call_id, AGENT_NEW_TOOL_NAME),
         Duration::from_secs(60),
     )
     .await;
@@ -1364,7 +1364,7 @@ async fn live_cross_node_create_session() -> Result<()> {
     assert_eq!(
         fetch_tool_call(&db_a.node, request_id, session_id, &row.tool_call_id)
             .await
-            .expect("create_session row after restart")
+            .expect("agent_new row after restart")
             .lifecycle_state,
         "completed"
     );
@@ -1383,13 +1383,13 @@ async fn live_cross_node_create_session() -> Result<()> {
 
 const ORCHESTRATOR_SYSTEM_PROMPT: &str = "You are an orchestrator agent. You can start a session on \
 an agent named `researcher`. For ANY research or factual lookup the user asks for, you MUST call the \
-`create_session` tool with agent exactly \"researcher\" and a `prompt` describing the question, then \
+`agent_new` tool with agent exactly \"researcher\" and a `prompt` describing the question, then \
 tell the user the research is under way without calling any other tool. Do not answer factual \
 questions yourself. When a background completion notification arrives, relay its answer to the user \
 without calling any tool.";
 
 const CROSS_NODE_ORCHESTRATOR_SYSTEM_PROMPT: &str = "You are the root of a deterministic remote \
-session test. When asked to run the remote research workflow, call `create_session` exactly once with \
+session test. When asked to run the remote research workflow, call `agent_new` exactly once with \
 agent exactly \"fast-worker\" and prompt exactly \"What is the capital of France? Answer in one short \
 sentence.\" After its running receipt arrives, reply exactly REMOTE_SESSION_STARTED and do not call any \
 other tool. Do not answer the question yourself. When a background completion notification arrives, \
@@ -1483,8 +1483,8 @@ fn assert_standard_backgrounding_tool_surfaces(
         .explain_with_runtime(false, agent_did, &active_behavior_ids);
     for required in [
         "bash_unrestricted",
-        CREATE_SESSION_TOOL_NAME,
-        SEND_MESSAGE_TOOL_NAME,
+        AGENT_NEW_TOOL_NAME,
+        AGENT_MESSAGE_TOOL_NAME,
         "spawn_process",
         "list_processes",
         "read_process",
@@ -1500,11 +1500,15 @@ fn assert_standard_backgrounding_tool_surfaces(
     }
     assert_eq!(
         parent_surface.included.get("subagent"),
-        Some(&vec![
-            CREATE_SESSION_TOOL_NAME.to_string(),
-            SEND_MESSAGE_TOOL_NAME.to_string(),
-        ]),
-        "enabled session targets must resolve exactly create_session and send_message"
+        Some(&{
+            let mut names = gents::toolset::AGENT_TOOL_NAMES
+                .iter()
+                .map(|name| name.to_string())
+                .collect::<Vec<_>>();
+            names.sort();
+            names
+        }),
+        "enabled session targets must resolve exactly the agents tool group"
     );
     assert_eq!(
         parent_surface.included.get("background_process"),
@@ -1533,7 +1537,7 @@ fn assert_standard_backgrounding_tool_surfaces(
             .any(|name| name == "bash_unrestricted"),
         "background worker must receive its foreground bash tool"
     );
-    for parent_only in [CREATE_SESSION_TOOL_NAME, "spawn_process", "read_process"] {
+    for parent_only in [AGENT_NEW_TOOL_NAME, "spawn_process", "read_process"] {
         assert!(
             !child_surface
                 .tool_names
@@ -1687,7 +1691,7 @@ fn target_documents(targets: Vec<SubagentTargetDocument>) -> Vec<(Collection, se
         .collect()
 }
 
-/// Publish canonical tools enabling `create_session`/`send_message` over
+/// Publish canonical tools enabling `agent_new`/`agent_message` over
 /// `targets` for `behavior_id`.
 async fn authorize_session_targets(
     node: &EmbeddedNode,
@@ -1801,7 +1805,7 @@ async fn fetch_request_lifecycle(node: &EmbeddedNode, request_id: &str) -> Optio
     first_optional_row::<Row>(&resp, "AgentRequest").and_then(|r| r.lifecycle_state)
 }
 
-/// A request caused by a `create_session`/`send_message` call, identified by
+/// A request caused by an `agent_new`/`agent_message` call, identified by
 /// its `caused_by_parent_*` edge.
 #[derive(Debug, Clone, Deserialize)]
 struct CausedRequestRow {
@@ -2126,7 +2130,7 @@ fn tool_result_texts(messages: &[gents_protocol::message::Message]) -> Vec<&str>
         .collect()
 }
 
-/// Every `create_session`/`send_message` receipt the model received.
+/// Every `agent_new`/`agent_message` receipt the model received.
 fn session_receipts(messages: &[gents_protocol::message::Message]) -> Vec<serde_json::Value> {
     tool_result_texts(messages)
         .into_iter()

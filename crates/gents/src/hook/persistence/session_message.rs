@@ -1,10 +1,10 @@
 use super::*;
 use anyhow::Context;
 
-use crate::session_message::{CreateSessionArgs, SendMessageArgs};
+use crate::session_message::{AgentMessageArgs, AgentNewArgs};
 
 impl DefraSessionHook {
-    /// Dispatch `create_session`/`send_message`. The accepted call was
+    /// Dispatch `agent_new`/`agent_message`. The accepted call was
     /// published in background: it returns its receipt immediately and stays
     /// running until the request it caused reaches a durable terminal, which
     /// the background completion observer delivers as a notification.
@@ -58,22 +58,22 @@ impl DefraSessionHook {
                     tool_name,
                     "/",
                     tool_name,
-                    "create_session and send_message are not enabled for this behavior",
+                    "the agents tools are not enabled for this behavior",
                     tools.names(),
                 )
             );
         }
 
-        let create = tool_name == CREATE_SESSION_TOOL_NAME;
-        let (target, body, title) = if create {
-            let parsed = match serde_json::from_str::<CreateSessionArgs>(args) {
+        let create = tool_name == AGENT_NEW_TOOL_NAME;
+        let (target, body, title, interrupt) = if create {
+            let parsed = match serde_json::from_str::<AgentNewArgs>(args) {
                 Ok(parsed) => parsed,
                 Err(error) => refuse!(
                     FailureClass::ArgumentInvalid,
                     invalid_tool_arguments_payload(
                         tool_name,
                         "/",
-                        format!("invalid create_session arguments: {error}"),
+                        format!("invalid agent_new arguments: {error}"),
                     )
                 ),
             };
@@ -116,16 +116,17 @@ impl DefraSessionHook {
                 },
                 (parsed.prompt, parsed.task),
                 parsed.title,
+                false,
             )
         } else {
-            let parsed = match serde_json::from_str::<SendMessageArgs>(args) {
+            let parsed = match serde_json::from_str::<AgentMessageArgs>(args) {
                 Ok(parsed) => parsed,
                 Err(error) => refuse!(
                     FailureClass::ArgumentInvalid,
                     invalid_tool_arguments_payload(
                         tool_name,
                         "/",
-                        format!("invalid send_message arguments: {error}"),
+                        format!("invalid agent_message arguments: {error}"),
                     )
                 ),
             };
@@ -138,7 +139,7 @@ impl DefraSessionHook {
                     invalid_tool_arguments_payload(
                         tool_name,
                         "/session_id",
-                        "send_message cannot address the calling session itself",
+                        "agent_message cannot address the calling session itself",
                     )
                 );
             }
@@ -161,9 +162,29 @@ impl DefraSessionHook {
                     )
                 );
             };
-            (target, (parsed.prompt, parsed.task), None)
+            if parsed.interrupt {
+                if let Some(reason) = crate::session_message::interrupt_refusal(
+                    &self.node,
+                    &caller.session_id,
+                    &target,
+                )
+                .await?
+                {
+                    refuse!(
+                        FailureClass::ArgumentInvalid,
+                        interrupt_refused_payload(tool_name, &target_session, &reason)
+                    );
+                }
+            }
+            (
+                target,
+                (parsed.message, parsed.task),
+                None,
+                parsed.interrupt,
+            )
         };
-        let body = match owned_body(body.0, body.1) {
+        let field = if create { "prompt" } else { "message" };
+        let body = match owned_body(field, body.0, body.1) {
             Ok(body) => body,
             Err(message) => refuse!(
                 FailureClass::ArgumentInvalid,
@@ -213,6 +234,7 @@ impl DefraSessionHook {
             &target,
             rendered,
             title.as_deref(),
+            interrupt,
         )
         .await?
         {
@@ -237,6 +259,9 @@ impl DefraSessionHook {
                 );
             }
         }
+        if interrupt {
+            crate::session_message::interrupt_session(&self.node, &target).await?;
+        }
         let receipt =
             match crate::session_message::commit(&self.node, &cause, &mut lifecycle, plan, !create)
                 .await
@@ -260,6 +285,122 @@ impl DefraSessionHook {
     }
 }
 
+impl DefraSessionHook {
+    /// `agent_interrupt` and `agent_list`: foreground calls answered in the
+    /// calling turn from the caller's own agents configuration.
+    pub(super) async fn persist_agent_control_tool_call(
+        &self,
+        tool_name: &str,
+        tool_call_id: Option<String>,
+        internal_call_id: &str,
+        args: &str,
+    ) -> anyhow::Result<ToolCallHookAction> {
+        let (session_id, request_id, deadline_at, _seq) =
+            self.ensure_assistant_turn_sequence().await?;
+        let mut lifecycle = self
+            .adopt_accepted_tool_dispatch(
+                internal_call_id,
+                tool_call_id.as_deref(),
+                &request_id,
+                &session_id,
+                tool_name,
+                args,
+                deadline_at,
+                AwaitMode::Foreground,
+            )
+            .await?;
+        lifecycle.start_running().await?;
+        let result = self
+            .agent_control_result(&lifecycle, tool_name, args)
+            .await?;
+        self.complete_control_tool_call(&mut lifecycle, tool_name, result)
+            .await
+    }
+
+    async fn agent_control_result(
+        &self,
+        lifecycle: &crate::tool_call_lifecycle::ToolCallLifecycle,
+        tool_name: &str,
+        args: &str,
+    ) -> anyhow::Result<String> {
+        let caller_doc_id = lifecycle
+            .request_doc_id()
+            .context("agents tool call lacks its calling request document")?
+            .to_owned();
+        let caller =
+            crate::request_binding::load_agent_request_by_doc_id(&self.node, &caller_doc_id)
+                .await?
+                .context("agents tool calling request disappeared")?;
+        let tools = crate::session_message::load_caller_session_tools(
+            &self.node,
+            &caller.agent_did,
+            &caller.behavior_id,
+        )
+        .await?;
+        if !tools.enabled {
+            return Ok(tool_not_allowed_payload(
+                tool_name,
+                "/",
+                tool_name,
+                "the agents tools are not enabled for this behavior",
+                tools.names(),
+            ));
+        }
+        if tool_name == crate::toolset::AGENT_LIST_TOOL_NAME {
+            if let Err(error) = serde_json::from_str::<crate::session_message::AgentListArgs>(args)
+            {
+                return Ok(invalid_tool_arguments_payload(
+                    tool_name,
+                    "/",
+                    format!("invalid agent_list arguments: {error}"),
+                ));
+            }
+            return Ok(json_string(
+                crate::session_message::agent_list(&self.node, &caller, &tools).await?,
+            ));
+        }
+        let parsed = match serde_json::from_str::<crate::session_message::AgentInterruptArgs>(args)
+        {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                return Ok(invalid_tool_arguments_payload(
+                    tool_name,
+                    "/",
+                    format!("invalid agent_interrupt arguments: {error}"),
+                ))
+            }
+        };
+        let session = parsed.session_id.trim();
+        let Some(target) = crate::session_message::resolve_send_target(
+            &self.node,
+            &caller.agent_did,
+            &tools,
+            session,
+        )
+        .await?
+        else {
+            return Ok(interrupt_refused_payload(
+                tool_name,
+                session,
+                "only the session that started this session may interrupt it",
+            ));
+        };
+        if let Some(reason) =
+            crate::session_message::interrupt_refusal(&self.node, &caller.session_id, &target)
+                .await?
+        {
+            return Ok(interrupt_refused_payload(tool_name, session, &reason));
+        }
+        let interrupted = crate::session_message::interrupt_session(&self.node, &target).await?;
+        Ok(json_string(json!({
+            "ok": true,
+            "session_id": session,
+            "status": if interrupted.is_some() { "interrupting" } else { "idle" },
+            "request_id": interrupted
+        })))
+    }
+}
+
 /// An owned message body, parsed once from the accepted arguments.
 enum OwnedBody {
     Prompt(String),
@@ -276,6 +417,7 @@ impl OwnedBody {
 }
 
 fn owned_body(
+    field: &str,
     prompt: Option<String>,
     task: Option<crate::session_message::TaskBody>,
 ) -> Result<OwnedBody, String> {
@@ -284,10 +426,24 @@ fn owned_body(
             Ok(OwnedBody::Prompt(prompt.trim().to_owned()))
         }
         (None, Some(task)) if !task.task_id.trim().is_empty() => Ok(OwnedBody::Task(task)),
-        (Some(_), None) => Err("prompt must be non-empty".to_owned()),
+        (Some(_), None) => Err(format!("{field} must be non-empty")),
         (None, Some(_)) => Err("task.task_id must be non-empty".to_owned()),
-        _ => Err("provide exactly one of prompt or task".to_owned()),
+        _ => Err(format!("provide exactly one of {field} or task")),
     }
+}
+
+fn interrupt_refused_payload(tool_name: &str, session_id: &str, reason: &str) -> String {
+    json_string(json!({
+        "ok": false,
+        "failure_class": "tool_not_allowed",
+        "code": "interrupt_not_permitted",
+        "path": "/session_id",
+        "message": reason,
+        "retryable": false,
+        "service_id": "session",
+        "tool_name": tool_name,
+        "session_id": session_id
+    }))
 }
 
 fn hop_exceeded_payload(tool_name: &str, hop: u32, max_request_hop: u32) -> String {

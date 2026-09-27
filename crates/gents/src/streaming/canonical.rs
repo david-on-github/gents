@@ -35,7 +35,7 @@ pub(crate) struct ProviderPublicationPlan {
     pub(crate) background_calls: Vec<String>,
 }
 
-/// Provider-native ids of a turn's `create_session`/`send_message` calls: a
+/// Provider-native ids of a turn's `agent_new`/`agent_message` calls: a
 /// started session is a background row from its accepted publication on.
 pub(crate) fn session_message_call_ids(message: &gents_protocol::message::Message) -> Vec<String> {
     match message {

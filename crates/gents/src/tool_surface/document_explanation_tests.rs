@@ -30,9 +30,7 @@ fn document_explanation_resolves_target_owner_separately_from_destination() {
         "owner",
         &HashSet::new(),
     );
-    assert!(explanation
-        .tool_names
-        .contains(&"create_session".to_owned()));
+    assert!(explanation.tool_names.contains(&"agent_new".to_owned()));
     assert!(build(&[]).is_err());
     let mut foreign = target.clone();
     foreign.agent_did = "foreign".to_owned();

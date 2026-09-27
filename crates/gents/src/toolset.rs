@@ -30,8 +30,8 @@ use bash_tools::{ReadOnlyBashTool, UnrestrictedBashTool};
 use cli_tool::CliTool;
 use file_tools::{EditFileTool, GlobTool, GrepTool, ListFilesTool, ReadFileTool, WriteFileTool};
 use session_message::{
-    CancelProcessTool, CreateSessionTool, ListProcessesTool, ReadProcessTool, SendMessageTool,
-    SpawnProcessTool, WaitProcessTool,
+    AgentInterruptTool, AgentListTool, AgentMessageTool, AgentNewTool, CancelProcessTool,
+    ListProcessesTool, ReadProcessTool, SpawnProcessTool, WaitProcessTool,
 };
 
 use crate::tool_surface::{BackgroundToolConfig, SubagentToolConfig};
@@ -129,8 +129,18 @@ pub(crate) const DEFAULT_COMMAND_TIMEOUT_SECS: u64 = 120;
 // backstop (grok-build uses the same bound) so an orphaned job cannot run
 // forever (#985). `background_timeout_secs` may only shorten it.
 pub(crate) const BACKGROUND_COMMAND_TIMEOUT_SECS: u64 = 36_000;
-pub const CREATE_SESSION_TOOL_NAME: &str = "create_session";
-pub const SEND_MESSAGE_TOOL_NAME: &str = "send_message";
+pub const AGENT_NEW_TOOL_NAME: &str = "agent_new";
+pub const AGENT_MESSAGE_TOOL_NAME: &str = "agent_message";
+pub const AGENT_INTERRUPT_TOOL_NAME: &str = "agent_interrupt";
+pub const AGENT_LIST_TOOL_NAME: &str = "agent_list";
+/// The agents tool group (`SubagentTools.enabled`), in the order they are
+/// offered.
+pub const AGENT_TOOL_NAMES: [&str; 4] = [
+    AGENT_NEW_TOOL_NAME,
+    AGENT_MESSAGE_TOOL_NAME,
+    AGENT_INTERRUPT_TOOL_NAME,
+    AGENT_LIST_TOOL_NAME,
+];
 pub(crate) const SPAWN_PROCESS_TOOL_NAME: &str = "spawn_process";
 pub(crate) const WAIT_PROCESS_TOOL_NAME: &str = "wait_process";
 pub(crate) const LIST_PROCESSES_TOOL_NAME: &str = "list_processes";
@@ -668,19 +678,23 @@ pub fn build_native_tools() -> Result<Vec<Box<dyn ToolDyn>>> {
         .build_native_tools()
 }
 
-/// `create_session`/`send_message` (Lean `ToolOperation.sessionMessage`).
+/// `agent_new`/`agent_message` (Lean `ToolOperation.sessionMessage`).
+/// The agents tools that start or message a session: each is a background
+/// row that ends with the request it caused.
 pub(crate) fn is_session_message_tool(tool_name: &str) -> bool {
-    tool_name == CREATE_SESSION_TOOL_NAME || tool_name == SEND_MESSAGE_TOOL_NAME
+    tool_name == AGENT_NEW_TOOL_NAME || tool_name == AGENT_MESSAGE_TOOL_NAME
+}
+
+/// The foreground agents tools, answered in the calling turn.
+pub(crate) fn is_agent_control_tool(tool_name: &str) -> bool {
+    tool_name == AGENT_INTERRUPT_TOOL_NAME || tool_name == AGENT_LIST_TOOL_NAME
 }
 
 pub(crate) fn subagent_tool_names(config: &SubagentToolConfig) -> Vec<String> {
     if !config.tools_enabled() {
         return Vec::new();
     }
-    [CREATE_SESSION_TOOL_NAME, SEND_MESSAGE_TOOL_NAME]
-        .into_iter()
-        .map(str::to_string)
-        .collect()
+    AGENT_TOOL_NAMES.into_iter().map(str::to_string).collect()
 }
 
 pub(crate) fn build_subagent_tools(config: SubagentToolConfig) -> Vec<Box<dyn ToolDyn>> {
@@ -688,8 +702,10 @@ pub(crate) fn build_subagent_tools(config: SubagentToolConfig) -> Vec<Box<dyn To
         return Vec::new();
     }
     vec![
-        Box::new(CreateSessionTool::new(config)),
-        Box::new(SendMessageTool),
+        Box::new(AgentNewTool::new(config)),
+        Box::new(AgentMessageTool),
+        Box::new(AgentInterruptTool),
+        Box::new(AgentListTool),
     ]
 }
 

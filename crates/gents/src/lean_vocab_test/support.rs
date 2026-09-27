@@ -984,6 +984,18 @@ pub(crate) struct LeanCausalHopContract {
     pub(crate) default_max_request_hop: u32,
     pub(crate) step_cases: Vec<LeanCausalHopStepCase>,
     pub(crate) chain_cases: Vec<LeanCausalHopChainCase>,
+    pub(crate) interrupt_cases: Vec<LeanAgentInterruptCase>,
+}
+
+/// One agent-interrupt permission question (`DurableLineage.interruptAllowed`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LeanAgentInterruptCase {
+    pub(crate) name: String,
+    pub(crate) caller_session: String,
+    pub(crate) target_session: String,
+    pub(crate) target_origin_cause: Option<String>,
+    pub(crate) expected_allowed: bool,
 }
 
 /// One materialization step: `cause` is `root`, `cross_session` (with its

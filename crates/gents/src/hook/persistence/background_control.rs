@@ -13,7 +13,7 @@ impl DefraSessionHook {
     }
 
     /// A background row this session principal manages: a native process or
-    /// a `create_session`/`send_message` row.
+    /// an `agent_new`/`agent_message` row.
     pub(super) async fn load_authorized_background_tool(
         &self,
         caller: &ProcessControlScope,

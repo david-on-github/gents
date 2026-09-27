@@ -299,7 +299,7 @@ async fn accepted_tool_arguments_read_only_the_accepted_message() {
         name: "accepted-arguments-exact".into(),
         real_identity: true,
         await_mode: AwaitMode::Background,
-        tool_name: Some(crate::toolset::CREATE_SESSION_TOOL_NAME.into()),
+        tool_name: Some(crate::toolset::AGENT_NEW_TOOL_NAME.into()),
         ..Default::default()
     })
     .await
@@ -311,7 +311,7 @@ async fn accepted_tool_arguments_read_only_the_accepted_message() {
         &mut owner,
         &admitted.agent_did,
         1,
-        crate::toolset::CREATE_SESSION_TOOL_NAME,
+        crate::toolset::AGENT_NEW_TOOL_NAME,
         "bridge-second",
         second_arguments.clone(),
         AwaitMode::Background,

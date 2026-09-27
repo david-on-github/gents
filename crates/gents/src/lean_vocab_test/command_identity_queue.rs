@@ -309,7 +309,7 @@ pub(crate) struct LeanRestartDispositionCase {
     pub(crate) name: String,
     pub(crate) rust_function: String,
     pub(crate) await_mode: String,
-    /// The row records a `create_session`/`send_message` delivery.
+    /// The row records an `agent_new`/`agent_message` delivery.
     pub(crate) session_message: bool,
     pub(crate) parent_observation: String,
     pub(crate) deadline_expired: bool,

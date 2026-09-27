@@ -1019,3 +1019,78 @@ async fn append_sequence_excludes_foreign_session_messages_and_reservations() {
         "own background reservation remains ahead of own message; foreign rows cannot move this session's cursor"
     );
 }
+
+/// Lean `CausalHop.completionWake`: the next wake claim consumes every pending
+/// notification, so a notification that needs a higher hop raises the one
+/// pending wake instead of riding a lower-hop wake already queued.
+#[tokio::test]
+async fn a_lower_hop_wake_never_consumes_a_higher_hop_notification() {
+    let db = test_db("wake-hop-raise").await;
+    let parent = root_parent(db.agent_did(), "wake-hop-raise-session");
+    let native = persist_background_completion_with_message(
+        &db.node,
+        &parent,
+        "native process done",
+        "background-completion-notification:native:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+    )
+    .await
+    .unwrap();
+    let native_wake = native.request.expect("native wake").doc_id;
+    let raised = persist_background_completion_with_message_waking(
+        &db.node,
+        &parent,
+        "agent result",
+        "background-completion-notification:agent:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+        CompletionWake::AtHop(2),
+    )
+    .await
+    .unwrap();
+    assert!(raised.created_request);
+    let raised_wake = raised.request.expect("raised wake").doc_id;
+    assert_ne!(raised_wake, native_wake);
+    let later = persist_background_completion_with_message(
+        &db.node,
+        &parent,
+        "another native process done",
+        "background-completion-notification:native-2:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!later.created_request);
+    assert_eq!(later.request.expect("joined wake").doc_id, raised_wake);
+
+    let response = db
+        .node
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{ session_id: {{ _eq: "{}" }}, execution_origin: {{ _eq: "scheduled" }} }}) {{ _docID lifecycle_state subagent_depth superseded_by_request_doc_id }} }}"#,
+            escape_graphql_string(&parent.session_id)
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let rows = response.data.unwrap()["AgentRequest"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let pending = rows
+        .iter()
+        .filter(|row| row["lifecycle_state"] == "pending")
+        .collect::<Vec<_>>();
+    assert_eq!(pending.len(), 1, "{rows:?}");
+    assert_eq!(pending[0]["_docID"], raised_wake.as_str());
+    assert_eq!(pending[0]["subagent_depth"], 2);
+    let lower = rows
+        .iter()
+        .find(|row| row["_docID"] == native_wake.as_str())
+        .unwrap();
+    assert_eq!(lower["lifecycle_state"], "superseded");
+    assert_eq!(lower["superseded_by_request_doc_id"], raised_wake.as_str());
+}

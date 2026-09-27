@@ -370,8 +370,8 @@ async fn from_default_behavior_documents_resolves_tool_selection_with_ceiling() 
         .get(&default_behavior_id)
         .expect("tool surface for default behavior");
     let tool_names = tool_surface.tool_names();
-    assert!(tool_names.contains(&"create_session".to_string()));
-    assert!(tool_names.contains(&"send_message".to_string()));
+    assert!(tool_names.contains(&"agent_new".to_string()));
+    assert!(tool_names.contains(&"agent_message".to_string()));
 }
 
 async fn load_installed_tools(node: &EmbeddedNode, did: &str, behavior_id: &str) -> Tools {

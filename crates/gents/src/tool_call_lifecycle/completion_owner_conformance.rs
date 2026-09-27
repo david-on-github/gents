@@ -447,7 +447,7 @@ pub(crate) struct SelectedBackgroundWake {
 }
 
 /// Compose the signed session-message owners through watcher selection,
-/// leaving the actual wake claim to the caller: a `create_session` row settles
+/// leaving the actual wake claim to the caller: an `agent_new` row settles
 /// from its caused request's terminal after a later assistant call.
 pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     use super::admission_fixture::{
@@ -558,12 +558,11 @@ pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     );
     let queue = wake.input.as_ref().unwrap().queue.as_ref().unwrap();
     assert_eq!(queue.policy, QueuePolicy::Coalesce);
-    // The caused request ran at hop 1, so its wake climbs to hop 2 and
-    // coalesces only with wakes at that hop.
+    // The caused request ran at hop 1, so its wake climbs to hop 2.
     assert_eq!(wake.subagent_depth, Some(2));
     assert_eq!(
         queue.key.as_deref(),
-        Some(format!("background_completion:{session}:hop:2").as_str())
+        Some(format!("background_completion:{session}").as_str())
     );
     assert_eq!(queue.background_completion_wake_version, Some(1));
 

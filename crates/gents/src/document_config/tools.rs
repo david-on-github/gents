@@ -351,7 +351,7 @@ pub struct RemoteServiceTools {
     pub max_wait_timeout_secs: Option<i64>,
 }
 
-/// Session-message targets: the allowlist create_session/send_message address.
+/// Session-message targets: the allowlist agent_new/agent_message address.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -364,7 +364,7 @@ pub struct SubagentTools {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "typescript", ts(as = "Option<Vec<String>>", optional = nullable))]
     pub target_ids: Vec<String>,
-    /// Exposes create_session/send_message over the allowlisted targets. Every
+    /// Exposes agent_new/agent_message over the allowlisted targets. Every
     /// started session is a background tool row; there is no foreground wait,
     /// workspace inheritance, cascade or cross-principal switch. A target on
     /// another principal is admitted there as a Peer request under its ACP.

@@ -93,7 +93,7 @@ impl AwaitMode {
 
 /// What interrupting a request does to one of its owned tool calls
 /// (Lean `Background.Interrupt.disposition`). An interrupt never reaches
-/// background work, including a `create_session`/`send_message` row.
+/// background work, including an `agent_new`/`agent_message` row.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum InterruptDisposition {
     /// Never-dispatched intents and running foreground calls.
@@ -439,7 +439,7 @@ impl ToolCallLifecycle {
         self.deadline_at <= now
     }
 
-    /// A `create_session`/`send_message` row (Lean
+    /// An `agent_new`/`agent_message` row (Lean
     /// `ToolOperation.sessionMessage`): no host process backs it, and its
     /// terminal is the terminal output of the request it caused. It has no
     /// deadline (Lean `session_message_row_left_running`): the stored

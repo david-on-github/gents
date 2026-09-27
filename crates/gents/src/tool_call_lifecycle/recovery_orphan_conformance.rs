@@ -64,7 +64,7 @@ async fn recovery_leaves_session_message_row_and_its_request_running_after_calle
         ..Default::default()
     })
     .await
-    .expect("publish accepted create_session and its request");
+    .expect("publish accepted agent_new and its request");
     let admitted = message.admission;
     terminalize_accepted_parent(&admitted, &mut owner, RequestTerminalOutcome::Interrupted).await;
     drop(owner);

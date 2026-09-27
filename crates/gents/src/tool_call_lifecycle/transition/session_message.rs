@@ -1,6 +1,6 @@
 use super::*;
 
-/// The durable terminal of the request a `create_session`/`send_message` row
+/// The durable terminal of the request an `agent_new`/`agent_message` row
 /// caused (Lean `Recovery.SessionMessageRecoveryCause`): the row's only
 /// terminal cause.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -62,7 +62,7 @@ impl ToolCallLifecycle {
     ) -> Result<bool> {
         anyhow::ensure!(
             self.is_session_message() && self.await_mode == AwaitMode::Background,
-            "session-message settlement requires a background create_session/send_message row"
+            "session-message settlement requires a background agent_new/agent_message row"
         );
         let state = terminal.tool_state();
         self.ensure_state(&[ToolCallState::Running, state], "settle_session_message")?;

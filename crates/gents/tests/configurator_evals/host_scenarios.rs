@@ -988,7 +988,7 @@ pub(super) fn verify_no_auxiliary_authority(tools: &gents::document_config::Tool
         tools.subagents.as_ref().is_none_or(
             |subagents| subagents.target_ids.is_empty() && subagents.enabled != Some(true)
         ),
-        "monitor must not gain create_session/send_message authority"
+        "monitor must not gain agent_new/agent_message authority"
     );
     ensure!(
         tools

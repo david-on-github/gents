@@ -15,7 +15,7 @@ use crate::document_config::load_agent_behavior;
 use crate::tool_call_lifecycle::query::load_tool_call_result;
 use crate::tool_call_lifecycle::{AwaitMode, CancelCause, FailureClass, ToolCallLifecycle};
 use crate::toolset::{
-    CANCEL_PROCESS_TOOL_NAME, CREATE_SESSION_TOOL_NAME, LIST_PROCESSES_TOOL_NAME,
+    AGENT_NEW_TOOL_NAME, CANCEL_PROCESS_TOOL_NAME, LIST_PROCESSES_TOOL_NAME,
     READ_PROCESS_TOOL_NAME, SPAWN_PROCESS_TOOL_NAME, WAIT_PROCESS_TOOL_NAME,
 };
 use crate::truncation::{truncate_text, TruncationMode};

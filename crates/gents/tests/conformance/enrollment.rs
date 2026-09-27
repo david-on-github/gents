@@ -152,6 +152,19 @@ fn generated_causal_hop_cases_match_native_materializer() {
         assert_eq!(hops, chain.expected_hops, "{}", chain.name);
         assert_eq!(admitted, chain.expected_admitted, "{}", chain.name);
     }
+    assert!(!contract.interrupt_cases.is_empty());
+    for case in &contract.interrupt_cases {
+        assert_eq!(
+            gents::session_message::agent_interrupt_allowed(
+                &case.caller_session,
+                &case.target_session,
+                case.target_origin_cause.as_deref(),
+            ),
+            case.expected_allowed,
+            "{}",
+            case.name
+        );
+    }
 }
 
 fn lower_hex(bytes: &[u8]) -> String {

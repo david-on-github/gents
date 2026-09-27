@@ -174,10 +174,10 @@ fn session_message_tool_names_are_gated_by_enabled_and_targets() {
     };
     assert_eq!(
         subagent_tool_names(&enabled),
-        vec![
-            CREATE_SESSION_TOOL_NAME.to_string(),
-            SEND_MESSAGE_TOOL_NAME.to_string()
-        ]
+        AGENT_TOOL_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
     );
 }
 
@@ -270,10 +270,10 @@ async fn session_message_tool_definitions_register_expected_surface() {
     let names = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
     assert_eq!(
         names,
-        vec![
-            CREATE_SESSION_TOOL_NAME.to_string(),
-            SEND_MESSAGE_TOOL_NAME.to_string()
-        ]
+        AGENT_TOOL_NAMES
+            .iter()
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
     );
 
     let create = tools[0].definition(String::new()).await;
@@ -284,13 +284,13 @@ async fn session_message_tool_definitions_register_expected_surface() {
     for field in ["prompt", "task", "title"] {
         assert!(
             create.parameters["properties"].get(field).is_some(),
-            "create_session advertises {field}"
+            "agent_new advertises {field}"
         );
     }
     for absent in ["await_mode", "workspace", "deadline"] {
         assert!(
             create.parameters["properties"].get(absent).is_none(),
-            "create_session has no {absent}: a started session is always background work"
+            "agent_new has no {absent}: a started session is always background work"
         );
     }
     let send = tools[1].definition(String::new()).await;
@@ -298,6 +298,20 @@ async fn session_message_tool_definitions_register_expected_surface() {
         send.parameters["required"],
         serde_json::json!(["session_id"])
     );
+    for field in ["message", "task", "interrupt"] {
+        assert!(
+            send.parameters["properties"].get(field).is_some(),
+            "agent_message advertises {field}"
+        );
+    }
+    assert!(send.parameters["properties"].get("prompt").is_none());
+    let interrupt = tools[2].definition(String::new()).await;
+    assert_eq!(
+        interrupt.parameters["required"],
+        serde_json::json!(["session_id"])
+    );
+    let list = tools[3].definition(String::new()).await;
+    assert_eq!(list.parameters["properties"], serde_json::json!({}));
 }
 
 /// Build a single-target list for session-message tool tests. `name` doubles as the

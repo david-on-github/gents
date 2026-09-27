@@ -615,7 +615,7 @@ impl ToolCallLifecycle {
     }
 
     /// Publish the one immediate native receipt for a background
-    /// `create_session`/`send_message` row without terminalizing it or
+    /// `agent_new`/`agent_message` row without terminalizing it or
     /// closing its ToolCall source. The receipt has its own immutable
     /// authored source, owned by the physical row; the caused request's
     /// terminal later closes the ToolCall source and appends the notification.

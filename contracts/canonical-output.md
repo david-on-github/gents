@@ -33,8 +33,8 @@ check must not be reapplied to reject exact replay or later out-of-extent facts.
 
 Provider/tool payloads and whole authored content live in segments. Small runtime
 presentation literals live inline in headers; they do not duplicate payload bytes.
-There is no payload-copy exception: a session started by `create_session` or
-`send_message` receives its own materialized request, not copied arguments.
+There is no payload-copy exception: a session started by `agent_new` or
+`agent_message` receives its own materialized request, not copied arguments.
 The collections only grow, so replication is set union and a reader only asks
 which facts are visible: no visible closure means closure is unknown, a closure with
 missing segments means an incomplete replica, twins mean a conflict. Unsealed
@@ -131,7 +131,7 @@ does not change its lifecycle to completed. Pending direct-call cancellation may
 require a later empty output closure and native cancellation result; it must remain deliverable without
 redispatch. A late background result can close and publish after parent expiry
 or termination without renewing or reopening that request. A
-`create_session`/`send_message` row closes with the terminal output of the
+`agent_new`/`agent_message` row closes with the terminal output of the
 request it caused, not a fabricated native completion.
 
 An invocation reply is not always execution completion. A started session

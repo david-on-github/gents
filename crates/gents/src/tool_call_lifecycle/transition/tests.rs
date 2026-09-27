@@ -125,8 +125,8 @@ async fn foreground_rejects_pending_state() {
 #[tokio::test]
 async fn foreground_rejects_session_message_rows() {
     for tool_name in [
-        crate::toolset::CREATE_SESSION_TOOL_NAME,
-        crate::toolset::SEND_MESSAGE_TOOL_NAME,
+        crate::toolset::AGENT_NEW_TOOL_NAME,
+        crate::toolset::AGENT_MESSAGE_TOOL_NAME,
     ] {
         let mut lc = running(tool_name, true).await;
         let err = lc.foreground().await.unwrap_err();

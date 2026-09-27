@@ -29,7 +29,7 @@ pub struct AcceptedToolCall {
     pub(crate) execution_generation: String,
     pub(crate) arguments: gents_protocol::output::PayloadRef,
     /// Immutable await mode fixed at accepted publication. Only a
-    /// `create_session`/`send_message` call is published in background.
+    /// `agent_new`/`agent_message` call is published in background.
     pub(crate) await_mode: crate::tool_call_lifecycle::AwaitMode,
 }
 

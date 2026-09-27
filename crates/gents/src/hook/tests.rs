@@ -1321,7 +1321,7 @@ async fn accepted_session_message_lifecycle(
     accepted_hook_tool_lifecycle(
         hook,
         internal_call_id,
-        crate::toolset::CREATE_SESSION_TOOL_NAME,
+        crate::toolset::AGENT_NEW_TOOL_NAME,
         &arguments,
         deadline_at,
         crate::tool_call_lifecycle::AwaitMode::Background,

@@ -1067,7 +1067,7 @@ def extract_subagent_lifecycle(
         elif (
             method == STANDARD_UPDATE_METHOD
             and kind == "tool_call"
-            and update.get("title") in ("task", "Task", "create_session")
+            and update.get("title") in ("task", "Task", "agent_new")
             and lifecycle["task_tool_call"] is None
         ):
             lifecycle["task_tool_call"] = update
@@ -2434,7 +2434,7 @@ def probe_subagent(
     wait from the standard tool_call before the subagent lifecycle begins).
     """
     prompt_text = (
-        f"Use the create_session tool exactly once with agent "
+        f"Use the agent_new tool exactly once with agent "
         f"'{SUBAGENT_MARKER}' and the prompt: 'Reply with exactly "
         f"one short sentence confirming the subagent worker ran.' When its completion "
         f"notification arrives, reply on one line beginning exactly "
@@ -2466,7 +2466,7 @@ def probe_subagent(
     task_call = lifecycle["task_tool_call"]
     require(
         task_call is not None,
-        "subagent turn emitted no standard-rail tool_call titled task/Task/create_session "
+        "subagent turn emitted no standard-rail tool_call titled task/Task/agent_new "
         "(the pager-local foreground wait marker); observed standard updates: "
         f"{result['kinds']}",
     )
@@ -2689,7 +2689,7 @@ def matching_spawn_calls(
         row
         for row in documents.get("spawn_tool_calls", [])
         if isinstance(row, dict)
-        and row.get("tool_name") in ("create_session", "task", "Task")
+        and row.get("tool_name") in ("agent_new", "task", "Task")
         and row.get("request_id") == child_row.get("caused_by_parent_request_id")
         and row.get("child_request_id") == child_row.get("request_id")
     ]

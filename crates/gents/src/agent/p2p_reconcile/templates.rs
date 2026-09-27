@@ -471,7 +471,7 @@ const AGENT_CONFIG_COLLECTIONS: &[&str] = &[
     "InferenceBackend",
 ];
 
-/// Caller → target leg of cross-principal `create_session`/`send_message`:
+/// Caller → target leg of cross-principal `agent_new`/`agent_message`:
 /// carry only the requests addressed to this peer. The caller's own requests,
 /// sessions and tool calls stay home.
 const SUBAGENT_COORDINATOR_COLLECTIONS: &[&str] = &["AgentRequest"];

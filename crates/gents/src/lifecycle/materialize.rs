@@ -340,7 +340,7 @@ pub struct RequestIdentity {
 }
 
 /// Causal lineage: the logical and physical identifiers of the request (and,
-/// for `create_session`/`send_message`, the tool call) that caused this one,
+/// for `agent_new`/`agent_message`, the tool call) that caused this one,
 /// plus the resulting causal hop (`subagent_depth`). A request-only link is a
 /// control continuation that copies its predecessor's hop.
 #[derive(Default)]
@@ -601,7 +601,7 @@ pub enum RequestHopCause {
     /// A user, trigger or schedule root.
     Root,
     /// Caused by another session's action at `cause_hop`: a
-    /// `create_session`/`send_message` request or steering continuation, or a
+    /// `agent_new`/`agent_message` request or steering continuation, or a
     /// session-message completion wake.
     CrossSession { cause_hop: u32 },
     /// A retry, goal continuation, user steering or native completion wake.
@@ -623,7 +623,7 @@ pub fn request_hop_within_bound(max_request_hop: u32, hop: u32) -> bool {
     hop <= max_request_hop
 }
 
-/// The calling edge a `create_session`/`send_message` request records: the
+/// The calling edge an `agent_new`/`agent_message` request records: the
 /// caller's principal (its requester and signer), request and tool call.
 #[derive(Debug, Clone)]
 pub(crate) struct SessionMessageCause {
@@ -645,7 +645,7 @@ pub(crate) struct SessionMessageTarget {
     pub(crate) session_id: String,
 }
 
-/// Build and sign the request a `create_session`/`send_message` call
+/// Build and sign the request an `agent_new`/`agent_message` call
 /// materializes at `hop` (Lean `CausalHop.nextHop` of a cross-session cause).
 /// This is the single writer of the calling edge (`caused_by_parent_*`). The
 /// caller is the requester and signer: its own principal admits it as

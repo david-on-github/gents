@@ -63,7 +63,7 @@ impl ToolCallLifecycle {
     /// Lean parity: ToolCallContext.Transition.foreground.
     /// Requires Running state. Returns `ModeAlreadyForeground` if already in
     /// Foreground mode. Persists the new await_mode to the row, then updates
-    /// the in-memory field on success. A `create_session`/`send_message` row
+    /// the in-memory field on success. An `agent_new`/`agent_message` row
     /// is background-only: its result arrives only as a message.
     pub async fn foreground(&mut self) -> Result<()> {
         self.ensure_state(&[ToolCallState::Running], "foreground")?;

@@ -45,7 +45,7 @@ pub enum IllegalToolCallTransition {
     ModeAlreadyForeground,
     #[error("AgentRequest parent linkage incoherent: must set both or neither parent fields")]
     ParentLinkageIncoherent,
-    #[error("foreground rejected: a create_session/send_message row is background-only")]
+    #[error("foreground rejected: an agent_new/agent_message row is background-only")]
     SessionMessageIsBackgroundOnly,
 }
 

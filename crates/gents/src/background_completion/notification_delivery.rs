@@ -305,7 +305,7 @@ pub(super) async fn ensure_notification_delivery(
         RequestQueue {
             source: QueueSource::BackgroundCompletion,
             policy: QueuePolicy::Coalesce,
-            key: Some(wake.queue_key(&parent.session_id, parent.subagent_depth)),
+            key: Some(format!("background_completion:{}", parent.session_id)),
             queued_after_request_id: Some(parent.request_id.clone()),
             interrupted_request_id: None,
             background_completion_wake_version: None,

@@ -724,7 +724,7 @@ mod tests {
         .expect("valid canonical daemon fixture")
     }
 
-    /// Accept one `create_session` call on the coordinator addressed to the
+    /// Accept one `agent_new` call on the coordinator addressed to the
     /// host principal and materialize its Peer request through the
     /// session-message owner. Returns the caused request id.
     async fn seed_peer_session_message(
@@ -752,7 +752,7 @@ mod tests {
                 id: tool_call_id.into(),
                 call_id: Some(tool_call_id.into()),
                 function: ToolFunction::new(
-                    crate::toolset::CREATE_SESSION_TOOL_NAME.into(),
+                    crate::toolset::AGENT_NEW_TOOL_NAME.into(),
                     serde_json::json!({ "agent": "remote-target", "prompt": prompt }),
                 ),
                 signature: None,
@@ -762,7 +762,7 @@ mod tests {
         let publication = writer
             .publish_native_turn(lifecycle, turn, 0, &message)
             .await
-            .expect("accept remote create_session intent");
+            .expect("accept remote agent_new intent");
         let accepted = publication.accepted_tools.into_iter().next().unwrap();
         let mut row = ToolCallLifecycle::from_accepted(
             node.clone(),
@@ -772,7 +772,7 @@ mod tests {
             lifecycle.claimed_deadline_at().unwrap(),
             AwaitMode::Background,
         )
-        .expect("adopt accepted create_session");
+        .expect("adopt accepted agent_new");
         let cause = crate::lifecycle::SessionMessageCause {
             caller_agent_did: lifecycle.request().agent_did.clone(),
             caller_request_id: lifecycle.request().request_id.clone(),
@@ -796,6 +796,7 @@ mod tests {
                 goal: None,
             },
             None,
+            false,
         )
         .await
         .expect("plan peer session message")
@@ -907,7 +908,7 @@ mod tests {
                     agent_did: "did:key:coord",
                     requester_did: "{requester_did}",
                     message_sequence: 1,
-                    tool_name: "create_session",
+                    tool_name: "agent_new",
                     tool_call_id: "{tool_call_id}",
                     lifecycle_state: "running",
                     started_at: "2026-07-06T00:00:00Z",

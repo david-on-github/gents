@@ -1,6 +1,6 @@
 //! Recovery for persisted running tool calls: the startup sweep over rows
 //! orphaned by a daemon restart, the session-message sweep that settles a
-//! `create_session`/`send_message` row from its caused request's terminal (or
+//! `agent_new`/`agent_message` row from its caused request's terminal (or
 //! fails it closed when it cannot name that request), and the live
 //! terminal-parent owned-tool cleanup that
 //! cancels running foreground tools whose parent is already terminal without
@@ -175,7 +175,7 @@ impl super::ToolCallLifecycle {
     /// 3. Require a terminal parent before any write.
     /// 4. Leave every background row to its own sweep regardless of parent
     ///    state: native processes to the registry-aware orphan sweep and
-    ///    `create_session`/`send_message` rows to the session-message sweep.
+    ///    `agent_new`/`agent_message` rows to the session-message sweep.
     ///    No parent terminal is a cancel signal for another session.
     ///
     /// Covers running native tool calls stranded under a terminal parent with
@@ -842,7 +842,7 @@ mod tests {
             lifecycle_state: Some(state),
             ..Default::default()
         };
-        for tool_name in [crate::toolset::CREATE_SESSION_TOOL_NAME, "bash"] {
+        for tool_name in [crate::toolset::AGENT_NEW_TOOL_NAME, "bash"] {
             let background = row("background", tool_name);
             for state in [
                 RequestLifecycleState::Interrupted,

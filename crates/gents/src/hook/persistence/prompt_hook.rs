@@ -81,6 +81,24 @@ impl DefraSessionHook {
                 }
             };
         }
+        if crate::toolset::is_agent_control_tool(tool_name) {
+            let result = self
+                .persist_agent_control_tool_call(tool_name, tool_call_id, internal_call_id, args)
+                .instrument(tracing::info_span!(
+                    "tool.call",
+                    tool_name = %tool_name,
+                    tool_call_id = %internal_call_id,
+                ))
+                .await;
+
+            return match result {
+                Ok(action) => {
+                    self.record_success();
+                    action
+                }
+                Err(e) => self.on_tool_persistence_error("persist agents tool call", &e),
+            };
+        }
         if crate::toolset::is_session_message_tool(tool_name) {
             let result = self
                 .persist_session_message_tool_call(tool_name, tool_call_id, internal_call_id, args)

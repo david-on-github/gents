@@ -312,13 +312,13 @@ fn explain_subagents(
     if !included.is_empty() {
         builder.include_many("subagent", included);
     } else if config.subagent_tools().tools_enabled() {
-        builder.unavailable("subagent", crate::toolset::CREATE_SESSION_TOOL_NAME);
+        builder.unavailable("subagent", crate::toolset::AGENT_NEW_TOOL_NAME);
         builder.warn(
             "subagent_targets_unavailable",
-            "create_session is configured, but every local target's behavior is inactive.",
+            "agent_new is configured, but every local target's behavior is inactive.",
         );
     } else {
-        builder.exclude("subagent", crate::toolset::CREATE_SESSION_TOOL_NAME);
+        builder.exclude("subagent", crate::toolset::AGENT_NEW_TOOL_NAME);
     }
 }
 

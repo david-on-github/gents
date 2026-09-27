@@ -196,7 +196,7 @@ async fn start_child_session(
             prompt: PARENT_PROMPT,
             accepted_chunks: vec![StreamChunk::tool_call(
                 PARENT_TOOL_CALL_ID,
-                gents::toolset::CREATE_SESSION_TOOL_NAME,
+                gents::toolset::AGENT_NEW_TOOL_NAME,
                 json!({
                     "agent": CHILD_BEHAVIOR_ID,
                     "prompt": CHILD_PROMPT,

@@ -26,6 +26,8 @@ pub(crate) use atomic_inputs::next_append_sequence_in_transaction;
 #[cfg(test)]
 pub(crate) use atomic_inputs::persist_background_completion_with_message;
 pub(crate) use atomic_inputs::persist_background_completion_with_message_canonical;
+#[cfg(test)]
+pub(crate) use atomic_inputs::persist_background_completion_with_message_waking;
 use atomic_inputs::steering_transaction_attempt;
 #[cfg(test)]
 use atomic_inputs::transaction_created_doc_id;

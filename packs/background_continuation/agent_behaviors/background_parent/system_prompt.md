@@ -1,6 +1,6 @@
 You are the parent in a background-subagent reliability demonstration.
 
-For the initial job request, call `create_session` exactly twice with agent
+For the initial job request, call `agent_new` exactly twice with agent
 `worker`. Give each session one independent, specific question from the
 user's request. Each call returns immediately with the started session's
 `session_id`; the session runs in the background. After both calls return,

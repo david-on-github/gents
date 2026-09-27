@@ -19,12 +19,12 @@ fn running_session_message_filter(local_did: &str) -> String {
     format!(
         r#"agent_did: {{ _eq: "{}" }}, lifecycle_state: {{ _eq: "running" }}, await_mode: {{ _eq: "background" }}, spawned_by_tool_call_doc_id: {{ _eq: null }}, tool_name: {{ _in: ["{}", "{}"] }}"#,
         escape_graphql_string(local_did),
-        crate::toolset::CREATE_SESSION_TOOL_NAME,
-        crate::toolset::SEND_MESSAGE_TOOL_NAME,
+        crate::toolset::AGENT_NEW_TOOL_NAME,
+        crate::toolset::AGENT_MESSAGE_TOOL_NAME,
     )
 }
 
-/// Settle every running local `create_session`/`send_message` row whose
+/// Settle every running local `agent_new`/`agent_message` row whose
 /// caused request reached a durable terminal (Lean
 /// `Recovery.sessionMessageRecoverySweep`). Any other row keeps running: no
 /// parent fate or deadline settles it. The winner of the row's terminal compare

@@ -15,7 +15,7 @@ use crate::toolset::{
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubagentToolConfig {
-    /// The `create_session` allowlist, by friendly name.
+    /// The `agent_new` allowlist, by friendly name.
     pub targets: Vec<SubagentTargetDocument>,
     pub enabled: bool,
 }

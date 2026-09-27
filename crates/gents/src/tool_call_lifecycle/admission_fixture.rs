@@ -28,7 +28,7 @@
 //! |---------------------|-------------|
 //! | `claimed_request(node, request_id, session_id, agent_did)` | [`claimed_request`] (same signature) |
 //! | `published_spawn_parent(name)` | [`published_spawn_parent`] (same return shape; same defaults: `AwaitMode::Foreground`, `start_running()` invoked) |
-//! | `published_background_bridge(name)` | [`published_background_bridge`] (a running background `create_session` row with a real `KeyIdentity` (`test-agent.key`)) |
+//! | `published_background_bridge(name)` | [`published_background_bridge`] (a running background `agent_new` row with a real `KeyIdentity` (`test-agent.key`)) |
 //!
 //! Many conformance files also use these constructor shapes; they must be
 //! migrated to this shared fixture by their own owners. Deletion of the
@@ -59,7 +59,7 @@ pub struct PublishedAdmissionOptions {
     /// the fixture pins the legacy literal `"did:test:test"`.
     pub real_identity: bool,
     /// Awaiting mode handed to `ToolCallLifecycle::from_accepted`. Only a
-    /// `create_session`/`send_message` call publishes in background.
+    /// `agent_new`/`agent_message` call publishes in background.
     pub await_mode: AwaitMode,
     /// Whether the fixture starts the tool call running before returning.
     /// When false, the returned lifecycle is left in the canonical `Pending`
@@ -70,7 +70,7 @@ pub struct PublishedAdmissionOptions {
     /// fixtures. The default keeps the ordinary real-time admission shape.
     pub request_created_at: Option<String>,
     /// Native tool name; `None` publishes `SPAWN_PROCESS_TOOL_NAME`. Only a
-    /// `create_session`/`send_message` name publishes in background.
+    /// `agent_new`/`agent_message` name publishes in background.
     pub tool_name: Option<String>,
 }
 
@@ -521,7 +521,7 @@ pub async fn published_spawn_parent(name: &str) -> (Arc<EmbeddedNode>, PathBuf, 
     (node, path, tool)
 }
 
-/// A running background `create_session` row with a real `KeyIdentity`
+/// A running background `agent_new` row with a real `KeyIdentity`
 /// (`test-agent.key`), before its request is materialized.
 pub async fn published_background_bridge(
     name: &str,
@@ -532,15 +532,15 @@ pub async fn published_background_bridge(
         name: name.to_owned(),
         real_identity: true,
         await_mode: AwaitMode::Background,
-        tool_name: Some(crate::toolset::CREATE_SESSION_TOOL_NAME.to_owned()),
+        tool_name: Some(crate::toolset::AGENT_NEW_TOOL_NAME.to_owned()),
         ..Default::default()
     })
     .await
-    .expect("publish canonical background create_session admission");
+    .expect("publish canonical background agent_new admission");
     (node, path, tool)
 }
 
-/// Dispatch a pending accepted `create_session` row and materialize its
+/// Dispatch a pending accepted `agent_new` row and materialize its
 /// request on `target_agent_did`'s `general` behavior through the
 /// session-message owner, publishing the row's receipt.
 pub(crate) async fn materialize_session_message(
@@ -577,20 +577,21 @@ pub(crate) async fn materialize_session_message(
             goal: None,
         },
         None,
+        false,
     )
     .await?
     .map_err(anyhow::Error::msg)?;
     crate::session_message::commit(node, &cause, tool, plan, false).await
 }
 
-/// An accepted `create_session` call and the request it caused.
+/// An accepted `agent_new` call and the request it caused.
 pub struct PublishedSessionMessage {
     pub admission: PublishedAdmission,
     pub caused_request_id: String,
     pub caused_request_doc_id: String,
 }
 
-/// Publish an accepted background `create_session` call on this principal's
+/// Publish an accepted background `agent_new` call on this principal's
 /// `general` behavior and materialize its caused request, with the row's
 /// receipt, through the session-message owner (`lifecycle::materialize`).
 pub async fn published_session_message(
@@ -609,7 +610,7 @@ pub async fn published_session_message_with_owner(
         "a session message is signed by a real principal and runs in background"
     );
     let (mut admission, request) = published_admission_with_owner(PublishedAdmissionOptions {
-        tool_name: Some(crate::toolset::CREATE_SESSION_TOOL_NAME.to_owned()),
+        tool_name: Some(crate::toolset::AGENT_NEW_TOOL_NAME.to_owned()),
         start_running: false,
         ..options
     })
@@ -651,7 +652,6 @@ pub async fn pending_spawn_parent(name: &str) -> (Arc<EmbeddedNode>, PathBuf, To
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
-    use crate::config_client::ConfigAccess;
     use crate::tool_call_lifecycle::{CancelCause, FailureClass};
 
     async fn row(node: &EmbeddedNode, session_id: &str) -> serde_json::Value {

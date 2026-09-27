@@ -214,7 +214,7 @@ separately audited camelCase DTO shapes; `x.ai/subagent/cancel` is not
 served, because cancelling a started session is `cancel_process` on its one
 request. The worker target `port-live-worker` is
 no-shell/no-file/no-subagent; its parent target `port-live-tools` starts it
-with `create_session`, and the worker's result returns to the parent session
+with `agent_new`, and the worker's result returns to the parent session
 as a completion notification.
 
 `--edge all` runs the same checks on one multi-turn session. Keep one separate

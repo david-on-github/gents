@@ -7,32 +7,38 @@ use crate::background_tools::{
     BackgroundToolArgs, CancelToolArgs, WaitToolArgs, DEFAULT_WAIT_PROCESS_TIMEOUT_SECS,
     MAX_WAIT_PROCESS_TIMEOUT_SECS,
 };
-use crate::session_message::{CreateSessionArgs, SendMessageArgs};
+use crate::session_message::{AgentInterruptArgs, AgentListArgs, AgentMessageArgs, AgentNewArgs};
 use crate::tool_surface::{BackgroundToolConfig, SubagentToolConfig};
 
 use super::shared::ToolError;
 use super::{
-    CANCEL_PROCESS_TOOL_NAME, CREATE_SESSION_TOOL_NAME, LIST_PROCESSES_TOOL_NAME,
-    READ_PROCESS_TOOL_NAME, SEND_MESSAGE_TOOL_NAME, SPAWN_PROCESS_TOOL_NAME,
-    WAIT_PROCESS_TOOL_NAME,
+    AGENT_INTERRUPT_TOOL_NAME, AGENT_LIST_TOOL_NAME, AGENT_MESSAGE_TOOL_NAME, AGENT_NEW_TOOL_NAME,
+    CANCEL_PROCESS_TOOL_NAME, LIST_PROCESSES_TOOL_NAME, READ_PROCESS_TOOL_NAME,
+    SPAWN_PROCESS_TOOL_NAME, WAIT_PROCESS_TOOL_NAME,
 };
 
 const SESSION_SERVICE_ID: &str = "session";
 
 #[derive(Clone)]
-pub(super) struct CreateSessionTool {
+pub(super) struct AgentNewTool {
     config: SubagentToolConfig,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct SendMessageTool;
+pub(super) struct AgentMessageTool;
+
+#[derive(Clone, Copy)]
+pub(super) struct AgentInterruptTool;
+
+#[derive(Clone, Copy)]
+pub(super) struct AgentListTool;
 
 #[derive(Clone)]
 pub(super) struct SpawnProcessTool {
     config: BackgroundToolConfig,
 }
 
-impl CreateSessionTool {
+impl AgentNewTool {
     pub(super) fn new(config: SubagentToolConfig) -> Self {
         Self { config }
     }
@@ -85,12 +91,8 @@ pub(super) struct ReadProcessTool;
 #[derive(Clone, Copy)]
 pub(super) struct CancelProcessTool;
 
-fn message_body_schema() -> serde_json::Value {
-    serde_json::json!({
-        "prompt": {
-            "type": "string",
-            "description": "Message to send. Provide exactly one of prompt or task."
-        },
+fn message_body_schema(field: &str) -> serde_json::Value {
+    let mut schema = serde_json::json!({
         "task": {
             "type": "object",
             "additionalProperties": false,
@@ -99,20 +101,25 @@ fn message_body_schema() -> serde_json::Value {
                 "task_id": { "type": "string", "description": "Task whose prompt is rendered and whose Goal, if declared, is set on the session." },
                 "input": { "type": "object", "description": "Arguments rendered into the Task prompt." }
             },
-            "description": "Configured Task to render. Provide exactly one of prompt or task."
+            "description": format!("Configured Task to render. Provide exactly one of {field} or task.")
         }
-    })
+    });
+    schema[field] = serde_json::json!({
+        "type": "string",
+        "description": format!("Text to send. Provide exactly one of {field} or task.")
+    });
+    schema
 }
 
-impl Tool for CreateSessionTool {
-    const NAME: &'static str = CREATE_SESSION_TOOL_NAME;
+impl Tool for AgentNewTool {
+    const NAME: &'static str = AGENT_NEW_TOOL_NAME;
 
     type Error = ToolError;
-    type Args = CreateSessionArgs;
+    type Args = AgentNewArgs;
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let mut properties = message_body_schema();
+        let mut properties = message_body_schema("prompt");
         properties["agent"] = serde_json::json!({
             "type": "string",
             "enum": self.allowed_target_names(),
@@ -124,7 +131,7 @@ impl Tool for CreateSessionTool {
         });
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Start a new session with an allowed agent and send it a first message. Returns session_id, request_id and tool_call_id immediately; the session runs in the background under the agent's own behavior. When its request ends, its final answer arrives in this session as a completion message; end your turn instead of polling. Use send_message with the session_id to continue it, and cancel_process with the tool_call_id to interrupt that one request."
+            description: "Starts an agent on a task in the background; its result arrives later as a message in this conversation. Returns session_id, request_id and tool_call_id immediately. End your turn instead of polling. Continue the session with agent_message, stop its current turn with agent_interrupt, and kill the call with cancel_process."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -154,22 +161,26 @@ impl Tool for CreateSessionTool {
     }
 }
 
-impl Tool for SendMessageTool {
-    const NAME: &'static str = SEND_MESSAGE_TOOL_NAME;
+impl Tool for AgentMessageTool {
+    const NAME: &'static str = AGENT_MESSAGE_TOOL_NAME;
 
     type Error = ToolError;
-    type Args = SendMessageArgs;
+    type Args = AgentMessageArgs;
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let mut properties = message_body_schema();
+        let mut properties = message_body_schema("message");
         properties["session_id"] = serde_json::json!({
             "type": "string",
-            "description": "A session this session started with create_session, or this session's own id."
+            "description": "An agent session you can reach (see agent_list), never this conversation's own session."
+        });
+        properties["interrupt"] = serde_json::json!({
+            "type": "boolean",
+            "description": "Stop the session's current turn first, so the message starts a new turn instead of steering the current one. Allowed only for sessions this conversation started."
         });
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Send a message to an existing session. An idle session starts a new request; a busy one receives it as steering for its current work. Returns request_id, delivery (request or steering) and tool_call_id immediately; the result arrives in this session as a completion message."
+            description: "Send a message to an agent session you can reach. An idle session starts a new turn; a busy one receives it as steering for its current turn unless interrupt is set. Returns request_id, delivery (request or steering) and tool_call_id immediately; the result arrives later as a message in this conversation."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -189,6 +200,64 @@ impl Tool for SendMessageTool {
         }
         args.body()
             .map_err(|message| invalid_arguments_error(Self::NAME, "/", message))?;
+        Err(not_yet_executable_error(Self::NAME))
+    }
+}
+
+impl Tool for AgentInterruptTool {
+    const NAME: &'static str = AGENT_INTERRUPT_TOOL_NAME;
+
+    type Error = ToolError;
+    type Args = AgentInterruptArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Stop an agent session's current turn without sending it a message. Allowed only for sessions this conversation started; the session stays available for agent_message."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "A session this conversation started with agent_new."
+                    }
+                },
+                "required": ["session_id"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if args.session_id.trim().is_empty() {
+            return Err(invalid_arguments_error(
+                Self::NAME,
+                "/session_id",
+                "session_id is required",
+            ));
+        }
+        Err(not_yet_executable_error(Self::NAME))
+    }
+}
+
+impl Tool for AgentListTool {
+    const NAME: &'static str = AGENT_LIST_TOOL_NAME;
+
+    type Error = ToolError;
+    type Args = AgentListArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "List the agents you can start with agent_new, and the agent sessions you can reach: each with how it relates to this conversation (started_by_you, started_you or messaged), whether it is busy, and whether you can message or interrupt it."
+                .to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
         Err(not_yet_executable_error(Self::NAME))
     }
 }

@@ -273,7 +273,7 @@ async fn generated_native_restart_dispositions_use_canonical_admission_owner() {
 }
 
 /// A started session is an ordinary agent's session, not a subordinate: no
-/// parent observation ends its `create_session`/`send_message` row on restart,
+/// parent observation ends its `agent_new`/`agent_message` row on restart,
 /// only the row's own expired deadline does. The rows come from the Lean
 /// classifier; the fixture publishes an accepted session-message call.
 #[tokio::test]

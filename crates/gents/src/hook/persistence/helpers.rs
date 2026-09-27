@@ -526,7 +526,7 @@ mod tests {
         };
         let raw = "line 1\nline 2\nline 3\nline 4";
 
-        let bounded = bounded_tool_result_for_model("create_session", raw, &limits);
+        let bounded = bounded_tool_result_for_model("agent_new", raw, &limits);
 
         assert!(bounded.contains("line 1\nline 2"));
         assert!(!bounded.contains("line 3"));

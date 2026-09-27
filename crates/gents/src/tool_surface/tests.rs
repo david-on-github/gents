@@ -1968,7 +1968,7 @@ fn explain_init_package_document_matrix_resolves_expected_surfaces() {
                 "call_tool",
                 "read_file",
                 "spawn_process",
-                "create_session",
+                "agent_new",
             ],
             expected_warnings: vec!["host_ceiling_not_global", "defra_query_empty_scope_all"],
             host_ceiling_warning: true,
@@ -2021,7 +2021,7 @@ fn explain_init_package_document_matrix_resolves_expected_surfaces() {
                 "discover_tools",
                 "call_tool",
                 "bash",
-                "create_session",
+                "agent_new",
                 "defra_query",
             ],
             expected_warnings: vec![],
@@ -2151,8 +2151,10 @@ fn explain_complex_document_combination_filters_subagents_and_groups_surface() {
         "bash",
         "call_tool",
         "spawn_process",
-        "create_session",
-        "send_message",
+        "agent_new",
+        "agent_message",
+        "agent_interrupt",
+        "agent_list",
         "defra_query",
     ] {
         assert!(
@@ -2168,7 +2170,7 @@ fn explain_complex_document_combination_filters_subagents_and_groups_surface() {
     assert!(explanation_category_contains(
         &explanation.included,
         "subagent",
-        "create_session"
+        "agent_new"
     ));
     assert!(explanation_category_contains(
         &explanation.included,

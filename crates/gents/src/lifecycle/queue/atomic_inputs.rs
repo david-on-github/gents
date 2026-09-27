@@ -22,19 +22,6 @@ pub(crate) enum CompletionWake {
     RefusedByHopBound { hop: u32, max_request_hop: u32 },
 }
 
-impl CompletionWake {
-    /// Wakes coalesce only with wakes at the same hop, so a completion caused
-    /// by another session never rides a lower-hop wake.
-    pub(crate) fn queue_key(&self, session_id: &str, own_hop: u32) -> String {
-        match self {
-            Self::AtHop(hop) if *hop != own_hop => {
-                format!("background_completion:{session_id}:hop:{hop}")
-            }
-            _ => format!("background_completion:{session_id}"),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct BackgroundCompletionGateKey {
     node: usize,
@@ -176,6 +163,31 @@ pub(crate) async fn persist_background_completion_with_message(
     queue: RequestQueue,
     existing_notification_doc_id: Option<&str>,
 ) -> Result<EnqueuedBackgroundCompletionInput> {
+    persist_background_completion_with_message_waking(
+        node,
+        parent,
+        notification_content,
+        message_key,
+        wake_content,
+        queue,
+        existing_notification_doc_id,
+        CompletionWake::AtHop(parent.subagent_depth),
+    )
+    .await
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn persist_background_completion_with_message_waking(
+    node: &EmbeddedNode,
+    parent: &AgentRequest,
+    notification_content: &str,
+    message_key: &str,
+    wake_content: &str,
+    queue: RequestQueue,
+    existing_notification_doc_id: Option<&str>,
+    wake: CompletionWake,
+) -> Result<EnqueuedBackgroundCompletionInput> {
     use gents_protocol::output::{
         OutputOutcome, OutputSegment, OutputSource, OutputWriter, SegmentRun, SourceClose,
         StreamDeclaration, StreamPayload,
@@ -304,7 +316,7 @@ pub(crate) async fn persist_background_completion_with_message(
                 end_byte: notification_content.len() as u64,
             }],
         },
-        CompletionWake::AtHop(parent.subagent_depth),
+        wake,
     )
     .await
 }
@@ -362,6 +374,7 @@ async fn background_completion_transaction_attempt(
                     request_id
                     session_id
                     input
+                    subagent_depth
                 }}
                 generations: AgentRequest(
                     filter: {{
@@ -480,12 +493,25 @@ async fn background_completion_transaction_attempt(
     let pending_rows: Vec<AgentRequestRow> =
         serde_json::from_value(response["data"]["pending"].clone())
             .context("decode pending AgentRequest rows")?;
-    let pending = pending_rows
-        .into_iter()
-        .find(|row| {
-            row_matches_coalesced_source_and_key(row, QueueSource::BackgroundCompletion, queue_key)
-        })
-        .and_then(|row| queue_row_to_enqueued_request(&row));
+    // Every pending notification is consumed by whichever wake claims next
+    // (the claim snapshots the session's input by sequence), so the one
+    // pending wake must carry the highest hop any of them requires: a lower
+    // one is superseded by a new wake at this hop rather than joined.
+    let (pending, lower) = match pending_rows.into_iter().find(|row| {
+        row_matches_coalesced_source_and_key(row, QueueSource::BackgroundCompletion, queue_key)
+    }) {
+        Some(row)
+            if row
+                .subagent_depth
+                .and_then(|hop| u32::try_from(hop).ok())
+                .unwrap_or(0)
+                >= wake_hop =>
+        {
+            (queue_row_to_enqueued_request(&row), None)
+        }
+        Some(row) => (None, Some(row)),
+        None => (None, None),
+    };
     let message_sequence =
         next_append_sequence_in_transaction(txn, &parent.agent_did, &parent.session_id).await?;
     let mut max_generation = None::<u64>;
@@ -540,6 +566,37 @@ async fn background_completion_transaction_attempt(
             .await?;
             let response = txn.execute(&request_mutation).await?;
             let doc_id = transaction_created_doc_id(&response, "AgentRequest")?;
+            if let Some(lower) = &lower {
+                let lower_doc_id = lower
+                    .doc_id
+                    .as_deref()
+                    .context("pending wake is missing _docID")?;
+                txn.execute(&format!(
+                    r#"mutation {{
+                        update_AgentRequest(
+                            filter: {{
+                                _docID: {{ _eq: "{}" }},
+                                agent_did: {{ _eq: "{}" }},
+                                lifecycle_state: {{ _eq: "pending" }}
+                            }},
+                            input: {{
+                                lifecycle_state: "superseded",
+                                superseded_by_request: "{}",
+                                superseded_by_request_doc_id: "{}",
+                                failure_reason: "raised to the hop of a later completion",
+                                terminalized_at: "{}",
+                                terminal_redrive_attempts: 0
+                            }}
+                        ) {{ _docID }}
+                    }}"#,
+                    escape_graphql_string(lower_doc_id),
+                    escape_graphql_string(&parent.agent_did),
+                    escape_graphql_string(&request_id),
+                    escape_graphql_string(&doc_id),
+                    escape_graphql_string(&chrono::Utc::now().to_rfc3339()),
+                ))
+                .await?;
+            }
             (
                 EnqueuedAgentRequest {
                     doc_id,
