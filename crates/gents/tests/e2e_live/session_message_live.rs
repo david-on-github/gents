@@ -2931,8 +2931,8 @@ const RESTART_WORKER_BEHAVIOR_ID: &str = "live-restart-worker";
 /// The caller's runtime stops while the session it started on another node
 /// is blocked, then restarts on the same store. The started session keeps
 /// running meanwhile; once released, its terminal settles the caller's row
-/// and is delivered as exactly one notification and one wake, including
-/// across a further crash and restart.
+/// and is delivered as exactly one notification bound to a completed wake,
+/// still exactly one after a crash and restart that follow delivery.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live: set GENTS_LIVE_SESSION_MESSAGE=1 and pass --ignored"]
 async fn live_restart_mid_delegation_recovers() -> Result<()> {
