@@ -4,8 +4,8 @@
  * One caused request and the call that caused it. `caused_by_session_id` is
  * null when the causing request is not visible on this node.
  */
-export type CausedRequestView = { requestId: string, requestDocId: string, sessionId: string | null, agentDid: string | null, behaviorId: string | null, lifecycleState: string | null, interruptRequestedAt: string | null, createdAt: string | null,
+export type CausedRequestView = { requestId: string, requestDocId: string, sessionId: string | null, agentDid: string | null, requesterDid: string | null, behaviorId: string | null, lifecycleState: string | null, interruptRequestedAt: string | null, createdAt: string | null,
 /**
  * `subagent_depth`: the causal hop.
  */
-hop: number | null, causedByRequestId: string | null, causedByRequestDocId: string | null, causedByToolCallId: string | null, causedBySessionId: string | null, };
+hop: number | null, causedByRequestId: string | null, causedByRequestDocId: string | null, causedByToolCallId: string | null, causedByToolCallDocId: string | null, causedBySessionId: string | null, };

@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -91,19 +91,22 @@ pub struct StuckWorkDiagnosticView {
     pub stuck_since: Option<String>,
 }
 
-/// Session-message provenance for one session, read from the immutable
-/// `AgentRequest.caused_by_parent_*` lineage. It is provenance only: no
-/// hierarchy, cascade or authority follows from it.
+/// Session-message provenance for one session scope, read from the immutable
+/// `AgentRequest.caused_by_parent_*` lineage under the `gents::session_origin`
+/// rule. It is provenance only: no hierarchy, cascade or authority follows.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionProvenanceView {
     pub session_id: String,
-    /// Requests in this session that another session's tool call caused.
+    /// This session's origin, when another session's call caused it.
+    pub started_by: Option<CausedRequestView>,
+    /// Requests in this session that another session's call caused.
     pub received: Vec<CausedRequestView>,
-    /// Requests in other sessions that this session's tool calls caused.
+    /// The origins of the sessions this session's calls started: its
+    /// subagents. A message into an existing session is not one.
+    pub started: Vec<CausedRequestView>,
+    /// Every request this session's calls caused, starts and messages alike.
     pub sent: Vec<CausedRequestView>,
-    /// A bound was reached; older links may be missing.
-    pub truncated: bool,
 }
 
 /// One caused request and the call that caused it. `caused_by_session_id` is
@@ -115,6 +118,7 @@ pub struct CausedRequestView {
     pub request_doc_id: String,
     pub session_id: Option<String>,
     pub agent_did: Option<String>,
+    pub requester_did: Option<String>,
     pub behavior_id: Option<String>,
     pub lifecycle_state: Option<String>,
     pub interrupt_requested_at: Option<String>,
@@ -124,7 +128,19 @@ pub struct CausedRequestView {
     pub caused_by_request_id: Option<String>,
     pub caused_by_request_doc_id: Option<String>,
     pub caused_by_tool_call_id: Option<String>,
+    pub caused_by_tool_call_doc_id: Option<String>,
     pub caused_by_session_id: Option<String>,
+}
+
+/// The runtime owner's outcome for a background kill: `cancelled`, `lost`,
+/// `unverified`, `already_terminal` (with `state`), `not_background` or
+/// `not_found`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct BackgroundCancelResultView {
+    pub outcome: String,
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 /// Result envelope for `desktop_interrupt_request`:

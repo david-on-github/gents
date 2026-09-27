@@ -1,6 +1,7 @@
 import type { DesktopTransport } from "../transport.js";
 import type { BackendHealth } from "../types/backendHealth.js";
 import type {
+  BackgroundCancelResultView,
   ChatSendResult,
   CodexLoginResult,
   DesktopClientSnapshot,
@@ -340,5 +341,10 @@ export function createDesktopApiAdapter(
       invokeDesktop<InterruptRequestResult>("desktop_interrupt_request", {
         request,
       }),
+    cancelBackgroundProcess: (request) =>
+      invokeDesktop<BackgroundCancelResultView>(
+        "desktop_cancel_background_process",
+        { request },
+      ),
   };
 }

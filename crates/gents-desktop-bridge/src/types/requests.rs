@@ -290,14 +290,30 @@ pub struct DesktopOperationsSnapshotRequest {
     pub include_terminal: Option<bool>,
 }
 
-/// One session's provenance: the requests other sessions' tool calls caused in
-/// it, and the requests its own tool calls caused elsewhere.
+/// One session scope's provenance: what other sessions' calls caused in it,
+/// and what its own calls caused elsewhere.
 #[derive(Debug, Clone, Deserialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct DesktopSessionProvenanceRequest {
     pub session_id: String,
     #[serde(default)]
     pub agent_did: Option<String>,
+    /// Part of the exact session scope; null is the null-requester scope.
+    #[serde(default)]
+    pub requester_did: Option<String>,
+}
+
+/// Kills one background tool row (a process, or a started session's row) in
+/// the session scope the row belongs to.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct DesktopCancelBackgroundProcessRequest {
+    #[serde(default)]
+    pub agent_did: Option<String>,
+    pub session_id: String,
+    #[serde(default)]
+    pub requester_did: Option<String>,
+    pub tool_call_id: String,
 }
 
 /// Interrupts exactly `request_id`. Other requests, including those it caused

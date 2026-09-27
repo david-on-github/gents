@@ -1679,7 +1679,7 @@ def caseCoverage : List CoverageEntry :=
   , tagged (consumerCoverage
       "state_machine"
       "Request"
-      "gents_desktop_bridge::tests::operations_interrupt::interrupt_request_returns_accepted")
+      "gents_desktop_bridge::tests::operations_interrupt::interrupt_request_reaches_only_the_named_request")
       "interrupt-and-cancel" [Surface.operatorUi]
   , tagged (followUpCoverage
       "workspace_cases"

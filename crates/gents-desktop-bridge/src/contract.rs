@@ -107,6 +107,7 @@ pub fn command_inventory() -> Vec<CommandContract> {
         ("desktop_probe_mcp_service", "operations-read"),
         // interrupt-control
         ("desktop_interrupt_request", "interrupt-control"),
+        ("desktop_cancel_background_process", "interrupt-control"),
         // config-write (save/delete/test/auth)
         ("desktop_agent_config_save", "config-write"),
         ("desktop_default_behavior_set", "config-write"),
@@ -485,6 +486,7 @@ mod tests {
             ("desktop_list_mcp_services_with_health", "read"),
             ("desktop_probe_mcp_service", "read"),
             ("desktop_interrupt_request", "mutate"),
+            ("desktop_cancel_background_process", "mutate"),
             ("desktop_agent_config_save", "mutate"),
             ("desktop_default_behavior_set", "mutate"),
             ("desktop_config_components_apply", "mutate"),

@@ -2,20 +2,25 @@
 import type { CausedRequestView } from "./CausedRequestView.js";
 
 /**
- * Session-message provenance for one session, read from the immutable
- * `AgentRequest.caused_by_parent_*` lineage. It is provenance only: no
- * hierarchy, cascade or authority follows from it.
+ * Session-message provenance for one session scope, read from the immutable
+ * `AgentRequest.caused_by_parent_*` lineage under the `gents::session_origin`
+ * rule. It is provenance only: no hierarchy, cascade or authority follows.
  */
 export type SessionProvenanceView = { sessionId: string,
 /**
- * Requests in this session that another session's tool call caused.
+ * This session's origin, when another session's call caused it.
+ */
+startedBy: CausedRequestView | null,
+/**
+ * Requests in this session that another session's call caused.
  */
 received: Array<CausedRequestView>,
 /**
- * Requests in other sessions that this session's tool calls caused.
+ * The origins of the sessions this session's calls started: its
+ * subagents. A message into an existing session is not one.
  */
-sent: Array<CausedRequestView>,
+started: Array<CausedRequestView>,
 /**
- * A bound was reached; older links may be missing.
+ * Every request this session's calls caused, starts and messages alike.
  */
-truncated: boolean, };
+sent: Array<CausedRequestView>, };

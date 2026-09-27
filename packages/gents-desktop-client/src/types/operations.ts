@@ -1,3 +1,4 @@
+import type { DesktopCancelBackgroundProcessRequest as GeneratedDesktopCancelBackgroundProcessRequest } from "../generated/DesktopCancelBackgroundProcessRequest.js";
 import type { DesktopInterruptRequest as GeneratedDesktopInterruptRequest } from "../generated/DesktopInterruptRequest.js";
 import type { DesktopOperationsSnapshotRequest as GeneratedDesktopOperationsSnapshotRequest } from "../generated/DesktopOperationsSnapshotRequest.js";
 import type { DesktopProbeMcpServiceRequest as GeneratedDesktopProbeMcpServiceRequest } from "../generated/DesktopProbeMcpServiceRequest.js";
@@ -11,6 +12,7 @@ type RequestInput<T> = {
 
 export type { ActiveRequestView } from "../generated/ActiveRequestView.js";
 export type { ActiveToolCallView } from "../generated/ActiveToolCallView.js";
+export type { BackgroundCancelResultView } from "../generated/BackgroundCancelResultView.js";
 export type { BackgroundedToolView } from "../generated/BackgroundedToolView.js";
 export type { CausedRequestView } from "../generated/CausedRequestView.js";
 export type { DerivedCancelCauseView } from "../generated/DerivedCancelCauseView.js";
@@ -25,6 +27,8 @@ export type { StuckWorkDiagnosticView } from "../generated/StuckWorkDiagnosticVi
 export type { WorkspaceEntryView } from "../generated/WorkspaceEntryView.js";
 export type { WorkspaceListingView } from "../generated/WorkspaceListingView.js";
 
+export type DesktopCancelBackgroundProcessRequestRequest =
+  RequestInput<GeneratedDesktopCancelBackgroundProcessRequest>;
 export type DesktopInterruptRequestRequest =
   RequestInput<GeneratedDesktopInterruptRequest>;
 export type DesktopOperationsSnapshotRequest =

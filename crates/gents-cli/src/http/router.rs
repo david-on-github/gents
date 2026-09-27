@@ -178,6 +178,10 @@ pub(crate) fn runtime_contract_router(
         .route("/enrollment/pending", post(enrollment_pending_handler))
         .route("/self", get(self_handler))
         .route("/sessions", get(sessions_handler))
+        .route(
+            crate::http::background_cancel::BACKGROUND_CANCEL_PATH,
+            post(crate::http::background_cancel::background_cancel_handler),
+        )
         .route("/fleet", get(fleet_handler))
         .route("/fleet/slots", get(fleet_slots_handler))
         .route("/mcp/pool", get(mcp_pool_handler))

@@ -120,8 +120,10 @@ export type {
 export type {
   ActiveRequestView,
   ActiveToolCallView,
+  BackgroundCancelResultView,
   BackgroundedToolView,
   CausedRequestView,
+  DesktopCancelBackgroundProcessRequestRequest,
   DesktopInterruptRequestRequest,
   DesktopOperationsSnapshot,
   DesktopOperationsSnapshotRequest,

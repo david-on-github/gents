@@ -28,6 +28,8 @@ import type {
   GrokLoginResult,
   DesktopClientSnapshot,
   EnrollmentRequestView,
+  BackgroundCancelResultView,
+  DesktopCancelBackgroundProcessRequestRequest,
   DesktopInterruptRequestRequest,
   DesktopSessionProvenanceRequest,
   DesktopSessionSnapshot,
@@ -298,6 +300,10 @@ export type DesktopApiAdapter = {
   interruptRequest: (
     request: DesktopInterruptRequestRequest,
   ) => Promise<InterruptRequestResult>;
+  /** Kill one background tool row through the runtime that owns it. */
+  cancelBackgroundProcess: (
+    request: DesktopCancelBackgroundProcessRequestRequest,
+  ) => Promise<BackgroundCancelResultView>;
 };
 
 export type { HomeResetDisposition, ManagedServerResetResult, ManagedServerStatus };
