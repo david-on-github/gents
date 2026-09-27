@@ -1,4 +1,5 @@
-/* Which sessions sent work into this one: the session whose call started it,
+/* Which sessions sent work into this one: the session whose call started it
+   (its origin, under the runtime's session-origin rule),
    and the sender of each turn another session's call caused. Read from the
    durable request lineage; a turn's request names the call that caused it,
    so nothing is matched by text. Senders are ordinary sessions, and none of
@@ -65,16 +66,10 @@ export function useParentWork(
     const byRequest = new Map(
       received.map((r) => [r.requestId, r.causedBySessionId] as const),
     );
-    /* the session's provenance names the request whose call started it; a
-       session a person started and another session later messaged has none */
-    const startedBy = sessions.get(provenance?.sessionId ?? "")?.provenance
-      ?.parent_request_doc_id;
-    const parent = startedBy
-      ? sender(
-          received.find((r) => r.causedByRequestDocId === startedBy)
-            ?.causedBySessionId ?? null,
-        )
-      : null;
+    /* the session another one started names that session through its
+       origin; a session a person started and another session later messaged
+       has none */
+    const parent = sender(provenance?.startedBy?.causedBySessionId ?? null);
     return {
       parent,
       hasSenders: true,

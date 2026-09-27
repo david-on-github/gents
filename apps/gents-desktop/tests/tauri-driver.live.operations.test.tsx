@@ -53,7 +53,6 @@ describeLive("Tauri app live operations snapshot", () => {
             `expected running native background tool: ${JSON.stringify(snapshot.backgroundedTools)}`,
           ).toBeDefined();
           expect(row?.awaitMode).toBe("background");
-          expect(row?.childRequestId).toBeNull();
           expect(row?.lifecycleState).toMatch(/pending|running/i);
           expect(row?.nativeExecutor).not.toBeNull();
           return row!;

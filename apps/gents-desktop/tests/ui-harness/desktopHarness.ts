@@ -2250,11 +2250,15 @@ export function createDesktopUiHarness(
     async sessionProvenance(request) {
       const view: SessionProvenanceView = {
         sessionId: request.sessionId,
+        startedBy: null,
         received: [],
+        started: [],
         sent: [],
-        truncated: false,
       };
       return view;
+    },
+    async cancelBackgroundProcess() {
+      return { outcome: "cancelled", state: null };
     },
     async listBackendsWithHealth() {
       if (scenario === "backend-health-error") {

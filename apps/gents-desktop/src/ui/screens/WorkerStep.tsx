@@ -5,10 +5,7 @@
    states. */
 import { type ReactNode } from "react";
 import { ArrowUpRight, Ban, CircleCheck, CircleX } from "lucide-react";
-import type {
-  CausedRequestView,
-  RenderedToolCallView,
-} from "@source-inc/gents-desktop-client";
+import type { RenderedToolCallView } from "@source-inc/gents-desktop-client";
 import { Spinner } from "@gents/ui/components/spinner";
 import { BehaviorAvatar } from "./parts";
 import { behaviorName } from "./behavior";
@@ -25,7 +22,7 @@ import { ToolBody } from "./tool-views";
 import { duration } from "./tool-summary";
 import { when } from "./time";
 import { isLive } from "@/lib/live";
-import type { Subagent, Workers } from "./workers";
+import type { Reached, Subagent, Workers } from "./workers";
 import { WorkerStop } from "./WorkerActions";
 
 type Tone = "running" | "done" | "failed" | "stopped" | "unknown";
@@ -34,32 +31,29 @@ const firstLine = (s: string | null | undefined) => s?.trim().split("\n")[0] ?? 
 const since = (iso: string | null | undefined) =>
   iso ? duration(Math.max(0, Date.now() - Date.parse(iso))) : null;
 
-/* where a subagent is, from the bridge's own facts in order of freshness:
-   its session's turn (turn_state_label), then the lifecycle of the request
-   this call caused there. Nothing here guesses at replication: a subagent
-   with no summary yet reads as its request says. */
+/* where this row's call got to: the lifecycle of the one request it caused.
+   Other requests in the same session are other rows' business. Nothing here
+   guesses at replication: a request the lineage has not delivered yet reads
+   as the call's own status says. */
 const WAITING = new Set(["waitingforclaim", "pending", "claimed"]);
 
 export function workerNow(
   tool: RenderedToolCallView,
-  reached: { subagent: Subagent; request: CausedRequestView } | null,
+  reached: Reached | null,
 ): { tone: Tone; text: string; detail?: string | null } {
-  const turn = reached?.subagent.summary?.turnState ?? null;
-  const request =
-    reached?.subagent.live?.lifecycleState ?? reached?.request.lifecycleState;
   const failure = firstLine(
     tool.presentation.kind === "subagent" ? tool.presentation.output : null,
   );
-  const state = turn ?? request ?? null;
+  const state = reached?.request.lifecycleState ?? null;
   if (!state) {
-    /* no session or lineage fact: only the call speaks, and its status
+    /* no lineage fact: only the call speaks, and its status
        (tool_status_kind: success, error, running, unknown) is about the
-       call, so it never makes a subagent look live on its own */
+       call, so it never makes a request look live on its own */
     switch (tool.statusKind) {
       case "running":
         return { tone: "running", text: "starting" };
       case "success":
-        return { tone: "done", text: "started" };
+        return { tone: "done", text: "sent" };
       case "error":
         return { tone: "failed", text: "failed", detail: failure };
       default:
@@ -69,7 +63,7 @@ export function workerNow(
   if (WAITING.has(state.toLowerCase()))
     return { tone: "running", text: "waiting for the agent to pick it up" };
   if (isLive(state)) {
-    const s = when(reached?.subagent.summary?.updatedAt ?? null);
+    const s = when(reached?.summary?.updatedAt ?? null);
     return {
       tone: "running",
       text: s && s !== "now" ? `working · last change ${s}` : "working",
@@ -251,6 +245,7 @@ export function WorkerStep({
         }
         detail={bg?.nativeExecutor ? `pid ${bg.nativeExecutor.pid}` : null}
         sessionId={null}
+        menu={<WorkerStop name={p.target ?? tool.toolName} tool={tool} />}
       >
         <ToolBody tool={tool} />
       </Row>
@@ -258,13 +253,13 @@ export function WorkerStep({
   }
   if (p.kind !== "subagent") return null;
   const reached = workers.byToolCall(tool);
-  const subagent = reached?.subagent ?? null;
-  const name = subagentName(subagent, p.name);
-  const sessionId = subagent?.sessionId ?? p.sessionId ?? null;
-  /* the same mark the session list uses, so a subagent looks like itself
+  const summary = reached?.summary ?? null;
+  const name = summary?.title ?? p.name ?? "a session";
+  const sessionId = reached?.request.sessionId ?? p.sessionId ?? null;
+  /* the same mark the session list uses, so a session looks like itself
      wherever it appears. One with no summary has no behavior to wear, and
      keeps the tone's glyph. */
-  const behaviorId = subagent?.summary?.behaviorId ?? null;
+  const behaviorId = summary?.behaviorId ?? null;
   const mark = behaviorId ? (
     <BehaviorAvatar
       name={behaviorName(behaviorId, deployment)}
@@ -273,32 +268,20 @@ export function WorkerStep({
     />
   ) : undefined;
   const now = workerNow(tool, reached);
-  const stop = <WorkerStop name={name} live={subagent?.live ?? null} />;
-  if (p.action === "start")
-    return (
-      <Row
-        tone={now.tone}
-        verb="Started"
-        mark={mark}
-        name={name}
-        state={now.text}
-        detail={now.detail ?? firstLine(p.description)}
-        sessionId={sessionId}
-        menu={stop}
-      >
-        <ToolBody tool={tool} />
-      </Row>
-    );
   return (
     <Row
       tone={now.tone}
-      verb="Messaged"
+      /* a start whose session this one began is a subagent; any other call
+         only sent a message */
+      verb={
+        p.action === "start" && (!reached || reached.subagent) ? "Started" : "Messaged"
+      }
       mark={mark}
       name={name}
       state={now.text}
-      detail={firstLine(p.description)}
+      detail={now.detail ?? firstLine(p.description)}
       sessionId={sessionId}
-      menu={stop}
+      menu={<WorkerStop name={name} tool={tool} />}
     >
       <ToolBody tool={tool} />
     </Row>
@@ -308,8 +291,8 @@ export function WorkerStep({
 export const subagentName = (subagent: Subagent | null, target?: string | null) =>
   subagent?.summary?.title ?? target ?? "a subagent";
 
-/* The sessions this one started or messaged, each as the session it is:
-   where it got to, a way in, and a stop while it works. */
+/* The sessions this one started, each as the session it is: where it got
+   to and a way in. Stopping is a row's business: it names the call. */
 export function SubagentList({ workers }: { workers: Workers }) {
   const deployment = useDeployment();
   if (workers.all.length === 0) return null;
@@ -321,7 +304,6 @@ export function SubagentList({ workers }: { workers: Workers }) {
         const behaviorId = subagent.summary?.behaviorId ?? null;
         const state =
           subagent.summary?.turnState ??
-          subagent.live?.lifecycleState ??
           subagent.requests[subagent.requests.length - 1]?.lifecycleState ??
           null;
         return (
@@ -340,7 +322,6 @@ export function SubagentList({ workers }: { workers: Workers }) {
               <span className="truncate">{name}</span>
               {state && <span className="shrink-0">· {state}</span>}
             </a>
-            <WorkerStop name={name} live={subagent.live} />
           </span>
         );
       })}

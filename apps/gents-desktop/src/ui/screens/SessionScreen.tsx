@@ -93,7 +93,7 @@ import {
 } from "@gents/ui/components/alert-dialog";
 import { Markdown } from "./Markdown";
 import { ToolBody } from "./tool-views";
-import { SubagentList, WorkerStep, isWorkerStep, subagentName } from "./WorkerStep";
+import { SubagentList, WorkerStep, isWorkerStep } from "./WorkerStep";
 import { NO_WORKERS, useSessionProvenance, useWorkers, type Workers } from "./workers";
 import { useParentWork, type ParentWork } from "./parentWork";
 import { WorkerActionsContext, type WorkerActions } from "./WorkerActions";
@@ -479,10 +479,8 @@ function WorkerRunStep({
   const first = tools[0]!;
   const p = first.presentation;
   const reached = workers.byToolCall(first);
-  const name = subagentName(
-    reached?.subagent ?? null,
-    p.kind === "subagent" ? p.name : null,
-  );
+  const name =
+    reached?.summary?.title ?? (p.kind === "subagent" ? p.name : null) ?? "a session";
   const last = tools[tools.length - 1]!;
   const failed = tools.some(
     (t) => t.statusKind === "error" || t.statusKind === "failed",
@@ -491,7 +489,7 @@ function WorkerRunStep({
      avatar the session list and the parent's turns use. A worker with
      no session summary has no behavior to wear, and falls back to the
      kind's glyph. */
-  const behaviorId = reached?.subagent.summary?.behaviorId ?? null;
+  const behaviorId = reached?.summary?.behaviorId ?? null;
   return (
     <ToolStep
       label={name}
@@ -640,6 +638,15 @@ const TranscriptItem = memo(function TranscriptItem({
       );
   }
 });
+
+/* what a kill outcome needs said; a stopped row says it by settling */
+const KILL_OUTCOMES: Record<string, string> = {
+  already_terminal: "That had already finished.",
+  lost: "Stopped; its process could not be found to confirm.",
+  unverified: "Asked it to stop; a process is still observed running.",
+  not_found: "Couldn't stop: the runtime does not know that call.",
+  not_background: "Couldn't stop: that call is not running in the background.",
+};
 
 const STOP_SOURCES: Record<string, string> = {
   requestInterrupt: "a stop request on this request",
@@ -963,28 +970,37 @@ export function SessionScreen({ shell }: { shell: Shell }) {
       window.removeEventListener("resize", publish);
     };
   }, []);
-  /* a person stopping a subagent from here: the desktop's interrupt on the
-     one request it is working on, on its own agent */
+  /* a person killing a background row from here: the runtime that owns the
+     row stops it within this session's exact scope. A subagent row's kill
+     interrupts only the request that row's call caused. */
+  const sessionScope = deployment?.sessions.find(
+    (x) => x.sessionId === session?.sessionId,
+  );
   const workerActions = useMemo<WorkerActions>(
     () => ({
-      stop: (request) => {
+      kill: (tool) => {
+        if (!sessionScope || !tool.toolCallId) {
+          toast("Couldn't stop: this session's scope is not known yet.");
+          return;
+        }
         void shell.api
-          .interruptRequest({
-            requestId: request.requestId,
-            agentDid: request.agentDid,
-            cause: "userCancelled",
+          .cancelBackgroundProcess({
+            agentDid: sessionScope.agentDid,
+            sessionId: sessionScope.sessionId,
+            requesterDid: sessionScope.requesterDid,
+            toolCallId: tool.toolCallId,
           })
           .then(
             (r) => {
-              if (!r.accepted && !r.alreadyInterrupted)
-                toast("That subagent had already finished.");
+              const said = KILL_OUTCOMES[r.outcome];
+              if (said) toast(said);
             },
             (e: unknown) =>
               toast(`Couldn't stop: ${e instanceof Error ? e.message : String(e)}`),
           );
       },
     }),
-    [shell.api],
+    [shell.api, sessionScope],
   );
   const agentName = deployment?.agentPrincipal.displayName ?? "the agent";
   /* the snapshot says what happened in a session; the summary says where it
@@ -1132,15 +1148,11 @@ export function SessionScreen({ shell }: { shell: Shell }) {
     const release = () =>
       setRequestedStop((current) => (current === requestId ? null : current));
     try {
-      const r = await shell.api.interruptRequest({
+      await shell.api.interruptRequest({
         requestId,
         agentDid: shell.selectedAgentDid,
         cause: "userCancelled",
       });
-      if (!r.accepted && !r.alreadyInterrupted) {
-        release();
-        toast("This response had already finished.");
-      }
     } catch (e) {
       release();
       toast(`Couldn't stop: ${e instanceof Error ? e.message : String(e)}`);

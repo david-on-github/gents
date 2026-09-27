@@ -11,20 +11,28 @@ import type {
 vi.mock("@/lib/router", () => ({ href: () => "#", navigate: vi.fn() }));
 
 import { SubagentList, WorkerStep, workerNow } from "../src/ui/screens/WorkerStep";
-import { NO_WORKERS, type Subagent, type Workers } from "../src/ui/screens/workers";
+import {
+  NO_WORKERS,
+  type Reached,
+  type Subagent,
+  type Workers,
+} from "../src/ui/screens/workers";
 import { WorkerActionsContext } from "../src/ui/screens/WorkerActions";
 
-const start = (statusKind = "success"): RenderedToolCallView =>
+const call = (
+  statusKind = "running",
+  action: "start" | "message" = "start",
+): RenderedToolCallView =>
   ({
     itemKey: "tool-1",
-    toolName: "create_session",
+    toolName: action === "start" ? "create_session" : "send_message",
     toolCallId: "call-1",
     requestId: "parent-req",
     statusKind,
     awaitMode: "background",
     presentation: {
       kind: "subagent",
-      action: "start",
+      action,
       name: "reviewer",
       sessionId: "child-session",
       description: "Review the diff",
@@ -49,6 +57,7 @@ const caused = (requestId: string, lifecycleState: string): CausedRequestView =>
   requestDocId: `doc-${requestId}`,
   sessionId: "child-session",
   agentDid: "did:key:reviewer",
+  requesterDid: null,
   behaviorId: null,
   lifecycleState,
   interruptRequestedAt: null,
@@ -57,102 +66,110 @@ const caused = (requestId: string, lifecycleState: string): CausedRequestView =>
   causedByRequestId: "parent-req",
   causedByRequestDocId: "doc-parent-req",
   causedByToolCallId: "call-1",
+  causedByToolCallDocId: "doc-call-1",
   causedBySessionId: "parent-session",
 });
 
-const subagent = (
-  turnState: string | null,
-  live: CausedRequestView | null = null,
-): Subagent => ({
+const subagent = (turnState: string | null): Subagent => ({
   sessionId: "child-session",
   agentDid: "did:key:reviewer",
   summary: summary(turnState),
-  requests: [caused("child-req", "completed"), ...(live ? [live] : [])],
-  live,
+  origin: caused("child-req", "completed"),
+  requests: [caused("child-req", "completed"), caused("child-req-2", "processing")],
 });
 
-const reached = (s: Subagent) => ({ subagent: s, request: s.requests[0]! });
+/* this row's call caused `request`; the session may be working on others */
+const reached = (
+  request: CausedRequestView,
+  s: Subagent | null = subagent("running"),
+): Reached => ({ request, summary: s?.summary ?? summary("running"), subagent: s });
 
-function workersWith(s: Subagent | null): Workers {
+function workersWith(r: Reached | null): Workers {
   return {
     ...NO_WORKERS,
-    all: s ? [s] : [],
-    byToolCall: () => (s ? reached(s) : null),
+    all: r?.subagent ? [r.subagent] : [],
+    byToolCall: () => r,
     loaded: true,
   };
 }
 
-function renderStep(s: Subagent | null, stop = vi.fn()) {
+function renderStep(tool: RenderedToolCallView, r: Reached | null, kill = vi.fn()) {
   render(
-    <WorkerActionsContext.Provider value={{ stop }}>
-      <WorkerStep tool={start()} workers={workersWith(s)} />
+    <WorkerActionsContext.Provider value={{ kill }}>
+      <WorkerStep tool={tool} workers={workersWith(r)} />
     </WorkerActionsContext.Provider>,
   );
-  return stop;
+  return kill;
 }
 
-describe("subagent state", () => {
+describe("a subagent row", () => {
+  it("shows the request this row's call caused, not the session's latest", () => {
+    /* the session is working on a later request; this call's has finished */
+    expect(workerNow(call(), reached(caused("child-req", "completed")))).toEqual({
+      tone: "done",
+      text: "finished",
+    });
+    expect(workerNow(call(), reached(caused("child-req", "processing"))).tone).toBe(
+      "running",
+    );
+  });
+
+  it("reads the caused request's lifecycle", () => {
+    const at = (state: string) => workerNow(call(), reached(caused("r", state)));
+    expect(at("pending").text).toBe("waiting for the agent to pick it up");
+    expect(at("processing").tone).toBe("running");
+    expect(at("completed").tone).toBe("done");
+    expect(at("dead").tone).toBe("failed");
+    expect(at("interrupted").tone).toBe("stopped");
+    expect(at("superseded").tone).toBe("stopped");
+  });
+
   it("never infers replication from a missing message count", () => {
-    for (const turn of ["running", "completed", "waitingForClaim"]) {
-      expect(workerNow(start(), reached(subagent(turn))).text).not.toMatch(/sync/i);
+    for (const state of ["processing", "completed", "pending"]) {
+      expect(workerNow(call(), reached(caused("r", state))).text).not.toMatch(/sync/i);
     }
   });
 
-  it("reads every live turn state the bridge emits as running", () => {
-    expect(workerNow(start(), reached(subagent("running"))).tone).toBe("running");
-    expect(workerNow(start(), reached(subagent("waitingForClaim")))).toEqual({
+  it("never reads the tool call's own status as a live request", () => {
+    expect(workerNow(call("success"), null)).toEqual({ tone: "done", text: "sent" });
+    expect(workerNow(call("error"), null).tone).toBe("failed");
+    expect(workerNow(call("unknown"), null)).toEqual({
+      tone: "unknown",
+      text: "state unknown",
+    });
+    expect(workerNow(call("running"), null)).toEqual({
       tone: "running",
-      text: "waiting for the agent to pick it up",
+      text: "starting",
     });
   });
 
-  it("uses the caused request's lifecycle when there is no summary", () => {
-    const lifecycle = (lifecycleState: string) => {
-      const request = caused("child-req", lifecycleState);
-      return workerNow(start(), {
-        subagent: {
-          sessionId: "child-session",
-          agentDid: null,
-          summary: null,
-          requests: [request],
-          live: null,
-        },
-        request,
-      });
-    };
-    expect(lifecycle("processing").tone).toBe("running");
-    expect(lifecycle("pending").text).toBe("waiting for the agent to pick it up");
-    expect(lifecycle("completed").tone).toBe("done");
-    expect(lifecycle("dead").tone).toBe("failed");
-  });
-
-  it("settles on the terminal turn states", () => {
-    expect(workerNow(start(), reached(subagent("completed"))).tone).toBe("done");
-    expect(workerNow(start(), reached(subagent("failed"))).tone).toBe("failed");
-    expect(workerNow(start(), reached(subagent("interrupted"))).tone).toBe("stopped");
-    expect(workerNow(start(), reached(subagent("superseded"))).tone).toBe("stopped");
-  });
-
-  it("offers Stop on a running subagent and targets only its live request", () => {
-    const live = caused("child-req-2", "processing");
-    const stop = renderStep(subagent("running", live));
-    expect(screen.queryByText(/not synced/)).toBeNull();
+  it("kills this row's background call, whichever request the session is on", () => {
+    const tool = call("running");
+    const kill = renderStep(tool, reached(caused("child-req", "processing")));
     screen.getByRole("button", { name: "Stop Reviewer" }).click();
-    expect(stop).toHaveBeenCalledTimes(1);
-    expect(stop).toHaveBeenCalledWith(live);
+    expect(kill).toHaveBeenCalledTimes(1);
+    expect(kill).toHaveBeenCalledWith(tool);
   });
 
-  it("offers Stop while a subagent waits for the agent", () => {
-    renderStep(subagent("waitingForClaim", caused("child-req-2", "pending")));
-    expect(
-      screen.getAllByText("waiting for the agent to pick it up").length,
-    ).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "Stop Reviewer" })).toBeInTheDocument();
+  it("offers no Stop once the background row has settled", () => {
+    renderStep(call("success"), reached(caused("child-req", "processing")));
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
   });
 
-  it("offers no Stop once the subagent has settled", () => {
-    renderStep(subagent("completed"));
-    expect(screen.queryByRole("button", { name: "Stop Reviewer" })).toBeNull();
+  it("labels a start as Started and a message as Messaged", () => {
+    renderStep(call("success"), reached(caused("child-req", "completed")));
+    expect(screen.getByText("Started")).toBeInTheDocument();
+  });
+
+  it("labels a message to a session this one did not start as Messaged", () => {
+    const existing = reached(caused("req-existing", "processing"), null);
+    renderStep(call("running", "message"), existing);
+    expect(screen.getByText("Messaged")).toBeInTheDocument();
+  });
+
+  it("links the row to the session it reached, as an ordinary session", () => {
+    renderStep(call("success"), reached(caused("child-req", "completed")));
+    expect(screen.getByRole("link", { name: "Open Reviewer" })).toBeInTheDocument();
   });
 
   it("keeps replication claims out of the transcript, which has no owner for them", () => {
@@ -163,67 +180,49 @@ describe("subagent state", () => {
       expect(source, file).not.toMatch(/messageCount == null/);
     }
   });
+});
 
-  it("never reads the tool call's own status as a live subagent", () => {
-    expect(workerNow(start("success"), null)).toEqual({
-      tone: "done",
-      text: "started",
-    });
-    expect(workerNow(start("error"), null).tone).toBe("failed");
-    expect(workerNow(start("unknown"), null)).toEqual({
-      tone: "unknown",
-      text: "state unknown",
-    });
-    expect(workerNow(start("running"), null)).toEqual({
-      tone: "running",
-      text: "starting",
-    });
+describe("a background process row", () => {
+  const process = (statusKind: string) =>
+    ({
+      itemKey: "proc-1",
+      toolName: "spawn_process",
+      toolCallId: "call-proc",
+      requestId: "parent-req",
+      statusKind,
+      awaitMode: "background",
+      presentation: {
+        kind: "process",
+        action: "spawn",
+        target: "cargo test",
+        description: null,
+        output: null,
+      },
+    }) as unknown as RenderedToolCallView;
+
+  it("offers Stop while it runs and kills that row", () => {
+    const tool = process("running");
+    const kill = renderStep(tool, null);
+    screen.getByRole("button", { name: "Stop cargo test" }).click();
+    expect(kill).toHaveBeenCalledWith(tool);
   });
 
-  it("offers no Stop without a live request to stop", () => {
-    for (const status of ["success", "unknown", "error", "running"]) {
-      const view = render(
-        <WorkerActionsContext.Provider value={{ stop: vi.fn() }}>
-          <WorkerStep tool={start(status)} workers={NO_WORKERS} />
-        </WorkerActionsContext.Provider>,
-      );
-      expect(screen.queryByRole("button", { name: /^Stop / }), status).toBeNull();
-      view.unmount();
-    }
-  });
-
-  it("links a subagent row to the session it reached, as an ordinary session", () => {
-    renderStep(subagent("completed"));
-    expect(screen.getByRole("link", { name: "Open Reviewer" })).toBeInTheDocument();
-  });
-
-  it("labels a message to an existing session as one", () => {
-    const message = {
-      ...start(),
-      toolName: "send_message",
-      presentation: { ...start().presentation, action: "message" },
-    } as RenderedToolCallView;
-    render(<WorkerStep tool={message} workers={workersWith(subagent("running"))} />);
-    expect(screen.getByText("Messaged")).toBeInTheDocument();
+  it("offers no Stop once it has settled", () => {
+    renderStep(process("success"), null);
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
   });
 });
 
 describe("subagent list", () => {
-  it("lists each subagent session with its state, a way in and Stop while it works", () => {
-    const stop = vi.fn();
-    const live = caused("child-req-2", "processing");
+  it("lists each started session with its state and a way in", () => {
     render(
-      <WorkerActionsContext.Provider value={{ stop }}>
-        <SubagentList workers={workersWith(subagent("running", live))} />
-      </WorkerActionsContext.Provider>,
+      <SubagentList workers={workersWith(reached(caused("child-req", "completed")))} />,
     );
     expect(screen.getByText("Subagents")).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /Reviewer/ })).toBeInTheDocument();
-    screen.getByRole("button", { name: "Stop Reviewer" }).click();
-    expect(stop).toHaveBeenCalledWith(live);
   });
 
-  it("renders nothing for a session that reached no other session", () => {
+  it("renders nothing for a session that started no other session", () => {
     const view = render(<SubagentList workers={NO_WORKERS} />);
     expect(view.container).toBeEmptyDOMElement();
   });

@@ -58,6 +58,7 @@ const received = (
   requestDocId: `doc-${requestId}`,
   sessionId: "session-child",
   agentDid: AGENT,
+  requesterDid: null,
   behaviorId: "crew-explorer",
   lifecycleState: "completed",
   interruptRequestedAt: null,
@@ -66,11 +67,19 @@ const received = (
   causedByRequestId: "req-parent",
   causedByRequestDocId,
   causedByToolCallId: "call-1",
+  causedByToolCallDocId: "doc-call-1",
   causedBySessionId,
 });
 
-const view = (rows: CausedRequestView[], sessionId = "session-child") =>
-  ({ sessionId, received: rows, sent: [], truncated: false }) as SessionProvenanceView;
+/* `startedBy` is what the bridge's origin owner returns: the received row
+   that began the session, when another session's call caused it */
+const view = (rows: CausedRequestView[]): SessionProvenanceView => ({
+  sessionId: "session-child",
+  startedBy: rows.find((r) => r.causedByRequestDocId === PARENT_DOC) ?? null,
+  received: rows,
+  started: [],
+  sent: [],
+});
 
 function shellFor(sessions: SessionSummary[] = [parent, other, child]) {
   return {
@@ -85,7 +94,7 @@ function shellFor(sessions: SessionSummary[] = [parent, other, child]) {
 }
 
 describe("the sessions that sent work into this one", () => {
-  it("names the session whose call started it, through its provenance document", () => {
+  it("names the session whose call caused its origin", () => {
     const { result } = renderHook(() =>
       useParentWork(
         shellFor(),
