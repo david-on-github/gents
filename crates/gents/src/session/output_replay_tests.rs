@@ -910,7 +910,7 @@ async fn non_required_signed_history_with_wrong_provider_scope_stays_permissive(
     ));
 
     let tagged = crate::provider_input::replay::tag_canonical_history(&history);
-    let projected = provider_view_tagged(ProviderInputProfile::ClaudeMessages, tagged).unwrap();
+    let projected = provider_view_tagged(tagged).unwrap();
     let rows = projected
         .iter()
         .map(|row| {

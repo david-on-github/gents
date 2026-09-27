@@ -166,11 +166,8 @@ mod tests {
             assert_eq!(tagged.physical_header, row.canonical_header_doc_id);
             assert_eq!(tagged.block_indices, row.block_indices);
         }
-        let projected = gents_loop::loop_stream::provider_view_tagged(
-            super::super::ProviderInputProfile::ClaudeMessages,
-            tagged,
-        )
-        .expect("canonical rows can be projected");
+        let projected = gents_loop::loop_stream::provider_view_tagged(tagged)
+            .expect("canonical rows can be projected");
         assert_eq!(projected[1].source, Some(first));
     }
 }

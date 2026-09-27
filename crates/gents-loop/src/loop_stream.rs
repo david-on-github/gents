@@ -68,8 +68,8 @@ pub use one_shot::{
 pub use repeated_tool_failure::REPEATED_TOOL_FAILURE_PREFIX;
 pub use request_assembly::{assemble_new_messages, is_request_context_message};
 pub use request_assembly::{
-    assemble_provider_request, provider_view_tagged, replay_compaction_prefix_bound,
-    sanitize_tagged_history, select_tagged_assistant_blocks,
+    assemble_provider_request, association_reduction, provider_messages, provider_view_tagged,
+    replay_compaction_prefix_bound, sanitize_tagged_history, select_tagged_assistant_blocks,
 };
 // Not `#[cfg(test)]`: gents' own loop_stream test suite (crates/gents/src/
 // agent/loop_stream/tests/budgeting.rs and request_assembly.rs) calls these
@@ -125,7 +125,7 @@ where
         // a tool call in history remains paired with a tool result prompt.
         let mut entry_projection = history;
         entry_projection.push(prompt);
-        let mut entry_projection = sanitize_tagged_history(provider_profile, entry_projection)?;
+        let mut entry_projection = sanitize_tagged_history(entry_projection)?;
         let prompt = entry_projection.pop().ok_or_else(|| {
             StreamingError::Completion(CompletionError::RequestError(Box::new(
                 std::io::Error::new(
@@ -1269,20 +1269,28 @@ pub async fn build_request<M: CompletionModel>(
     Ok(builder.build())
 }
 
+/// The send boundary: the one place the provider content order is applied,
+/// after replay association has run over the native-order rows.
 fn assemble_rig_chat_history(
     config: &LoopConfig,
     prompt: &Message,
     history: &[Message],
     prior: &[Message],
 ) -> Vec<rig::completion::Message> {
+    let messages = history
+        .iter()
+        .chain(prior)
+        .chain(std::iter::once(prompt))
+        .cloned()
+        .collect();
+    let ordered =
+        request_assembly::provider_order(config.provider_input_counter.profile(), messages);
     config
         .preamble
         .as_ref()
         .map(|preamble| rig::completion::Message::system(preamble.clone()))
         .into_iter()
-        .chain(history.iter().map(rig_compat::to_rig_message))
-        .chain(prior.iter().map(rig_compat::to_rig_message))
-        .chain(std::iter::once(rig_compat::to_rig_message(prompt)))
+        .chain(ordered.iter().map(rig_compat::to_rig_message))
         .collect()
 }
 

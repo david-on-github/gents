@@ -211,12 +211,35 @@ fn check_summarize_gate_and_split(
     // predicate on `Message` values: it lives in the durable header-loading
     // path. This summary fixture does not exercise that loader or establish
     // publication readiness; it pins the structural components only.
-    let production_gate_open = gents::compaction::safe_to_reduce(GROUPED_PROFILE, &input);
+    let production_gate_open = gents::compaction::safe_to_reduce(&input);
     assert_eq!(
         production_gate_open,
         case.turn_boundary && case.provider_fixpoint,
         "{}: production safe_to_reduce must agree with the modelled \
          turn-boundary and sanitizer-fixpoint gate components",
+        case.name
+    );
+    // The modelled rows carry no content order. The same rows persisted in a
+    // grouped wire's native emission order (reasoning before text) are the
+    // same modelled prefix, and the gate must decide them identically.
+    let native_order = with_leading_reasoning(&input);
+    assert_eq!(
+        gents::compaction::history::normalize_assistant_content_order(
+            GROUPED_PROFILE,
+            native_order.clone()
+        ) == native_order,
+        native_order.iter().all(|message| !matches!(
+            message,
+            Message::Assistant { content, .. }
+                if content.iter().any(|item| matches!(item, AssistantContent::Text(_)))
+        )),
+        "{}: native-order fixture differs from its provider order exactly when it has assistant text",
+        case.name
+    );
+    assert_eq!(
+        gents::compaction::safe_to_reduce(&native_order),
+        case.turn_boundary && case.provider_fixpoint,
+        "{}: gate on native-order rows",
         case.name
     );
     assert_eq!(
@@ -315,6 +338,29 @@ pub(super) fn compaction_messages_for_count(count: usize) -> Vec<Message> {
         ],
         other => panic!("unsupported compaction message_count {other}"),
     }
+}
+
+/// Every assistant row with text gains a leading reasoning block, as a grouped
+/// wire persists a turn that thought before answering.
+fn with_leading_reasoning(messages: &[Message]) -> Vec<Message> {
+    messages
+        .iter()
+        .cloned()
+        .map(|message| match message {
+            Message::Assistant { id, mut content }
+                if content
+                    .iter()
+                    .any(|item| matches!(item, AssistantContent::Text(_))) =>
+            {
+                content.insert(
+                    0,
+                    AssistantContent::Reasoning(gents::llm::message::Reasoning::new("thinking")),
+                );
+                Message::Assistant { id, content }
+            }
+            other => other,
+        })
+        .collect()
 }
 
 fn compaction_text_message(role: &str, text: &str) -> Message {

@@ -7,7 +7,7 @@ use crate::compaction;
 use crate::prompt::PromptBuilder;
 use crate::runtime_trace::RequestTraceAttrs;
 use crate::session;
-use gents_loop::loop_stream::{provider_view_tagged, TaggedMessage};
+use gents_loop::loop_stream::{provider_messages, provider_view_tagged, TaggedMessage};
 
 const CANCELLATION_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_millis(100);
 
@@ -255,7 +255,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                     // tail. The projected view is intentionally a fixpoint;
                     // checking only that view would make this gate vacuous.
                     let canonical_prefix_is_stable =
-                        compaction::safe_to_reduce(provider_profile, &durable_history);
+                        compaction::safe_to_reduce(&durable_history);
                     // The sourced projection below performs this same file
                     // activity extraction before stripping tool results.
                     let file_activity = compaction::history::extract_file_activity(&durable_history);
@@ -279,7 +279,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                     let tagged = crate::provider_input::replay::tag_canonical_history(
                         &sequenced_history,
                     );
-                    let provider_history = provider_view_tagged(provider_profile, tagged)?;
+                    let provider_history = provider_view_tagged(tagged)?;
 
                     // The database query already excludes the exact raw prefix
                     // named by the required compaction cursor.
@@ -342,12 +342,12 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                             aggregate_token_budget.clone(),
                             effective_seed,
                         );
-                        let projected = provider_view_tagged(provider_profile, history)?;
+                        let projected = provider_view_tagged(history)?;
                         options.max_compacted_prefix_messages =
                             crate::agent::loop_stream::replay_compaction_prefix_bound(
                                 &projected, &replay.required,
                             )?;
-                        let projected_native = projected.iter().map(|row| row.message.clone()).collect::<Vec<_>>();
+                        let projected_native = provider_messages(provider_profile, &projected);
                         options.keep_recent_tokens = self.compactor.retention_target(
                             options.keep_recent_tokens,
                             &projected_native,
@@ -374,8 +374,11 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                             let associations = crate::provider_context_reduction::ReplayAssociations::from_tagged_split(
                                 replay.required.clone(), prefix, suffix,
                             );
+                            let native = crate::agent::loop_stream::association_reduction(
+                                provider_profile, &projected, exact,
+                            )?;
                             crate::provider_context_reduction::validate_replay_associations(
-                                &associations, exact.compacted_prefix, exact.retained_suffix, &request.doc_id,
+                                &associations, native.exact().compacted_prefix, native.exact().retained_suffix, &request.doc_id,
                             )?;
                             suffix.to_vec()
                         } else {
