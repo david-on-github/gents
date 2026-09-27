@@ -342,6 +342,34 @@ mod tests {
         assert_eq!(vacuous.score_bp, Some(10_000));
     }
 
+    /// Per-pair scoring would otherwise reward padding a capture with rows
+    /// that happen to match.
+    #[test]
+    fn rows_beyond_max_rows_count_as_unmet_pairs() {
+        let verdict = CapturedFieldsMatch.evaluate(
+            &json!({"name": "items", "expect": [{"field": "sku", "equals": "A1"}], "max_rows": 1}),
+            &stage(vec![
+                json!({"sku": "A1"}),
+                json!({"sku": "A1"}),
+                json!({"sku": "A1"}),
+            ]),
+        );
+        assert_eq!(
+            (verdict.kind, verdict.score_bp),
+            (OutcomeKind::ModelAcceptance, Some(3_333))
+        );
+        let text = feedback(&verdict);
+        assert!(
+            text.contains("extra rows: items holds 3 rows, at most 1 allowed"),
+            "{text}"
+        );
+        let bad = CapturedFieldsMatch.evaluate(
+            &json!({"name": "items", "expect": [{"field": "sku", "equals": "A1"}], "min_rows": 2, "max_rows": 1}),
+            &stage(vec![]),
+        );
+        assert_eq!(bad.raw["reason_code"], "bad_params");
+    }
+
     #[test]
     fn feedback_details_the_first_rows_and_counts_the_rest() {
         let rows = (0..50).map(|_| json!({"sku": "x".repeat(1_000)})).collect();
