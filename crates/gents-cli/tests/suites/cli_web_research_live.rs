@@ -4,9 +4,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
+use gents::config::ReasoningEffort;
+use gents::config_client::{
+    apply_desired_state_plan, read_desired_state_record_in_txn, ConfigAccess,
+    DesiredStateApplyDocument, DesiredStateApplyPlan,
+};
+use gents::document_config::{InferenceExecution, InferenceProfile, ToolServiceRegistry};
+use gents::Collection;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -14,100 +22,159 @@ const SERVICE_ID: &str = "web-research-mcp";
 const DEFAULT_RESEARCH_QUESTION: &str = "How should an organization design a production deployment of the Model Context Protocol in 2026 to minimize prompt-injection and credential risks? Compare current MCP authorization and security guidance, the OAuth security best-current-practice, and at least two independent security analyses. Distinguish normative requirements from recommendations, identify disagreements, and cite primary sources.";
 
 async fn register_real_web_research_service(graphql: &str, agent_did: &str) -> Result<()> {
-    let hostname = hostname::get()
-        .context("reading local hostname")?
-        .into_string()
-        .map_err(|_| anyhow!("local hostname is not UTF-8"))?;
+    graphql_query(graphql, &real_web_research_registry_mutation(agent_did)).await?;
+    Ok(())
+}
+
+fn real_web_research_registry_mutation(agent_did: &str) -> String {
     let service_id = escape_graphql_string(SERVICE_ID);
-    let hostname = escape_graphql_string(&hostname);
     let agent_did = escape_graphql_string(agent_did);
-    let mutation = format!(
+    format!(
         r#"mutation {{
             create_ToolServiceRegistry(input: {{
                 service_id: "{service_id}",
+                agent_did: "{agent_did}",
                 display_name: "Real Web Research MCP",
                 description: "Live SearXNG and Firecrawl evidence gateway for {agent_did}",
-                hostname: "{hostname}",
+                hostname: null,
                 tailscale_ip: null,
-                lan_ip: null,
+                lan_ip: "127.0.0.1",
                 mcp_port: 19213,
                 mcp_path: "/mcp",
                 send_agent_did: true,
+                enabled: true,
                 status: "online",
                 version: "0.1.10"
             }}) {{ _docID }}
         }}"#
-    );
-    graphql_query(graphql, &mutation).await?;
-    Ok(())
+    )
 }
 
-async fn configure_live_research_inference_profile(graphql: &str, agent_did: &str) -> Result<()> {
-    let owner = escape_graphql_string(agent_did);
-    let response = graphql_query(
-        graphql,
-        &format!(
-            r#"{{
-                InferenceProfile(
-                    filter: {{ agent_did: {{ _eq: "{owner}" }} }}
-                ) {{ _docID profile_id }}
-                InferenceExecution(
-                    filter: {{ agent_did: {{ _eq: "{owner}" }}, execution_id: {{ _eq: "research-execution" }} }},
-                    limit: 1
-                ) {{ _docID execution_id }}
-            }}"#
-        ),
-    )
-    .await?;
-    let execution_doc_id = response
-        .pointer("/data/InferenceExecution/0/_docID")
-        .and_then(Value::as_str)
-        .context("installed research inference execution is missing")?;
-    graphql_query(
-        graphql,
-        &format!(
-            r#"mutation {{
-                update_InferenceExecution(
-                    docID: "{}",
-                    input: {{ max_turns: 64 }}
-                ) {{ _docID }}
-            }}"#,
-            escape_graphql_string(execution_doc_id),
-        ),
-    )
-    .await?;
-    let profiles = response
-        .pointer("/data/InferenceProfile")
-        .and_then(Value::as_array)
-        .context("installed research inference profiles are missing")?
-        .iter()
-        .filter(|profile| {
-            profile
-                .get("profile_id")
-                .and_then(Value::as_str)
-                .is_some_and(|profile_id| profile_id.starts_with("research-"))
-        })
-        .collect::<Vec<_>>();
-    anyhow::ensure!(profiles.len() == 4, "expected four research profiles");
-    for profile in profiles {
-        let doc_id = profile
-            .get("_docID")
-            .and_then(Value::as_str)
-            .context("installed research inference profile has no _docID")?;
-        graphql_query(
-            graphql,
+#[tokio::test]
+async fn live_research_registry_matches_measured_loopback_endpoint() -> Result<()> {
+    let node = Arc::new(gents::defra_node::EmbeddedNode::builder().build().await?);
+    gents::ensure_runtime_schemas(node.as_ref()).await?;
+    let access = ConfigAccess::Local(node.clone());
+    let agent_did = "did:key:web-research-registry-test";
+    access
+        .write(
+            "test.web_research.registry",
+            &real_web_research_registry_mutation(agent_did),
+        )
+        .await?;
+    let (fields, _) =
+        gents::config_client::config_projection(Collection::ToolServiceRegistry, None)?;
+    let registry_rows = access
+        .execute(&format!(
+            r#"{{ ToolServiceRegistry(filter: {{ agent_did: {{ _eq: "{}" }} }}) {{ {} }} }}"#,
+            escape_graphql_string(agent_did),
+            fields.join(" ")
+        ))
+        .await?;
+    let registry: ToolServiceRegistry =
+        serde_json::from_value(first_graphql_row(&registry_rows, "ToolServiceRegistry")?.clone())?;
+    anyhow::ensure!(registry.enabled && registry.hostname.is_none());
+    anyhow::ensure!(registry.lan_ip.as_deref() == Some("127.0.0.1"));
+    access
+        .write(
+            "test.web_research.health",
             &format!(
-                r#"mutation {{
-                    update_InferenceProfile(
-                        docID: "{}",
-                        input: {{ max_output_tokens: 8192, reasoning_effort: "low" }}
-                    ) {{ _docID }}
-                }}"#,
-                escape_graphql_string(doc_id),
+                r#"mutation {{ create_ToolServiceHealthState(input: {{ agent_did: "{}", service_id: "{}", endpoint: "http://127.0.0.1:19213/mcp", status: "healthy", tool_count: 2 }}) {{ _docID }} }}"#,
+                escape_graphql_string(agent_did),
+                escape_graphql_string(SERVICE_ID)
             ),
         )
         .await?;
-    }
+    anyhow::ensure!(
+        gents::tool_surface::measured_mcp_services_for_access(&access, agent_did, &[registry])
+            .await?
+            == [SERVICE_ID]
+    );
+    node.shutdown().await;
+    Ok(())
+}
+
+async fn configure_live_research_inference_profile(
+    graphql: &str,
+    agent_did: &str,
+    profile_id: &str,
+) -> Result<()> {
+    let access = ConfigAccess::Graphql(graphql.to_owned());
+    access
+        .transact("test.web_research.inference", |txn| {
+            Box::pin(async move {
+                let (_, value) = read_desired_state_record_in_txn(
+                    txn,
+                    Collection::InferenceProfile,
+                    agent_did,
+                    profile_id,
+                )
+                .await?
+                .context("initialized inference profile is missing")?;
+                let profile: InferenceProfile = serde_json::from_value(value)?;
+                let plan = live_research_inference_plan(profile)?;
+                apply_desired_state_plan(txn, &plan).await.map(|_| ())
+            })
+        })
+        .await
+}
+
+fn live_research_inference_plan(mut profile: InferenceProfile) -> Result<DesiredStateApplyPlan> {
+    let execution = InferenceExecution {
+        agent_did: profile.agent_did.clone(),
+        execution_id: "web-research-live-execution".to_owned(),
+        max_turns: Some(64),
+        ..InferenceExecution::default()
+    };
+    profile.execution_id = Some(execution.execution_id.clone());
+    profile.max_output_tokens = Some(8192);
+    profile.reasoning_effort = Some(ReasoningEffort::Low);
+    DesiredStateApplyPlan::new(
+        [
+            (
+                Collection::InferenceExecution,
+                serde_json::to_value(execution)?,
+            ),
+            (Collection::InferenceProfile, serde_json::to_value(profile)?),
+        ]
+        .into_iter()
+        .map(|(collection, value)| DesiredStateApplyDocument {
+            collection,
+            add: value.clone(),
+            update: value,
+        })
+        .collect(),
+    )
+}
+
+#[test]
+fn live_research_plan_binds_initialized_profile_to_execution() -> Result<()> {
+    let profile = InferenceProfile {
+        agent_did: "did:key:live-test".to_owned(),
+        profile_id: "initialized-profile".to_owned(),
+        backend_id: "initialized-backend".to_owned(),
+        model_name: "real-model".to_owned(),
+        ..InferenceProfile::default()
+    };
+    let plan = live_research_inference_plan(profile)?;
+    let execution = plan
+        .documents()
+        .iter()
+        .find(|doc| doc.collection == Collection::InferenceExecution)
+        .context("missing execution plan")?;
+    let profile = plan
+        .documents()
+        .iter()
+        .find(|doc| doc.collection == Collection::InferenceProfile)
+        .context("missing profile plan")?;
+    anyhow::ensure!(execution.add["agent_did"] == profile.add["agent_did"]);
+    anyhow::ensure!(execution.add["execution_id"] == profile.add["execution_id"]);
+    anyhow::ensure!(execution.add["max_turns"] == 64);
+    anyhow::ensure!(profile.add["profile_id"] == "initialized-profile");
+    anyhow::ensure!(profile.add["backend_id"] == "initialized-backend");
+    anyhow::ensure!(profile.add["model_name"] == "real-model");
+    anyhow::ensure!(profile.add["max_output_tokens"] == 8192);
+    anyhow::ensure!(profile.add["reasoning_effort"] == "low");
     Ok(())
 }
 
@@ -325,8 +392,6 @@ fn expected_research_tool_surfaces() -> [(&'static str, &'static [&'static str])
                 "discover_tools",
                 "describe_tool",
                 "call_tool",
-                "get_goal",
-                "update_goal",
                 "write_research_assignment",
                 "write_research_plan",
             ],
@@ -337,8 +402,6 @@ fn expected_research_tool_surfaces() -> [(&'static str, &'static [&'static str])
                 "discover_tools",
                 "describe_tool",
                 "call_tool",
-                "get_goal",
-                "update_goal",
                 "write_research_source",
                 "write_research_claim",
                 "write_research_evidence",
@@ -369,6 +432,14 @@ fn expected_research_tool_surfaces() -> [(&'static str, &'static [&'static str])
 }
 
 fn verify_exact_research_tool_surfaces(explanation: &Value) -> Result<()> {
+    let measured = explanation
+        .pointer("/runtime_availability/measured_available_mcp_service_ids")
+        .and_then(Value::as_array)
+        .context("tool explanation is missing measured MCP services")?;
+    anyhow::ensure!(
+        measured.len() == 1 && measured[0].as_str() == Some(SERVICE_ID),
+        "research gateway is not the sole measured MCP service: {explanation}"
+    );
     for (display_name, expected_tools) in expected_research_tool_surfaces() {
         let behavior = explanation
             .get("behaviors")
@@ -380,8 +451,24 @@ fn verify_exact_research_tool_surfaces(explanation: &Value) -> Result<()> {
             })
             .with_context(|| format!("tool explanation is missing {display_name}"))?;
         anyhow::ensure!(
-            behavior.get("tool_policy_version").and_then(Value::as_str) == Some("tool-policy/v1"),
-            "{display_name} is not using secure-default tool policy decoding: {behavior}"
+            behavior.get("tools_source").and_then(Value::as_str) == Some("document"),
+            "{display_name} is not bound to its authored Tools document: {behavior}"
+        );
+        let effective_mcp = behavior
+            .pointer("/surface/policy/effective/meta_mcp")
+            .and_then(Value::as_array)
+            .context("research behavior has no effective MCP policy trace")?
+            .iter()
+            .map(|value| value.as_str().context("invalid effective MCP policy trace"))
+            .collect::<Result<BTreeSet<_>>>()?;
+        let expected_mcp = if expected_tools.contains(&"call_tool") {
+            BTreeSet::from(["enabled:true", "services:only"])
+        } else {
+            BTreeSet::from(["enabled:false", "services:none"])
+        };
+        anyhow::ensure!(
+            effective_mcp == expected_mcp,
+            "{display_name} has an unexpected effective MCP scope: {behavior}"
         );
         let actual = behavior
             .pointer("/surface/tool_names")
@@ -393,9 +480,49 @@ fn verify_exact_research_tool_surfaces(explanation: &Value) -> Result<()> {
         let expected = expected_tools.iter().copied().collect::<BTreeSet<_>>();
         anyhow::ensure!(
             actual == expected,
-            "{display_name} has authority beyond its exact stage surface; expected {expected:?}, got {actual:?}"
+            "{display_name} differs from its exact stage surface; expected {expected:?}, got {actual:?}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn exact_research_surface_rejects_wider_mcp_policy_and_extra_tools() -> Result<()> {
+    let behaviors = expected_research_tool_surfaces()
+        .into_iter()
+        .map(|(display_name, tools)| {
+            let effective_mcp = if tools.contains(&"call_tool") {
+                vec!["enabled:true", "services:only"]
+            } else {
+                vec!["enabled:false", "services:none"]
+            };
+            serde_json::json!({
+                "display_name": display_name,
+                "tools_source": "document",
+                "surface": {
+                    "tool_names": tools,
+                    "policy": { "effective": { "meta_mcp": effective_mcp } }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut explanation = serde_json::json!({
+        "runtime_availability": {
+            "measured_available_mcp_service_ids": [SERVICE_ID]
+        },
+        "behaviors": behaviors
+    });
+    verify_exact_research_tool_surfaces(&explanation)?;
+    explanation["behaviors"][0]["surface"]["policy"]["effective"]["meta_mcp"] =
+        serde_json::json!(["enabled:true", "services:all"]);
+    anyhow::ensure!(verify_exact_research_tool_surfaces(&explanation).is_err());
+    explanation["behaviors"][0]["surface"]["policy"]["effective"]["meta_mcp"] =
+        serde_json::json!(["enabled:true", "services:only"]);
+    explanation["behaviors"][0]["surface"]["tool_names"]
+        .as_array_mut()
+        .context("synthetic tool surface is not an array")?
+        .push(Value::String("bash".to_owned()));
+    anyhow::ensure!(verify_exact_research_tool_surfaces(&explanation).is_err());
     Ok(())
 }
 
@@ -477,6 +604,10 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
     let init_arg_refs = init_args.iter().map(String::as_str).collect::<Vec<_>>();
     let init = run_init_json(&home_dir, &init_arg_refs)?;
     let agent_did = agent_did_from_init(&init)?;
+    let profile_id = init
+        .get("inference_profile_id")
+        .and_then(Value::as_str)
+        .context("init receipt is missing inference_profile_id")?;
 
     let port = allocate_port()?;
     let graphql = graphql_url(port);
@@ -514,6 +645,11 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
         "real MCP service probe failed: {probe}"
     );
     wait_for_runtime_mcp_health(&graphql, &agent_did, Duration::from_secs(45)).await?;
+    configure_live_research_inference_profile(&graphql, &agent_did, profile_id).await?;
+
+    let coordinator_slot = format!("coordinator={profile_id}");
+    let researcher_slot = format!("researcher={profile_id}");
+    let verifier_slot = format!("verifier={profile_id}");
 
     let install = run_cli_json_with_env(
         &home_dir,
@@ -523,6 +659,16 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
             "web_deep_research",
             "--home",
             home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
+            "--inference-slot",
+            &coordinator_slot,
+            "--inference-slot",
+            &researcher_slot,
+            "--inference-slot",
+            &verifier_slot,
             "--output",
             "json",
         ],
@@ -535,7 +681,6 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
         install.pointer("/install/revision_digest").is_some(),
         "web research graph installation failed: {install}"
     );
-    configure_live_research_inference_profile(&graphql, &agent_did).await?;
     wait_for_runtime_quiescence(&graphql, &agent_did, 2, Duration::from_secs(6)).await?;
     wait_for_all_research_behaviors_runnable(&graphql, &agent_did, Duration::from_secs(30)).await?;
     wait_for_exact_research_tool_surfaces(&home_dir, &graphql, &agent_did, Duration::from_secs(45))
@@ -551,6 +696,10 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
             "web_deep_research",
             "--home",
             home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
             "--question",
             &question,
             "--investigator-count",
@@ -573,6 +722,10 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
             &run_id,
             "--home",
             home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
             "--interval-ms",
             "2000",
         ],
@@ -584,7 +737,17 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
     let watch = run_cli_json(
         &home_dir,
         &[
-            "graph", "watch", &run_id, "--home", home_arg, "--output", "json",
+            "graph",
+            "watch",
+            &run_id,
+            "--home",
+            home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
+            "--output",
+            "json",
         ],
     )?;
     anyhow::ensure!(
@@ -684,7 +847,17 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
     let result = run_cli_json(
         &home_dir,
         &[
-            "graph", "result", &run_id, "--home", home_arg, "--output", "json",
+            "graph",
+            "result",
+            &run_id,
+            "--home",
+            home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
+            "--output",
+            "json",
         ],
     )?;
     anyhow::ensure!(result.get("status").and_then(Value::as_str) == Some("succeeded"));
