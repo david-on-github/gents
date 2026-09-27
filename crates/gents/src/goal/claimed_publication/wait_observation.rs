@@ -10,6 +10,8 @@ use crate::tool_call_lifecycle::{query, ToolCallState};
 /// Goal wait evidence read inside the publication transaction.
 pub(super) enum WaitEvidence {
     Absent,
+    /// A waited target still owes its result: running, or ended with its
+    /// completion delivery pending.
     Running,
     /// Fail-closed: the evidence was read but cannot be interpreted.
     Invalid(anyhow::Error),
@@ -215,7 +217,7 @@ async fn observe_waits(
             .execute(&format!(
                 r#"{{ AgentToolCall(filter: {{ {scope}, tool_call_id: {{ _eq: "{handle_escaped}" }} }},
                     limit: 2) {{ _docID tool_call_id request_doc_id tool_call_key
-                    lifecycle_state await_mode spawned_by_tool_call_doc_id }} }}"#
+                    lifecycle_state status await_mode spawned_by_tool_call_doc_id }} }}"#
             ))
             .await?;
         let targets = rows(&targets, "AgentToolCall")?;
@@ -251,7 +253,14 @@ async fn observe_waits(
                 && spawn_parent.request_doc_id == required(target, "request_doc_id")?,
             "spawned background lacks accepted spawn_process parent"
         );
-        if target_state == ToolCallState::Running {
+        // Lean `BackgroundState.resultOwed`: an ended target whose completion
+        // notification and wake are still owed (`completionPending`) has not
+        // yet delivered its result to the session.
+        let delivery_owed = target_state.is_terminal()
+            && target["status"]
+                .as_str()
+                .is_some_and(|status| status.starts_with("completionPending"));
+        if target_state == ToolCallState::Running || delivery_owed {
             running = true;
         }
     }

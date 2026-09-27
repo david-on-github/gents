@@ -30,6 +30,8 @@ def waiting : PublicationObservation := ⟨[timedOutWait], some [runningTool], f
 def launchedOnly : PublicationObservation := ⟨[], some [runningTool], false⟩
 def completedTool : PublicationObservation :=
   { waiting with backgrounds := some [{runningTool with state := .terminal}] }
+def undeliveredTool : PublicationObservation :=
+  { waiting with backgrounds := some [{runningTool with state := .completionPending}] }
 def pendingTool : PublicationObservation :=
   { waiting with waits := [{timedOutWait with reply := .other}], backgrounds := some [{runningTool with state := .pending}] }
 def lostTool : PublicationObservation := { waiting with backgrounds := some [] }
@@ -95,6 +97,12 @@ def cases : List PublicationCase :=
   , ⟨"claimed_wait_running_defers", claimed, request, waiting, true, claimed, .deferred⟩
   , ⟨"launched_without_wait_publishes", claimed, request, launchedOnly, true, published, .created⟩
   , ⟨"completed_waited_tool_resumes", claimed, request, completedTool, true, published, .created⟩
+  , ⟨"completed_waited_tool_with_owed_delivery_defers", claimed, request, undeliveredTool,
+       true, claimed, .deferred⟩
+  , ⟨"failed_waited_tool_with_owed_delivery_defers", claimed, request, undeliveredTool,
+       true, claimed, .deferred⟩
+  , ⟨"cancelled_waited_tool_with_owed_delivery_defers", claimed, request, undeliveredTool,
+       true, claimed, .deferred⟩
   , ⟨"pending_waited_tool_does_not_suppress", claimed, request, pendingTool, true,
        published, .created⟩
   , ⟨"lost_waited_tool_recovers", claimed, request, lostTool, true, published, .created⟩
@@ -146,12 +154,14 @@ theorem explicit_cases_replay : ∀ c ∈ cases,
     publishClaimed c.before c.request c.observation c.commit = (c.expected, c.outcome) := by decide
 
 /-- The claim already exists when the wait is observed. A deferred publication
-does not consume another claim, and target completion permits that same claim
-to materialize its child on reconciliation. -/
+does not consume another claim; the target ending with its completion still
+owed keeps it deferred, and once that delivery lands the same claim
+materializes its child on reconciliation. -/
 theorem claimed_wait_then_completion_reuses_claim :
     let deferred := publishClaimed claimed request waiting true
     GoalAutomation.continuationStep .unclaimed (.claim true) = .claimed ∧
       deferred = (claimed, .deferred) ∧
+      publishClaimed deferred.1 request undeliveredTool true = (claimed, .deferred) ∧
       publishClaimed deferred.1 request completedTool true = (published, .created) := by decide
 
 
@@ -185,7 +195,7 @@ def backgroundJson (b : BackgroundTool) : String :=
   ",\"session\":" ++ Conformance.Contracts.jsonString b.session ++
   ",\"requester\":" ++ (match b.requester with | none => "null" | some x => Conformance.Contracts.jsonString x) ++
   ",\"state\":" ++ Conformance.Contracts.jsonString
-    (match b.state with | .pending => "pending" | .running => "running" | .terminal => "terminal") ++ "}"
+    (match b.state with | .pending => "pending" | .running => "running" | .completionPending => "completion_pending" | .terminal => "terminal") ++ "}"
 
 def waitJson (w : WaitControl) : String :=
   "{\"doc_id\":" ++ toString w.docId ++ ",\"parent_request_doc\":" ++ toString w.parentRequestDoc ++

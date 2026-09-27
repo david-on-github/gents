@@ -13,9 +13,20 @@ structure ClaimedRequest extends Request where
   requester : Option String
   deriving DecidableEq, Repr
 
+/-- `completionPending` is terminal with its completion notification and
+wake not yet delivered: the process result is not yet in the session. -/
 inductive BackgroundState where
-  | pending | running | terminal
+  | pending | running | completionPending | terminal
   deriving DecidableEq, Repr
+
+/-- The waited process's result is not yet in the session: it is still
+running, or it ended and its completion notification and wake are still
+owed. Continuing the Goal now would run without that result, and the wake
+would then run as well; recovery redrives an owed delivery, so the deferral
+ends, and the Goal continues from the wake. -/
+def BackgroundState.resultOwed : BackgroundState → Bool
+  | .running | .completionPending => true
+  | _ => false
 
 inductive BackgroundOrigin where
   | spawned (parentToolDoc : Nat) (stableKey : String)
@@ -110,7 +121,7 @@ def malformedControl (w : WaitControl) : Bool :=
         (w.reply != .argumentError && w.replyHandle != w.acceptedHandle)))
 
 /-- A completed bounded wait is intentional only while its exact physical
-background generation is running. A malformed same-parent canonical receipt
+background generation still owes its result (`BackgroundState.resultOwed`). A malformed same-parent canonical receipt
 blocks publication; an unrelated wait or a mere background launch does not.
 The native projection must bind spawned origin to the accepted physical
 spawn_process parent, not trust a row's claimed handle or key alone. Ordinary
@@ -130,7 +141,7 @@ def assessWait (r : ClaimedRequest) (o : PublicationObservation) : WaitAssessmen
         then .invalid
       else if relevant.any fun w =>
           w.reply == .timedOutRunning &&
-          (backgrounds.filter (matchingBackground r w)).any (·.state == .running) then .pending
+          (backgrounds.filter (matchingBackground r w)).any (·.state.resultOwed) then .pending
       else .absent
 
 /-- Temporary storage trouble is not evidence: publication makes no Goal write
@@ -249,12 +260,13 @@ theorem completed_wrapup_admits_no_publication (s : Snapshot) (r : ClaimedReques
   all_goals simp_all
 
 /-- Anti-suppression: a deferral exists only because a matching accepted
-wait_process timed out on a matching, correctly-originated, running target. -/
+wait_process timed out on a matching, correctly-originated target that still
+owes its result. -/
 theorem pending_requires_matching_running_wait (r : ClaimedRequest)
     (o : PublicationObservation) (h : assessWait r o = .pending) :
     ∃ w ∈ o.waits, matchingWait r w = true ∧ w.reply = .timedOutRunning ∧
       ∃ backgrounds, o.backgrounds = some backgrounds ∧
-        ∃ b ∈ backgrounds, matchingBackground r w b = true ∧ b.state = .running := by
+        ∃ b ∈ backgrounds, matchingBackground r w b = true ∧ b.state.resultOwed = true := by
   unfold assessWait at h
   dsimp only at h
   by_cases hs : o.storageFailed = true
