@@ -368,3 +368,59 @@ fn clean_binary_install_is_idempotent_activates_and_is_owner_fenced() -> Result<
     anyhow::ensure!(enabled.get("enabled") == Some(&Value::Bool(true)));
     Ok(())
 }
+
+/// A documents pack whose graph dependency installs into the same offline
+/// home under the one store claim the pack install holds, while a second
+/// holder of that home is still refused.
+#[test]
+fn offline_pack_install_with_a_graph_dependency_holds_one_store_claim() -> Result<()> {
+    let tempdir = tempfile::tempdir().context("creating pack install tempdir")?;
+    let home = tempdir.path().join("agent-home");
+    let home_arg = home.to_str().context("pack home path is not UTF-8")?;
+    let initialized = run_init_json(
+        tempdir.path(),
+        &["--agent-name", "port-installer", "--home", home_arg],
+    )?;
+    let owner_did = agent_did_from_init(&initialized)?;
+    let profile = format!("{owner_did}:default-profile");
+    let slots: Vec<String> = ["coordinator", "worker", "verifier", "reviewer"]
+        .iter()
+        .map(|slot| format!("{slot}={profile}"))
+        .collect();
+    let mut install_args = vec!["pack", "install", "grok_tui_port", "--home", home_arg];
+    for slot in &slots {
+        install_args.extend(["--inference-slot", slot.as_str()]);
+    }
+
+    let installed = run_cli_json(tempdir.path(), &install_args)?;
+    anyhow::ensure!(
+        installed["dependencies"] == serde_json::json!(["code_review"])
+            && installed["owner"] == owner_did.as_str(),
+        "pack install did not report its graph dependency: {installed}"
+    );
+    let enabled = run_cli_json(
+        tempdir.path(),
+        &[
+            "graph",
+            "enable",
+            "code_review",
+            "--home",
+            home_arg,
+            "--agent-did",
+            &owner_did,
+        ],
+    )?;
+    anyhow::ensure!(
+        enabled.get("enabled") == Some(&Value::Bool(true)),
+        "the graph dependency was not installed: {enabled}"
+    );
+
+    let _held = gents::home::lock_store(&home, &gents::home::default_data_dir(&home))?;
+    let denial = run_cli_failure_stderr(tempdir.path(), &install_args)?;
+    anyhow::ensure!(
+        denial.contains("another Gents runtime")
+            && denial.contains(&format!("process {}", std::process::id())),
+        "a second holder of the home was not refused: {denial}"
+    );
+    Ok(())
+}

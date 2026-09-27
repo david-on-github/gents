@@ -40,6 +40,18 @@ pub(crate) async fn dispatch(command: GraphCommand) -> Result<()> {
 
 pub(crate) async fn install(args: PackInstallArgs, emit_report: bool) -> Result<()> {
     let (access, owner_did) = access_and_actor(&args.scope).await?;
+    install_with_access(&access, &owner_did, args, emit_report).await
+}
+
+/// Installs and activates a bundled graph package through a caller's open
+/// access, so a pack that installs it as a dependency keeps its one claim on
+/// the home's store for the whole install.
+pub(crate) async fn install_with_access(
+    access: &ConfigAccess,
+    owner_did: &str,
+    args: PackInstallArgs,
+    emit_report: bool,
+) -> Result<()> {
     let requested = super::pack::parse_inference_slot_bindings(&args.inference_slots)?;
     let mut bindings = if let Some(path) = args.bindings.as_deref() {
         let bindings: GraphPackageInstallBindings = serde_json::from_slice(
@@ -56,13 +68,8 @@ pub(crate) async fn install(args: PackInstallArgs, emit_report: bool) -> Result<
         }
         bindings
     } else {
-        default_bundled_graph_package_install_bindings(
-            &access,
-            &args.package,
-            &owner_did,
-            &requested,
-        )
-        .await?
+        default_bundled_graph_package_install_bindings(access, &args.package, owner_did, &requested)
+            .await?
     };
     for (slot, profile_id) in requested {
         if let Some(existing) = bindings
@@ -80,9 +87,9 @@ pub(crate) async fn install(args: PackInstallArgs, emit_report: bool) -> Result<
     };
     let package = load_bundled_graph_package(&args.package, &scope)?;
     let preview = gents::pack::preview_pack_inference_bindings(
-        &access,
+        access,
         &package.manifest,
-        &owner_did,
+        owner_did,
         &bindings.inference_slots,
     )
     .await?;
@@ -124,19 +131,19 @@ pub(crate) async fn install(args: PackInstallArgs, emit_report: bool) -> Result<
     // A failure past this point must not leave the plugins installed above
     // orphaned: undo them along with the graph install that never landed.
     let receipt =
-        match install_bundled_graph_package(&access, &owner_did, &args.package, &bindings).await {
+        match install_bundled_graph_package(access, owner_did, &args.package, &bindings).await {
             Ok(receipt) => receipt,
             Err(error) => {
                 super::pack::rollback_pack_plugin_records(&plugin_home, &plugin_rollback);
                 return Err(error);
             }
         };
-    let previous = load_active_graph_plan_with_access(&access, &owner_did, &receipt.graph_id)
+    let previous = load_active_graph_plan_with_access(access, owner_did, &receipt.graph_id)
         .await?
         .map(|plan| plan.digest);
     let activation = activate_graph_revision_with_access(
-        &access,
-        &owner_did,
+        access,
+        owner_did,
         &receipt.graph_id,
         &receipt.revision_digest,
         previous.as_deref(),
