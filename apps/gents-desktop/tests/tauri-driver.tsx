@@ -102,8 +102,11 @@ export function renderTauriAppDriverWithBridge(
         "event-sources": "Event sources",
         triggers: "Triggers",
       };
-      const label = labels[tabId] ?? tabId;
-      return screen.getByRole("link", { name: new RegExp(`^${label}(?:\\s+\\d+)?$`) });
+      const label = labels[tabId];
+      if (!label) throw new Error(`No visible configuration section ${tabId}`);
+      return screen.getAllByRole("link", {
+        name: new RegExp(`^${label}(?:\\s+\\d+)?$`, "i"),
+      })[0];
     },
     behaviorKey() {
       return screen.getByTestId("behavior-id") as HTMLInputElement;
@@ -179,10 +182,18 @@ export function renderTauriAppDriverWithBridge(
       await new Promise((resolve) => setTimeout(resolve, 0));
     },
     async openConfigItem(itemId: string) {
-      const link = [...document.querySelectorAll<HTMLAnchorElement>("a[href]")].find(
-        (candidate) => candidate.getAttribute("href")?.split("/").at(-1) === itemId,
+      const link = await waitFor(
+        () => {
+          const visible = [
+            ...document.querySelectorAll<HTMLAnchorElement>("a[href]"),
+          ].find(
+            (candidate) => candidate.getAttribute("href")?.split("/").at(-1) === itemId,
+          );
+          if (!visible) throw new Error(`configuration item ${itemId} is not visible`);
+          return visible;
+        },
+        { timeout: 30_000 },
       );
-      if (!link) throw new Error(`configuration item ${itemId} is not visible`);
       await user.click(link);
     },
     async replaceInput(testId: string, value: string) {
