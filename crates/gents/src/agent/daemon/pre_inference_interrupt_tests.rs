@@ -266,19 +266,13 @@ async fn interrupt_while_preparing_provider_input_terminalizes_through_the_owner
     );
 }
 
-/// The window that runs before `begin_owned_execution` decides on a request that
-/// is still `claimed`, and the owner terminalizes it from there. `can_finalize`
-/// admits a claimed request for every noncompleted outcome, so this is the
-/// modeled claimed-to-interrupted transition, not the processing one the prompt
-/// assembly window above reaches.
-///
-/// That window holds only durable reads, so there is nothing in it to park a
-/// barrier on the way the blocking tool definition parks prompt assembly.
-/// Racing a latch against reads that finish in milliseconds would decide which
-/// window fires by timing, so the latch is instead made observable before the
-/// window is entered: `prepare_unless_interrupted` checks the latch before it
-/// polls its work, and that check is the decision this asserts. The claim, the
-/// observer, the window and the terminal owner are all the production ones.
+/// `prepare_unless_interrupted` evaluates `borrow_and_update().is_some()` ahead
+/// of its `biased` select, so a latch already observable on the receiver handed
+/// to `handle_request` is decided when a window is entered rather than raced
+/// against the durable reads inside it. Which window decided shows up only in
+/// durable state: the admission window returns with the request still
+/// `claimed`, while reaching the assembly window means execution has begun and
+/// the row reads `processing`.
 #[tokio::test]
 async fn interrupt_latched_at_the_claim_terminalizes_before_execution_begins() {
     let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
@@ -294,7 +288,7 @@ async fn interrupt_latched_at_the_claim_terminalizes_before_execution_begins() {
         &[],
     );
     let provider_calls = Arc::new(AtomicUsize::new(0));
-    let daemon = BehaviorDaemon::new(
+    let mut daemon = BehaviorDaemon::new(
         node.clone(),
         behavior.clone(),
         None,
@@ -366,7 +360,7 @@ async fn interrupt_latched_at_the_claim_terminalizes_before_execution_begins() {
             node.clone(),
             request_doc_id.clone(),
             interrupt_tx,
-            shutdown_rx,
+            shutdown_rx.clone(),
         ),
     );
     crate::interrupt::interrupt_request_by_doc_id(
@@ -387,33 +381,28 @@ async fn interrupt_latched_at_the_claim_terminalizes_before_execution_begins() {
     .expect("the claim's observer must surface the durable latch")
     .expect("the observer channel stays open while the claim is held");
 
-    // Both halves of the premise at once: the latch is observable, and the
-    // request it will be decided against has not left `claimed`.
     let latched = request_terminal_row(node.as_ref(), &request_doc_id)
         .await
         .expect("read the latched request row");
-    assert_eq!(
-        latched["lifecycle_state"], "claimed",
-        "the latch must be observable while the request is still claimed: {latched}"
-    );
     assert!(
         !latched["interrupt_requested_at"].is_null(),
-        "the durable latch is what the window observes: {latched}"
+        "the window decides on the durable latch: {latched}"
     );
 
-    // The same decision the pre-execution window makes, over the same read it
-    // wraps: a claimed request with an observable latch does not fall through.
-    let prepared = crate::interrupt::prepare_unless_interrupted(
-        &mut interrupt_rx,
-        crate::completion_factory::aggregate_token_budget_for_request(node.as_ref(), &request),
-    )
-    .await;
-    assert!(
-        matches!(
-            prepared,
-            crate::interrupt::InterruptiblePreparation::Interrupted
-        ),
-        "a claimed request with an observable latch must not proceed into preparation"
+    let outcome = daemon
+        .handle_request(&mut lifecycle, &stream_writer, shutdown_rx, interrupt_rx)
+        .await
+        .expect("the claimed request's owner returns an outcome");
+    let crate::agent::daemon::HandleRequestOutcome::Interrupted(evidence) = outcome else {
+        panic!("an observable latch must interrupt the claimed request");
+    };
+
+    let undecided = request_terminal_row(node.as_ref(), &request_doc_id)
+        .await
+        .expect("read the pre-terminal request row");
+    assert_eq!(
+        undecided["lifecycle_state"], "claimed",
+        "the admission window must decide before execution begins: {undecided}"
     );
 
     daemon
@@ -421,7 +410,7 @@ async fn interrupt_latched_at_the_claim_terminalizes_before_execution_begins() {
             &mut lifecycle,
             &stream_writer,
             &request,
-            crate::agent::daemon::InterruptEvidence::observed(),
+            evidence,
             "pre_inference",
         )
         .await;
