@@ -2100,6 +2100,11 @@ mod tests {
         let error = check_resume(&request(), &other_policy, &origin()).unwrap_err();
         assert!(job_refused(&error).unwrap().0.contains("policy"));
 
+        // A task_id is only part of the target when the target is a task.
+        let mut stray = request();
+        stray.task_id = Some("plan".into());
+        check_resume(&stray, &policy, &origin()).unwrap();
+
         let mut retargeted = request();
         retargeted.target_field = TargetField::TaskPromptTemplate;
         retargeted.task_id = Some("plan".into());

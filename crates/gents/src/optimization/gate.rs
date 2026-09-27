@@ -371,6 +371,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_task_candidate_that_does_not_parse_is_rejected() {
+        let task = task_fixture(false);
+        let rejection = text_gate(&task.baseline, "Do {{ args.goal ", 32 * 1024).unwrap_err();
+        assert_eq!(rejection.reason, "template_invalid");
+        assert!(
+            rejection.detail.contains("does not parse"),
+            "{}",
+            rejection.detail
+        );
+    }
+
     /// A task template is rendered with its variables when a seed stage fires
     /// the task; a candidate that drops one would render another prompt shape.
     #[test]

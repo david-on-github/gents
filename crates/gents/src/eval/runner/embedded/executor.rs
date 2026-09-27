@@ -1547,7 +1547,6 @@ mod tests {
     async fn a_cancelled_seed_stage_is_runtime_before_any_request_exists() {
         let home = EmbeddedHome::create_temp("seed-cancel").await.unwrap();
         let cancel = CancellationToken::new();
-        cancel.cancel();
         let stage = StageSpec {
             stage_id: "fire".into(),
             prompt: String::new(),
@@ -1564,7 +1563,12 @@ mod tests {
             home_hint: None,
         };
         // Never ready: only the cancel can end the wait.
-        let never_ready = watch::channel(false).1;
+        let (_ready_tx, never_ready) = watch::channel(false);
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
         let observed = tokio::time::timeout(
             Duration::from_secs(5),
             submit_and_observe(
