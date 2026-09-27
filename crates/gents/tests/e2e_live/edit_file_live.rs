@@ -99,7 +99,7 @@ async fn edit_file_live_model_lands_drifted_edit_without_write_file() {
                 root: Some(workspace.path().display().to_string()),
                 files: Some(FileTools {
                     mode: FileToolMode::ReadWrite,
-                    timeout_secs: None,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),
