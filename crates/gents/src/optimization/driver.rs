@@ -583,6 +583,15 @@ pub struct JobOutcome {
 /// optimizer that tries several candidates on one validation split, so the
 /// divisor has to be the number of candidates the budget allows.
 pub(crate) fn check_policy(request: &JobRequest, policy: &PolicyV2) -> Result<()> {
+    if policy.min_pairs == 0 {
+        return Err(refused("policy min_pairs must be at least 1"));
+    }
+    if policy.monte_carlo_samples < 1_000 {
+        return Err(refused(format!(
+            "policy monte_carlo_samples {} must be at least 1000",
+            policy.monte_carlo_samples
+        )));
+    }
     if policy.max_rounds == request.budgets.max_rounds {
         return Ok(());
     }

@@ -26,6 +26,7 @@ const _: () = assert!(EXACT_CASE_LIMIT < 64);
 /// Frozen into a job at start. A rule change is a new version, never an edit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyV2 {
+    /// At least 1 (`check_policy`): a case with no pairs is not evidence.
     pub min_pairs: u64,
     pub max_not_evidence_bp: u64,
     pub max_asymmetry_bp: u64,
@@ -39,6 +40,8 @@ pub struct PolicyV2 {
     /// not by `decide`.
     pub max_missing_usage_bp: u64,
     pub max_reruns: u32,
+    /// At least 1000 (`check_policy`): the sampled p-value resolves to
+    /// `1e6 / samples` ppm, so fewer samples let a p of zero decide.
     pub monte_carlo_samples: u32,
 }
 
@@ -222,12 +225,16 @@ pub fn no_case_regression(policy: &PolicyV2, evidence: &Evidence) -> bool {
     })
 }
 
-/// Gate 2b, `Optimization.costOk`.
+/// Gate 2b, `Optimization.costOk`. The model is over naturals; a product past
+/// the integer width is not ok rather than wrapped.
 pub fn cost_ok(policy: &PolicyV2, tokens: &TokenTotals) -> bool {
-    tokens.candidate_tokens as u128 * tokens.baseline_trials as u128 * 10_000
-        <= tokens.baseline_tokens as u128
-            * tokens.candidate_trials as u128
-            * (10_000 + policy.max_token_increase_bp as u128)
+    let candidate = (tokens.candidate_tokens as u128)
+        .checked_mul(tokens.baseline_trials as u128)
+        .and_then(|product| product.checked_mul(10_000));
+    let baseline = (tokens.baseline_tokens as u128)
+        .checked_mul(tokens.candidate_trials as u128)
+        .and_then(|product| product.checked_mul(10_000 + policy.max_token_increase_bp as u128));
+    matches!((candidate, baseline), (Some(candidate), Some(baseline)) if candidate <= baseline)
 }
 
 fn gcd(a: u128, b: u128) -> u128 {
