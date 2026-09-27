@@ -18,15 +18,17 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::optimization::subject::MaterializedPack;
+use crate::optimization::subject::{baseline_text, MaterializedPack};
+use crate::optimization::target::TargetField;
 use crate::pack::interpolate;
+use crate::template::parse_template_for_validation;
 
 const CONFIG_ASSET: &str = "pack_config.json";
 
 /// Why a candidate never reached a validation run. `reason` is a closed
 /// vocabulary for the journal — `empty_text`, `text_too_long`,
-/// `unexpected_change`, `text_mismatch` or `duplicate_candidate` — and
-/// `detail` is diagnostics for an operator.
+/// `template_variables_dropped`, `unexpected_change`, `text_mismatch` or
+/// `duplicate_candidate` — and `detail` is diagnostics for an operator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructuralRejection {
     pub reason: &'static str,
@@ -116,7 +118,39 @@ pub fn text_gate(
             "an inline prompt beginning with ./ is read by the pack loader as a sidecar path",
         ));
     }
+    if baseline.target == TargetField::TaskPromptTemplate {
+        let current = baseline_text(baseline)
+            .map_err(|error| reject("unexpected_change", format!("{error:#}")))?;
+        let dropped: Vec<String> = template_variables(&current)?
+            .difference(&template_variables(text)?)
+            .cloned()
+            .collect();
+        if !dropped.is_empty() {
+            return Err(reject(
+                "template_variables_dropped",
+                format!("the candidate template no longer references {dropped:?}"),
+            ));
+        }
+    }
     Ok(())
+}
+
+/// The variable paths a task template renders, as the template owner reads
+/// them; a template the owner cannot parse renders nothing.
+fn template_variables(template: &str) -> Result<BTreeSet<String>, StructuralRejection> {
+    parse_template_for_validation(template)
+        .map(|references| {
+            references
+                .into_iter()
+                .map(|reference| reference.path.join("."))
+                .collect()
+        })
+        .map_err(|error| {
+            reject(
+                "template_variables_dropped",
+                format!("the template does not parse: {error}"),
+            )
+        })
 }
 
 /// Decide whether `candidate` may be evaluated at all.
