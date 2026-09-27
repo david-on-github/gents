@@ -2302,7 +2302,7 @@ mod tests {
     }
 
     #[test]
-    fn request_only_steering_and_goal_links_are_included_without_tool_bridges() {
+    fn request_only_user_steering_and_goal_links_are_included_without_tool_bridges() {
         let control_request = |request_id: &str, source: &str| {
             TimelineRequestRow {
             doc_id: Some(format!("doc-{request_id}")),
@@ -2322,7 +2322,7 @@ mod tests {
             requests: vec![
                 control_request("goal-child", "goal"),
                 control_request("steering-child", "steering"),
-                control_request("ordinary-child", "user"),
+                control_request("user-child", "user"),
                 TimelineRequestRow {
                     doc_id: Some("doc-unqueued-child".to_string()),
                     request_id: "unqueued-child".to_string(),
@@ -2336,7 +2336,7 @@ mod tests {
 
         assert_eq!(
             timeline.child_request_ids,
-            vec!["goal-child", "ordinary-child", "steering-child"]
+            vec!["goal-child", "steering-child", "user-child"]
         );
         assert!(!timeline.events.iter().any(|event| {
             matches!(event, RunTimelineEvent::Request(request) if request.request_id == "unqueued-child")
