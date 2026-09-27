@@ -185,6 +185,8 @@ def recoverySweepCases : List RecoverySweepCase :=
       "failed"
       "r6-cross-turn-background-process-durability"
   , sessionMessageRecoveryCase
+      "session_message_caused_request_unbound_to_failed" .causedRequestUnbound
+  , sessionMessageRecoveryCase
       "session_message_request_completed_to_completed" .requestCompleted
   , sessionMessageRecoveryCase
       "session_message_request_failed_to_failed" .requestFailed

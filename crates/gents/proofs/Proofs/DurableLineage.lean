@@ -1,4 +1,5 @@
 import Proofs.Basic
+import Proofs.Request.CausalHop
 
 /-!
 # Durable request lineage
@@ -17,10 +18,12 @@ the ingest boundary for request lineage:
   the prepared message belongs to the owned execution start, not this lineage
   ingest boundary (see `QueuedSteering`).
 
-`subagentDepth` is the causal hop (`CausalHop`): a session-message request is
-one further than its calling request and every continuation keeps its
-predecessor's hop. The edge is provenance only; it grants no hierarchy,
-cascade or authority over the calling session.
+`subagentDepth` is the causal hop (`CausalHop`). A session-message request and
+every continuation caused by another session's action (an agent-authored
+steering continuation, a session-message completion wake) take
+`max own (cause + 1)`; same-session continuations keep their predecessor's
+hop (`ContinuationKind.hop`). The edge is provenance only; it grants no
+hierarchy, cascade or authority over the calling session.
 -/
 
 namespace DurableLineage
@@ -126,5 +129,47 @@ theorem goal_continuation_is_admissible (depth : Nat) :
     admissible (goalContinuation depth) = true := by
   simp [admissible, edgePairsCoherent, pairCoherent, parentShapeCoherent,
     depthCoherent, goalContinuation]
+
+/-- The request-only continuations. Two are caused by another session's
+action and carry that cause's hop: a `send_message` steering a busy session
+(the calling request) and a session-message completion wake (the caused
+request that finished). The rest continue their own session's work. -/
+inductive ContinuationKind where
+  | userSteering
+  | agentSteering (callerHop : Nat)
+  | retry
+  | goal
+  | nativeCompletionWake
+  | sessionMessageCompletionWake (causedHop : Nat)
+  deriving DecidableEq, Repr
+
+def ContinuationKind.cause : ContinuationKind → CausalHop.Cause
+  | .agentSteering callerHop => .crossSession callerHop
+  | .sessionMessageCompletionWake causedHop => .crossSession causedHop
+  | _ => .continuation
+
+/-- The hop a continuation of a request at hop `own` is written with. -/
+def ContinuationKind.hop (kind : ContinuationKind) (own : Nat) : Nat :=
+  CausalHop.nextHop kind.cause own
+
+/-- Every continuation keeps the request-only control shape at any hop. -/
+theorem continuation_lineage_is_admissible (kind : ContinuationKind) (own : Nat) :
+    admissible (steeringContinuation (kind.hop own)) = true :=
+  steering_continuation_is_admissible _
+
+/-- Continuations caused by another session climb past that cause, so they
+cannot carry an agent loop past the admitting bound. -/
+theorem cross_session_continuations_climb (own causeHop : Nat) :
+    causeHop + 1 ≤ (ContinuationKind.agentSteering causeHop).hop own ∧
+      causeHop + 1 ≤ (ContinuationKind.sessionMessageCompletionWake causeHop).hop own :=
+  ⟨CausalHop.cross_session_exceeds_cause causeHop own,
+    CausalHop.cross_session_exceeds_cause causeHop own⟩
+
+/-- Same-session continuations copy their predecessor's hop. -/
+theorem own_session_continuations_copy (own : Nat) :
+    ContinuationKind.userSteering.hop own = own ∧ ContinuationKind.retry.hop own = own ∧
+      ContinuationKind.goal.hop own = own ∧
+      ContinuationKind.nativeCompletionWake.hop own = own := by
+  simp [ContinuationKind.hop, ContinuationKind.cause, CausalHop.nextHop]
 
 end DurableLineage
