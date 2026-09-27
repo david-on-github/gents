@@ -51,7 +51,9 @@ use gents::document_config::{
 use gents::goal::{set_goal, GoalStatus};
 use gents::graphql::escape_graphql_string;
 use gents::run_timeline_fetch::load_run_timeline_rows;
-use gents::toolset::{AGENT_INTERRUPT_TOOL_NAME, AGENT_MESSAGE_TOOL_NAME, AGENT_NEW_TOOL_NAME};
+use gents::toolset::{
+    AGENT_INTERRUPT_TOOL_NAME, AGENT_LIST_TOOL_NAME, AGENT_MESSAGE_TOOL_NAME, AGENT_NEW_TOOL_NAME,
+};
 use gents::{
     default_behavior_id_for_agent, default_inference_profile_id_for_behavior,
     ensure_agent_principal, AgentIdentity, BashMode, Collection, DocumentRuntimeOptions, Gents,
@@ -1370,7 +1372,7 @@ tool: reply with one short sentence that repeats, verbatim, every code word repo
 notifications you have received so far in this conversation.";
 
 /// One parent fans out to two agents, both results return as notifications
-/// and wake the parent, which combines them. The parent then lists the
+/// and wake the parent through completed wakes. The parent then lists the
 /// sessions it started and continues one of them with `agent_message`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live: set GENTS_LIVE_SESSION_MESSAGE=1 and pass --ignored"]
@@ -1519,14 +1521,14 @@ async fn live_fan_out_list_and_continue() -> Result<()> {
         .iter()
         .map(|row| row.doc_id.as_str())
         .collect::<Vec<_>>();
-    let combined =
-        assert_completed_wake_attempted_deliveries(db.node.as_ref(), session_id, &delivered).await;
+    let wakes =
+        assert_deliveries_bound_to_completed_wakes(db.node.as_ref(), session_id, &delivered).await;
     tracing::info!(
         parent_session = session_id,
         alpha_session = %alpha.session_id,
         beta_session = %beta.session_id,
-        combining_wake = %combined,
-        "[live-fan-out] both results reached the parent in one completed wake's input"
+        wakes = ?wakes,
+        "[live-fan-out] each result reached the parent through a completed wake"
     );
 
     // agent_list reports both started sessions and their relationship.
@@ -2467,7 +2469,7 @@ sentence that repeats, verbatim, every code word reported in the notifications."
     ] {
         wait_for_session_quiescent(fx.node(), session, Duration::from_secs(240)).await;
     }
-    assert_completed_wake_attempted_deliveries(fx.node(), &middle.session_id, &[&leaf_row.doc_id])
+    assert_deliveries_bound_to_completed_wakes(fx.node(), &middle.session_id, &[&leaf_row.doc_id])
         .await;
     let leaf_requests = session_requests(fx.node(), &leaf.session_id).await;
     assert!(
@@ -2697,8 +2699,9 @@ with the code word it reports, verbatim.";
 
 /// A session with an active Goal starts a worker and keeps continuing while
 /// the worker is blocked. Once released, the worker's completion is delivered
-/// as its own wake, which is the next request the session runs, and the
-/// Goal continues after it.
+/// through its own completed wake, no newer Goal continuation is claimed
+/// before that wake, and the Goal continues after it. Which request a later
+/// continuation names as its parent is covered by the native Goal tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "live: set GENTS_LIVE_SESSION_MESSAGE=1 and pass --ignored"]
 async fn live_goal_does_not_suppress_completion_wake() -> Result<()> {
@@ -2817,7 +2820,8 @@ async fn live_goal_does_not_suppress_completion_wake() -> Result<()> {
     // An active Goal must not suppress the wake: the notification binds a
     // completion wake, not a Goal continuation, and that wake runs.
     let wake = wait_for_bound_wake(fx.node(), session, &notification).await;
-    // The Goal is not wedged by the wake: it continues once the wake ends.
+    // The Goal is not wedged by the wake: some continuation is claimed after
+    // the wake ends. Its parent edge is not asserted here.
     let wake_terminalized = rfc3339(&wake.terminalized_at).expect("terminal wake time");
     let resumed = wait_for_session_request(
         fx.node(),
@@ -2839,7 +2843,7 @@ async fn live_goal_does_not_suppress_completion_wake() -> Result<()> {
     )
     .await?;
     wait_for_session_quiescent(fx.node(), session, Duration::from_secs(240)).await;
-    assert_completed_wake_attempted_deliveries(fx.node(), session, &[&row.doc_id]).await;
+    assert_deliveries_bound_to_completed_wakes(fx.node(), session, &[&row.doc_id]).await;
 
     // No Goal continuation created after the wake runs ahead of it.
     // `created_at` has second resolution, so only a continuation created in a
@@ -3029,6 +3033,32 @@ async fn live_restart_mid_delegation_recovers() -> Result<()> {
     )
     .await
     .expect("the caller must start the worker");
+    let caller_doc_id = requests_where(
+        db_a.node.as_ref(),
+        "request_id",
+        &format!(
+            r#"{{ _eq: "{}" }}"#,
+            escape_graphql_string(start_request_id)
+        ),
+    )
+    .await
+    .into_iter()
+    .next()
+    .expect("calling request row")
+    .doc_id;
+    assert_eq!(
+        worker.caused_by_parent_tool_call_doc_id.as_deref(),
+        Some(row.doc_id.as_str()),
+        "the worker must be caused by the observed agent_new row: {worker:?}"
+    );
+    assert_eq!(
+        worker.caused_by_parent_tool_call_id.as_deref(),
+        Some(row.tool_call_id.as_str())
+    );
+    assert_eq!(
+        worker.caused_by_parent_request_doc_id.as_deref(),
+        Some(caller_doc_id.as_str())
+    );
     assert_eq!(worker.agent_did, did_b);
     assert_eq!(worker.admission_kind.as_deref(), Some("peer"));
     wait_for_request_on_node(
@@ -3118,7 +3148,7 @@ async fn live_restart_mid_delegation_recovers() -> Result<()> {
     assert_eq!(notification.session_id.as_deref(), Some(session));
     let wake = wait_for_bound_wake(db_a.node.as_ref(), session, &notification).await;
     wait_for_session_quiescent(db_a.node.as_ref(), session, Duration::from_secs(240)).await;
-    assert_completed_wake_attempted_deliveries(db_a.node.as_ref(), session, &[&row.doc_id]).await;
+    assert_deliveries_bound_to_completed_wakes(db_a.node.as_ref(), session, &[&row.doc_id]).await;
 
     // A crash and restart re-runs every recovery owner over the same facts;
     // none may deliver the completion again.
@@ -3131,11 +3161,14 @@ async fn live_restart_mid_delegation_recovers() -> Result<()> {
         (db_a.node.as_ref(), "caller"),
         (db_b.node.as_ref(), "worker"),
     ] {
-        let caused = fetch_caused_requests(node, start_request_id).await;
+        let caused = requests_caused_by_row(node, &row.doc_id).await;
         assert_eq!(
-            caused.len(),
-            1,
-            "recovery must not duplicate the caused request on the {label} node: {caused:?}"
+            caused
+                .iter()
+                .map(|request| request.request_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![worker.request_id.as_str()],
+            "the agent_new row must cause exactly the observed worker on the {label} node: {caused:?}"
         );
     }
     assert_eq!(
@@ -3145,7 +3178,7 @@ async fn live_restart_mid_delegation_recovers() -> Result<()> {
         1,
         "the completion notification must be delivered exactly once"
     );
-    assert_completed_wake_attempted_deliveries(db_a.node.as_ref(), session, &[&row.doc_id]).await;
+    assert_deliveries_bound_to_completed_wakes(db_a.node.as_ref(), session, &[&row.doc_id]).await;
     tracing::info!(
         worker = %worker.request_id,
         wake = %wake.request_id,
@@ -3250,6 +3283,61 @@ async fn wait_for_completion_notification(
 // ---------------------------------------------------------------------------
 
 const SOAK_GATES: usize = 3;
+const SOAK_PRELUDE: usize = 5;
+
+/// Operations of the soak's root requests that took effect, read from the
+/// durable rows.
+#[derive(Debug, Default)]
+struct SoakCoverage {
+    agent_new_started: usize,
+    messages_delivered: usize,
+    interrupting_messages: usize,
+    interrupts_landed: usize,
+    interrupts_refused: usize,
+    interrupts_idle: usize,
+    lists: usize,
+}
+
+async fn soak_coverage(fx: &LivePrincipal, op_requests: &[String]) -> SoakCoverage {
+    let mut coverage = SoakCoverage::default();
+    for request_id in op_requests {
+        for tool in timeline_tools(&fx.db.node, &request_id)
+            .await
+            .into_iter()
+            .filter(|tool| tool.request_id.as_deref() == Some(request_id.as_str()))
+        {
+            let result = tool
+                .result
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                .unwrap_or_default();
+            let caused = match tool.doc_id.as_deref() {
+                Some(doc) => !requests_caused_by_row(fx.node(), doc).await.is_empty(),
+                None => false,
+            };
+            match tool.tool_name.as_str() {
+                AGENT_NEW_TOOL_NAME if caused => coverage.agent_new_started += 1,
+                AGENT_MESSAGE_TOOL_NAME if caused => {
+                    coverage.messages_delivered += 1;
+                    let args =
+                        serde_json::from_str::<serde_json::Value>(&tool.args).unwrap_or_default();
+                    if args["interrupt"] == true {
+                        coverage.interrupting_messages += 1;
+                    }
+                }
+                AGENT_INTERRUPT_TOOL_NAME => match result["status"].as_str() {
+                    Some("interrupting") => coverage.interrupts_landed += 1,
+                    Some("idle") => coverage.interrupts_idle += 1,
+                    _ if result["ok"] == false => coverage.interrupts_refused += 1,
+                    _ => {}
+                },
+                AGENT_LIST_TOOL_NAME if result.get("sessions").is_some() => coverage.lists += 1,
+                _ => {}
+            }
+        }
+    }
+    coverage
+}
 
 fn soak_enabled() -> bool {
     live_enabled() && std::env::var("GENTS_LIVE_SOAK").as_deref() == Ok("1")
@@ -3398,15 +3486,46 @@ async fn live_randomized_soak() -> Result<()> {
     let agent_new = |name: &str, message: &str| {
         format!("Call agent_new exactly once now with agent {name:?} and prompt {message:?}. After its receipt arrives, reply exactly OP_DONE and call no other tool.")
     };
+    let session_of = |started: &[(String, &'static str)], index: usize| {
+        started
+            .get(index)
+            .filter(|(_, name)| *name == "blocker")
+            .map(|(session, _)| session.clone())
+            .unwrap_or_else(|| {
+                panic!("[live-soak] seed={seed}: prelude blocker {index} missing: {started:?}")
+            })
+    };
+    assert!(
+        iterations >= SOAK_PRELUDE,
+        "GENTS_LIVE_SOAK_ITERS must cover the {SOAK_PRELUDE}-step prelude"
+    );
+    let mut op_requests = Vec::new();
     for step in 0..iterations {
         let roll = rng.random_range(0..100);
         let root = roots[rng.random_range(0..roots.len())];
-        let prompt = if step < roots.len() {
-            // Each root first starts a blocker, so interrupts meet busy sessions.
-            agent_new("blocker", &format!("BLOCK_GATE_{step}"))
+        // A fixed prelude guarantees coverage of every kind against busy
+        // sessions: each root starts a blocker, root 0 interrupts its own,
+        // root 1 messages its own, and root 0 lists. The rest is seeded.
+        let (root, prompt) = if step < SOAK_PRELUDE {
+            let root = roots[step % roots.len()];
+            let prompt = match step {
+                0 | 1 => agent_new("blocker", &format!("BLOCK_GATE_{step}")),
+                2 => {
+                    wait_for_started_marker(&gates[0], "GATE_0_STARTED", Duration::from_secs(240))
+                        .await;
+                    format!("Call agent_interrupt exactly once now with session_id {:?}. Then reply exactly OP_DONE and call no other tool.", session_of(&started, 0))
+                }
+                3 => {
+                    wait_for_started_marker(&gates[1], "GATE_1_STARTED", Duration::from_secs(240))
+                        .await;
+                    format!("Call agent_message exactly once now with session_id {:?}, message \"BLOCK_GATE_2\" and interrupt false. After its receipt arrives, reply exactly OP_DONE and call no other tool.", session_of(&started, 1))
+                }
+                _ => "Call agent_list exactly once now, then reply exactly OP_DONE and call no other tool.".to_owned(),
+            };
+            (root, prompt)
         } else if started.is_empty() || roll < 30 {
             let (name, _) = pool[rng.random_range(0..pool.len())];
-            agent_new(name, &message_for(name, &mut rng))
+            (root, agent_new(name, &message_for(name, &mut rng)))
         } else if roll < 55 {
             let interrupt = rng.random_bool(0.4);
             let (session, name) = if interrupt {
@@ -3415,25 +3534,24 @@ async fn live_randomized_soak() -> Result<()> {
                 started[rng.random_range(0..started.len())].clone()
             };
             let message = message_for(name, &mut rng);
-            format!("Call agent_message exactly once now with session_id {session:?}, message {message:?} and interrupt {interrupt}. After its receipt arrives, reply exactly OP_DONE and call no other tool.")
+            (root, format!("Call agent_message exactly once now with session_id {session:?}, message {message:?} and interrupt {interrupt}. After its receipt arrives, reply exactly OP_DONE and call no other tool."))
         } else if roll < 72 {
             let (session, _) = pick_for_interrupt(&started, &mut rng);
-            format!("Call agent_interrupt exactly once now with session_id {session:?}. Then reply exactly OP_DONE and call no other tool.")
+            (root, format!("Call agent_interrupt exactly once now with session_id {session:?}. Then reply exactly OP_DONE and call no other tool."))
         } else if roll < 88 {
-            "Call agent_list exactly once now, then reply exactly OP_DONE and call no other tool."
-                .to_owned()
+            (
+                root,
+                "Call agent_list exactly once now, then reply exactly OP_DONE and call no other tool."
+                    .to_owned(),
+            )
         } else {
             let gate = rng.random_range(0..SOAK_GATES);
             std::fs::write(&gates[gate], b"release").expect("release soak gate");
             tracing::info!(seed, step, gate, "[live-soak] released gate");
             continue;
         };
-        let root = if step < roots.len() {
-            roots[step]
-        } else {
-            root
-        };
         let request_id = format!("req-live-soak-{step}");
+        op_requests.push(request_id.clone());
         tracing::info!(seed, step, root, %prompt, "[live-soak] op");
         fx.request(&request_id, root, &prompt).await;
         let state =
@@ -3453,19 +3571,38 @@ async fn live_randomized_soak() -> Result<()> {
                 started.push((caused.session_id, *name));
             }
         }
+        if step + 1 == roots.len() {
+            for index in 0..roots.len() {
+                session_of(&started, index);
+            }
+        }
     }
     for gate in &gates {
         std::fs::write(gate, b"release").expect("release soak gate");
     }
     wait_for_principal_quiescent(fx.node(), &fx.did, Duration::from_secs(900)).await;
 
+    let coverage = soak_coverage(&fx, &op_requests).await;
+    tracing::info!(
+        seed,
+        iterations,
+        ?coverage,
+        "[live-soak] executed operations"
+    );
+    assert!(
+        coverage.agent_new_started >= roots.len()
+            && coverage.messages_delivered >= 1
+            && coverage.interrupts_landed >= 1
+            && coverage.lists >= 1,
+        "[live-soak] seed={seed} iterations={iterations}: operations did not execute: {coverage:?}"
+    );
     let violations = soak_violations(&fx).await;
     assert!(
         violations.is_empty(),
         "[live-soak] seed={seed} iterations={iterations}: invariant violations: {violations:#?}"
     );
-    // Per caller session, every delivered completion reached one completed
-    // wake's provider input.
+    // Per caller session, every delivered completion is bound to a completed
+    // wake.
     let mut delivered = std::collections::BTreeMap::<String, Vec<String>>::new();
     for row in session_message_tool_rows(fx.node(), &fx.did).await {
         if row.completion_notification_delivered_at.is_some() {
@@ -3477,7 +3614,7 @@ async fn live_randomized_soak() -> Result<()> {
     }
     for (session, rows) in &delivered {
         let rows = rows.iter().map(String::as_str).collect::<Vec<_>>();
-        assert_completed_wake_attempted_deliveries(fx.node(), session, &rows).await;
+        assert_deliveries_bound_to_completed_wakes(fx.node(), session, &rows).await;
     }
     agent.shutdown().await;
     Ok(())
@@ -4291,12 +4428,14 @@ struct CausedRequestRow {
     admission_kind: Option<String>,
     subagent_depth: Option<i64>,
     caused_by_parent_request_id: Option<String>,
+    caused_by_parent_request_doc_id: Option<String>,
     caused_by_parent_tool_call_id: Option<String>,
+    caused_by_parent_tool_call_doc_id: Option<String>,
 }
 
 const CAUSED_REQUEST_FIELDS: &str = "request_id session_id agent_did requester_did behavior_id \
     lifecycle_state admission_kind subagent_depth caused_by_parent_request_id \
-    caused_by_parent_tool_call_id";
+    caused_by_parent_request_doc_id caused_by_parent_tool_call_id caused_by_parent_tool_call_doc_id";
 
 fn caused_request_rows(response: &gents::defra_node::QueryResponse) -> Vec<CausedRequestRow> {
     assert!(
@@ -4325,6 +4464,18 @@ async fn fetch_caused_requests(
     let escaped = escape_graphql_string(parent_request_id);
     let query = format!(
         r#"{{ AgentRequest(filter: {{ caused_by_parent_request_id: {{ _eq: "{escaped}" }}, caused_by_parent_tool_call_id: {{ _ne: null }} }}) {{ {CAUSED_REQUEST_FIELDS} }} }}"#
+    );
+    caused_request_rows(&node.execute(&query).await)
+}
+
+/// The requests whose calling edge names the physical tool-call row.
+async fn requests_caused_by_row(
+    node: &EmbeddedNode,
+    tool_call_doc_id: &str,
+) -> Vec<CausedRequestRow> {
+    let escaped = escape_graphql_string(tool_call_doc_id);
+    let query = format!(
+        r#"{{ AgentRequest(filter: {{ caused_by_parent_tool_call_doc_id: {{ _eq: "{escaped}" }} }}) {{ {CAUSED_REQUEST_FIELDS} }} }}"#
     );
     caused_request_rows(&node.execute(&query).await)
 }
@@ -4568,16 +4719,15 @@ async fn wait_for_session_quiescent(node: &EmbeddedNode, session_id: &str, timeo
 
 /// Every listed background row's completion reached the parent as exactly one
 /// notification bound to a completed background-completion wake (Lean
-/// `WakeAttemptSnapshot.acknowledgedBindings`), and some completed wake's claim
-/// snapshot reaches past every notification, so one provider input held all
-/// results. A completion landing while an earlier wake is claimed belongs to a
-/// successor wake, so the wake count and each wake's wording are not part of
-/// the contract. Returns the covering wake's request id.
-async fn assert_completed_wake_attempted_deliveries(
+/// `WakeAttemptSnapshot.acknowledgedBindings`). A completion landing while an
+/// earlier wake is claimed belongs to a successor wake, so which wake carries
+/// which notification, the wake count and each wake's wording are not part of
+/// the contract. Returns the bound wakes' request ids, one per row.
+async fn assert_deliveries_bound_to_completed_wakes(
     node: &EmbeddedNode,
     session_id: &str,
     tool_call_doc_ids: &[&str],
-) -> String {
+) -> Vec<String> {
     #[derive(Deserialize)]
     struct WakeRow {
         #[serde(rename = "_docID")]
@@ -4585,12 +4735,10 @@ async fn assert_completed_wake_attempted_deliveries(
         request_id: String,
         lifecycle_state: Option<String>,
         input: Option<RequestInput>,
-        background_completion_input_through_sequence: Option<i64>,
     }
     #[derive(Deserialize)]
     struct DeliveryRow {
         request_doc_id: Option<String>,
-        sequence: i64,
         publication: serde_json::Value,
     }
     let escaped = escape_graphql_string(session_id);
@@ -4598,10 +4746,10 @@ async fn assert_completed_wake_attempted_deliveries(
         .execute(&format!(
             r#"{{
                 AgentRequest(filter: {{ session_id: {{ _eq: "{escaped}" }} }}) {{
-                    _docID request_id lifecycle_state input background_completion_input_through_sequence
+                    _docID request_id lifecycle_state input
                 }}
                 AgentMessage(filter: {{ session_id: {{ _eq: "{escaped}" }} }}) {{
-                    request_doc_id sequence publication
+                    request_doc_id publication
                 }}
             }}"#
         ))
@@ -4636,7 +4784,7 @@ async fn assert_completed_wake_attempted_deliveries(
                 let wake = wakes
                     .iter()
                     .find(|wake| message.request_doc_id.as_deref() == Some(wake.doc_id.as_str()))?;
-                Some((message.sequence, wake))
+                Some(wake)
             })
             .collect::<Vec<_>>();
         assert_eq!(
@@ -4644,30 +4792,16 @@ async fn assert_completed_wake_attempted_deliveries(
             1,
             "completion of {tool_call_doc_id} must reach the parent as exactly one notification bound to a completion wake"
         );
-        let (sequence, wake) = bound[0];
+        let wake = bound[0];
         assert_eq!(
             wake.lifecycle_state.as_deref(),
             Some("completed"),
             "the wake owning {tool_call_doc_id}'s notification must complete: {}",
             wake.request_id
         );
-        deliveries.push(sequence);
+        deliveries.push(wake.request_id.clone());
     }
-    let last_delivery = *deliveries.iter().max().expect("at least one delivery");
-    wakes
-        .iter()
-        .find(|wake| {
-            wake.lifecycle_state.as_deref() == Some("completed")
-                && wake
-                    .background_completion_input_through_sequence
-                    .is_some_and(|through| through >= last_delivery)
-        })
-        .map(|wake| wake.request_id.clone())
-        .unwrap_or_else(|| {
-            panic!(
-                "no completed completion wake attempted every delivery (sequences {deliveries:?}) in session {session_id}"
-            )
-        })
+    deliveries
 }
 
 /// Wait for a JSON tool result of `request_id` that satisfies `matches`.
