@@ -159,6 +159,60 @@ def pingPongHops (n : Nat) : List Nat :=
       hops ++ [nextHop (.crossSession cause) own])
     [0]
 
+/-! ## The session current hop
+
+`created_at` has whole-second precision, so several requests can share the
+latest second with no order between them. The current hop is the highest hop
+among the requests of the latest second: it errs toward refusing a
+continuation, never toward running one below a refusal. A user root written in
+the same second as a refused wake therefore still reads as refused until the
+next user message. -/
+
+/-- A request as the hop owner sees it: its whole-second creation time and
+its hop. -/
+structure RequestStamp where
+  second : Nat
+  hop : Nat
+  deriving DecidableEq, Repr
+
+def latestSecond : List RequestStamp → Nat
+  | [] => 0
+  | r :: rs => max r.second (latestSecond rs)
+
+def maxStampHop : List RequestStamp → Nat
+  | [] => 0
+  | r :: rs => max r.hop (maxStampHop rs)
+
+theorem hop_le_maxStampHop {r : RequestStamp} :
+    ∀ {rows : List RequestStamp}, r ∈ rows → r.hop ≤ maxStampHop rows
+  | [], h => by simp at h
+  | x :: xs, h => by
+    simp only [List.mem_cons] at h
+    simp only [maxStampHop]
+    rcases h with h | h
+    · subst h; omega
+    · have := hop_le_maxStampHop h; omega
+
+/-- The session's current hop: the highest hop among its latest second. -/
+def sessionCurrentHop (rows : List RequestStamp) : Nat :=
+  maxStampHop (rows.filter (fun r => r.second == latestSecond rows))
+
+/-- No request of the latest second is above the current hop, so a tie can
+never select a lower hop than a refusal written in the same second. -/
+theorem latest_second_hop_le_current (rows : List RequestStamp) (r : RequestStamp)
+    (h_mem : r ∈ rows) (h_latest : r.second = latestSecond rows) :
+    r.hop ≤ sessionCurrentHop rows :=
+  hop_le_maxStampHop (List.mem_filter.2 ⟨h_mem, by simp [h_latest]⟩)
+
+/-- A refused max+1 wake and a native wake written in the same second read as
+the refused hop, and a continuation copying it is refused. -/
+theorem same_second_tie_takes_the_highest_hop :
+    let rows := [⟨4, 0⟩, ⟨5, defaultMaxRequestHop + 1⟩, ⟨5, 3⟩]
+    sessionCurrentHop rows = defaultMaxRequestHop + 1 ∧
+      admitHop defaultMaxRequestHop (nextHop .continuation (sessionCurrentHop rows)) =
+        false := by
+  native_decide
+
 /-! ## Sessions, wakes and refusal
 
 A session's durable state for the hop bound is its current hop and the one
