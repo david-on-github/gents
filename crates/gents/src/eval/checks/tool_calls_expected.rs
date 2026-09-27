@@ -51,6 +51,11 @@ impl Check for ToolCallsExpected {
                     "forbidden": {"type": "array", "items": {"type": "string"}},
                     "max_calls": {"type": ["integer", "null"], "minimum": 0}
                 },
+                "anyOf": [
+                    {"required": ["required"], "properties": {"required": {"minItems": 1}}},
+                    {"required": ["forbidden"], "properties": {"forbidden": {"minItems": 1}}},
+                    {"required": ["max_calls"], "properties": {"max_calls": {"type": "integer"}}}
+                ],
                 "additionalProperties": false
             }),
             reads: vec!["stage:tool_calls".into()],

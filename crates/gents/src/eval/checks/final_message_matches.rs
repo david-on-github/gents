@@ -111,6 +111,10 @@ impl Check for FinalMessageMatches {
                     "any": {"type": "array", "items": pattern},
                     "all": {"type": "array", "items": pattern}
                 },
+                "anyOf": [
+                    {"required": ["any"], "properties": {"any": {"minItems": 1}}},
+                    {"required": ["all"], "properties": {"all": {"minItems": 1}}}
+                ],
                 "additionalProperties": false
             }),
             reads: vec!["stage:messages".into()],

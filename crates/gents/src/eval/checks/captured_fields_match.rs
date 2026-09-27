@@ -35,11 +35,16 @@ fn one() -> usize {
     1
 }
 
+/// A present `equals: null` is a test for null, not an absent test.
+fn some<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Expectation {
     field: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "some")]
     equals: Option<Value>,
     #[serde(default)]
     contains: Option<String>,
