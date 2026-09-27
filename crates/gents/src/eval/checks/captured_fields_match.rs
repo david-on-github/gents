@@ -12,11 +12,16 @@ use crate::eval::checks::{
 use crate::eval::runner::executor::{CaptureResult, StageEvidence};
 
 /// Params: `{ "name": <capture>, "expect": [{ "field", "equals" | "contains"
-/// | "matches" }], "min_rows": <u64>? }`. Every (row, expectation) pair is
-/// one requirement, over at least `min_rows` rows (default 1): a row the
-/// capture lacks fails every expectation. `field` is a dotted path into the
-/// row; `contains` and `matches` read a string field as its text and any
+/// | "matches" }], "min_rows": <u64>?, "max_rows": <u64>? }`. Every (row,
+/// expectation) pair is one requirement, over at least `min_rows` rows
+/// (default 1): a row the capture lacks fails every expectation, and so does
+/// every row past `max_rows`. `field` is a dotted path of object keys into
+/// the row; `contains` and `matches` read a string field as its text and any
 /// other value as its JSON.
+///
+/// Feedback states the expected values. It is written only on the train
+/// split, and the held-out split is what catches a candidate that hard-codes
+/// them.
 pub struct CapturedFieldsMatch;
 
 /// Rows whose mismatches feedback spells out.
@@ -29,6 +34,8 @@ struct Params {
     expect: Vec<Expectation>,
     #[serde(default = "one")]
     min_rows: usize,
+    #[serde(default)]
+    max_rows: Option<usize>,
 }
 
 fn one() -> usize {
@@ -119,7 +126,7 @@ impl Check for CapturedFieldsMatch {
         CheckDescription {
             name: self.name().into(),
             version: self.version().into(),
-            summary: "Scores the fraction of (row, expectation) pairs that hold over a documents capture's rows, counting rows below min_rows (default 1) as failing every expectation.".into(),
+            summary: "Scores the fraction of (row, expectation) pairs that hold over a documents capture's rows, each pair counting once, so larger captures weigh more. Rows below min_rows (default 1) or past max_rows fail every expectation.".into(),
             params_schema: json!({
                 "type": "object",
                 "properties": {
@@ -130,7 +137,7 @@ impl Check for CapturedFieldsMatch {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "field": {"type": "string", "description": "dotted path into the row"},
+                                "field": {"type": "string", "description": "dotted path of object keys into the row; no array indexing"},
                                 "equals": {},
                                 "contains": {"type": "string"},
                                 "matches": {"type": "string", "description": "a regex"}
@@ -144,7 +151,8 @@ impl Check for CapturedFieldsMatch {
                             "additionalProperties": false
                         }
                     },
-                    "min_rows": {"type": "integer", "minimum": 0}
+                    "min_rows": {"type": "integer", "minimum": 0},
+                    "max_rows": {"type": ["integer", "null"], "minimum": 0}
                 },
                 "required": ["name", "expect"],
                 "additionalProperties": false
@@ -174,6 +182,13 @@ impl Check for CapturedFieldsMatch {
             Ok(tests) => tests,
             Err(detail) => return grader("bad_params", detail),
         };
+        let max_rows = params.max_rows.unwrap_or(usize::MAX);
+        if max_rows < params.min_rows {
+            return grader(
+                "bad_params",
+                format!("max_rows {max_rows} is below min_rows {}", params.min_rows),
+            );
+        }
         let name = &params.name;
         let rows = match stage.captures.get(name) {
             Some(CaptureResult::Documents { rows }) => rows,
@@ -198,7 +213,7 @@ impl Check for CapturedFieldsMatch {
         let mut satisfied = 0;
         let mut lines = Vec::new();
         let mut hidden = 0;
-        for (index, row) in rows.iter().enumerate() {
+        for (index, row) in rows.iter().take(max_rows).enumerate() {
             let mut mismatched = false;
             for (field, test) in &tests {
                 let actual = lookup(row, field);
@@ -229,6 +244,12 @@ impl Check for CapturedFieldsMatch {
                 params.min_rows,
                 rows.len(),
                 params.min_rows - 1
+            ));
+        }
+        if rows.len() > max_rows {
+            lines.push(format!(
+                "extra rows: {name} holds {} rows, at most {max_rows} allowed",
+                rows.len()
             ));
         }
         let feedback = (!lines.is_empty()).then(|| lines.join("\n"));

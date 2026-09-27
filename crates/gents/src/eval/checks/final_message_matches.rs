@@ -15,6 +15,10 @@ use crate::eval::runner::executor::StageEvidence;
 /// a substring or `{ "matches": <regex> }`. Reads the last non-empty
 /// assistant message. Scores the fraction of `all` found, and 0 when `any`
 /// is given and none of it is found.
+///
+/// Feedback names the missing patterns. It is written only on the train
+/// split, and the held-out split is what catches a candidate that hard-codes
+/// them.
 pub struct FinalMessageMatches;
 
 /// Chars of the final message quoted in feedback.
