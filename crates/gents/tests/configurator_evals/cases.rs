@@ -1,6 +1,5 @@
 //! Independent acceptance checks for progressively generated behaviors.
 
-use super::host_scenarios::decode_configuration;
 use super::readiness::recorded_command as recorded_readiness_command;
 use super::{exact_named_behavior, rows, stages};
 use anyhow::{ensure, Context, Result};
@@ -61,6 +60,57 @@ fn exposes_unscoped_defra_query(
         .iter()
         .any(|name| name == gents::defra_query::DEFRA_QUERY_TOOL_NAME)
         && effective.iter().any(|entry| entry == "collections:all"))
+}
+
+async fn builder_exposes_unscoped_defra_query(
+    node: &std::sync::Arc<gents::defra_node::EmbeddedNode>,
+    owner: &str,
+    builder: &serde_json::Value,
+) -> Result<bool> {
+    let tools_id = builder["tools"]["tools_id"]
+        .as_str()
+        .context("Builder Tools ID missing from preservation snapshot")?
+        .to_owned();
+    let owner = owner.to_owned();
+    let (tools, targets) = gents::ConfigAccess::Local(node.clone())
+        .transact("test.configurator_evals.grader_tools", move |txn| {
+            let tools_id = tools_id.clone();
+            let owner = owner.clone();
+            Box::pin(async move {
+                let (_, value) = gents::config_client::read_desired_state_record_in_txn(
+                    txn,
+                    gents::Collection::Tools,
+                    &owner,
+                    &tools_id,
+                )
+                .await?
+                .with_context(|| format!("selected Builder Tools {tools_id} is missing"))?;
+                let tools: gents::document_config::Tools = serde_json::from_value(value)?;
+                let target_ids = tools
+                    .subagents
+                    .as_ref()
+                    .map(|subagents| subagents.target_ids.clone())
+                    .unwrap_or_default();
+                let mut targets = Vec::with_capacity(target_ids.len());
+                for id in target_ids {
+                    let (_, value) = gents::config_client::read_desired_state_record_in_txn(
+                        txn,
+                        gents::Collection::SubagentTarget,
+                        &owner,
+                        &id,
+                    )
+                    .await?
+                    .with_context(|| format!("selected SubagentTarget {id} is missing"))?;
+                    targets.push(serde_json::from_value(value)?);
+                }
+                Ok((tools, targets))
+            })
+        })
+        .await?;
+    let surfaces =
+        gents::document_config::list_datastore_tool_surfaces(node, &tools.agent_did).await?;
+    let eth_tools = gents::document_config::list_eth_tools(node, &tools.agent_did).await?;
+    exposes_unscoped_defra_query(&tools, &surfaces, &eth_tools, &targets)
 }
 
 #[test]
@@ -153,6 +203,94 @@ fn automation_query_grader_resolves_referenced_surface_before_checking_scope() {
             unscoped
         );
     }
+}
+
+#[tokio::test]
+async fn automation_query_grader_reads_full_tools_behind_partial_builder_snapshot() -> Result<()> {
+    use crate::support::fixtures::{bind_behavior_backend, configure_behavior_tools};
+    use gents::config_client::{
+        apply_desired_state_plan, read_desired_state_record_in_txn as read,
+        DesiredStateApplyDocument, DesiredStateApplyPlan,
+    };
+    use gents::document_config::{DatastoreToolSurfaceDocument, DatastoreTools, Tools};
+
+    let db = crate::support::test_db("automation-query-grader").await;
+    let owner = "did:key:automation-query-grader";
+    let behavior_id = "builder";
+    bind_behavior_backend(
+        db.node.as_ref(),
+        owner,
+        behavior_id,
+        "grader-backend",
+        "http://127.0.0.1:1/v1",
+        "fixture-model",
+    )
+    .await;
+    gents::ConfigAccess::transact_local(
+        db.node.as_ref(),
+        None,
+        "test.grader_builder_name",
+        |txn| {
+            Box::pin(async move {
+                let (_, mut behavior) =
+                    read(txn, gents::Collection::AgentBehavior, owner, behavior_id)
+                        .await?
+                        .context("fixture Builder behavior missing")?;
+                behavior["display_name"] = "Builder".into();
+                let plan = DesiredStateApplyPlan::new(vec![DesiredStateApplyDocument {
+                    collection: gents::Collection::AgentBehavior,
+                    add: behavior.clone(),
+                    update: behavior,
+                }])?;
+                apply_desired_state_plan(txn, &plan).await.map(|_| ())
+            })
+        },
+    )
+    .await?;
+
+    let surface = DatastoreToolSurfaceDocument {
+        surface_id: "eval-output-publisher".into(),
+        agent_did: owner.into(),
+        display_name: None,
+        enabled: true,
+        entries: Some(Vec::new()),
+        created_at: None,
+        tags: Vec::new(),
+    };
+    for (collections, unscoped) in [
+        (Some(vec!["EvalAutomationInput".into()]), false),
+        (None, true),
+    ] {
+        configure_behavior_tools(
+            db.node.as_ref(),
+            owner,
+            behavior_id,
+            None,
+            Tools {
+                tools_id: "builder-tools".into(),
+                agent_did: owner.into(),
+                datastore: Some(DatastoreTools {
+                    enable_defra_query: Some(true),
+                    defra_query_collections: collections,
+                    datastore_tool_surface_ids: Some(vec![surface.surface_id.clone()]),
+                }),
+                ..Default::default()
+            },
+            vec![(
+                gents::Collection::DatastoreToolSurface,
+                serde_json::to_value(&surface)?,
+            )],
+        )
+        .await;
+        let builder = behavior_configuration(&db.node, owner, None).await?;
+        assert!(builder["tools"].get("agent_did").is_none());
+        assert_eq!(
+            builder_exposes_unscoped_defra_query(&db.node, owner, &builder).await?,
+            unscoped
+        );
+    }
+    db.node.shutdown().await;
+    Ok(())
 }
 
 /// Exercise the generated default in a new session without changing its grants.
@@ -466,42 +604,8 @@ async fn run_document_automation(
         "automation changed Setup"
     );
     let mut builder_after = behavior_configuration(node, owner, None).await?;
-    let tools: gents::document_config::Tools =
-        decode_configuration(gents::Collection::Tools, &builder_after["tools"])?;
-    let surfaces = gents::document_config::list_datastore_tool_surfaces(node, owner).await?;
-    let eth_tools = gents::document_config::list_eth_tools(node, owner).await?;
-    let target_ids = tools
-        .subagents
-        .as_ref()
-        .map(|subagents| subagents.target_ids.clone())
-        .unwrap_or_default();
-    let target_owner = owner.to_owned();
-    let targets = gents::ConfigAccess::Local(node.clone())
-        .transact("test.configurator_evals.grader_targets", move |txn| {
-            let ids = target_ids.clone();
-            let owner = target_owner.clone();
-            Box::pin(async move {
-                let mut targets = Vec::with_capacity(ids.len());
-                for id in ids {
-                    let (_, value) = gents::config_client::read_desired_state_record_in_txn(
-                        txn,
-                        gents::Collection::SubagentTarget,
-                        &owner,
-                        &id,
-                    )
-                    .await?
-                    .with_context(|| format!("selected SubagentTarget {id} is missing"))?;
-                    targets.push(decode_configuration(
-                        gents::Collection::SubagentTarget,
-                        &value,
-                    )?);
-                }
-                Ok(targets)
-            })
-        })
-        .await?;
     ensure!(
-        !exposes_unscoped_defra_query(&tools, &surfaces, &eth_tools, &targets)?,
+        !builder_exposes_unscoped_defra_query(node, owner, &builder_after).await?,
         "automation enabled unrestricted query tools"
     );
     ensure!(
