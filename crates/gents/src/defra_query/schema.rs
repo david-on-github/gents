@@ -24,6 +24,20 @@ pub struct SchemaField {
     pub type_name: String,
 }
 
+impl SchemaField {
+    /// The field's named type, with the non-nillable marker
+    /// [`SchemaField::type_name`] renders stripped off.
+    ///
+    /// Introspection reports a non-nillable field as a `NON_NULL` wrapper with
+    /// no name of its own; `type_name` resolves the name out of `ofType` and
+    /// re-renders the wrapper as `Name!`. Nillability is not part of a GraphQL
+    /// type name and no name contains `!`, so a rule stated over type *names*
+    /// has to compare against this rather than against `type_name`.
+    pub fn named_type(&self) -> &str {
+        self.type_name.trim_end_matches('!')
+    }
+}
+
 /// The introspected field set of one collection.
 #[derive(Debug, Clone)]
 pub struct CollectionSchema {

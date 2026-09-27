@@ -121,6 +121,12 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Fixed
 
+- `config apply` no longer refuses an event source whose `correlation_field` or
+  group `expected_count` field is declared non-nillable (`String!`, `Int!`) with
+  a false "does not exist", and accepts every field type a canonical count can
+  come back through (`Float`, `JSON`, `ID`, `Blob`) instead of only `String` and
+  `Int` (#1889).
+
 - Title audits dispatch only through the runtime watcher, preventing duplicate
   claim attempts while retaining received reasoning (#1916).
 - A command that hits its own timeout no longer reports a duration shorter
