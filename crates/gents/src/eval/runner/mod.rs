@@ -162,12 +162,7 @@ fn cancel_requested(run_dir: &Path, cancel: &CancellationToken) -> bool {
 /// still holds is refused instead: its marker and `progress.json` are that
 /// process's.
 fn clear_cancel(run_dir: &Path) -> Result<()> {
-    if running_elsewhere(run_dir) {
-        return Err(anyhow::Error::from(FreezeRefused(format!(
-            "run {} is still running in another process",
-            run_dir.display()
-        ))));
-    }
+    refuse_if_held(run_dir)?;
     let marker = run_dir.join(CANCEL_MARKER);
     match std::fs::remove_file(&marker) {
         Ok(()) => {
@@ -180,6 +175,16 @@ fn clear_cancel(run_dir: &Path) -> Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(error).with_context(|| format!("removing {}", marker.display())),
     }
+}
+
+fn refuse_if_held(run_dir: &Path) -> Result<()> {
+    if running_elsewhere(run_dir) {
+        return Err(anyhow::Error::from(FreezeRefused(format!(
+            "run {} is still running in another process",
+            run_dir.display()
+        ))));
+    }
+    Ok(())
 }
 
 /// How often the loop checks the cancel marker while a batch is in flight or
@@ -265,6 +270,9 @@ pub async fn run(
     cancel: CancellationToken,
     options: &RunOptions,
 ) -> Result<RunOutcome> {
+    // Before freezing, which rewrites an existing run's files in place. Two
+    // starters racing past this check is the accepted ceiling.
+    refuse_if_held(&run_dir(&request.runs_dir, &request.run_id)?)?;
     let frozen = freeze(access, request, executor.isolation()).await?;
     clear_cancel(&frozen.run_dir)?;
     let recorder = DocumentRecorder(access);
@@ -2280,6 +2288,14 @@ mod tests {
         let holder = ProgressWriter::new(&frozen.run_dir);
         let _held = holder.hold();
         let marker = request_cancel(&launching.runs_dir(), "run-held").unwrap();
+        let definition = frozen.run_dir.join(freeze::DEFINITION_FILE);
+        let long_ago = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+        std::fs::File::options()
+            .write(true)
+            .open(&definition)
+            .unwrap()
+            .set_modified(long_ago)
+            .unwrap();
 
         // STALE_WINDOW is 3 s: refresh the holder before each look, or a slow
         // machine sees it go stale mid-test.
@@ -2315,6 +2331,11 @@ mod tests {
         }
         holder.heartbeat(Duration::ZERO);
         assert!(marker.exists(), "the holder's cancel request survives");
+        assert_eq!(
+            std::fs::metadata(&definition).unwrap().modified().unwrap(),
+            long_ago,
+            "run refuses before freezing rewrites the run's files"
+        );
         assert!(running_elsewhere(&frozen.run_dir));
         assert!(load_trials(&launching.access, OWNER, "run-held")
             .await
