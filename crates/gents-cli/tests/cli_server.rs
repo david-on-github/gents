@@ -206,6 +206,109 @@ async fn server_sigterm_runs_the_graceful_shutdown_path() -> Result<()> {
     );
     Ok(())
 }
+/// An error returned after the runtime is spawned must still run the runtime's
+/// shutdown epilogue. A closed stdout makes the post-readiness report write
+/// fail; the durable readiness row must then end at `shutdown`, not stay
+/// `ready` as it does when the runtime task is dropped with the process.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_error_after_runtime_spawn_drains_the_runtime() -> Result<()> {
+    use gents::defra_node::{EmbeddedNode, StorageBackend};
+    use gents_protocol::row::{
+        decode_behavior_readiness_snapshot, AgentBehaviorReadinessRow,
+        BehaviorReadinessProcessState,
+    };
+    use std::process::Stdio;
+
+    let tempdir = tempfile::tempdir().context("creating tempdir")?;
+    let home_dir = tempdir.path().join("home");
+    fs::create_dir_all(&home_dir)?;
+    let agent_name = format!("cli-broken-stdout-{}", Uuid::new_v4().simple());
+    let init = run_init_json(
+        &home_dir,
+        &[
+            "--agent-name",
+            &agent_name,
+            "--inference-url",
+            "http://127.0.0.1:9/v1",
+            "--model-name",
+            "broken-stdout-no-provider",
+        ],
+    )?;
+    let agent_did = agent_did_from_init(&init)?;
+
+    let port = allocate_port()?;
+    let stderr_log = tempfile::NamedTempFile::new().context("creating gents stderr log")?;
+    let mut command = Command::new(cli_bin());
+    command
+        .env("HOME", &home_dir)
+        .env("RUST_LOG", "error")
+        .current_dir(&home_dir)
+        .args(["server", "--http-port", &port.to_string()])
+        .args(["--no-codex-shim", "--p2p-transport", "none"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(
+            stderr_log.reopen().context("opening gents stderr log")?,
+        ));
+    support::process::configure_foreground_server_env(&mut command, &[]);
+    let mut child = command.spawn().context("spawning gents server")?;
+    // Close the only reader so the readiness report hits a broken pipe.
+    drop(child.stdout.take());
+    let mut serve = ServeProcess {
+        child,
+        stdout_log: None,
+        stderr_log: Some(stderr_log),
+    };
+
+    let status = wait_for_server_exit(&mut serve, Duration::from_secs(60))?;
+    let (_, stderr) = serve.captured_output()?;
+    assert_eq!(
+        status.code(),
+        Some(1),
+        "a failed readiness report must be a returned error, not a panic or signal: {status}\nstderr:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("writing JSON report to stdout"),
+        "server exited without the report write failure:\n{stderr}"
+    );
+
+    let data_dir = home_dir.join(".gents").join("data");
+    let node = EmbeddedNode::builder()
+        .data_path(&data_dir)
+        .with_storage_backend(StorageBackend::Regolith)
+        .build()
+        .await
+        .with_context(|| format!("opening embedded node at {}", data_dir.display()))?;
+    let response = node
+        .execute(&format!(
+            r#"{{ AgentBehaviorReadiness(filter: {{ agent_did: {{ _eq: "{}" }} }}, limit: 1) {{
+                agent_did snapshot_json updated_at
+            }} }}"#,
+            escape_graphql_string(&agent_did),
+        ))
+        .await;
+    node.shutdown().await;
+    anyhow::ensure!(
+        !response.has_errors(),
+        "reading behavior readiness: {:?}",
+        response.errors
+    );
+    let row = response
+        .data
+        .as_ref()
+        .and_then(|data| data["AgentBehaviorReadiness"].get(0).cloned())
+        .context("server left no behavior readiness row")?;
+    let row: AgentBehaviorReadinessRow = serde_json::from_value(row)?;
+    let snapshot = decode_behavior_readiness_snapshot(&row, &agent_did)
+        .map_err(|reason| anyhow!("undecodable behavior readiness: {reason:?}"))?;
+    assert_eq!(
+        snapshot.process_state,
+        BehaviorReadinessProcessState::Shutdown,
+        "the runtime was not drained after the post-spawn error\nstderr:\n{stderr}"
+    );
+    Ok(())
+}
+
 // Covers OS process loading and Tokio startup under concurrent builds. The
 // port-zero and occupied-port checks still reject before readiness is emitted.
 const SERVER_REJECTION_EXIT_TIMEOUT: Duration = Duration::from_secs(30);
