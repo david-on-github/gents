@@ -148,7 +148,9 @@ def ContinuationKind.cause : ContinuationKind → CausalHop.Cause
   | .sessionMessageCompletionWake causedHop => .crossSession causedHop
   | _ => .continuation
 
-/-- The hop a continuation of a request at hop `own` is written with. -/
+/-- The hop a continuation is written with, from its session's current hop
+`own` (the hop of the session's latest request, not of an older request that
+scheduled the continuation). -/
 def ContinuationKind.hop (kind : ContinuationKind) (own : Nat) : Nat :=
   CausalHop.nextHop kind.cause own
 
