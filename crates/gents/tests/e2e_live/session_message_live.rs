@@ -1514,30 +1514,21 @@ async fn live_fan_out_list_and_continue() -> Result<()> {
         )
         .await;
     }
-    let combined = wait_for_session_answer_containing(
+    wait_for_session_quiescent(db.node.as_ref(), session_id, Duration::from_secs(240)).await;
+    let delivered = rows.iter().map(|row| row.doc_id.as_str()).collect::<Vec<_>>();
+    let combined = assert_completed_wake_attempted_deliveries(
         db.node.as_ref(),
         session_id,
-        &[&alpha_first, &beta_first],
-        Duration::from_secs(300),
+        &delivered,
     )
     .await;
-    let combined_row = session_requests(db.node.as_ref(), session_id)
-        .await
-        .into_iter()
-        .find(|row| row.request_id == combined)
-        .expect("combining request row");
-    assert!(
-        combined_row.is_background_completion_wake(),
-        "the combined answer must come from a completion wake, not the spawning turn: {combined_row:?}"
-    );
     tracing::info!(
         parent_session = session_id,
         alpha_session = %alpha.session_id,
         beta_session = %beta.session_id,
         combining_wake = %combined,
-        "[live-fan-out] both results reached the parent and were combined"
+        "[live-fan-out] both results reached the parent in one completed wake's input"
     );
-    wait_for_session_quiescent(db.node.as_ref(), session_id, Duration::from_secs(240)).await;
 
     // agent_list reports both started sessions and their relationship.
     let list_request_id = "req-live-fan-out-list";
@@ -4418,6 +4409,8 @@ async fn wait_for_caused_requests(
 
 #[derive(Debug, Clone, Deserialize)]
 struct SessionToolRow {
+    #[serde(rename = "_docID")]
+    doc_id: String,
     tool_call_id: String,
     await_mode: Option<String>,
 }
@@ -4428,7 +4421,7 @@ async fn session_tool_rows(
     tool_name: &str,
 ) -> Vec<SessionToolRow> {
     let query = format!(
-        r#"{{ AgentToolCall(filter: {{ session_id: {{ _eq: "{}" }}, tool_name: {{ _eq: "{}" }} }}) {{ tool_call_id await_mode }} }}"#,
+        r#"{{ AgentToolCall(filter: {{ session_id: {{ _eq: "{}" }}, tool_name: {{ _eq: "{}" }} }}) {{ _docID tool_call_id await_mode }} }}"#,
         escape_graphql_string(session_id),
         escape_graphql_string(tool_name),
     );
@@ -4578,34 +4571,108 @@ async fn wait_for_session_quiescent(node: &EmbeddedNode, session_id: &str, timeo
     }
 }
 
-/// Wait for a completed request of the session whose terminal answer holds
-/// every needle, and return its request id.
-async fn wait_for_session_answer_containing(
+/// Every listed background row's completion reached the parent as exactly one
+/// notification bound to a completed background-completion wake (Lean
+/// `WakeAttemptSnapshot.acknowledgedBindings`), and some completed wake's claim
+/// snapshot reaches past every notification, so one provider input held all
+/// results. A completion landing while an earlier wake is claimed belongs to a
+/// successor wake, so the wake count and each wake's wording are not part of
+/// the contract. Returns the covering wake's request id.
+async fn assert_completed_wake_attempted_deliveries(
     node: &EmbeddedNode,
     session_id: &str,
-    needles: &[&str],
-    timeout: Duration,
+    tool_call_doc_ids: &[&str],
 ) -> String {
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let requests = session_requests(node, session_id).await;
-        for row in requests
-            .iter()
-            .filter(|row| row.lifecycle_state.as_deref() == Some("completed"))
-        {
-            let answer = terminal_assistant_answer(node, &row.request_id).await;
-            if needles.iter().all(|needle| answer.contains(needle)) {
-                return row.request_id.clone();
-            }
-        }
-        if tokio::time::Instant::now() >= deadline {
-            dump_session_diagnostics(node, session_id).await;
-            panic!(
-                "no completed request in session {session_id} answered with {needles:?}; requests={requests:?}"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
+    #[derive(Deserialize)]
+    struct WakeRow {
+        #[serde(rename = "_docID")]
+        doc_id: String,
+        request_id: String,
+        lifecycle_state: Option<String>,
+        input: Option<RequestInput>,
+        background_completion_input_through_sequence: Option<i64>,
     }
+    #[derive(Deserialize)]
+    struct DeliveryRow {
+        request_doc_id: Option<String>,
+        sequence: i64,
+        publication: serde_json::Value,
+    }
+    let escaped = escape_graphql_string(session_id);
+    let response = node
+        .execute(&format!(
+            r#"{{
+                AgentRequest(filter: {{ session_id: {{ _eq: "{escaped}" }} }}) {{
+                    _docID request_id lifecycle_state input background_completion_input_through_sequence
+                }}
+                AgentMessage(filter: {{ session_id: {{ _eq: "{escaped}" }} }}) {{
+                    request_doc_id sequence publication
+                }}
+            }}"#
+        ))
+        .await;
+    assert!(
+        !response.has_errors(),
+        "query completion deliveries failed: {:?}",
+        response.errors
+    );
+    let data = response.data.as_ref().expect("completion delivery data");
+    let wakes = serde_json::from_value::<Vec<WakeRow>>(data["AgentRequest"].clone())
+        .expect("decode session requests")
+        .into_iter()
+        .filter(|row| {
+            row.input
+                .as_ref()
+                .and_then(|input| input.queue.as_ref())
+                .is_some_and(|queue| queue.source == QueueSource::BackgroundCompletion)
+        })
+        .collect::<Vec<_>>();
+    let messages = serde_json::from_value::<Vec<DeliveryRow>>(data["AgentMessage"].clone())
+        .expect("decode session messages");
+    let mut deliveries = Vec::new();
+    for tool_call_doc_id in tool_call_doc_ids {
+        let bound = messages
+            .iter()
+            .filter(|message| {
+                message.publication["kind"] == "tool_delivery"
+                    && message.publication["tool_call_doc_id"] == *tool_call_doc_id
+            })
+            .filter_map(|message| {
+                let wake = wakes
+                    .iter()
+                    .find(|wake| message.request_doc_id.as_deref() == Some(wake.doc_id.as_str()))?;
+                Some((message.sequence, wake))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bound.len(),
+            1,
+            "completion of {tool_call_doc_id} must reach the parent as exactly one notification bound to a completion wake"
+        );
+        let (sequence, wake) = bound[0];
+        assert_eq!(
+            wake.lifecycle_state.as_deref(),
+            Some("completed"),
+            "the wake owning {tool_call_doc_id}'s notification must complete: {}",
+            wake.request_id
+        );
+        deliveries.push(sequence);
+    }
+    let last_delivery = *deliveries.iter().max().expect("at least one delivery");
+    wakes
+        .iter()
+        .find(|wake| {
+            wake.lifecycle_state.as_deref() == Some("completed")
+                && wake
+                    .background_completion_input_through_sequence
+                    .is_some_and(|through| through >= last_delivery)
+        })
+        .map(|wake| wake.request_id.clone())
+        .unwrap_or_else(|| {
+            panic!(
+                "no completed completion wake attempted every delivery (sequences {deliveries:?}) in session {session_id}"
+            )
+        })
 }
 
 /// Wait for a JSON tool result of `request_id` that satisfies `matches`.
