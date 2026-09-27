@@ -47,8 +47,46 @@ impl Check for TerminalState {
         }
     }
 
-    fn evaluate(&self, _params: &Value, _stage: &StageEvidence) -> CheckVerdict {
-        grader("bad_params", "unimplemented")
+    fn evaluate(&self, params: &Value, stage: &StageEvidence) -> CheckVerdict {
+        // An omitted `params` reaches the check as null.
+        if !params.is_null() {
+            if let Err(error) = serde_json::from_value::<Params>(params.clone()) {
+                return grader("bad_params", error.to_string());
+            }
+        }
+        if stage.terminal_state == Some(RequestLifecycleState::Completed)
+            && stage.failure_kind.is_none()
+        {
+            return graded(1, 1, None);
+        }
+        let mut text = format!(
+            "stage ended {}",
+            stage
+                .terminal_state
+                .map_or("unknown", |state| state.as_str())
+        );
+        if let Some(kind) = stage.failure_kind {
+            text.push_str(&format!("; failure_kind {}", kind.as_str()));
+        }
+        if let Some(reason) = stage.provider_reason {
+            text.push_str(&format!("; provider_reason {}", reason.as_str()));
+        }
+        let last_error = stage.tool_calls.iter().rev().find(|call| {
+            call.status.as_deref() == Some("failed") || call.tool_failure_class.is_some()
+        });
+        if let Some(call) = last_error {
+            let message = match &call.result {
+                Value::String(result) => result.clone(),
+                Value::Null => call.tool_failure_class.clone().unwrap_or_default(),
+                result => result.to_string(),
+            };
+            text.push_str(&format!(
+                "; last tool error: {}: {}",
+                call.tool_name,
+                excerpt(&message, EXCERPT_CHARS)
+            ));
+        }
+        graded(0, 1, Some(text))
     }
 }
 
