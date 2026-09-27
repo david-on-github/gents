@@ -98,6 +98,22 @@ struct ReconstructedScopedMessage {
     segments: Vec<super::canonical_rows::OutputSegmentRow>,
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static REQUEST_OUTPUT_SCANS: std::sync::Arc<std::sync::atomic::AtomicUsize>;
+}
+
+/// Run `future`, counting the request-wide output segment scans canonical
+/// reconstruction issues on this task.
+#[cfg(test)]
+pub(crate) async fn count_request_output_scans<F: std::future::Future>(
+    future: F,
+) -> (F::Output, usize) {
+    let scans = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let output = REQUEST_OUTPUT_SCANS.scope(scans.clone(), future).await;
+    (output, scans.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 #[derive(Clone, Copy)]
 enum ReadAccess<'a, 'txn> {
     Node(&'a EmbeddedNode),
@@ -546,6 +562,8 @@ async fn load_referenced_segments(
             crate::graphql::escape_graphql_string(&request_doc_id),
             crate::graphql::escape_graphql_string(agent_did)
         );
+        #[cfg(test)]
+        let _ = REQUEST_OUTPUT_SCANS.try_with(|scans| scans.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let response = access.query(&query, "load_output_source").await?;
         let rows = rows_value(&response, "AgentOutputSegment")?
             .iter()

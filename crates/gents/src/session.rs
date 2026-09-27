@@ -48,6 +48,8 @@ pub(crate) use observations::{
     update_session_title_with_source,
 };
 pub use observations::{load_latest_request_in_txn, SessionRequestFact};
+#[cfg(test)]
+pub(crate) use output::count_request_output_scans;
 pub use output::{
     load_canonical_message, load_canonical_message_from_node, CanonicalOutputReadError,
 };
