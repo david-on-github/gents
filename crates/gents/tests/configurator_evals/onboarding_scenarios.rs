@@ -472,9 +472,12 @@ async fn submit_mailbox_input(
     let mut last_observation = None;
     let outcome = async {
         loop {
-            let requests = super::rows(node, &format!(r#"{{ AgentRequest(filter: {{caused_by_source_doc_id: {{_eq: "{source}"}}}}) {{request_id behavior_id caused_by_trigger_id lifecycle_state failure_reason content}} }}"#), "AgentRequest").await.map_err(stages::infrastructure)?;
-            ensure!(requests.len() <= 1, "duplicate requests for input: {requests:?}");
-            if let Some(request) = requests.first() {
+            let requests = super::rows(node, &format!(r#"{{ AgentRequest(filter: {{caused_by_source_doc_id: {{_eq: "{source}"}}}}) {{request_id behavior_id caused_by_trigger_id caused_by_trigger_kind lifecycle_state failure_reason content}} }}"#), "AgentRequest").await.map_err(stages::infrastructure)?;
+            let (event_request, continuations) = partition_input_requests(&requests, &automation["trigger"]["trigger_id"])?;
+            if !continuations.is_empty() {
+                tracing::debug!(case, continuations = continuations.len(), "input has goal continuations");
+            }
+            if let Some(request) = event_request {
                 let observation = (request["request_id"].as_str(), request["lifecycle_state"].as_str());
                 let owned_observation = (observation.0.map(str::to_owned), observation.1.map(str::to_owned));
                 if last_observation.as_ref() != Some(&owned_observation) {
@@ -493,12 +496,37 @@ async fn submit_mailbox_input(
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
     }.await;
-    let diagnostics = node.execute("{ Trigger { trigger_id last_error last_status } AgentRequest { request_id caused_by_source_doc_id caused_by_trigger_id lifecycle_state failure_reason } }").await;
+    let diagnostics = node.execute("{ Trigger { trigger_id last_error last_status } AgentRequest { request_id caused_by_source_doc_id caused_by_trigger_id caused_by_trigger_kind lifecycle_state failure_reason } }").await;
     let retention = reporting::write_json_new(
         &evidence.join(format!("{case}-dispatch.json")),
         &serde_json::json!({"data":diagnostics.data,"errors":format!("{:?}", diagnostics.errors)}),
     );
     stages::retain_outcome(outcome, retention)
+}
+
+/// Splits the requests caused by one mailbox input into the request the event
+/// trigger materialized and the goal continuations that inherit its source.
+/// A goal continuation keeps the parent's `caused_by_source_doc_id` but carries
+/// `caused_by_trigger_kind = "goal"` and the goal's ID, so only event-kind
+/// requests from the automation trigger count toward the single-dispatch bound.
+fn partition_input_requests<'a>(
+    requests: &'a [Value],
+    trigger_id: &Value,
+) -> Result<(Option<&'a Value>, Vec<&'a Value>)> {
+    let mut events = Vec::new();
+    let mut continuations = Vec::new();
+    for request in requests {
+        match request["caused_by_trigger_kind"].as_str() {
+            Some("event") if request["caused_by_trigger_id"] == *trigger_id => events.push(request),
+            Some("goal") => continuations.push(request),
+            _ => anyhow::bail!("request did not originate from model-authored chain: {request:?}"),
+        }
+    }
+    ensure!(
+        events.len() <= 1,
+        "duplicate requests for input: {events:?}; continuations: {continuations:?}"
+    );
+    Ok((events.first().copied(), continuations))
 }
 
 fn sorted(mut values: Vec<Value>, key: &str) -> Vec<Value> {
@@ -528,6 +556,27 @@ fn contains_forbidden_secret_shape(value: &Value) -> bool {
         Value::Array(values) => values.iter().any(contains_forbidden_secret_shape),
         _ => false,
     }
+}
+
+#[test]
+fn input_requests_admit_goal_continuations_but_reject_duplicate_event_dispatch() {
+    let trigger = Value::String("monitor-trigger".into());
+    let event = |id: &str| serde_json::json!({"request_id": id, "caused_by_trigger_kind": "event", "caused_by_trigger_id": "monitor-trigger", "lifecycle_state": "completed"});
+    let continuation = serde_json::json!({"request_id": "goal-cont", "caused_by_trigger_kind": "goal", "caused_by_trigger_id": "goal-1", "lifecycle_state": "processing"});
+
+    let continued = [event("event-1"), continuation.clone()];
+    let (request, continuations) = partition_input_requests(&continued, &trigger).unwrap();
+    assert_eq!(request.unwrap()["request_id"], "event-1");
+    assert_eq!(continuations, vec![&continuation]);
+
+    let duplicated = [event("event-1"), event("event-2")];
+    let error = partition_input_requests(&duplicated, &trigger).unwrap_err();
+    assert!(error.to_string().contains("duplicate requests for input"));
+
+    let foreign = [
+        serde_json::json!({"request_id": "other", "caused_by_trigger_kind": "event", "caused_by_trigger_id": "other-trigger"}),
+    ];
+    assert!(partition_input_requests(&foreign, &trigger).is_err());
 }
 
 #[test]
