@@ -228,7 +228,8 @@ pub fn structural_gate(
 mod tests {
     use super::*;
     use crate::optimization::subject::tests::{
-        write_fixture_pack, write_inline_fixture_pack, FIXTURE_PROMPT,
+        write_fixture_pack, write_inline_fixture_pack, write_task_fixture_pack, FIXTURE_PROMPT,
+        FIXTURE_TEMPLATE,
     };
     use crate::optimization::subject::{materialize_candidate, materialize_pack};
     use crate::optimization::target::TargetField;
@@ -281,6 +282,90 @@ mod tests {
             32 * 1024,
             &[fixture.baseline.digest.clone()],
         )
+    }
+
+    fn task_fixture(inline: bool) -> Fixture {
+        let dirs = tempfile::tempdir().unwrap();
+        let root = dirs.path().to_path_buf();
+        write_task_fixture_pack(&root.join("baseline"), inline);
+        let baseline = materialize_pack(
+            &root.join("baseline"),
+            OWNER,
+            "monitor",
+            TargetField::TaskPromptTemplate,
+            Some("plan"),
+        )
+        .unwrap();
+        Fixture {
+            _dirs: dirs,
+            root,
+            baseline,
+        }
+    }
+
+    const TEMPLATE: &str = "Do {{ args.goal }} for {{ doc.owner }}, and say why.\n";
+
+    #[test]
+    fn a_one_field_task_candidate_passes_in_a_sidecar_and_inline() {
+        for inline in [false, true] {
+            let fixture = task_fixture(inline);
+            assert_eq!(fixture.baseline.prompt_asset.is_none(), inline);
+            let candidate = candidate(&fixture, TEMPLATE, "c1");
+            gate(&fixture, &candidate, TEMPLATE).unwrap();
+            let rejection = gate(&fixture, &candidate, FIXTURE_TEMPLATE).unwrap_err();
+            assert_eq!(rejection.reason, "text_mismatch");
+        }
+    }
+
+    #[test]
+    fn an_inline_task_candidate_that_changed_another_task_field_is_rejected() {
+        let fixture = task_fixture(true);
+        let mut tampered = candidate(&fixture, TEMPLATE, "c2");
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&tampered.files["pack_config.json"]).unwrap();
+        raw["tasks"][0]["display_name"] = serde_json::json!("Renamed");
+        tampered.files.insert(
+            "pack_config.json".into(),
+            serde_json::to_vec_pretty(&raw).unwrap(),
+        );
+        let rejection = gate(&fixture, &tampered, TEMPLATE).unwrap_err();
+        assert_eq!(rejection.reason, "unexpected_change");
+        assert!(
+            rejection.detail.contains("besides tasks"),
+            "{}",
+            rejection.detail
+        );
+    }
+
+    /// A task template is rendered with its variables when a seed stage fires
+    /// the task; a candidate that drops one would render another prompt shape.
+    #[test]
+    fn a_task_candidate_that_drops_a_template_variable_is_rejected() {
+        let task = task_fixture(false);
+        let rejection = text_gate(&task.baseline, "Do {{ args.goal }}.\n", 32 * 1024).unwrap_err();
+        assert_eq!(rejection.reason, "template_variables_dropped");
+        assert!(
+            rejection.detail.contains("doc.owner"),
+            "{}",
+            rejection.detail
+        );
+        assert!(
+            !rejection.detail.contains("args.goal"),
+            "{}",
+            rejection.detail
+        );
+
+        text_gate(&task.baseline, TEMPLATE, 32 * 1024).unwrap();
+        text_gate(
+            &task.baseline,
+            "{{ doc.owner }}: {{ args.goal }} {{ args.extra }}\n",
+            32 * 1024,
+        )
+        .unwrap();
+
+        // A context prompt is not a template: braces there are only text.
+        let context = fixture(false);
+        text_gate(&context.baseline, "Watch {{ nothing }}.\n", 32 * 1024).unwrap();
     }
 
     #[test]
