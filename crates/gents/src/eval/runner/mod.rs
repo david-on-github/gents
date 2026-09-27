@@ -420,6 +420,11 @@ pub(crate) async fn execute_frozen(
                     // The trials still in flight are cancelled and drained
                     // rather than dropped, which would detach their runtimes.
                     Some(Err(error)) => {
+                        tracing::error!(
+                            run_id,
+                            error = %format!("{error:#}"),
+                            "eval trial failed; draining in-flight trials"
+                        );
                         failed.get_or_insert(error);
                         stop.store(true, Ordering::Relaxed);
                         cancel.cancel();
