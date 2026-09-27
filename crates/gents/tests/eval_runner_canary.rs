@@ -12,6 +12,7 @@
 mod support;
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use gents::config_client::{
     apply_desired_state_plan, DesiredStateApplyDocument, DesiredStateApplyPlan,
@@ -281,7 +282,11 @@ async fn a_seed_stage_no_trigger_fires_for_ends_unsubmitted_at_its_deadline() {
     canary
         .install(vec![(
             Collection::EvalDefinition,
-            quiet_seed_definition_document(&canary.owner),
+            quiet_seed_definition_document(
+                &canary.owner,
+                "seed-quiet",
+                &[SEED_ITEM_SDL, QUIET_ITEM_SDL],
+            ),
         )])
         .await;
     request.definition_id = "seed-quiet".into();
@@ -321,6 +326,55 @@ async fn a_seed_stage_no_trigger_fires_for_ends_unsubmitted_at_its_deadline() {
         backend.observed_completion_bodies().len(),
         0,
         "no request reached the provider"
+    );
+}
+
+/// A seed stage in a home whose event sources cannot reconcile, here because
+/// the pack's `SeedItem` schema is not among the fixtures: the reconcile error
+/// ends the stage at once rather than waiting out the runtime-ready budget.
+#[tokio::test]
+async fn a_seed_stage_whose_event_sources_do_not_reconcile_fails_at_once() {
+    let backend = MockStreamingBackend::start_with_plans(MODEL, Vec::new()).unwrap();
+    let (canary, mut request) = canary_request(backend.endpoint(), "run-seed-unreconciled").await;
+    canary
+        .install(vec![(
+            Collection::EvalDefinition,
+            quiet_seed_definition_document(&canary.owner, "seed-unreconciled", &[QUIET_ITEM_SDL]),
+        )])
+        .await;
+    request.definition_id = "seed-unreconciled".into();
+    request.cells[0].source = CellSource::Directory(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval_runner/trigger_pack"),
+    );
+    request.cells[0].behavior_id = "seeded".into();
+    let executor = EmbeddedExecutor::new(DocumentRuntimeOptions::default(), canary.runs_dir());
+
+    let started = Instant::now();
+    let outcome = run(
+        &canary.access,
+        &request,
+        &executor,
+        &CheckRegistry::builtin(),
+        CancellationToken::new(),
+        &RunOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "the stage waited {:?} instead of failing on the reconcile error",
+        started.elapsed()
+    );
+    assert_eq!((outcome.completed, outcome.not_evidence), (1, 1));
+
+    let verdicts = load_verdicts(&canary.access, &request.owner, &request.run_id)
+        .await
+        .unwrap();
+    assert_eq!(verdicts.len(), 1, "{verdicts:#?}");
+    assert_eq!(
+        verdicts[0].kind,
+        OutcomeKind::Infrastructure,
+        "{verdicts:#?}"
     );
 }
 
@@ -772,17 +826,16 @@ fn definition_document(owner: &str) -> Value {
 }
 
 /// One case whose stage seeds a `QuietItem` row, which no trigger of the pack
-/// watches, under a deadline short enough for the test to wait out.
-fn quiet_seed_definition_document(owner: &str) -> Value {
+/// watches, under a deadline short enough for the test to wait out. The
+/// pack's own event source reconciles only when `schemas` holds `SeedItem`.
+fn quiet_seed_definition_document(owner: &str, definition_id: &str, schemas: &[&str]) -> Value {
     json!({
-        "definition_id": "seed-quiet",
+        "definition_id": definition_id,
         "agent_did": owner,
         "comparability_version": 1,
         "title": "Eval runner seed stage without a trigger",
         "subject": {"kind": "behavior", "inference_slots": ["primary"]},
-        // Both schemas: the pack's own event source must reconcile, or the
-        // stage would wait out the runtime-ready budget instead of its own.
-        "fixtures": {"schemas": [SEED_ITEM_SDL, QUIET_ITEM_SDL]},
+        "fixtures": {"schemas": schemas},
         "cases": [{
             "case_id": "quiet",
             "split": "validation",
