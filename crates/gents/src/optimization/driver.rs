@@ -36,7 +36,8 @@ use crate::optimization::job::{
     Checkpoint, DecisionSummary, JobOrigin, JobRecord, JobState, JournalEntry,
 };
 use crate::optimization::policy::{
-    decide, Decision, DecisionReport, InconclusiveReason, Mode, PolicyV2, RejectReason,
+    alpha_effective_ppm, decide, Decision, DecisionReport, InconclusiveReason, Mode, PolicyV2,
+    RejectReason, EXACT_CASE_LIMIT,
 };
 use crate::optimization::proposer::{ProposalInput, Proposer, Rejection};
 use crate::optimization::subject::{
@@ -590,10 +591,17 @@ pub(crate) fn check_policy(
     if policy.min_pairs == 0 {
         return Err(refused("policy min_pairs must be at least 1"));
     }
-    if policy.monte_carlo_samples < 1_000 {
+    // Above the exact limit the p-value is sampled at a resolution of
+    // 1e6 / (samples + 1) ppm; the model's own bound (`1000000 <= alphaEff *
+    // 2^n`) applied to that resolution says whether alpha is reachable at all.
+    let validation = split_case_count(definition, EvalSplit::Validation);
+    let samples = policy.monte_carlo_samples as u64;
+    if validation > EXACT_CASE_LIMIT as u64
+        && 1_000_000 > alpha_effective_ppm(policy) * (samples + 1)
+    {
         return Err(refused(format!(
-            "policy monte_carlo_samples {} must be at least 1000",
-            policy.monte_carlo_samples
+            "policy monte_carlo_samples {samples} cannot resolve alpha_effective {} ppm over the {validation}-case validation split",
+            alpha_effective_ppm(policy)
         )));
     }
     if policy.max_rounds == request.budgets.max_rounds {
@@ -1568,7 +1576,7 @@ mod tests {
     use super::*;
     use crate::document_config::EvalCase;
     use crate::eval::{DefinitionRef, SubjectRef};
-    use crate::optimization::policy::{PolicyV2, EXACT_CASE_LIMIT};
+    use crate::optimization::policy::PolicyV2;
     use crate::optimization::target::{Target, TargetField};
     use serde_json::json;
     use std::path::PathBuf;

@@ -40,8 +40,10 @@ pub struct PolicyV2 {
     /// not by `decide`.
     pub max_missing_usage_bp: u64,
     pub max_reruns: u32,
-    /// At least 1000 (`check_policy`): the sampled p-value resolves to
-    /// `1e6 / samples` ppm, so fewer samples let a p of zero decide.
+    /// Above `EXACT_CASE_LIMIT` cases the p-value is sampled at a resolution
+    /// of `1e6 / (samples + 1)` ppm and is never zero; fewer samples only
+    /// coarsen it and cost power. `check_policy` refuses a count too coarse
+    /// to reach the effective alpha.
     pub monte_carlo_samples: u32,
 }
 
