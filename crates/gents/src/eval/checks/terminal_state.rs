@@ -5,8 +5,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::eval::checks::{
-    excerpt, graded, graded_reason_codes, grader, Check, CheckDescription, CheckVerdict,
-    EXCERPT_CHARS,
+    failure_feedback, graded, graded_reason_codes, grader, Check, CheckDescription, CheckVerdict,
 };
 use crate::eval::runner::executor::StageEvidence;
 
@@ -59,34 +58,7 @@ impl Check for TerminalState {
         {
             return graded(1, 1, None);
         }
-        let mut text = format!(
-            "stage ended {}",
-            stage
-                .terminal_state
-                .map_or("unknown", |state| state.as_str())
-        );
-        if let Some(kind) = stage.failure_kind {
-            text.push_str(&format!("; failure_kind {}", kind.as_str()));
-        }
-        if let Some(reason) = stage.provider_reason {
-            text.push_str(&format!("; provider_reason {}", reason.as_str()));
-        }
-        let last_error = stage.tool_calls.iter().rev().find(|call| {
-            call.status.as_deref() == Some("failed") || call.tool_failure_class.is_some()
-        });
-        if let Some(call) = last_error {
-            let message = match &call.result {
-                Value::String(result) => result.clone(),
-                Value::Null => call.tool_failure_class.clone().unwrap_or_default(),
-                result => result.to_string(),
-            };
-            text.push_str(&format!(
-                "; last tool error: {}: {}",
-                call.tool_name,
-                excerpt(&message, EXCERPT_CHARS)
-            ));
-        }
-        graded(0, 1, Some(text))
+        graded(0, 1, Some(failure_feedback(stage)))
     }
 }
 

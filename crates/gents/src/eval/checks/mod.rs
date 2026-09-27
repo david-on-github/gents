@@ -153,14 +153,50 @@ fn graded(satisfied: usize, total: usize, feedback: Option<String>) -> CheckVerd
             "satisfied": satisfied,
             "total": total,
         }),
-        feedback: feedback.map(|mut text| {
-            if text.len() > FEEDBACK_BYTES {
-                text.truncate(text.floor_char_boundary(FEEDBACK_BYTES - "…".len()));
-                text.push('…');
-            }
-            text
-        }),
+        feedback: feedback.map(bounded),
     }
+}
+
+fn bounded(mut text: String) -> String {
+    if text.len() > FEEDBACK_BYTES {
+        text.truncate(text.floor_char_boundary(FEEDBACK_BYTES - "…".len()));
+        text.push('…');
+    }
+    text
+}
+
+/// Why `stage` did not complete: its end state, failure kind, provider
+/// reason and last tool error, bounded like any check's feedback.
+pub(crate) fn failure_feedback(stage: &StageEvidence) -> String {
+    let mut text = format!(
+        "stage ended {}",
+        stage
+            .terminal_state
+            .map_or("unknown", |state| state.as_str())
+    );
+    if let Some(kind) = stage.failure_kind {
+        text.push_str(&format!("; failure_kind {}", kind.as_str()));
+    }
+    if let Some(reason) = stage.provider_reason {
+        text.push_str(&format!("; provider_reason {}", reason.as_str()));
+    }
+    let last_error =
+        stage.tool_calls.iter().rev().find(|call| {
+            call.status.as_deref() == Some("failed") || call.tool_failure_class.is_some()
+        });
+    if let Some(call) = last_error {
+        let message = match &call.result {
+            Value::String(result) => result.clone(),
+            Value::Null => call.tool_failure_class.clone().unwrap_or_default(),
+            result => result.to_string(),
+        };
+        text.push_str(&format!(
+            "; last tool error: {}: {}",
+            call.tool_name,
+            excerpt(&message, EXCERPT_CHARS)
+        ));
+    }
+    bounded(text)
 }
 
 /// The check could not reach a verdict, which is no evidence about the

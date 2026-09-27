@@ -15,7 +15,7 @@
 use serde_json::{json, Value};
 
 use crate::document_config::{EvalCase, EvalCheckRef, EvalStage, EvalTier};
-use crate::eval::checks::CheckRegistry;
+use crate::eval::checks::{failure_feedback, CheckRegistry};
 use crate::eval::runner::executor::{StageEvidence, TrialEvidence};
 use crate::eval::{classify, EvidenceClass, OutcomeKind, ProviderReason};
 
@@ -74,7 +74,7 @@ pub fn grade(
                     "skipped_prerequisite",
                 ),
                 Some(observed) => match observed.failure_kind {
-                    Some(kind) => failed(stage, check, kind, observed.provider_reason),
+                    Some(kind) => failed(stage, check, kind, observed),
                     None => checked(stage, check, observed, registry),
                 },
             });
@@ -87,6 +87,9 @@ pub fn grade(
 /// evidence of anything: it is recorded as [`OutcomeKind::Unknown`], which is
 /// how the "no provider outcome without a reason" constraint is enforced.
 ///
+/// A `stage_failed` row carries [`failure_feedback`]: no check ran, so it is
+/// the only place the proposer learns why the stage failed.
+///
 /// A `failure_kind` that does not classify as a failure is malformed evidence:
 /// an executor that reports one is claiming a stage both failed and passed.
 /// Read literally the row would carry no score and
@@ -96,8 +99,9 @@ fn failed(
     stage: &EvalStage,
     check: &EvalCheckRef,
     kind: OutcomeKind,
-    provider_reason: Option<ProviderReason>,
+    observed: &StageEvidence,
 ) -> VerdictRow {
+    let provider_reason = observed.provider_reason;
     if classify(kind, provider_reason) == EvidenceClass::Pass {
         return synthetic(
             stage,
@@ -119,14 +123,17 @@ fn failed(
         );
     }
     let score_bp = (classify(kind, provider_reason) == EvidenceClass::Fail).then_some(0);
-    synthetic(
-        stage,
-        check,
-        kind,
-        provider_reason,
-        score_bp,
-        "stage_failed",
-    )
+    VerdictRow {
+        feedback: Some(failure_feedback(observed)),
+        ..synthetic(
+            stage,
+            check,
+            kind,
+            provider_reason,
+            score_bp,
+            "stage_failed",
+        )
+    }
 }
 
 /// A stage that ran to completion: the named check reads its evidence.
