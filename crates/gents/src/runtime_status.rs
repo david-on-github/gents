@@ -13,6 +13,14 @@ use crate::behavior_readiness_publisher::{
 use crate::graphql::escape_graphql_string;
 use crate::runtime_snapshot::ActiveRuntimeSnapshot;
 
+/// Target of the reconcile-phase transition event.
+///
+/// `AgentRuntime.reconcile_phase` holds only the phase the runtime is in now,
+/// and a reconcile leaves the intermediate phases for as long as its debounce
+/// and resolve take. The order and duration of those phases is therefore only
+/// observable through this event stream, not by reading the document.
+pub(crate) const RECONCILE_PHASE_EVENT_TARGET: &str = "gents.runtime.reconcile_phase";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReconcilePhase {
     Idle,
@@ -325,6 +333,15 @@ impl RuntimeStatusHandle {
             return;
         }
         next.updated_at = Utc::now().to_rfc3339();
+        if next.reconcile_phase != guard.reconcile_phase {
+            tracing::info!(
+                target: RECONCILE_PHASE_EVENT_TARGET,
+                agent_did = %next.agent_did,
+                previous_phase = guard.reconcile_phase.as_str(),
+                reconcile_phase = next.reconcile_phase.as_str(),
+                "runtime reconcile phase changed"
+            );
+        }
         *guard = next.clone();
         if let Err(error) = upsert_runtime_status(self.node.as_ref(), &next).await {
             tracing::warn!(
