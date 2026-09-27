@@ -392,8 +392,6 @@ fn expected_research_tool_surfaces() -> [(&'static str, &'static [&'static str])
                 "discover_tools",
                 "describe_tool",
                 "call_tool",
-                "get_goal",
-                "update_goal",
                 "write_research_assignment",
                 "write_research_plan",
             ],
@@ -404,8 +402,6 @@ fn expected_research_tool_surfaces() -> [(&'static str, &'static [&'static str])
                 "discover_tools",
                 "describe_tool",
                 "call_tool",
-                "get_goal",
-                "update_goal",
                 "write_research_source",
                 "write_research_claim",
                 "write_research_evidence",
@@ -484,7 +480,7 @@ fn verify_exact_research_tool_surfaces(explanation: &Value) -> Result<()> {
         let expected = expected_tools.iter().copied().collect::<BTreeSet<_>>();
         anyhow::ensure!(
             actual == expected,
-            "{display_name} has authority beyond its exact stage surface; expected {expected:?}, got {actual:?}"
+            "{display_name} differs from its exact stage surface; expected {expected:?}, got {actual:?}"
         );
     }
     Ok(())
