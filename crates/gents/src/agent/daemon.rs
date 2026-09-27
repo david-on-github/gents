@@ -217,8 +217,10 @@ impl InterruptSource {
 
 /// The durable interrupt row keeps only the outcome and its provider-call
 /// reason, so the event on this target is the sole record of the window the
-/// interrupt caught.
-pub(crate) const REQUEST_INTERRUPT_EVENT_TARGET: &str = "gents.request.interrupt";
+/// interrupt caught. Default CLI logging names this target explicitly: it
+/// shares no module prefix with the directives that admitted the daemon's
+/// own events, so an unlisted target falls to the bare `warn` floor.
+pub const REQUEST_INTERRUPT_EVENT_TARGET: &str = "gents.request.interrupt";
 
 impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
     pub(super) fn new(

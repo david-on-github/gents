@@ -253,6 +253,25 @@ mod tests {
     }
 
     #[test]
+    fn default_filter_keeps_the_interrupt_line_visible() {
+        let subscriber =
+            tracing_subscriber::registry().with(EnvFilter::new(crate::DEFAULT_LOG_FILTER));
+
+        tracing::subscriber::with_default(subscriber, || {
+            assert!(
+                tracing::enabled!(
+                    target: gents::REQUEST_INTERRUPT_EVENT_TARGET,
+                    tracing::Level::INFO
+                ),
+                "the interrupt event lives on its own target, off the daemon module \
+                 prefix the filter admits, so the filter must name the target or an \
+                 operator running with no RUST_LOG loses the only record of the \
+                 window an interrupt caught"
+            );
+        });
+    }
+
+    #[test]
     fn build_resource_sets_service_metadata() {
         let resource = build_resource("telemetry-test");
 

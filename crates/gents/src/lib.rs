@@ -322,6 +322,7 @@ pub use eth::{
     BUILTIN_QUERY_METHODS, ETH_USER_AGENT, KEYRING_SERVICE, KEY_BACKEND_KEYRING,
 };
 
+pub use crate::agent::daemon::REQUEST_INTERRUPT_EVENT_TARGET;
 pub use adapter_projection::{
     adapter_projection_eval_jsonl_record_schema, adapter_projection_eval_jsonl_records,
     adapter_projection_json_schema, adapter_projection_jsonl_record_schema,
