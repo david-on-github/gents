@@ -156,10 +156,6 @@ impl Drop for BlockedChild {
     }
 }
 
-/// The premise the binary split rests on: a child forked while the lock is
-/// held keeps the store excluded after the parent drops its `StoreLock`,
-/// until the child execs.
-#[cfg(unix)]
 #[test]
 fn a_store_outside_the_home_does_not_exclude_the_home_default_store() {
     let _exclusive = exclusive();
@@ -185,6 +181,10 @@ fn a_store_outside_the_home_does_not_exclude_the_home_default_store() {
     assert_ne!(held.path(), home_store.path());
 }
 
+/// The premise the binary split rests on: a child forked while the lock is
+/// held keeps the store excluded after the parent drops its `StoreLock`,
+/// until the child execs.
+#[cfg(unix)]
 #[test]
 fn a_forked_child_holds_the_store_lock_until_it_execs() {
     use std::ffi::CString;
