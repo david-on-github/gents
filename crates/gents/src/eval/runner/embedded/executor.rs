@@ -168,7 +168,7 @@ impl EmbeddedExecutor {
         }
         // The trial's own latch on its event sources, so a seed stage writes
         // only once the pack's triggers can see the write.
-        let (event_sources_ready, ready) = watch::channel(false);
+        let (event_sources_ready, ready) = watch::channel(None);
         let mut options = self.runtime_options.clone();
         // Replaces any observer the caller's options carried: the trial's
         // latch is the only reader of this runtime's snapshots.
@@ -198,15 +198,18 @@ impl EmbeddedExecutor {
     }
 }
 
-/// Latches the first clean reconcile of the trial runtime's event sources.
-struct EventSourcesReady(watch::Sender<bool>);
+/// The first reconcile of the trial runtime's event sources, once there is one.
+type Reconciled = Option<Result<(), String>>;
+
+/// Latches the first reconcile of the trial runtime's event sources.
+struct EventSourcesReady(watch::Sender<Reconciled>);
 
 impl RuntimeSnapshotObserver for EventSourcesReady {
     fn on_generation_published(&self, _: u64, _: &str, _: &[String]) {}
 
     fn on_event_sources_reconciled(&self, generation: u64, _: &str, result: Result<(), &str>) {
-        if generation >= 1 && result.is_ok() {
-            let _ = self.0.send(true);
+        if generation >= 1 && self.0.borrow().is_none() {
+            let _ = self.0.send(Some(result.map_err(str::to_owned)));
         }
     }
 }
@@ -701,7 +704,7 @@ async fn run_stages(
     home: &EmbeddedHome,
     locator: &TrialLocator,
     workspace: &Path,
-    ready: &watch::Receiver<bool>,
+    ready: &watch::Receiver<Reconciled>,
 ) -> Vec<StageEvidence> {
     let mut stages: Vec<StageEvidence> = Vec::new();
     for stage in &spec.stages {
@@ -724,7 +727,7 @@ async fn run_stage(
     locator: &TrialLocator,
     workspace: &Path,
     stage: &StageSpec,
-    ready: &watch::Receiver<bool>,
+    ready: &watch::Receiver<Reconciled>,
 ) -> StageEvidence {
     let observed = submit_and_observe(spec, cancel, home, locator, stage, ready).await;
     StageEvidence {
@@ -792,7 +795,7 @@ async fn submit_and_observe(
     home: &EmbeddedHome,
     locator: &TrialLocator,
     stage: &StageSpec,
-    ready: &watch::Receiver<bool>,
+    ready: &watch::Receiver<Reconciled>,
 ) -> ObservedStage {
     let deadline = Duration::from_secs(stage.deadline_secs);
     // A seed stage spends part of the deadline waiting for the fire; the
@@ -992,17 +995,21 @@ async fn submit_stage(
 /// request for the terminal wait.
 async fn seed_and_await_fire(
     home: &EmbeddedHome,
-    ready: &watch::Receiver<bool>,
+    ready: &watch::Receiver<Reconciled>,
     seed: &FixtureDocument,
     deadline: Duration,
 ) -> Result<(String, Duration)> {
-    tokio::time::timeout(
+    let reconciled = tokio::time::timeout(
         RUNTIME_READY_TIMEOUT,
-        ready.clone().wait_for(|ready| *ready),
+        ready.clone().wait_for(Option::is_some),
     )
     .await
     .context("waiting for the trial runtime's event sources")?
-    .context("the trial runtime stopped before its event sources were reconciled")?;
+    .context("the trial runtime stopped before its event sources were reconciled")?
+    .clone();
+    if let Some(Err(error)) = reconciled {
+        anyhow::bail!("the trial runtime's event sources did not reconcile: {error}");
+    }
     let access = ConfigAccess::Local(home.node.clone());
     let doc_id = create_document(
         &access,
@@ -1557,7 +1564,7 @@ mod tests {
             home_hint: None,
         };
         // Never ready: only the cancel can end the wait.
-        let (_ready_tx, never_ready) = watch::channel(false);
+        let (_ready_tx, never_ready) = watch::channel(None);
         let canceller = cancel.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
@@ -1866,7 +1873,7 @@ mod tests {
             &locator,
             &workspace,
             &stage,
-            &watch::channel(false).1,
+            &watch::channel(None).1,
         )
         .await;
 
