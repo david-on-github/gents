@@ -45,6 +45,8 @@ struct TitleProvider {
     stall: bool,
     calls: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
+    before_second: Option<Arc<tokio::sync::Notify>>,
+    third_poll: Option<Arc<tokio::sync::Notify>>,
     /// Moves the title request's execution generation before any output is
     /// streamed, so every later auxiliary write is fenced out.
     fence_generation: Option<(Arc<EmbeddedNode>, String, String)>,
@@ -71,6 +73,8 @@ impl TitleProvider {
             stall,
             calls: Arc::new(AtomicUsize::new(0)),
             entered: Arc::new(tokio::sync::Notify::new()),
+            before_second: None,
+            third_poll: None,
             fence_generation: None,
         }
     }
@@ -112,7 +116,32 @@ impl CompletionModel for TitleProvider {
         }
         self.entered.notify_one();
         let items = self.events.iter().cloned().map(Ok::<_, CompletionError>);
-        let inner: rig::streaming::StreamingResult<()> = if self.stall {
+        let inner: rig::streaming::StreamingResult<()> = if let (
+            Some(before_second),
+            Some(third_poll),
+        ) =
+            (&self.before_second, &self.third_poll)
+        {
+            let before_second = before_second.clone();
+            let third_poll = third_poll.clone();
+            let mut events = items.collect::<Vec<_>>().into_iter();
+            let first = events.next().expect("first reasoning event");
+            let second = events.next().expect("second reasoning event");
+            assert!(events.next().is_none());
+            Box::pin(
+                stream::once(async move { first })
+                    .chain(stream::once(async move {
+                        before_second.notified().await;
+                        second
+                    }))
+                    .chain(stream::once(async move {
+                        third_poll.notify_one();
+                        futures::future::pending::<Result<RawStreamingChoice<()>, CompletionError>>(
+                        )
+                        .await
+                    })),
+            )
+        } else if self.stall {
             Box::pin(stream::iter(items.collect::<Vec<_>>()).chain(stream::pending()))
         } else {
             Box::pin(stream::iter(items.collect::<Vec<_>>()))
@@ -1089,6 +1118,277 @@ async fn title_audit_is_dispatched_once_by_watcher_router_and_daemon() {
             "title owner emitted WARN"
         );
     }
+}
+
+async fn start_owned_title_daemon(
+    fixture: &TitleFixture,
+    provider: TitleProvider,
+) -> (
+    tokio::sync::mpsc::Sender<AgentRequest>,
+    tokio::sync::watch::Sender<bool>,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    crate::runtime_status::RuntimeStatusOwner,
+) {
+    let prompt_builder = LayeredPromptBuilder::for_behavior(
+        &fixture.behavior.system_prompt,
+        &fixture.behavior.behavior_id,
+        &[],
+        false,
+        &[],
+    );
+    let preamble = prompt_builder.preamble().to_string();
+    let (status_owner, status) = RuntimeStatusHandle::start_with_unbounded_test_clock(
+        fixture.node.clone(),
+        fixture.identity.did().to_owned(),
+    );
+    status.initialize_startup("general").await.unwrap();
+    status
+        .readiness()
+        .register_slot("general", 1)
+        .await
+        .unwrap();
+    let (dispatch, receiver) = tokio::sync::mpsc::channel(8);
+    let snapshot = ActiveRuntimeSnapshot {
+        generation: 1,
+        principal: None,
+        local_did: String::new(),
+        default_behavior_id: "general".into(),
+        behaviors: Default::default(),
+        tool_surfaces: Default::default(),
+        backend_admission_configs: Default::default(),
+        unavailable_behaviors: Default::default(),
+        active_schedules: Default::default(),
+        unavailable_schedules: Default::default(),
+        active_event_triggers: Default::default(),
+        unavailable_event_triggers: Default::default(),
+        active_tasks: Default::default(),
+        dispatchers: std::collections::HashMap::from([("general".into(), dispatch.clone())]),
+        behavior_executor_capacities: Default::default(),
+        behavior_executor_queue_capacities: Default::default(),
+    };
+    status
+        .readiness()
+        .publish_snapshot(&snapshot)
+        .await
+        .unwrap();
+    status
+        .set_process_state_durable(crate::agent::ProcessLifecycleState::Ready)
+        .await
+        .unwrap();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let mut daemon = BehaviorDaemon::new(
+        fixture.node.clone(),
+        fixture.behavior.clone(),
+        None,
+        Arc::new(provider),
+        preamble,
+        Arc::new(Vec::new()),
+        prompt_builder,
+        FailurePolicy::default(),
+        Some(crate::rendered_request::defra_rendered_request_capture_factory(fixture.node.clone())),
+        BackgroundToolRegistry::default(),
+        BackgroundExecutionRegistry::default(),
+        Arc::new(StartupBarrier::ready_for_test()),
+        status,
+        1,
+        crate::request_admission::AgentRequestAdmissionVerifier::new(
+            fixture.node.clone(),
+            fixture.identity.clone(),
+            crate::agent::p2p_reconcile::enrollment_authority_channel().1,
+        ),
+    )
+    .unwrap();
+    let task = tokio::spawn(async move {
+        daemon
+            .run(Arc::new(tokio::sync::Mutex::new(receiver)), shutdown_rx)
+            .await
+    });
+    (dispatch, shutdown_tx, task, status_owner)
+}
+
+fn buffered_reasoning_title_provider() -> (
+    TitleProvider,
+    Arc<tokio::sync::Notify>,
+    Arc<tokio::sync::Notify>,
+) {
+    let events = ["first", " second"]
+        .into_iter()
+        .map(|text| RawStreamingChoice::Reasoning {
+            id: None,
+            content: crate::llm::rig_compat::to_rig_reasoning_part(&ReasoningContent::Text {
+                text: text.into(),
+                signature: None,
+            }),
+        })
+        .collect();
+    let before_second = Arc::new(tokio::sync::Notify::new());
+    let third_poll = Arc::new(tokio::sync::Notify::new());
+    let mut provider = TitleProvider::new(events, false);
+    provider.before_second = Some(before_second.clone());
+    provider.third_poll = Some(third_poll.clone());
+    (provider, before_second, third_poll)
+}
+
+async fn wait_for_first_title_reasoning(fixture: &TitleFixture) {
+    tokio::time::timeout(Duration::from_secs(12), async {
+        loop {
+            let (rows, _) = fixture.output_rows().await;
+            if rows.iter().any(|row| !row.segment.runs.is_empty()) {
+                assert_eq!(open_title_reasoning(fixture).await, ["first"]);
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("first title reasoning never became durable");
+}
+
+async fn open_title_reasoning(fixture: &TitleFixture) -> Vec<String> {
+    let (rows, message_count) = fixture.output_rows().await;
+    assert_eq!(message_count, 0, "title published a public header");
+    let source = rows
+        .iter()
+        .find_map(|row| match &row.segment.source {
+            OutputSource::ProviderTurn { scope, .. }
+                if scope.kind == crate::rendered_request::CaptureScopeKind::Title =>
+            {
+                Some(row.segment.source.clone())
+            }
+            _ => None,
+        })
+        .expect("title provider source");
+    let writer = rows
+        .iter()
+        .find(|row| row.segment.source == source)
+        .unwrap()
+        .segment
+        .writer
+        .clone();
+    let observed = rows
+        .iter()
+        .filter(|row| row.segment.source == source)
+        .map(|row| ObservedSegment {
+            doc_id: &row.doc_id,
+            segment: &row.segment,
+        })
+        .collect::<Vec<_>>();
+    reconstruct_dense_prefix(&observed, &fixture.title.doc_id, &source, &writer, None)
+        .unwrap()
+        .streams
+        .into_iter()
+        .map(|stream| {
+            assert_eq!(stream.declaration.payload, StreamPayload::Reasoning);
+            stream.text
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn owned_title_shutdown_drains_buffered_reasoning_before_join() {
+    let mut fixture = TitleFixture::new().await;
+    Arc::get_mut(&mut fixture.behavior).unwrap().stream_batch_ms = 5_000;
+    fixture.terminalize_parent().await;
+    let (provider, before_second, third_poll) = buffered_reasoning_title_provider();
+    let calls = provider.calls.clone();
+    let (dispatch, shutdown, daemon, status_owner) =
+        start_owned_title_daemon(&fixture, provider).await;
+    dispatch.send(fixture.title.clone()).await.unwrap();
+    wait_for_first_title_reasoning(&fixture).await;
+    before_second.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), third_poll.notified())
+        .await
+        .expect("title provider did not process both reasoning chunks");
+    assert_eq!(open_title_reasoning(&fixture).await, ["first"]);
+    assert_eq!(
+        fixture.terminal_row().await.0,
+        RequestLifecycleState::Processing
+    );
+    shutdown.send(true).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("title daemon did not join its title task")
+        .unwrap()
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_title_audit(
+        &fixture,
+        &[
+            (StreamPayload::Reasoning, "first".into(), 0, 0),
+            (StreamPayload::Reasoning, " second".into(), 0, 1),
+        ],
+        OutputOutcome::Partial,
+        1,
+        false,
+    )
+    .await;
+    assert_eq!(
+        fixture.terminal_row().await,
+        (
+            RequestLifecycleState::Interrupted,
+            Some(gents_protocol::output::TerminalOutput::NoMessage)
+        )
+    );
+    status_owner.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn owned_title_shutdown_reports_fenced_partial_without_terminalizing() {
+    let mut fixture = TitleFixture::new().await;
+    Arc::get_mut(&mut fixture.behavior).unwrap().stream_batch_ms = 5_000;
+    fixture.terminalize_parent().await;
+    let (provider, before_second, third_poll) = buffered_reasoning_title_provider();
+    let calls = provider.calls.clone();
+    let (dispatch, shutdown, daemon, status_owner) =
+        start_owned_title_daemon(&fixture, provider).await;
+    dispatch.send(fixture.title.clone()).await.unwrap();
+    wait_for_first_title_reasoning(&fixture).await;
+    before_second.notify_one();
+    tokio::time::timeout(Duration::from_secs(10), third_poll.notified())
+        .await
+        .expect("title provider did not process both reasoning chunks");
+    assert_eq!(open_title_reasoning(&fixture).await, ["first"]);
+    let (before, before_messages) = fixture.output_rows().await;
+    assert_eq!(before_messages, 0);
+    assert!(before.iter().all(|row| row.segment.close.is_none()));
+    let doc = crate::graphql::escape_graphql_string(&fixture.title.doc_id);
+    let owner = crate::graphql::escape_graphql_string(&fixture.title.agent_did);
+    ConfigAccess::Local(fixture.node.clone())
+        .write(
+            "test.title_shutdown_fence_generation",
+            &format!(r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{doc}" }}, agent_did: {{ _eq: "{owner}" }} }}, input: {{ execution_generation: "fenced-title-generation" }}) {{ _docID }} }}"#),
+        )
+        .await
+        .unwrap();
+    shutdown.send(true).unwrap();
+    let error = tokio::time::timeout(Duration::from_secs(10), daemon)
+        .await
+        .expect("title daemon did not join its title task")
+        .unwrap()
+        .expect_err("fenced partial must surface through daemon join");
+    assert!(
+        error.is::<super::super::ShutdownDrainFailure>(),
+        "{error:#}"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fixture.terminal_row().await,
+        (RequestLifecycleState::Processing, None)
+    );
+    let (after, after_messages) = fixture.output_rows().await;
+    assert_eq!(after_messages, 0);
+    let mut before = before
+        .into_iter()
+        .map(|row| (row.doc_id, row.segment))
+        .collect::<Vec<_>>();
+    let mut after = after
+        .into_iter()
+        .map(|row| (row.doc_id, row.segment))
+        .collect::<Vec<_>>();
+    before.sort_by(|left, right| left.0.cmp(&right.0));
+    after.sort_by(|left, right| left.0.cmp(&right.0));
+    assert_eq!(after, before, "failed drain wrote or closed title output");
+    status_owner.close().await.unwrap();
 }
 
 #[tokio::test]
