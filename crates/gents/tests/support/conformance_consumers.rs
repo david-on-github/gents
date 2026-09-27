@@ -497,13 +497,6 @@ pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
             function: "generated_task_hook_run_cases_drive_the_production_hook_executor",
         },
         ConformanceConsumer::RustTest {
-            id: "lean_vocab_test::task_hook_executor::generated_task_hook_recovery_cases_drive_the_production_hook_executor",
-            package: "gents",
-            source_path: "crates/gents/src/lean_vocab_test/task_hook_executor.rs",
-            module_path: "lean_vocab_test::task_hook_executor",
-            function: "generated_task_hook_recovery_cases_drive_the_production_hook_executor",
-        },
-        ConformanceConsumer::RustTest {
             id: "conformance::graph_pipeline::generated_validation_cases_fence_whole_graph_compilation_gate",
             package: "gents",
             source_path: "crates/gents/tests/conformance/graph_pipeline.rs",

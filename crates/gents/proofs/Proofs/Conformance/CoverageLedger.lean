@@ -751,13 +751,13 @@ def caseCoverage : List CoverageEntry :=
       "task_hook_run_cases"
       "TaskHookRunCases"
       "lean_vocab_test::task_hook_executor::generated_task_hook_run_cases_drive_the_production_hook_executor"
-      "The production hook orchestration executes every generated trace: phase selection and order, stop-at-first-error for ordinary phases, all-cleanup-attempted, primary-error preservation, model-resolved effective timeouts, the final outcome and the request state its terminal owner would write. The host command observation is scripted exactly as the model scripts HookExec, so process launch, capture, timeout and cancellation are covered by managed-exec owner tests rather than here. The daemon wiring that places the before gate at claim and the after phases at the terminal owner is not itself replayed by these traces, and no durable attempt record exists yet, so production recovery has no caller.")
+      "The production hook orchestration executes every generated trace: phase selection and order, stop-at-first-error for ordinary phases, all-cleanup-attempted, primary-error preservation, model-resolved effective timeouts, the final outcome and the request state its terminal owner would write. The consumer records what the orchestration actually invoked, so the traces also fence how many times the owned work ran and that only the before phase precedes it. The host command observation is scripted exactly as the model scripts HookExec, so process launch, capture, timeout and cancellation are covered by managed-exec owner tests rather than here. The daemon wiring that places the before gate at claim and the after phases at the terminal owner is not itself replayed by these traces.")
       "task-hooks" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "task_hook_recovery_cases"
       "TaskHookRecoveryCases"
-      "lean_vocab_test::task_hook_executor::generated_task_hook_recovery_cases_drive_the_production_hook_executor"
-      "The production recovery selection executes every generated trace: no cleanup before work started, remaining cleanup after it started, and no repeat of an observed or unknown-outcome occurrence. It is driven by supplied observations because no durable record of a hook attempt exists; until one does, no production caller can supply them and interrupted-request cleanup stays unrecovered.")
+      "lean_vocab_test::task_hooks_policy::generated_task_hook_cases_fence_the_modeled_phase_vocabulary"
+      "Recovery selection of remaining cleanup from observed attempts has no native owner: it needs the durable attempt observations of the interrupted execution, and nothing records a hook attempt. The consumer binds only the phase vocabulary and admission of these traces. A test-local replay of recoveryCleanup would fence nothing, so none exists.")
       "task-hooks" [Surface.runtimeInternal]
   , tagged (consumerCoverage
       "request_progress_cases"

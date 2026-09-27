@@ -110,17 +110,18 @@ pub(crate) enum TaskAgentResult {
     Success,
     Failure,
     Cancelled,
-    /// Active work whose completion state is unknown. Only crash recovery can
-    /// observe this, and recovery has no production caller while no durable
-    /// record of a hook attempt exists.
+    /// Active work whose completion state is unknown. No native owner reports
+    /// it: distinguishing it from a cancellation needs a durable record of the
+    /// interrupted execution's hook attempts, and nothing records one.
     #[allow(dead_code)]
     Interrupted,
 }
 
 /// What the owned execution reported to the after-phases. `Relinquished` is
 /// outside `TaskHooks.runTask`: no agent result was observed and this execution
-/// no longer owns the request, so remaining cleanup belongs to
-/// [`recover_interrupted_task_hooks`] under the recovering owner.
+/// no longer owns the request, so remaining cleanup belongs to whichever owner
+/// recovers it. No native owner selects that cleanup, because selecting it
+/// needs durable attempt observations nothing records.
 pub(crate) enum OwnedWorkObservation {
     Observed(TaskAgentResult),
     Relinquished,
@@ -277,49 +278,6 @@ where
     }
     run.finally_attempted = run_finally(hooks, exec).await;
     Some(run)
-}
-
-/// `TaskHooks.recoveryCleanup`: cleanup occurrences the execution owner never
-/// observed. An observed occurrence is never scheduled again, including one
-/// whose host outcome is unknown.
-///
-/// No caller exists yet: selecting remaining cleanup needs the durable attempt
-/// observations of the interrupted execution, and nothing records a hook
-/// attempt. Supplying an empty observation set instead would replay attempts
-/// the previous owner already made, which the contract refuses.
-#[allow(dead_code)]
-pub(crate) fn recovery_cleanup<'a>(
-    hooks: &'a [TaskHook],
-    observed: &[HookAttempt],
-) -> Vec<&'a TaskHook> {
-    hooks
-        .iter()
-        .filter(|hook| {
-            hook.phase == TaskHookPhase::Finally
-                && !observed
-                    .iter()
-                    .any(|attempt| attempt.hook_id == hook.hook_id)
-        })
-        .collect()
-}
-
-/// `TaskHooks.recoverInterrupted`. `started` is the execution owner's
-/// observation that work began; admission alone starts nothing. It shares
-/// [`recovery_cleanup`]'s missing-observation gap, so it has no caller either.
-#[allow(dead_code)]
-pub(crate) async fn recover_interrupted_task_hooks(
-    started: bool,
-    hooks: &[TaskHook],
-    observed: &[HookAttempt],
-    exec: &dyn TaskHookExec,
-) -> (RequestTerminalOutcome, Vec<HookAttempt>) {
-    let mut attempts = Vec::new();
-    if started {
-        for hook in recovery_cleanup(hooks, observed) {
-            attempts.push(exec.attempt(hook).await);
-        }
-    }
-    (RequestTerminalOutcome::Interrupted, attempts)
 }
 
 /// Runs one configured occurrence through the host execution owner. The cwd is
