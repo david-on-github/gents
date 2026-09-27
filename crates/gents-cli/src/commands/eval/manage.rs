@@ -394,8 +394,7 @@ async fn gc_jobs(
         {
             continue;
         }
-        // The driver's job-id rule: one ordinary path component.
-        if job.job_id.trim().is_empty() || run_dir(&job.origin.jobs_dir, &job.job_id).is_err() {
+        if gents::optimization::validate_job_id(&job.job_id).is_err() {
             writeln!(
                 out,
                 "kept job {:?}: its id is not one ordinary path component",
