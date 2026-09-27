@@ -2,7 +2,8 @@ use std::collections::BTreeSet;
 
 use gents::agent::p2p_reconcile::templates::{
     admit_app_collections, builtin_templates, equality_filter, filter_conditions, resolve_template,
-    scope_filter, single_string_eq, Delivery, FilterPredicate, Scope, AGENT_DIRECTORY_COLLECTION,
+    scope_filter, single_string_eq, Delivery, FilterPredicate, Scope, ScopeTemplate,
+    AGENT_DIRECTORY_COLLECTION,
 };
 use gents::agent::p2p_reconcile::{
     client_route_collections, resolve_template_filters, PairingDirection, CLIENT_COLLECTIONS,
@@ -28,6 +29,50 @@ fn lean_string_list(definition: &str) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .collect()
+}
+
+/// A `CollectionRule` literal from the Lean scope model:
+/// `(collection, field, source)`.
+fn lean_collection_rules(definition: &str) -> Vec<(String, String, String)> {
+    let marker = format!("def {definition} : List CollectionRule :=");
+    let body = LEAN_SCOPE_STATE
+        .split_once(&marker)
+        .unwrap_or_else(|| panic!("Lean scope model omitted {definition}"))
+        .1
+        .split("\n\n")
+        .next()
+        .expect("Lean rule list body");
+    let quoted_after = |line: &str, key: &str| {
+        line.split_once(&format!("{key} := \""))
+            .and_then(|(_, rest)| rest.split_once('"'))
+            .map(|(value, _)| value.to_string())
+    };
+    body.lines()
+        .filter_map(|line| {
+            let collection = quoted_after(line, "collection")?;
+            let field = quoted_after(line, "field").expect("rule field");
+            let source = line
+                .split_once("source := .")
+                .and_then(|(_, rest)| rest.split(|c: char| !c.is_alphanumeric()).next())
+                .expect("rule source")
+                .to_string();
+            Some((collection, field, source))
+        })
+        .collect()
+}
+
+/// The Lean `routeSelects`: the route resolved for `peer_did` selects an
+/// `AgentRequest` row whose `field` holds `row_did`.
+fn route_selects_request(
+    template: &ScopeTemplate,
+    field: &str,
+    row_did: &str,
+    peer_did: &str,
+    local_did: &str,
+) -> bool {
+    scope_filter(&template.scope, template.collections, peer_did, local_did)
+        .get("AgentRequest")
+        .is_some_and(|predicate| single_string_eq(predicate) == Some((field, row_did)))
 }
 
 fn assert_eq_filter(predicate: &FilterPredicate, field: &str, value: &str) {
@@ -413,58 +458,78 @@ fn unscoped_scope_resolves_to_no_filter() {
 
 #[test]
 fn subagent_templates_resolve_to_exact_directional_filters() {
-    let projection_names = lean_string_list("subagentHostCollections");
-    let return_projection = projection_names
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let return_projection = return_projection.as_slice();
-
-    let coord = resolve_template("subagent-coordinator").expect("coordinator template");
-    assert_eq!(coord.delivery, Delivery::Push);
-    assert_eq!(coord.collections, &["AgentToolCall"]);
-    let coord_filter = scope_filter(
-        &coord.scope,
-        coord.collections,
-        "did:key:host",
-        "did:key:coord",
-    );
-    assert_eq!(coord_filter.len(), 1);
-    assert!(!coord_filter.contains_key("AgentRequest"));
-    assert_eq!(
-        coord_filter.get("AgentToolCall"),
-        Some(&equality_filter("spawn_target_did", "did:key:host"))
-    );
-
-    let host = resolve_template("subagent-host").expect("host template");
-    assert_eq!(host.delivery, Delivery::Push);
-    assert_eq!(host.collections, return_projection);
-    let host_filter = scope_filter(
-        &host.scope,
-        host.collections,
-        "did:key:coord",
-        "did:key:host",
-    );
-    assert_eq!(host_filter.len(), return_projection.len());
-    assert_eq!(
-        host_filter.get("AgentRequest"),
-        Some(&equality_filter("requester_did", "did:key:coord"))
-    );
-    for collection in return_projection {
+    let caller = "did:key:coord";
+    let host_did = "did:key:host";
+    for (template_id, collections_def, rules_def, peer_did, local_did) in [
+        (
+            "subagent-coordinator",
+            "subagentCoordinatorCollections",
+            "subagentCoordinatorRules",
+            host_did,
+            caller,
+        ),
+        (
+            "subagent-host",
+            "subagentHostCollections",
+            "subagentHostRules",
+            caller,
+            host_did,
+        ),
+    ] {
+        let collections = lean_string_list(collections_def);
+        let rules = lean_collection_rules(rules_def);
+        let template = resolve_template(template_id).expect("subagent template");
+        assert_eq!(template.delivery, Delivery::Push);
         assert_eq!(
-            host_filter.get(*collection),
-            Some(&equality_filter("requester_did", "did:key:coord")),
-            "unexpected host filter for {collection}"
+            template.collections,
+            collections.iter().map(String::as_str).collect::<Vec<_>>(),
+            "{template_id} collections must equal Lean {collections_def}"
         );
-    }
-    for local_collection in ["AgentToolResult", "AgentSession", "CompactionEntry"] {
-        assert!(!host.collections.contains(&local_collection));
-        assert!(!host_filter.contains_key(local_collection));
+        assert_eq!(
+            rules.iter().map(|(c, _, _)| c).collect::<Vec<_>>(),
+            collections.iter().collect::<Vec<_>>(),
+            "Lean {rules_def} must scope every declared collection"
+        );
+        let filter = scope_filter(&template.scope, template.collections, peer_did, local_did);
+        assert_eq!(filter.len(), rules.len());
+        for (collection, field, source) in &rules {
+            assert_eq!(
+                source, "peerDid",
+                "{template_id} {collection} is peer scoped"
+            );
+            assert_eq!(
+                filter.get(collection.as_str()),
+                Some(&equality_filter(field.as_str(), peer_did)),
+                "unexpected {template_id} filter for {collection}"
+            );
+        }
+        assert!(!template.collections.contains(&"AgentToolCall"));
+        assert!(!filter.contains_key("AgentToolCall"));
     }
 
-    for predicate in coord_filter.values().chain(host_filter.values()) {
-        let (_, value) = single_string_eq(predicate).expect("single equality filter");
-        assert!(value == "did:key:coord" || value == "did:key:host");
+    let coordinator_rules = lean_collection_rules("subagentCoordinatorRules");
+    assert_eq!(
+        coordinator_rules
+            .iter()
+            .map(|(c, f, _)| (c.as_str(), f.as_str()))
+            .collect::<Vec<_>>(),
+        [("AgentRequest", "agent_did")],
+        "caller -> host carries exactly the Peer AgentRequest, scoped by its target"
+    );
+    let host_rules = lean_collection_rules("subagentHostRules");
+    assert!(
+        host_rules
+            .iter()
+            .all(|(_, field, _)| field == "requester_did"),
+        "host -> caller returns the caused request lineage by requester_did"
+    );
+    for collection in [
+        "AgentRequest",
+        "AgentSession",
+        "AgentOutputSegment",
+        "AgentMessage",
+    ] {
+        assert!(host_rules.iter().any(|(c, _, _)| c == collection));
     }
 }
 
@@ -484,35 +549,33 @@ fn subagent_host_message_filter_excludes_unrelated_host_history() {
 
 #[test]
 fn sixteen_peer_request_wave_is_reduced_to_one_target() {
+    let request_field = |rules_def: &str| {
+        lean_collection_rules(rules_def)
+            .into_iter()
+            .find(|(collection, _, _)| collection == "AgentRequest")
+            .map(|(_, field, _)| field)
+            .unwrap_or_else(|| panic!("Lean {rules_def} carries AgentRequest"))
+    };
+
     let coordinator = resolve_template("subagent-coordinator").expect("coordinator template");
+    let target_field = request_field("subagentCoordinatorRules");
+    let caller = "did:key:coordinator-07";
+    let target = "did:key:host-07";
+    let routed_to = (0..16)
+        .map(|index| format!("did:key:host-{index:02}"))
+        .filter(|host_did| {
+            route_selects_request(coordinator, &target_field, target, host_did, caller)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(routed_to, [target]);
+
     let host = resolve_template("subagent-host").expect("host template");
-    let requester_did = "did:key:coordinator-07";
-
-    let current_parent_request_matches = (0..16)
-        .filter(|index| {
-            let host_did = format!("did:key:host-{index:02}");
-            scope_filter(
-                &coordinator.scope,
-                coordinator.collections,
-                &host_did,
-                requester_did,
-            )
-            .contains_key("AgentRequest")
-        })
-        .count();
-    assert_eq!(current_parent_request_matches, 0);
-
-    let routed_child_request_matches = (0..16)
-        .filter(|index| {
-            let peer_did = format!("did:key:coordinator-{index:02}");
-            scope_filter(&host.scope, host.collections, &peer_did, "did:key:host")
-                .get("AgentRequest")
-                .is_some_and(|predicate| {
-                    single_string_eq(predicate) == Some(("requester_did", requester_did))
-                })
-        })
-        .count();
-    assert_eq!(routed_child_request_matches, 1);
+    let requester_field = request_field("subagentHostRules");
+    let returned_to = (0..16)
+        .map(|index| format!("did:key:coordinator-{index:02}"))
+        .filter(|peer_did| route_selects_request(host, &requester_field, caller, peer_did, target))
+        .collect::<Vec<_>>();
+    assert_eq!(returned_to, [caller]);
 }
 
 #[test]
