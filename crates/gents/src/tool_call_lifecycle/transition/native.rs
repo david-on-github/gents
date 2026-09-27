@@ -47,6 +47,14 @@ impl ToolCallLifecycle {
                 "start_running cannot re-dispatch an already-running physical tool; recover its registered executor instead"
             );
         }
+        // A row a recovery or interrupt already ended is a lost dispatch, not
+        // an illegal transition: the caller observes the rejection and stops.
+        if self.state.is_terminal() {
+            return Err(
+                crate::tool_call_lifecycle::delivery::ToolDispatchRejection::LostRequestOwnership
+                    .into(),
+            );
+        }
         self.ensure_state(&[ToolCallState::Pending], "start_running")?;
         if self.is_spawned_background() {
             return self.start_running_spawned_with_time(fixture_now).await;

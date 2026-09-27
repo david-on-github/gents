@@ -1629,12 +1629,12 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
             "expected exactly one Goal wrapup: {requests:?}"
         );
         assert_eq!(goal_requests[0]["caused_by_parent_request_id"], parent);
+        let wakes = requests
+            .iter()
+            .filter(|row| row["request_id"] != parent && row["_docID"] != goal_requests[0]["_docID"])
+            .collect::<Vec<_>>();
         assert_eq!(
-            requests
-                .iter()
-                .filter(|row| row["request_id"] != parent
-                    && row["_docID"] != goal_requests[0]["_docID"])
-                .count(),
+            wakes.len(),
             1,
             "besides the parent and the Goal wrapup, only the completion wake exists: {requests:?}"
         );
@@ -1657,7 +1657,8 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
             }
         }
         assert_eq!(completions.len(), 1);
-        assert_eq!(completions[0].0["request_doc_id"], parent_doc);
+        // The completion is published as the input of its wake.
+        assert_eq!(completions[0].0["request_doc_id"], wakes[0]["_docID"]);
         let background_rows = data["AgentToolCall"]
             .as_array()
             .unwrap()

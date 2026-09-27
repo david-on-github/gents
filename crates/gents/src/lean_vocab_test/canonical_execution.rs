@@ -493,7 +493,7 @@ where
         let actual = adapter
             .apply(&mut native, *query_document, action)
             .await
-            .map_err(|error| format!("{name} step {index}: native adapter failed: {error}"))?;
+            .map_err(|error| format!("{name} step {index}: native adapter failed: {error:#}"))?;
         if !observations_match(&actual, expected) {
             return Err(format!(
                 "{name} step {index} ({:?}): expected {expected:?}, got {actual:?}",

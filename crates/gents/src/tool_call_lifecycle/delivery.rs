@@ -1002,7 +1002,14 @@ impl ToolCallLifecycle {
         } else {
             Some(self.output_budget().await)
         };
-        let terminal_status = self.terminal_persistence_status(fields.completion_reason);
+        // Lean `RestartRow.notification`: an expired session-message row owes
+        // no completion; only its caused request's terminal is reported.
+        let terminal_status =
+            if self.is_session_message() && fields.state == ToolCallState::TimedOut {
+                "completed".to_string()
+            } else {
+                self.terminal_persistence_status(fields.completion_reason)
+            };
         let spawned_by_tool_call_doc_id = self.spawned_by_tool_call_doc_id.clone();
 
         let published = ConfigAccess::transact_local_idempotent(
