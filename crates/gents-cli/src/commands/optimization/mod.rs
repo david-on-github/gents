@@ -13,12 +13,12 @@ use anyhow::{Context, Result};
 use gents::eval::checks::CheckRegistry;
 use gents::eval::documents::default_breaker_threshold;
 use gents::eval::runner::embedded::EmbeddedExecutor;
-use gents::eval::runner::{run_dir, RunOptions};
+use gents::eval::runner::RunOptions;
 use gents::optimization::target::TargetField;
 use gents::optimization::{
     derive_state, job_dir, job_refused, load_job, promote_refused, removable, run_job,
-    show as show_job, Budgets, JobOutcome, JobRequest, JobState, PolicyV2, Proposal, Proposer,
-    ScriptedProposer,
+    show as show_job, validate_job_id, Budgets, JobOutcome, JobRequest, JobState, PolicyV2,
+    Proposal, Proposer, ScriptedProposer,
 };
 use gents::{default_behavior_id_for_agent, default_inference_profile_id_for_behavior};
 use tokio_util::sync::CancellationToken;
@@ -463,7 +463,7 @@ async fn revert(
 /// Delete `<jobs_dir>/<job_id>/`, the job's own jobs directory as its origin
 /// recorded it, when that is under this home. Its documents and runs stay.
 async fn rm(ctx: &EvalContext, args: &OptimizationRmArgs, out: &mut dyn Write) -> Result<()> {
-    validate_job_id(ctx, &args.job_id)?;
+    validate_job_id(&args.job_id)?;
     let job = load_job(&ctx.access, &ctx.owner, &args.job_id)
         .await?
         .with_context(|| format!("no optimization job {:?} for {}", args.job_id, ctx.owner))?;
@@ -502,18 +502,6 @@ async fn rm(ctx: &EvalContext, args: &OptimizationRmArgs, out: &mut dyn Write) -
         "removed {} ({bytes} bytes reclaimed); the job's documents and runs stay{unpromotable}",
         dir.display()
     )?;
-    Ok(())
-}
-
-/// The driver's job-id rule, checked before any I/O or path: not blank, and
-/// one ordinary path component, whose owner is [`run_dir`].
-fn validate_job_id(ctx: &EvalContext, job_id: &str) -> Result<()> {
-    anyhow::ensure!(
-        !job_id.trim().is_empty(),
-        "job_id {job_id:?} must not be blank"
-    );
-    run_dir(&ctx.jobs_dir(), job_id)
-        .map_err(|_| anyhow::anyhow!("job_id {job_id:?} must be one ordinary path component"))?;
     Ok(())
 }
 

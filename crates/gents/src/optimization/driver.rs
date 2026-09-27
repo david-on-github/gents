@@ -97,7 +97,7 @@ pub struct JobRequest {
 /// cell ids to. Every path below is built from a job id this has accepted;
 /// `run_job` and job creation call it before building any. A bad id is a
 /// [`JobRefused`]: nothing was written.
-pub(crate) fn validate_job_id(job_id: &str) -> Result<()> {
+pub fn validate_job_id(job_id: &str) -> Result<()> {
     if job_id.trim().is_empty() {
         return Err(refused(format!("job_id {job_id:?} must not be blank")));
     }

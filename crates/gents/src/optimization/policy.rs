@@ -60,6 +60,18 @@ impl PolicyV2 {
             monte_carlo_samples: 100_000,
         }
     }
+
+    /// Whether this is the placeholder defaults with any `max_rounds`:
+    /// `max_rounds` sizes a job's budget (the Bonferroni divisor), not a
+    /// calibrated value, so the defaults sized to any round count are still
+    /// uncalibrated.
+    pub fn is_placeholder(&self) -> bool {
+        *self
+            == Self {
+                max_rounds: self.max_rounds,
+                ..Self::uncalibrated()
+            }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
