@@ -256,7 +256,6 @@ pub(super) async fn cancel_projected_background_tool_key(
     let outcome = gents::cancel_background_tool_call(
         state.node.clone(),
         &state.background_execution_registry,
-        state.agent_did.as_ref(),
         session_id,
         tool_call_id,
     )
