@@ -751,6 +751,7 @@ async fn submit_and_observe(
     stage: &StageSpec,
 ) -> ObservedStage {
     let request_id = uuid::Uuid::new_v4().to_string();
+    let stage_started = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     if let Err(error) =
         submit_stage(&home.node, locator, &spec.behavior_id, stage, &request_id).await
     {
@@ -817,7 +818,7 @@ async fn submit_and_observe(
         request_id: Some(request_id),
         terminal_state: observed.as_ref().map(|observed| observed.terminal_state),
         failure_kind: match stage_failure_kind(observed.as_ref(), collected, stopped, &evidence) {
-            None => trigger_failure(&home.node, &locator.trial_agent_did).await,
+            None => trigger_failure(&home.node, &locator.trial_agent_did, &stage_started).await,
             failed => failed,
         },
         evidence,
@@ -890,7 +891,11 @@ fn provider_reason(
 /// render, so the subject can cause the error and it counts against it as
 /// [`OutcomeKind::Runtime`]. A status that could not be read leaves the pass
 /// unproven, which is the harness failing: [`OutcomeKind::Infrastructure`].
-async fn trigger_failure(node: &EmbeddedNode, agent_did: &str) -> Option<OutcomeKind> {
+async fn trigger_failure(
+    node: &EmbeddedNode,
+    agent_did: &str,
+    _since: &str,
+) -> Option<OutcomeKind> {
     let agent_did = escape_graphql_string(agent_did);
     let query = format!(
         r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{agent_did}" }}, last_status: {{ _eq: "error" }} }}) {{ trigger_id last_error }} }}"#
@@ -1822,20 +1827,42 @@ mod tests {
     #[tokio::test]
     async fn an_errored_trigger_fails_a_completed_stage_as_runtime() {
         let home = EmbeddedHome::create_temp("trigger-error").await.unwrap();
-        assert_eq!(trigger_failure(&home.node, home.did()).await, None);
+        let since = "2026-06-01T00:00:00Z";
+        assert_eq!(trigger_failure(&home.node, home.did(), since).await, None);
 
-        seed_trigger(&home, "healthy", "fired", None).await;
-        assert_eq!(trigger_failure(&home.node, home.did()).await, None);
+        seed_trigger(&home, "healthy", "fired", None, since).await;
+        assert_eq!(trigger_failure(&home.node, home.did(), since).await, None);
 
-        seed_trigger(&home, "broken", "error", Some("template did not render")).await;
+        seed_trigger(
+            &home,
+            "broken",
+            "error",
+            Some("template did not render"),
+            since,
+        )
+        .await;
         assert_eq!(
-            trigger_failure(&home.node, home.did()).await,
+            trigger_failure(&home.node, home.did(), since).await,
             Some(OutcomeKind::Runtime)
         );
         assert_eq!(
-            trigger_failure(&home.node, "did:key:zSomeoneElse").await,
+            trigger_failure(&home.node, "did:key:zSomeoneElse", since).await,
             None,
             "another principal's trigger is not this trial's"
+        );
+        home.node.shutdown().await;
+    }
+
+    /// An error a trigger recorded before the stage started belongs to an
+    /// earlier stage, not to this one.
+    #[tokio::test]
+    async fn a_trigger_error_from_before_the_stage_does_not_fail_it() {
+        let home = EmbeddedHome::create_temp("trigger-stale").await.unwrap();
+        seed_trigger(&home, "stale", "error", Some("old"), "2026-01-01T00:00:00Z").await;
+
+        assert_eq!(
+            trigger_failure(&home.node, home.did(), "2026-06-01T00:00:00Z").await,
+            None
         );
         home.node.shutdown().await;
     }
@@ -1845,13 +1872,14 @@ mod tests {
         trigger_id: &str,
         status: &str,
         error: Option<&str>,
+        last_attempt_at: &str,
     ) {
         let agent_did = escape_graphql_string(home.did());
         let last_error = error.map_or("null".to_string(), |error| {
             format!("\"{}\"", escape_graphql_string(error))
         });
         let mutation = format!(
-            r#"mutation {{ create_Trigger(input: {{ trigger_id: "{trigger_id}", agent_did: "{agent_did}", task_id: "task", enabled: true, last_status: "{status}", last_error: {last_error} }}) {{ _docID }} }}"#
+            r#"mutation {{ create_Trigger(input: {{ trigger_id: "{trigger_id}", agent_did: "{agent_did}", task_id: "task", enabled: true, last_status: "{status}", last_error: {last_error}, last_attempt_at: "{last_attempt_at}" }}) {{ _docID }} }}"#
         );
         let response = home.node.execute(&mutation).await;
         assert!(response.errors.is_empty(), "{:?}", response.errors);
