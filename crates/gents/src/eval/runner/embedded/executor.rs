@@ -832,7 +832,16 @@ async fn submit_and_observe(
         request_id: Some(request_id),
         terminal_state: observed.as_ref().map(|observed| observed.terminal_state),
         failure_kind: match stage_failure_kind(observed.as_ref(), collected, stopped, &evidence) {
-            None => trigger_failure(&home.node, &locator.trial_agent_did, &stage_started).await,
+            None => {
+                trigger_failure(
+                    &home.node,
+                    &locator.trial_agent_did,
+                    &stage_started,
+                    &spec.trial_id,
+                    &stage.stage_id,
+                )
+                .await
+            }
             failed => failed,
         },
         evidence,
@@ -911,7 +920,13 @@ fn provider_reason(
 /// asynchronously after the fire, so an error recorded after the stage is read
 /// is attributed to the next stage, and one recorded after the final stage is
 /// not attributed at all.
-async fn trigger_failure(node: &EmbeddedNode, agent_did: &str, since: &str) -> Option<OutcomeKind> {
+async fn trigger_failure(
+    node: &EmbeddedNode,
+    agent_did: &str,
+    since: &str,
+    trial_id: &str,
+    stage_id: &str,
+) -> Option<OutcomeKind> {
     let agent_did = escape_graphql_string(agent_did);
     let since = escape_graphql_string(since);
     let query = format!(
@@ -921,11 +936,20 @@ async fn trigger_failure(node: &EmbeddedNode, agent_did: &str, since: &str) -> O
         match graphql_with_transaction_retry(node, &query, "eval trial trigger status").await {
             Ok(response) => match errored_triggers(response.data.as_ref()) {
                 Some(errored) => errored,
-                None => return Some(OutcomeKind::Infrastructure),
+                None => {
+                    tracing::warn!(
+                        trial_id = %trial_id,
+                        stage_id = %stage_id,
+                        "eval trial trigger status read returned no Trigger list"
+                    );
+                    return Some(OutcomeKind::Infrastructure);
+                }
             },
             Err(error) => {
                 tracing::warn!(
                     error = %format!("{error:#}"),
+                    trial_id = %trial_id,
+                    stage_id = %stage_id,
                     "eval trial trigger status could not be read"
                 );
                 return Some(OutcomeKind::Infrastructure);
@@ -937,6 +961,8 @@ async fn trigger_failure(node: &EmbeddedNode, agent_did: &str, since: &str) -> O
     let triggers = Value::Array(errored);
     tracing::warn!(
         %triggers,
+        trial_id = %trial_id,
+        stage_id = %stage_id,
         "an eval trial trigger errored; the stage fails"
     );
     Some(OutcomeKind::Runtime)
@@ -1848,10 +1874,16 @@ mod tests {
     async fn an_errored_trigger_fails_a_completed_stage_as_runtime() {
         let home = EmbeddedHome::create_temp("trigger-error").await.unwrap();
         let since = "2026-06-01T00:00:00Z";
-        assert_eq!(trigger_failure(&home.node, home.did(), since).await, None);
+        assert_eq!(
+            trigger_failure(&home.node, home.did(), since, "t1", "only").await,
+            None
+        );
 
         seed_trigger(&home, "healthy", "fired", None, since).await;
-        assert_eq!(trigger_failure(&home.node, home.did(), since).await, None);
+        assert_eq!(
+            trigger_failure(&home.node, home.did(), since, "t1", "only").await,
+            None
+        );
 
         seed_trigger(
             &home,
@@ -1862,11 +1894,11 @@ mod tests {
         )
         .await;
         assert_eq!(
-            trigger_failure(&home.node, home.did(), since).await,
+            trigger_failure(&home.node, home.did(), since, "t1", "only").await,
             Some(OutcomeKind::Runtime)
         );
         assert_eq!(
-            trigger_failure(&home.node, "did:key:zSomeoneElse", since).await,
+            trigger_failure(&home.node, "did:key:zSomeoneElse", since, "t1", "only").await,
             None,
             "another principal's trigger is not this trial's"
         );
@@ -1892,7 +1924,7 @@ mod tests {
         seed_trigger(&home, "stale", "error", Some("old"), "2026-01-01T00:00:00Z").await;
 
         assert_eq!(
-            trigger_failure(&home.node, home.did(), "2026-06-01T00:00:00Z").await,
+            trigger_failure(&home.node, home.did(), "2026-06-01T00:00:00Z", "t1", "only").await,
             None
         );
         home.node.shutdown().await;
