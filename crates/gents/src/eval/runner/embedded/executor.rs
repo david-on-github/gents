@@ -170,6 +170,8 @@ impl EmbeddedExecutor {
         // only once the pack's triggers can see the write.
         let (event_sources_ready, ready) = watch::channel(false);
         let mut options = self.runtime_options.clone();
+        // Replaces any observer the caller's options carried: the trial's
+        // latch is the only reader of this runtime's snapshots.
         options.runtime_snapshot_observer = Some(Arc::new(EventSourcesReady(event_sources_ready)));
         // A failed boot has already stopped whatever it spawned, so the home is
         // ours to close.
@@ -632,7 +634,13 @@ async fn install_fixtures(
             .context("adding a fixture schema")?;
     }
     for fixture in &fixtures.documents {
-        create_document(access, &fixture.collection, &fixture.document).await?;
+        create_document(
+            access,
+            "eval.trial.fixture_document",
+            &fixture.collection,
+            &fixture.document,
+        )
+        .await?;
     }
     for file in &fixtures.files {
         let path = workspace_path(workspace, &file.path)?;
@@ -651,6 +659,7 @@ async fn install_fixtures(
 /// the mutation.
 async fn create_document(
     access: &ConfigAccess,
+    label: &'static str,
     collection: &str,
     document: &Value,
 ) -> Result<String> {
@@ -660,7 +669,7 @@ async fn create_document(
     );
     let variables = json!({ "input": document });
     access
-        .transact("eval.trial.fixture_document", |txn| {
+        .transact(label, |txn| {
             let (mutation, variables) = (&mutation, &variables);
             Box::pin(async move {
                 let response = txn.execute_with_variables(mutation, variables).await?;
@@ -705,12 +714,7 @@ async fn run_stages(
     let mut stages: Vec<StageEvidence> = Vec::new();
     for stage in &spec.stages {
         spec.progress.stage_started(&stage.stage_id);
-        // A seed stage takes the earliest fired request no earlier stage did.
-        let seen: Vec<String> = stages
-            .iter()
-            .filter_map(|stage| stage.request_id.clone())
-            .collect();
-        let evidence = run_stage(spec, cancel, home, locator, workspace, stage, ready, &seen).await;
+        let evidence = run_stage(spec, cancel, home, locator, workspace, stage, ready).await;
         spec.progress.stage_ended(&stage.stage_id);
         let failed = evidence.failure_kind.is_some();
         stages.push(evidence);
@@ -729,9 +733,8 @@ async fn run_stage(
     workspace: &Path,
     stage: &StageSpec,
     ready: &watch::Receiver<bool>,
-    seen: &[String],
 ) -> StageEvidence {
-    let observed = submit_and_observe(spec, cancel, home, locator, stage, ready, seen).await;
+    let observed = submit_and_observe(spec, cancel, home, locator, stage, ready).await;
     StageEvidence {
         stage_id: stage.stage_id.clone(),
         request_id: observed.request_id,
@@ -779,6 +782,16 @@ impl ObservedStage {
             evidence: RequestEvidence::default(),
         }
     }
+
+    /// A stage cancelled before it had a request: the same
+    /// [`OutcomeKind::Runtime`] a cancelled running stage gets from
+    /// [`stage_failure_kind`], since either way the request did not finish.
+    fn cancelled() -> Self {
+        Self {
+            failure_kind: Some(OutcomeKind::Runtime),
+            ..Self::unsubmitted()
+        }
+    }
 }
 
 async fn submit_and_observe(
@@ -788,28 +801,28 @@ async fn submit_and_observe(
     locator: &TrialLocator,
     stage: &StageSpec,
     ready: &watch::Receiver<bool>,
-    seen: &[String],
 ) -> ObservedStage {
-    let submitted = match &stage.seed {
-        Some(seed) => {
-            seed_and_await_fire(
-                home,
-                ready,
-                seen,
-                seed,
-                Duration::from_secs(stage.deadline_secs),
-            )
-            .await
-        }
-        None => {
-            let request_id = uuid::Uuid::new_v4().to_string();
-            submit_stage(&home.node, locator, &spec.behavior_id, stage, &request_id)
-                .await
-                .map(|()| request_id)
+    let deadline = Duration::from_secs(stage.deadline_secs);
+    // A seed stage spends part of the deadline waiting for the fire; the
+    // request it observes gets the remainder.
+    let submit = async {
+        match &stage.seed {
+            Some(seed) => seed_and_await_fire(home, ready, seed, deadline).await,
+            None => {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                submit_stage(&home.node, locator, &spec.behavior_id, stage, &request_id)
+                    .await
+                    .map(|()| (request_id, deadline))
+            }
         }
     };
-    let request_id = match submitted {
-        Ok(request_id) => request_id,
+    let submitted = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return ObservedStage::cancelled(),
+        submitted = submit => submitted,
+    };
+    let (request_id, remaining) = match submitted {
+        Ok(submitted) => submitted,
         Err(error) => {
             tracing::warn!(
                 error = %format!("{error:#}"),
@@ -823,13 +836,7 @@ async fn submit_and_observe(
 
     let cancelled;
     let observed = tokio::select! {
-        observed = await_terminal(
-            &home.node,
-            &request_id,
-            Duration::from_secs(stage.deadline_secs),
-            GRACE,
-            POLL,
-        ) => {
+        observed = await_terminal(&home.node, &request_id, remaining, GRACE, POLL) => {
             cancelled = false;
             observed
         }
@@ -986,15 +993,15 @@ async fn submit_stage(
 
 /// A seed stage: once the runtime's event sources are reconciled, write the
 /// document and take the request the pack's trigger fires for it. The wait for
-/// the event sources shares the runtime-ready budget; the wait for the fire is
-/// the stage's own deadline.
+/// the event sources shares the runtime-ready budget; the wait for the fire
+/// spends the stage's own deadline, and what it leaves is returned with the
+/// request for the terminal wait.
 async fn seed_and_await_fire(
     home: &EmbeddedHome,
     ready: &watch::Receiver<bool>,
-    seen: &[String],
     seed: &FixtureDocument,
     deadline: Duration,
-) -> Result<String> {
+) -> Result<(String, Duration)> {
     tokio::time::timeout(
         RUNTIME_READY_TIMEOUT,
         ready.clone().wait_for(|ready| *ready),
@@ -1003,12 +1010,18 @@ async fn seed_and_await_fire(
     .context("waiting for the trial runtime's event sources")?
     .context("the trial runtime stopped before its event sources were reconciled")?;
     let access = ConfigAccess::Local(home.node.clone());
-    let doc_id = create_document(&access, &seed.collection, &seed.document).await?;
+    let doc_id = create_document(
+        &access,
+        "eval.trial.seed_document",
+        &seed.collection,
+        &seed.document,
+    )
+    .await?;
     tracing::debug!(collection = %seed.collection, doc_id = %doc_id, "eval seed document written");
     let started = Instant::now();
     loop {
-        if let Some(request_id) = fired_request(&home.node, seen).await? {
-            return Ok(request_id);
+        if let Some(request_id) = fired_request(&home.node, &doc_id).await? {
+            return Ok((request_id, deadline.saturating_sub(started.elapsed())));
         }
         anyhow::ensure!(
             started.elapsed() < deadline,
@@ -1019,12 +1032,14 @@ async fn seed_and_await_fire(
     }
 }
 
-/// The earliest trigger-fired request in the home that `seen` does not name.
-/// A trial home holds a handful of requests, so the trigger filter is applied
+/// The earliest request an event trigger fired for the seed document: the
+/// trigger engine records the source document's `_docID` as
+/// `caused_by_source_doc_id`, so a fire left by another stage's seed is never
+/// taken. A trial home holds a handful of requests, so the filter is applied
 /// here rather than asked of a nullable column.
-async fn fired_request(node: &EmbeddedNode, seen: &[String]) -> Result<Option<String>> {
+async fn fired_request(node: &EmbeddedNode, doc_id: &str) -> Result<Option<String>> {
     let query =
-        r#"{ AgentRequest(order: { created_at: ASC }) { request_id caused_by_trigger_id } }"#;
+        r#"{ AgentRequest(order: { created_at: ASC }) { request_id caused_by_source_doc_id } }"#;
     let response = graphql_with_transaction_retry(node, query, "eval trial fired request").await?;
     Ok(response
         .data
@@ -1034,13 +1049,8 @@ async fn fired_request(node: &EmbeddedNode, seen: &[String]) -> Result<Option<St
         .map(Vec::as_slice)
         .unwrap_or_default()
         .iter()
-        .filter(|row| {
-            row.get("caused_by_trigger_id")
-                .and_then(Value::as_str)
-                .is_some_and(|trigger_id| !trigger_id.is_empty())
-        })
-        .filter_map(|row| row.get("request_id")?.as_str())
-        .find(|request_id| !seen.iter().any(|seen| seen == request_id))
+        .filter(|row| row.get("caused_by_source_doc_id").and_then(Value::as_str) == Some(doc_id))
+        .find_map(|row| row.get("request_id")?.as_str())
         .map(ToOwned::to_owned))
 }
 
@@ -1859,7 +1869,6 @@ mod tests {
             &workspace,
             &stage,
             &watch::channel(false).1,
-            &[],
         )
         .await;
 

@@ -249,12 +249,25 @@ async fn a_seed_stage_fires_the_pack_trigger_and_observes_the_task_request() {
         (OutcomeKind::Passed, &json!(1)),
         "the fired request is the stage's evidence: {verdicts:#?}"
     );
-    // AC4: the captured request carries the task's rendered template.
-    let recorded = evidence_records(&canary.runs_dir(), &request.run_id, &trials);
+    // AC4: the captured request carries the task's rendered template, read
+    // back out of the retained trial home with the capture's own filter.
+    let seeded = trial(&trials, "seeded");
+    let home_dir = canary
+        .runs_dir()
+        .join(locator(seeded).home_hint.expect("a retained home"))
+        .join("home");
+    let home = EmbeddedHome::open_retained(&home_dir).await.unwrap();
+    let fired = gents::graphql::graphql_with_transaction_retry(
+        &home.node,
+        r#"{ AgentRequest(filter: { caused_by_trigger_id: { _eq: "seed-trigger" } }) { content } }"#,
+        "canary fired request content",
+    )
+    .await
+    .unwrap();
     assert_eq!(
-        recorded[0].1["stages"][0]["captures"]["fired"]["rows"],
-        json!([{"content": SEED_MARKER}]),
-        "{recorded:#?}"
+        fired.data.as_ref().map(|data| &data["AgentRequest"]),
+        Some(&json!([{"content": SEED_MARKER}])),
+        "{fired:#?}"
     );
 }
 
@@ -767,7 +780,9 @@ fn quiet_seed_definition_document(owner: &str) -> Value {
         "comparability_version": 1,
         "title": "Eval runner seed stage without a trigger",
         "subject": {"kind": "behavior", "inference_slots": ["primary"]},
-        "fixtures": {"schemas": [QUIET_ITEM_SDL]},
+        // Both schemas: the pack's own event source must reconcile, or the
+        // stage would wait out the runtime-ready budget instead of its own.
+        "fixtures": {"schemas": [SEED_ITEM_SDL, QUIET_ITEM_SDL]},
         "cases": [{
             "case_id": "quiet",
             "split": "validation",
