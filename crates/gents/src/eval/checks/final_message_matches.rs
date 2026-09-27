@@ -69,6 +69,13 @@ impl Pattern {
     }
 }
 
+fn list<'a>(patterns: impl Iterator<Item = &'a Pattern>) -> String {
+    patterns
+        .map(Pattern::describe)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn parse_all(params: Vec<PatternParam>) -> Result<Vec<Pattern>, String> {
     params.into_iter().map(Pattern::parse).collect()
 }
@@ -111,8 +118,50 @@ impl Check for FinalMessageMatches {
         }
     }
 
-    fn evaluate(&self, _params: &Value, _stage: &StageEvidence) -> CheckVerdict {
-        grader("bad_params", "unimplemented")
+    fn evaluate(&self, params: &Value, stage: &StageEvidence) -> CheckVerdict {
+        let params: Params = match serde_json::from_value(params.clone()) {
+            Ok(params) => params,
+            Err(error) => return grader("bad_params", error.to_string()),
+        };
+        let (any, all) = match (parse_all(params.any), parse_all(params.all)) {
+            (Ok(any), Ok(all)) => (any, all),
+            (Err(detail), _) | (_, Err(detail)) => return grader("bad_params", detail),
+        };
+        if any.is_empty() && all.is_empty() {
+            return grader("bad_params", "neither any nor all names a pattern");
+        }
+        let total = all.len().max(1);
+        let Some(message) = stage
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "assistant" && !message.content.trim().is_empty())
+        else {
+            return graded(0, total, Some("no final assistant message".into()));
+        };
+        let text = message.content.as_str();
+        let mut lines = Vec::new();
+        let any_found = any.is_empty() || any.iter().any(|pattern| pattern.found_in(text));
+        if !any_found {
+            lines.push(format!("none of: {}", list(any.iter())));
+        }
+        let missing: Vec<_> = all
+            .iter()
+            .filter(|pattern| !pattern.found_in(text))
+            .collect();
+        if !missing.is_empty() {
+            lines.push(format!("missing: {}", list(missing.iter().copied())));
+        }
+        if lines.is_empty() {
+            return graded(total, total, None);
+        }
+        lines.push(format!(
+            "final message ({} chars): {}",
+            text.chars().count(),
+            excerpt(text, MESSAGE_CHARS)
+        ));
+        let satisfied = if any_found { total - missing.len() } else { 0 };
+        graded(satisfied, total, Some(lines.join("\n")))
     }
 }
 
