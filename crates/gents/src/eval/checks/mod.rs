@@ -8,6 +8,7 @@
 pub mod captured_fields_match;
 pub mod captured_rows_count;
 pub mod final_message_matches;
+pub mod terminal_state;
 pub mod tool_calls_expected;
 
 use std::collections::BTreeMap;
@@ -18,6 +19,7 @@ use serde_json::{json, Value};
 use crate::eval::checks::captured_fields_match::CapturedFieldsMatch;
 use crate::eval::checks::captured_rows_count::CapturedRowsCount;
 use crate::eval::checks::final_message_matches::FinalMessageMatches;
+use crate::eval::checks::terminal_state::TerminalState;
 use crate::eval::checks::tool_calls_expected::ToolCallsExpected;
 use crate::eval::runner::executor::StageEvidence;
 use crate::eval::OutcomeKind;
@@ -81,6 +83,7 @@ impl CheckRegistry {
         registry.register(Box::new(CapturedFieldsMatch));
         registry.register(Box::new(CapturedRowsCount));
         registry.register(Box::new(FinalMessageMatches));
+        registry.register(Box::new(TerminalState));
         registry.register(Box::new(ToolCallsExpected));
         registry
     }
@@ -203,6 +206,7 @@ mod tests {
                 "captured_fields_match",
                 "captured_rows_count",
                 "final_message_matches",
+                "terminal_state",
                 "tool_calls_expected"
             ]
         );
