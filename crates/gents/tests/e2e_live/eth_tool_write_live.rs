@@ -63,10 +63,18 @@ impl Drop for LocalChain {
         let Some(child) = self.child.as_mut() else {
             return;
         };
-        if let Some(pid) = child.id() {
-            let _ = std::process::Command::new("kill")
-                .args(["-TERM", &format!("-{pid}")])
-                .status();
+        // Signal the chain's own process group directly: procps-ng 4 `kill
+        // -TERM -<pgid>` parses the group operand as kill(-1, SIGTERM) and
+        // terminates every process of the invoking user.
+        #[cfg(unix)]
+        if let Some(pgid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+            if pgid > 1 {
+                // SAFETY: killpg has no memory-safety preconditions; the group
+                // was created for this child with `process_group(0)`.
+                unsafe {
+                    libc::killpg(pgid, libc::SIGTERM);
+                }
+            }
         }
         let _ = child.start_kill();
     }
