@@ -2081,6 +2081,27 @@ mod tests {
         check_policy(&request(), &policy).unwrap();
     }
 
+    /// `min_pairs = 0` lets a case with no pairs count as evidence, and too
+    /// few Monte Carlo samples let a p-value of zero decide; both are refused
+    /// by field.
+    #[test]
+    fn a_policy_that_cannot_gate_is_refused_by_field() {
+        let mut policy = PolicyV2::uncalibrated();
+        policy.min_pairs = 0;
+        let error = check_policy(&request(), &policy).unwrap_err();
+        let refusal = job_refused(&error).unwrap_or_else(|| panic!("{error:#}"));
+        assert!(refusal.0.contains("min_pairs"), "{}", refusal.0);
+
+        let mut policy = PolicyV2::uncalibrated();
+        policy.monte_carlo_samples = 999;
+        let error = check_policy(&request(), &policy).unwrap_err();
+        let refusal = job_refused(&error).unwrap_or_else(|| panic!("{error:#}"));
+        assert!(refusal.0.contains("monte_carlo_samples"), "{}", refusal.0);
+
+        policy.monte_carlo_samples = 1_000;
+        check_policy(&request(), &policy).unwrap();
+    }
+
     /// F2: a resume must repeat the request the job was frozen from.
     #[test]
     fn a_resume_that_disagrees_with_the_origin_is_refused_by_field() {

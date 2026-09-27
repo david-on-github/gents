@@ -688,6 +688,19 @@ mod tests {
         assert_eq!((report.improved, report.tied, report.worsened), (30, 0, 0));
     }
 
+    /// `Optimization.costOk` is over naturals; a product past the integer
+    /// width is not a cheaper candidate.
+    #[test]
+    fn a_cost_product_past_the_integer_width_is_not_ok() {
+        let totals = TokenTotals {
+            baseline_tokens: 1,
+            baseline_trials: 1 << 63,
+            candidate_tokens: 1 << 63,
+            candidate_trials: 1,
+        };
+        assert!(!cost_ok(&params(), &totals));
+    }
+
     #[test]
     fn gates_costs_and_decisions_match_lean() {
         let lean = crate::lean_vocab_test::lean_optimization_cases();
