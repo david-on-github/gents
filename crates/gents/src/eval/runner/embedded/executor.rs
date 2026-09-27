@@ -28,7 +28,7 @@ use crate::config_client::{
 };
 use crate::defra_node::EmbeddedNode;
 use crate::document_config::{InferenceSampling, PackConfig};
-use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome};
+use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome, RunningRuntime};
 use crate::eval::runner::embedded::observe::{
     await_terminal, classify_request_outcome, collect_request_evidence, RequestEvidence,
     TerminalObservation,
@@ -176,7 +176,7 @@ impl EmbeddedExecutor {
                 }
             };
 
-        let stages = run_stages(spec, &cancel, &home, &locator, &workspace).await;
+        let stages = run_stages(spec, &cancel, &home, &runtime, &locator, &workspace).await;
 
         if let Err(error) = runtime.shutdown().await {
             tracing::warn!(
@@ -665,13 +665,14 @@ async fn run_stages(
     spec: &TrialSpec,
     cancel: &CancellationToken,
     home: &EmbeddedHome,
+    runtime: &RunningRuntime,
     locator: &TrialLocator,
     workspace: &Path,
 ) -> Vec<StageEvidence> {
     let mut stages = Vec::new();
     for stage in &spec.stages {
         spec.progress.stage_started(&stage.stage_id);
-        let evidence = run_stage(spec, cancel, home, locator, workspace, stage).await;
+        let evidence = run_stage(spec, cancel, home, runtime, locator, workspace, stage).await;
         spec.progress.stage_ended(&stage.stage_id);
         let failed = evidence.failure_kind.is_some();
         stages.push(evidence);
@@ -686,11 +687,12 @@ async fn run_stage(
     spec: &TrialSpec,
     cancel: &CancellationToken,
     home: &EmbeddedHome,
+    runtime: &RunningRuntime,
     locator: &TrialLocator,
     workspace: &Path,
     stage: &StageSpec,
 ) -> StageEvidence {
-    let observed = submit_and_observe(spec, cancel, home, locator, stage).await;
+    let observed = submit_and_observe(spec, cancel, home, runtime, locator, stage).await;
     StageEvidence {
         stage_id: stage.stage_id.clone(),
         request_id: observed.request_id,
@@ -744,6 +746,7 @@ async fn submit_and_observe(
     spec: &TrialSpec,
     cancel: &CancellationToken,
     home: &EmbeddedHome,
+    _runtime: &RunningRuntime,
     locator: &TrialLocator,
     stage: &StageSpec,
 ) -> ObservedStage {
@@ -1683,10 +1686,12 @@ mod tests {
             ],
         };
 
+        let runtime = exited_runtime();
         let evidence = run_stage(
             &spec,
             &CancellationToken::new(),
             &home,
+            &runtime,
             &locator,
             &workspace,
             &stage,
@@ -1709,6 +1714,59 @@ mod tests {
             evidence.captures
         );
         home.node.shutdown().await;
+    }
+
+    /// The trial's runtime was already gone before the stage started, as an
+    /// OOM-killed or crashed runtime is.
+    #[tokio::test]
+    async fn a_runtime_that_exits_mid_stage_fails_the_stage_as_runtime_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let home = EmbeddedHome::create_temp("runtime-exit").await.unwrap();
+        let locator = TrialLocator {
+            trial_agent_did: home.did().to_string(),
+            session_id: "s-1".to_string(),
+            home_hint: None,
+        };
+        let stage = StageSpec {
+            stage_id: "only".to_string(),
+            prompt: "hello".to_string(),
+            deadline_secs: 600,
+            captures: Vec::new(),
+        };
+        let runtime = exited_runtime();
+
+        let evidence = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_stage(
+                &TrialSpec {
+                    behavior_id: "subject".to_string(),
+                    ..TrialSpec::empty_for_tests("t1")
+                },
+                &CancellationToken::new(),
+                &home,
+                &runtime,
+                &locator,
+                &workspace,
+                &stage,
+            ),
+        )
+        .await
+        .expect("a dead runtime is not waited out to the stage deadline");
+
+        assert!(evidence.request_id.is_some(), "the stage was submitted");
+        assert_eq!(evidence.failure_kind, Some(OutcomeKind::Runtime));
+        assert_eq!(evidence.provider_reason, None);
+        home.node.shutdown().await;
+    }
+
+    fn exited_runtime() -> RunningRuntime {
+        RunningRuntime {
+            shutdown: tokio::sync::watch::channel(false).0,
+            handle: tokio::spawn(async { Err(anyhow!("runtime killed")) }),
+            agent_did: String::new(),
+        }
     }
 
     async fn seed_request(home: &EmbeddedHome, request_id: &str) {
