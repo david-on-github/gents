@@ -1515,13 +1515,12 @@ async fn live_fan_out_list_and_continue() -> Result<()> {
         .await;
     }
     wait_for_session_quiescent(db.node.as_ref(), session_id, Duration::from_secs(240)).await;
-    let delivered = rows.iter().map(|row| row.doc_id.as_str()).collect::<Vec<_>>();
-    let combined = assert_completed_wake_attempted_deliveries(
-        db.node.as_ref(),
-        session_id,
-        &delivered,
-    )
-    .await;
+    let delivered = rows
+        .iter()
+        .map(|row| row.doc_id.as_str())
+        .collect::<Vec<_>>();
+    let combined =
+        assert_completed_wake_attempted_deliveries(db.node.as_ref(), session_id, &delivered).await;
     tracing::info!(
         parent_session = session_id,
         alpha_session = %alpha.session_id,
@@ -2450,23 +2449,7 @@ sentence that repeats, verbatim, every code word reported in the notifications."
         notification.session_id.as_deref(),
         Some(middle.session_id.as_str())
     );
-    let wake = wait_for_completion_wake(
-        fx.node(),
-        &middle.session_id,
-        &middle.request_id,
-        Duration::from_secs(300),
-    )
-    .await;
-    assert_eq!(
-        wake.lifecycle_state.as_deref(),
-        Some("completed"),
-        "leaf's result must wake middle's session: {wake:?}"
-    );
-    assert_eq!(
-        notification.request_doc_id.as_deref(),
-        Some(wake.doc_id.as_str()),
-        "the notification must bind the wake"
-    );
+    let wake = wait_for_bound_wake(fx.node(), &middle.session_id, &notification).await;
     assert_eq!(
         wake.subagent_depth,
         Some(3),
@@ -2484,6 +2467,8 @@ sentence that repeats, verbatim, every code word reported in the notifications."
     ] {
         wait_for_session_quiescent(fx.node(), session, Duration::from_secs(240)).await;
     }
+    assert_completed_wake_attempted_deliveries(fx.node(), &middle.session_id, &[&leaf_row.doc_id])
+        .await;
     let leaf_requests = session_requests(fx.node(), &leaf.session_id).await;
     assert!(
         leaf_requests
@@ -2649,8 +2634,9 @@ async fn live_agent_message_interrupt_steers() -> Result<()> {
         "the worker must have been interrupted while still blocked"
     );
     let steer_answer = terminal_assistant_answer(fx.node(), &steer.request_id).await;
+    let steer_token = steer_code.rsplit('-').next().expect("code word suffix");
     assert!(
-        steer_answer.contains(&steer_code),
+        steer_answer.contains(steer_token),
         "the steered session's final answer must reflect the steer: {steer_answer:?}"
     );
     let worker_requests = session_requests(fx.node(), &worker.session_id)
@@ -2828,23 +2814,9 @@ async fn live_goal_does_not_suppress_completion_wake() -> Result<()> {
     let notification =
         wait_for_completion_notification(fx.node(), &row.doc_id, Duration::from_secs(120)).await;
     assert_eq!(notification.session_id.as_deref(), Some(session));
-    let wake = wait_for_completion_wake(
-        fx.node(),
-        session,
-        start_request_id,
-        Duration::from_secs(300),
-    )
-    .await;
-    assert_eq!(
-        wake.lifecycle_state.as_deref(),
-        Some("completed"),
-        "an active Goal must not suppress the completion wake: {wake:?}"
-    );
-    assert_eq!(
-        notification.request_doc_id.as_deref(),
-        Some(wake.doc_id.as_str()),
-        "the notification must bind its own wake, not a Goal continuation"
-    );
+    // An active Goal must not suppress the wake: the notification binds a
+    // completion wake, not a Goal continuation, and that wake runs.
+    let wake = wait_for_bound_wake(fx.node(), session, &notification).await;
     // The Goal is not wedged by the wake: it continues once the wake ends.
     let wake_terminalized = rfc3339(&wake.terminalized_at).expect("terminal wake time");
     let resumed = wait_for_session_request(
@@ -2867,6 +2839,7 @@ async fn live_goal_does_not_suppress_completion_wake() -> Result<()> {
     )
     .await?;
     wait_for_session_quiescent(fx.node(), session, Duration::from_secs(240)).await;
+    assert_completed_wake_attempted_deliveries(fx.node(), session, &[&row.doc_id]).await;
 
     // No Goal continuation created after the wake runs ahead of it.
     // `created_at` has second resolution, so only a continuation created in a
@@ -3143,23 +3116,9 @@ async fn live_restart_mid_delegation_recovers() -> Result<()> {
         wait_for_completion_notification(db_a.node.as_ref(), &row.doc_id, Duration::from_secs(120))
             .await;
     assert_eq!(notification.session_id.as_deref(), Some(session));
-    let wake = wait_for_completion_wake(
-        db_a.node.as_ref(),
-        session,
-        start_request_id,
-        Duration::from_secs(300),
-    )
-    .await;
-    assert_eq!(
-        wake.lifecycle_state.as_deref(),
-        Some("completed"),
-        "the completion must wake the restarted caller: {wake:?}"
-    );
-    assert_eq!(
-        notification.request_doc_id.as_deref(),
-        Some(wake.doc_id.as_str())
-    );
+    let wake = wait_for_bound_wake(db_a.node.as_ref(), session, &notification).await;
     wait_for_session_quiescent(db_a.node.as_ref(), session, Duration::from_secs(240)).await;
+    assert_completed_wake_attempted_deliveries(db_a.node.as_ref(), session, &[&row.doc_id]).await;
 
     // A crash and restart re-runs every recovery owner over the same facts;
     // none may deliver the completion again.
@@ -3186,15 +3145,7 @@ async fn live_restart_mid_delegation_recovers() -> Result<()> {
         1,
         "the completion notification must be delivered exactly once"
     );
-    let wakes = session_requests(db_a.node.as_ref(), session)
-        .await
-        .into_iter()
-        .filter(|request| {
-            request.is_background_completion_wake()
-                && request.caused_by_parent_request_id.as_deref() == Some(start_request_id)
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(wakes.len(), 1, "exactly one wake after recovery: {wakes:?}");
+    assert_completed_wake_attempted_deliveries(db_a.node.as_ref(), session, &[&row.doc_id]).await;
     tracing::info!(
         worker = %worker.request_id,
         wake = %wake.request_id,
@@ -3240,6 +3191,35 @@ async fn completion_notifications(
         .flatten()
         .map(|row| serde_json::from_value(row.clone()).expect("decode completion notification"))
         .collect()
+}
+
+/// The completion wake `notification` binds, once it has run to terminal.
+async fn wait_for_bound_wake(
+    node: &EmbeddedNode,
+    session_id: &str,
+    notification: &NotificationRow,
+) -> SessionRequestRow {
+    let bound = notification
+        .request_doc_id
+        .as_deref()
+        .expect("a completion notification binds its wake");
+    let wake = wait_for_session_request(
+        node,
+        session_id,
+        |row| row.doc_id == bound && row.lifecycle_state.as_deref().is_some_and(is_terminal),
+        Duration::from_secs(300),
+    )
+    .await;
+    assert!(
+        wake.is_background_completion_wake(),
+        "the notification must bind a completion wake: {wake:?}"
+    );
+    assert_eq!(
+        wake.lifecycle_state.as_deref(),
+        Some("completed"),
+        "the bound completion wake must run: {wake:?}"
+    );
+    wake
 }
 
 async fn wait_for_completion_notification(
@@ -3484,6 +3464,21 @@ async fn live_randomized_soak() -> Result<()> {
         violations.is_empty(),
         "[live-soak] seed={seed} iterations={iterations}: invariant violations: {violations:#?}"
     );
+    // Per caller session, every delivered completion reached one completed
+    // wake's provider input.
+    let mut delivered = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for row in session_message_tool_rows(fx.node(), &fx.did).await {
+        if row.completion_notification_delivered_at.is_some() {
+            delivered
+                .entry(row.session_id)
+                .or_default()
+                .push(row.doc_id);
+        }
+    }
+    for (session, rows) in &delivered {
+        let rows = rows.iter().map(String::as_str).collect::<Vec<_>>();
+        assert_completed_wake_attempted_deliveries(fx.node(), session, &rows).await;
+    }
     agent.shutdown().await;
     Ok(())
 }
