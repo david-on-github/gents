@@ -905,13 +905,10 @@ async fn trigger_failure(node: &EmbeddedNode, agent_did: &str, since: &str) -> O
     );
     let errored =
         match graphql_with_transaction_retry(node, &query, "eval trial trigger status").await {
-            Ok(response) => response
-                .data
-                .as_ref()
-                .and_then(|data| data.get("Trigger"))
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default(),
+            Ok(response) => match errored_triggers(response.data.as_ref()) {
+                Some(errored) => errored,
+                None => return Some(OutcomeKind::Infrastructure),
+            },
             Err(error) => {
                 tracing::warn!(
                     error = %format!("{error:#}"),
@@ -929,6 +926,17 @@ async fn trigger_failure(node: &EmbeddedNode, agent_did: &str, since: &str) -> O
         "an eval trial trigger errored; the stage fails"
     );
     Some(OutcomeKind::Runtime)
+}
+
+/// The `Trigger` rows of a status read, or `None` when the response holds no
+/// such list: a read that returned nothing to read is not "no errors".
+fn errored_triggers(data: Option<&Value>) -> Option<Vec<Value>> {
+    Some(
+        data.and_then(|data| data.get("Trigger"))
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    )
 }
 
 async fn runtime_exited(runtime: &RunningRuntime) {
@@ -1854,6 +1862,17 @@ mod tests {
             "another principal's trigger is not this trial's"
         );
         home.node.shutdown().await;
+    }
+
+    #[test]
+    fn a_trigger_status_read_without_a_trigger_list_is_not_a_clean_read() {
+        assert_eq!(errored_triggers(None), None);
+        assert_eq!(errored_triggers(Some(&json!({}))), None);
+        assert_eq!(errored_triggers(Some(&json!({"Trigger": null}))), None);
+        assert_eq!(
+            errored_triggers(Some(&json!({"Trigger": []}))),
+            Some(Vec::new())
+        );
     }
 
     /// An error a trigger recorded before the stage started belongs to an
