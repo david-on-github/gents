@@ -1,5 +1,6 @@
 //! Independent acceptance checks for progressively generated behaviors.
 
+use super::host_scenarios::decode_configuration;
 use super::readiness::recorded_command as recorded_readiness_command;
 use super::{exact_named_behavior, rows, stages};
 use anyhow::{ensure, Context, Result};
@@ -34,19 +35,18 @@ async fn behavior_configuration(
     Ok(serde_json::json!({"behavior":behavior,"context":context,"tools":tools}))
 }
 
-fn exposes_unscoped_defra_query(datastore: &serde_json::Value) -> Result<bool> {
-    let datastore: Option<gents::document_config::DatastoreTools> =
-        serde_json::from_value(datastore.clone())
-            .context("decoding Builder datastore for effective query policy")?;
-    let tools = gents::document_config::Tools {
-        tools_id: "automation-query-grader".into(),
-        agent_did: "did:key:automation-query-grader".into(),
-        datastore,
-        ..Default::default()
-    };
-    let config = gents::tool_surface::BehaviorToolConfig::from_tools_document(
+fn exposes_unscoped_defra_query(
+    tools: &gents::document_config::Tools,
+    surfaces: &[gents::document_config::DatastoreToolSurfaceDocument],
+    eth_tools: &[gents::document_config::EthToolDocument],
+    targets: &[gents::document_config::SubagentTargetDocument],
+) -> Result<bool> {
+    let config = gents::tool_surface::BehaviorToolConfig::from_tools_documents(
         "Builder",
-        &tools,
+        tools,
+        surfaces,
+        eth_tools,
+        targets,
         &gents::ToolCeiling::meta_only(),
         Vec::new(),
     )?;
@@ -82,7 +82,57 @@ fn automation_query_grader_uses_effective_collection_scope() {
         (serde_json::json!({"enable_defra_query": false}), false),
         (serde_json::json!({}), false),
     ] {
-        assert_eq!(exposes_unscoped_defra_query(&datastore).unwrap(), unscoped);
+        let tools = gents::document_config::Tools {
+            tools_id: "automation-query-grader".into(),
+            agent_did: "did:key:automation-query-grader".into(),
+            datastore: serde_json::from_value(datastore).unwrap(),
+            ..Default::default()
+        };
+        assert_eq!(
+            exposes_unscoped_defra_query(&tools, &[], &[], &[]).unwrap(),
+            unscoped
+        );
+    }
+}
+
+#[test]
+fn automation_query_grader_resolves_referenced_surface_before_checking_scope() {
+    use gents::document_config::{DatastoreToolSurfaceDocument, QueryToolDecl, SurfaceToolDecl};
+
+    let owner = "did:key:automation-query-grader";
+    let surface = DatastoreToolSurfaceDocument {
+        surface_id: "eval-output-publisher".into(),
+        agent_did: owner.into(),
+        display_name: None,
+        enabled: true,
+        entries: Some(vec![SurfaceToolDecl::Query(QueryToolDecl {
+            tool_name: "inspect_eval_output".into(),
+            collection: "EvalAutomationInput".into(),
+            description: "Inspect evaluation output".into(),
+            fields: vec!["input_id".into()],
+            filter_fields: Vec::new(),
+        })]),
+        created_at: None,
+        tags: Vec::new(),
+    };
+    for (collections, unscoped) in [
+        (Some(vec!["EvalAutomationInput".into()]), false),
+        (None, true),
+    ] {
+        let tools = gents::document_config::Tools {
+            tools_id: "automation-query-grader".into(),
+            agent_did: owner.into(),
+            datastore: Some(gents::document_config::DatastoreTools {
+                enable_defra_query: Some(true),
+                defra_query_collections: collections,
+                datastore_tool_surface_ids: Some(vec![surface.surface_id.clone()]),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            exposes_unscoped_defra_query(&tools, &[surface.clone()], &[], &[]).unwrap(),
+            unscoped
+        );
     }
 }
 
@@ -397,13 +447,31 @@ async fn run_document_automation(
         "automation changed Setup"
     );
     let mut builder_after = behavior_configuration(node, owner, None).await?;
-    let datastore = &builder_after["tools"]["datastore"];
+    let tools: gents::document_config::Tools =
+        decode_configuration(gents::Collection::Tools, &builder_after["tools"])?;
+    let surfaces = gents::document_config::list_datastore_tool_surfaces(node, owner).await?;
+    let eth_tools = gents::document_config::list_eth_tools(node, owner).await?;
+    let (target_fields, _) =
+        gents::config_client::config_projection(gents::Collection::SubagentTarget, None)?;
+    let escaped_owner = gents::graphql::escape_graphql_string(owner);
+    let targets = rows(
+        node,
+        &format!(
+            "{{ SubagentTarget(filter: {{agent_did: {{_eq: \"{escaped_owner}\"}}}}) {{ {} }} }}",
+            target_fields.join(" ")
+        ),
+        "SubagentTarget",
+    )
+    .await?
+    .iter()
+    .map(|row| decode_configuration(gents::Collection::SubagentTarget, row))
+    .collect::<Result<Vec<gents::document_config::SubagentTargetDocument>>>()?;
     ensure!(
-        !exposes_unscoped_defra_query(datastore)?,
+        !exposes_unscoped_defra_query(&tools, &surfaces, &eth_tools, &targets)?,
         "automation enabled unrestricted query tools"
     );
     ensure!(
-        datastore["datastore_tool_surface_ids"]
+        builder_after["tools"]["datastore"]["datastore_tool_surface_ids"]
             .as_array()
             .is_some_and(|ids| !ids.is_empty()),
         "automation did not select a narrow datastore surface"
