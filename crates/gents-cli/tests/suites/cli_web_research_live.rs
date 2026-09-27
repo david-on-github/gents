@@ -436,6 +436,14 @@ fn expected_research_tool_surfaces() -> [(&'static str, &'static [&'static str])
 }
 
 fn verify_exact_research_tool_surfaces(explanation: &Value) -> Result<()> {
+    let measured = explanation
+        .pointer("/runtime_availability/measured_available_mcp_service_ids")
+        .and_then(Value::as_array)
+        .context("tool explanation is missing measured MCP services")?;
+    anyhow::ensure!(
+        measured.len() == 1 && measured[0].as_str() == Some(SERVICE_ID),
+        "research gateway is not the sole measured MCP service: {explanation}"
+    );
     for (display_name, expected_tools) in expected_research_tool_surfaces() {
         let behavior = explanation
             .get("behaviors")
@@ -447,8 +455,24 @@ fn verify_exact_research_tool_surfaces(explanation: &Value) -> Result<()> {
             })
             .with_context(|| format!("tool explanation is missing {display_name}"))?;
         anyhow::ensure!(
-            behavior.get("tool_policy_version").and_then(Value::as_str) == Some("tool-policy/v1"),
-            "{display_name} is not using secure-default tool policy decoding: {behavior}"
+            behavior.get("tools_source").and_then(Value::as_str) == Some("document"),
+            "{display_name} is not bound to its authored Tools document: {behavior}"
+        );
+        let effective_mcp = behavior
+            .pointer("/surface/policy/effective/meta_mcp")
+            .and_then(Value::as_array)
+            .context("research behavior has no effective MCP policy trace")?
+            .iter()
+            .map(|value| value.as_str().context("invalid effective MCP policy trace"))
+            .collect::<Result<BTreeSet<_>>>()?;
+        let expected_mcp = if expected_tools.contains(&"call_tool") {
+            BTreeSet::from(["enabled:true", "services:only"])
+        } else {
+            BTreeSet::from(["enabled:false", "services:none"])
+        };
+        anyhow::ensure!(
+            effective_mcp == expected_mcp,
+            "{display_name} has an unexpected effective MCP scope: {behavior}"
         );
         let actual = behavior
             .pointer("/surface/tool_names")
@@ -463,6 +487,46 @@ fn verify_exact_research_tool_surfaces(explanation: &Value) -> Result<()> {
             "{display_name} has authority beyond its exact stage surface; expected {expected:?}, got {actual:?}"
         );
     }
+    Ok(())
+}
+
+#[test]
+fn exact_research_surface_rejects_wider_mcp_policy_and_extra_tools() -> Result<()> {
+    let behaviors = expected_research_tool_surfaces()
+        .into_iter()
+        .map(|(display_name, tools)| {
+            let effective_mcp = if tools.contains(&"call_tool") {
+                vec!["enabled:true", "services:only"]
+            } else {
+                vec!["enabled:false", "services:none"]
+            };
+            serde_json::json!({
+                "display_name": display_name,
+                "tools_source": "document",
+                "surface": {
+                    "tool_names": tools,
+                    "policy": { "effective": { "meta_mcp": effective_mcp } }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut explanation = serde_json::json!({
+        "runtime_availability": {
+            "measured_available_mcp_service_ids": [SERVICE_ID]
+        },
+        "behaviors": behaviors
+    });
+    verify_exact_research_tool_surfaces(&explanation)?;
+    explanation["behaviors"][0]["surface"]["policy"]["effective"]["meta_mcp"] =
+        serde_json::json!(["enabled:true", "services:all"]);
+    anyhow::ensure!(verify_exact_research_tool_surfaces(&explanation).is_err());
+    explanation["behaviors"][0]["surface"]["policy"]["effective"]["meta_mcp"] =
+        serde_json::json!(["enabled:true", "services:only"]);
+    explanation["behaviors"][0]["surface"]["tool_names"]
+        .as_array_mut()
+        .context("synthetic tool surface is not an array")?
+        .push(Value::String("bash".to_owned()));
+    anyhow::ensure!(verify_exact_research_tool_surfaces(&explanation).is_err());
     Ok(())
 }
 
