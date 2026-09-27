@@ -283,6 +283,12 @@ source consistency checks, not a separate runtime compatibility version.
   unclaimed-spawn bound as a cross-principal spawn on every route; when the
   bound passes the parent's turn receives a non-retryable `spawn_unclaimed`
   result and the child is fenced (#1830).
+- Task hooks configured on a Task now run. A `before` hook gates the request
+  ahead of the provider, `after_success`/`after_failure` and `finally` run at
+  the completion boundary, and a failing gate fails the request with the
+  command's own output instead of completing it silently. Hooks resolve for
+  schedule- and event-fired requests; a manual run carries no task reference
+  and runs none (#1600).
 
 ## 0.19.0 - 2026-09-24
 
