@@ -325,7 +325,8 @@ async fn live_standard_backgrounding_uses_real_inference() -> Result<()> {
     let blocked_command = |started: &str, release: &Path, done: &str| {
         serde_json::json!({
             "command": format!(
-                "printf {started}; while [ ! -f '{}' ]; do sleep 0.2; done; printf {done}",
+                "printf {started}; printf {started} > '{}'; while [ ! -f '{}' ]; do sleep 0.2; done; printf {done}",
+                started_path(release).display(),
                 release.display()
             ),
             "args": [],
@@ -685,13 +686,19 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
     )
     .await
     .expect("managed agent_new must cause a request");
-    // The started session is busy once its foreground bash call is accepted.
+    // The started session is busy once its shell reports it is blocking.
     wait_for_model_tool_call(
         &db.node,
         &managed_caused.request_id,
         &managed_caused.session_id,
         "bash_unrestricted",
         Duration::from_secs(180),
+    )
+    .await;
+    wait_for_started_marker(
+        &managed_child_release,
+        "CHILD_MANAGED_STARTED",
+        Duration::from_secs(120),
     )
     .await;
 
@@ -1513,6 +1520,16 @@ async fn live_fan_out_list_and_continue() -> Result<()> {
     )
     .await;
     let rows = session_tool_rows(db.node.as_ref(), session_id, AGENT_NEW_TOOL_NAME).await;
+    assert_eq!(
+        rows.len(),
+        2,
+        "fan-out must start exactly two sessions, one per agent_new call: {rows:?}"
+    );
+    assert_eq!(
+        caused.len(),
+        2,
+        "each agent_new call must cause exactly one request: {caused:?}"
+    );
     let alpha = caused
         .iter()
         .find(|row| row.behavior_id == ALPHA_BEHAVIOR_ID)
@@ -1690,17 +1707,28 @@ async fn live_fan_out_list_and_continue() -> Result<()> {
         Duration::from_secs(60),
     )
     .await;
-    let continued_wake = wait_for_session_answer_containing(
+    let continued_wake = wait_for_completion_wake(
         db.node.as_ref(),
         session_id,
-        &[&alpha_second],
+        message_request_id,
         Duration::from_secs(300),
     )
     .await;
+    assert_eq!(
+        continued_wake.lifecycle_state.as_deref(),
+        Some("completed"),
+        "the wake for the agent_message completion must run: {continued_wake:?}"
+    );
+    let continued_answer =
+        terminal_assistant_answer(db.node.as_ref(), &continued_wake.request_id).await;
+    assert!(
+        continued_answer.contains(&alpha_second),
+        "the wake for the agent_message completion must use the continued session's result"
+    );
     tracing::info!(
         continued_request = %continued.request_id,
         message_tool_call = %message_row.tool_call_id,
-        wake = %continued_wake,
+        wake = %continued_wake.request_id,
         "[live-fan-out] agent_message continued the idle session and its result reached the parent"
     );
 
@@ -1729,7 +1757,8 @@ async fn live_agent_interrupt_is_spawner_only() -> Result<()> {
     let release = workspace.path().join("release-blocker");
     let blocked_args = serde_json::json!({
         "command": format!(
-            "printf BLOCKER_STARTED; while [ ! -f '{}' ]; do sleep 0.2; done; printf BLOCKER_DONE",
+            "printf BLOCKER_STARTED; printf BLOCKER_STARTED > '{}'; while [ ! -f '{}' ]; do sleep 0.2; done; printf BLOCKER_DONE",
+            started_path(&release).display(),
             release.display()
         ),
         "args": [],
@@ -1845,6 +1874,7 @@ reply exactly BLOCKED_JOB_DONE. Do not call any other tool."
         Duration::from_secs(240),
     )
     .await;
+    wait_for_started_marker(&release, "BLOCKER_STARTED", Duration::from_secs(120)).await;
     assert_eq!(
         wait_for_request_terminal(db.node.as_ref(), start_request_id, Duration::from_secs(240))
             .await,
@@ -1948,12 +1978,25 @@ reply exactly BLOCKED_JOB_DONE. Do not call any other tool."
         !release.exists(),
         "the worker must have been interrupted while still blocked"
     );
+    let wake = wait_for_completion_wake(
+        db.node.as_ref(),
+        spawner_session,
+        start_request_id,
+        Duration::from_secs(240),
+    )
+    .await;
+    assert_eq!(
+        wake.lifecycle_state.as_deref(),
+        Some("completed"),
+        "the interrupted result must wake the spawner: {wake:?}"
+    );
     tracing::info!(
         worker_session = %worker.session_id,
         worker_request = %worker.request_id,
         agent_new_row = %start_row.tool_call_id,
         row_state = %settled.lifecycle_state,
-        "[live-interrupt] non-spawner refused; spawner interrupted; notification delivered"
+        wake = %wake.request_id,
+        "[live-interrupt] non-spawner refused; spawner interrupted; notification delivered and wake completed"
     );
 
     std::fs::write(&release, b"release").expect("release blocker");
@@ -2667,6 +2710,28 @@ async fn wait_for_caused_request(
     }
 }
 
+/// Where a blocked test command records its started marker. A running
+/// foreground tool's stdout is not durable until it exits, so the command
+/// also writes the marker here.
+fn started_path(release: &Path) -> std::path::PathBuf {
+    release.with_extension("started")
+}
+
+async fn wait_for_started_marker(release: &Path, marker: &str, timeout: Duration) {
+    let path = started_path(release);
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if std::fs::read_to_string(&path).is_ok_and(|text| text.contains(marker)) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the blocked command never reported {marker}; it did not start blocking"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 async fn wait_for_caused_requests(
     node: &EmbeddedNode,
     parent_request_id: &str,
@@ -2728,6 +2793,7 @@ struct SessionRequestRow {
     subagent_depth: Option<i64>,
     failure_reason: Option<String>,
     input: Option<RequestInput>,
+    caused_by_parent_request_id: Option<String>,
 }
 
 impl SessionRequestRow {
@@ -2741,7 +2807,7 @@ impl SessionRequestRow {
 
 async fn session_requests(node: &EmbeddedNode, session_id: &str) -> Vec<SessionRequestRow> {
     let query = format!(
-        r#"{{ AgentRequest(filter: {{ session_id: {{ _eq: "{}" }} }}, order: {{ created_at: ASC }}) {{ request_id lifecycle_state subagent_depth failure_reason input }} }}"#,
+        r#"{{ AgentRequest(filter: {{ session_id: {{ _eq: "{}" }} }}, order: {{ created_at: ASC }}) {{ request_id lifecycle_state subagent_depth failure_reason input caused_by_parent_request_id }} }}"#,
         escape_graphql_string(session_id),
     );
     let response = node.execute(&query).await;
@@ -2761,6 +2827,45 @@ async fn session_requests(node: &EmbeddedNode, session_id: &str) -> Vec<SessionR
                 .unwrap_or_else(|error| panic!("decode session request {row}: {error}"))
         })
         .collect()
+}
+
+/// The terminal completion wake caused by a background row of
+/// `owning_request_id` settling: a background-completion wake whose cause
+/// names that request.
+async fn wait_for_completion_wake(
+    node: &EmbeddedNode,
+    session_id: &str,
+    owning_request_id: &str,
+    timeout: Duration,
+) -> SessionRequestRow {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let requests = session_requests(node, session_id).await;
+        let wakes = requests
+            .iter()
+            .filter(|row| {
+                row.is_background_completion_wake()
+                    && row.caused_by_parent_request_id.as_deref() == Some(owning_request_id)
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            wakes.len() <= 1,
+            "one completion must cause at most one wake: {wakes:?}"
+        );
+        if let Some(wake) = wakes
+            .first()
+            .filter(|row| row.lifecycle_state.as_deref().is_some_and(is_terminal))
+        {
+            return (*wake).clone();
+        }
+        if tokio::time::Instant::now() >= deadline {
+            dump_session_diagnostics(node, session_id).await;
+            panic!(
+                "no terminal completion wake caused by {owning_request_id} in session {session_id}; requests={requests:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// Wait until every request of the session is terminal.
