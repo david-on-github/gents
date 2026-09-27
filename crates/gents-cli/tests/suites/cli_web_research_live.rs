@@ -7,6 +7,13 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
+use gents::config::ReasoningEffort;
+use gents::config_client::{
+    apply_desired_state_plan, read_desired_state_record_in_txn, ConfigAccess,
+    DesiredStateApplyDocument, DesiredStateApplyPlan,
+};
+use gents::document_config::{InferenceExecution, InferenceProfile};
+use gents::Collection;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -43,72 +50,87 @@ async fn register_real_web_research_service(graphql: &str, agent_did: &str) -> R
     Ok(())
 }
 
-async fn configure_live_research_inference_profile(graphql: &str, agent_did: &str) -> Result<()> {
-    let owner = escape_graphql_string(agent_did);
-    let response = graphql_query(
-        graphql,
-        &format!(
-            r#"{{
-                InferenceProfile(
-                    filter: {{ agent_did: {{ _eq: "{owner}" }} }}
-                ) {{ _docID profile_id }}
-                InferenceExecution(
-                    filter: {{ agent_did: {{ _eq: "{owner}" }}, execution_id: {{ _eq: "research-execution" }} }},
-                    limit: 1
-                ) {{ _docID execution_id }}
-            }}"#
-        ),
-    )
-    .await?;
-    let execution_doc_id = response
-        .pointer("/data/InferenceExecution/0/_docID")
-        .and_then(Value::as_str)
-        .context("installed research inference execution is missing")?;
-    graphql_query(
-        graphql,
-        &format!(
-            r#"mutation {{
-                update_InferenceExecution(
-                    docID: "{}",
-                    input: {{ max_turns: 64 }}
-                ) {{ _docID }}
-            }}"#,
-            escape_graphql_string(execution_doc_id),
-        ),
-    )
-    .await?;
-    let profiles = response
-        .pointer("/data/InferenceProfile")
-        .and_then(Value::as_array)
-        .context("installed research inference profiles are missing")?
-        .iter()
-        .filter(|profile| {
-            profile
-                .get("profile_id")
-                .and_then(Value::as_str)
-                .is_some_and(|profile_id| profile_id.starts_with("research-"))
+async fn configure_live_research_inference_profile(
+    graphql: &str,
+    agent_did: &str,
+    profile_id: &str,
+) -> Result<()> {
+    let access = ConfigAccess::Graphql(graphql.to_owned());
+    access
+        .transact("test.web_research.inference", |txn| {
+            Box::pin(async move {
+                let (_, value) = read_desired_state_record_in_txn(
+                    txn,
+                    Collection::InferenceProfile,
+                    agent_did,
+                    profile_id,
+                )
+                .await?
+                .context("initialized inference profile is missing")?;
+                let profile: InferenceProfile = serde_json::from_value(value)?;
+                let plan = live_research_inference_plan(profile)?;
+                apply_desired_state_plan(txn, &plan).await.map(|_| ())
+            })
         })
-        .collect::<Vec<_>>();
-    anyhow::ensure!(profiles.len() == 4, "expected four research profiles");
-    for profile in profiles {
-        let doc_id = profile
-            .get("_docID")
-            .and_then(Value::as_str)
-            .context("installed research inference profile has no _docID")?;
-        graphql_query(
-            graphql,
-            &format!(
-                r#"mutation {{
-                    update_InferenceProfile(
-                        docID: "{}",
-                        input: {{ max_output_tokens: 8192, reasoning_effort: "low" }}
-                    ) {{ _docID }}
-                }}"#,
-                escape_graphql_string(doc_id),
+        .await
+}
+
+fn live_research_inference_plan(mut profile: InferenceProfile) -> Result<DesiredStateApplyPlan> {
+    let execution = InferenceExecution {
+        agent_did: profile.agent_did.clone(),
+        execution_id: "web-research-live-execution".to_owned(),
+        max_turns: Some(64),
+        ..InferenceExecution::default()
+    };
+    profile.execution_id = Some(execution.execution_id.clone());
+    profile.max_output_tokens = Some(8192);
+    profile.reasoning_effort = Some(ReasoningEffort::Low);
+    DesiredStateApplyPlan::new(
+        [
+            (
+                Collection::InferenceExecution,
+                serde_json::to_value(execution)?,
             ),
-        )
-        .await?;
-    }
+            (Collection::InferenceProfile, serde_json::to_value(profile)?),
+        ]
+        .into_iter()
+        .map(|(collection, value)| DesiredStateApplyDocument {
+            collection,
+            add: value.clone(),
+            update: value,
+        })
+        .collect(),
+    )
+}
+
+#[test]
+fn live_research_plan_binds_initialized_profile_to_execution() -> Result<()> {
+    let profile = InferenceProfile {
+        agent_did: "did:key:live-test".to_owned(),
+        profile_id: "initialized-profile".to_owned(),
+        backend_id: "initialized-backend".to_owned(),
+        model_name: "real-model".to_owned(),
+        ..InferenceProfile::default()
+    };
+    let plan = live_research_inference_plan(profile)?;
+    let execution = plan
+        .documents()
+        .iter()
+        .find(|doc| doc.collection == Collection::InferenceExecution)
+        .context("missing execution plan")?;
+    let profile = plan
+        .documents()
+        .iter()
+        .find(|doc| doc.collection == Collection::InferenceProfile)
+        .context("missing profile plan")?;
+    anyhow::ensure!(execution.add["agent_did"] == profile.add["agent_did"]);
+    anyhow::ensure!(execution.add["execution_id"] == profile.add["execution_id"]);
+    anyhow::ensure!(execution.add["max_turns"] == 64);
+    anyhow::ensure!(profile.add["profile_id"] == "initialized-profile");
+    anyhow::ensure!(profile.add["backend_id"] == "initialized-backend");
+    anyhow::ensure!(profile.add["model_name"] == "real-model");
+    anyhow::ensure!(profile.add["max_output_tokens"] == 8192);
+    anyhow::ensure!(profile.add["reasoning_effort"] == "low");
     Ok(())
 }
 
@@ -478,6 +500,10 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
     let init_arg_refs = init_args.iter().map(String::as_str).collect::<Vec<_>>();
     let init = run_init_json(&home_dir, &init_arg_refs)?;
     let agent_did = agent_did_from_init(&init)?;
+    let profile_id = init
+        .get("inference_profile_id")
+        .and_then(Value::as_str)
+        .context("init receipt is missing inference_profile_id")?;
 
     let port = allocate_port()?;
     let graphql = graphql_url(port);
@@ -515,6 +541,11 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
         "real MCP service probe failed: {probe}"
     );
     wait_for_runtime_mcp_health(&graphql, &agent_did, Duration::from_secs(45)).await?;
+    configure_live_research_inference_profile(&graphql, &agent_did, profile_id).await?;
+
+    let coordinator_slot = format!("coordinator={profile_id}");
+    let researcher_slot = format!("researcher={profile_id}");
+    let verifier_slot = format!("verifier={profile_id}");
 
     let install = run_cli_json_with_env(
         &home_dir,
@@ -524,6 +555,16 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
             "web_deep_research",
             "--home",
             home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
+            "--inference-slot",
+            &coordinator_slot,
+            "--inference-slot",
+            &researcher_slot,
+            "--inference-slot",
+            &verifier_slot,
             "--output",
             "json",
         ],
@@ -536,7 +577,6 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
         install.pointer("/install/revision_digest").is_some(),
         "web research graph installation failed: {install}"
     );
-    configure_live_research_inference_profile(&graphql, &agent_did).await?;
     wait_for_runtime_quiescence(&graphql, &agent_did, 2, Duration::from_secs(6)).await?;
     wait_for_all_research_behaviors_runnable(&graphql, &agent_did, Duration::from_secs(30)).await?;
     wait_for_exact_research_tool_surfaces(&home_dir, &graphql, &agent_did, Duration::from_secs(45))
@@ -552,6 +592,10 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
             "web_deep_research",
             "--home",
             home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
             "--question",
             &question,
             "--investigator-count",
@@ -574,6 +618,10 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
             &run_id,
             "--home",
             home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
             "--interval-ms",
             "2000",
         ],
@@ -585,7 +633,17 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
     let watch = run_cli_json(
         &home_dir,
         &[
-            "graph", "watch", &run_id, "--home", home_arg, "--output", "json",
+            "graph",
+            "watch",
+            &run_id,
+            "--home",
+            home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
+            "--output",
+            "json",
         ],
     )?;
     anyhow::ensure!(
@@ -685,7 +743,17 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
     let result = run_cli_json(
         &home_dir,
         &[
-            "graph", "result", &run_id, "--home", home_arg, "--output", "json",
+            "graph",
+            "result",
+            &run_id,
+            "--home",
+            home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &agent_did,
+            "--output",
+            "json",
         ],
     )?;
     anyhow::ensure!(result.get("status").and_then(Value::as_str) == Some("succeeded"));
