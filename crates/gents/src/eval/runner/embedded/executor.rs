@@ -816,6 +816,8 @@ async fn submit_and_observe(
             }
         }
     };
+    // A cancel that lands between the request write and its return ends here
+    // without interrupt_and_settle; the trial home is torn down with it.
     let submitted = tokio::select! {
         biased;
         () = cancel.cancelled() => return ObservedStage::cancelled(),

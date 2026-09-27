@@ -615,9 +615,11 @@ pub(crate) fn check_resume(
     if origin.subject.behavior_id != request.behavior_id {
         differs.push("behavior_id");
     }
-    if origin.target.field != request.target_field
-        || origin.target.task_id() != request.task_id.as_deref()
-    {
+    let task_id = request
+        .task_id
+        .as_deref()
+        .filter(|_| request.target_field == TargetField::TaskPromptTemplate);
+    if origin.target.field != request.target_field || origin.target.task_id() != task_id {
         differs.push("target");
     }
     if origin.definition.definition_id != request.definition_id {

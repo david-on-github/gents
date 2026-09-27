@@ -27,8 +27,9 @@ const CONFIG_ASSET: &str = "pack_config.json";
 
 /// Why a candidate never reached a validation run. `reason` is a closed
 /// vocabulary for the journal — `empty_text`, `text_too_long`,
-/// `template_variables_dropped`, `unexpected_change`, `text_mismatch` or
-/// `duplicate_candidate` — and `detail` is diagnostics for an operator.
+/// `template_invalid`, `template_variables_dropped`, `unexpected_change`,
+/// `text_mismatch` or `duplicate_candidate` — and `detail` is diagnostics for
+/// an operator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructuralRejection {
     pub reason: &'static str,
@@ -147,7 +148,7 @@ fn template_variables(template: &str) -> Result<BTreeSet<String>, StructuralReje
         })
         .map_err(|error| {
             reject(
-                "template_variables_dropped",
+                "template_invalid",
                 format!("the template does not parse: {error}"),
             )
         })
