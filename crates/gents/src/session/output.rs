@@ -183,9 +183,9 @@ pub(crate) async fn load_canonical_message_in_txn(
 /// it validates every accepted tool reply, and a fresh read per header scans
 /// the request's whole output once per tool, starving lease renewal.
 ///
-/// Valid only while the transaction creates no `AgentMessage` or
-/// `AgentOutputSegment` after construction; a caller that publishes canonical
-/// output constructs its reader after publishing.
+/// Its cache is a snapshot: once the transaction creates an `AgentMessage` or
+/// `AgentOutputSegment`, the reader must not be used again. A caller that
+/// publishes canonical output constructs a new reader after publishing.
 pub(crate) struct TxnCanonicalReader<'a, 'txn> {
     txn: &'a ConfigApplyTxn<'txn>,
     agent_did: &'a str,
