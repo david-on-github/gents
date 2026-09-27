@@ -46,17 +46,12 @@ pending lifecycle state. -/
 def releasedBy (session : DocId → String) (head d : DocId) : Prop :=
   d ≠ head ∧ session d = session head
 
-/-- An overtaken request keeps its mark until released: no delivery at all. -/
-theorem watcher_marked_request_not_redelivered
-    (w : World) (d : DocId) (a : Action) (w' : World)
-    (h_marked : d ∈ w.processedSet)
-    (h : Transition w a w') :
-    a ≠ .handle d :=
-  C1_processed_set_excludes_handle w d a w' h_marked h
-
-/-- Once the overtaking head releases it and the head leaves the pending set
-(its terminal transition unblocks the session), the next rescan delivers the
-overtaken request within `rescanBoundedBy`. -/
+/-- Constructive redelivery witness: once the overtaking head releases it and
+the head leaves the pending set (its terminal transition unblocks the
+session), the Fair two-step trace `[rescanTick, handle d]` delivers the
+overtaken request. This exhibits one such trace; it is not a bound over every
+fair schedule. Until released, `watcher_cooldown_excludes_handle` excludes the
+delivery. -/
 theorem watcher_overtaken_request_redelivered_after_unblock
     (session : DocId → String) (w₀ : World) (head d : DocId)
     (h_released : releasedBy session head d)
