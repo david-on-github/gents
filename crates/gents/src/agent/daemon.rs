@@ -158,7 +158,8 @@ enum HandleRequestOutcome {
 /// The terminal this execution's owned work decided, before the task hook
 /// phases react to it. `release_writer_binding` keeps each arm's existing
 /// choice: an integrate failure retains its Active binding so a retry can
-/// observe the pending commit-tree.
+/// observe the pending commit-tree. An absent outcome means the work never
+/// started, which releases the binding rather than retaining it.
 struct OwnedWorkOutcome {
     observation: crate::task_hooks::OwnedWorkObservation,
     reason: Option<String>,
@@ -712,11 +713,11 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         error = %error,
                         "refusing to run a request whose configured task hooks cannot be resolved"
                     );
-                    finalize_request_failure(
+                    self.finalize_failure_before_work(
                         &mut lifecycle,
                         &stream_writer,
                         &error.to_string(),
-                        &request.request_id,
+                        &request,
                     )
                     .await;
                     return;
@@ -738,11 +739,11 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         error = %error,
                         "refusing to run task hooks without an admitted host-tools root"
                     );
-                    finalize_request_failure(
+                    self.finalize_failure_before_work(
                         &mut lifecycle,
                         &stream_writer,
                         &error.to_string(),
-                        &request.request_id,
+                        &request,
                     )
                     .await;
                     return;
@@ -779,7 +780,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
         let Some(run) = run else {
             return;
         };
-        let (work_reason, release_writer_binding) = work_decision.unwrap_or((None, false));
+        let (work_reason, release_writer_binding) = work_decision.unwrap_or((None, true));
 
         let final_outcome = run.final_outcome();
         if run.agent_result == Some(crate::task_hooks::TaskAgentResult::Success)
@@ -828,15 +829,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 .await
                     && release_writer_binding
                 {
-                    if let Err(release_error) =
-                        crate::workspace::release_writer_binding(self.node.as_ref(), &request).await
-                    {
-                        tracing::warn!(
-                            request_id = %request.request_id,
-                            error = %release_error,
-                            "failed to release writer workspace binding after failure"
-                        );
-                    }
+                    self.release_failed_writer_binding(&request).await;
                 }
             }
             crate::task_hooks::TaskHookOutcome::Interrupted => {
@@ -872,6 +865,35 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     "request interrupted mid-flight"
                 );
             }
+        }
+    }
+
+    /// A workspace-bound automated request receives its writer binding in the
+    /// trigger materializer, before this execution exists. Base freeze refuses
+    /// an Active writer binding even once its request is terminal, so a failure
+    /// that terminalizes before the owned work ran must release it, and only
+    /// the winning terminal CAS may.
+    async fn finalize_failure_before_work(
+        &self,
+        lifecycle: &mut RequestLifecycle,
+        stream_writer: &DefraStreamWriter,
+        reason: &str,
+        request: &AgentRequest,
+    ) {
+        if finalize_request_failure(lifecycle, stream_writer, reason, &request.request_id).await {
+            self.release_failed_writer_binding(request).await;
+        }
+    }
+
+    async fn release_failed_writer_binding(&self, request: &AgentRequest) {
+        if let Err(error) =
+            crate::workspace::release_writer_binding(self.node.as_ref(), request).await
+        {
+            tracing::warn!(
+                request_id = %request.request_id,
+                error = %error,
+                "failed to release writer workspace binding after failure"
+            );
         }
     }
 

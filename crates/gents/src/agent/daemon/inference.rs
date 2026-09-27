@@ -1164,6 +1164,7 @@ mod tests {
         node: &defra_node::EmbeddedNode,
         behavior: &ResolvedBehavior,
         hooks: serde_json::Value,
+        workspace_id: Option<&str>,
     ) -> AgentRequest {
         use crate::config_client::{
             ConfigAccess, DesiredStateApplyDocument, DesiredStateApplyPlan,
@@ -1260,6 +1261,11 @@ mod tests {
         create.caused_by_trigger_id = Some("hook-trigger".into());
         create.caused_by_trigger_kind = Some("schedule".into());
         create.caused_by_trigger_doc_id = Some(trigger_doc_id);
+        if let Some(workspace_id) = workspace_id {
+            create.workspace_id = Some(workspace_id.to_owned());
+            create.workspace_authority = Some("readWrite".into());
+            create.workspace_owner_agent_did = Some(owner.to_owned());
+        }
         crate::sign_agent_request_create(behavior.principal_identity().as_ref(), &mut create)
             .await
             .unwrap();
@@ -1276,7 +1282,105 @@ mod tests {
             .unwrap()
     }
 
+    const TASK_HOOK_WORKSPACE_ID: &str = "task-hook-workspace";
+
+    /// A Ready isolated workspace and its placement, so the binding the trigger
+    /// materializer writes is exactly the Active readWrite binding base freeze
+    /// refuses. Claim admission revalidates both against the host, so the
+    /// placement must name a real directory.
+    async fn install_task_hook_workspace(
+        node: &defra_node::EmbeddedNode,
+        owner: &str,
+        host_path: &std::path::Path,
+    ) {
+        let workspace = crate::workspace::IsolatedWorkspaceDoc {
+            path_capability: crate::workspace::WorkspacePathCapability::exact_paths(vec![
+                "patch.rs".to_string(),
+            ])
+            .unwrap(),
+            workspace_id: TASK_HOOK_WORKSPACE_ID.to_string(),
+            work_unit_id: "hook-task".to_string(),
+            repository_id: "hook-repo".to_string(),
+            base_sha: "0".repeat(40),
+            branch: "gents/hook-task".to_string(),
+            creation_policy: crate::workspace::CreationPolicy::GitWorktreeDiff
+                .as_str()
+                .to_string(),
+            adapter: crate::workspace::WorkspaceAdapterKind::GitWorktree
+                .as_str()
+                .to_string(),
+            owner_agent_did: owner.to_string(),
+            writer_principal: owner.to_string(),
+            integrator_principal: owner.to_string(),
+            instruction_manifest: String::new(),
+            seal_hash: None,
+            lifecycle_state: "ready".to_string(),
+            caused_by_invocation_id: "hook-invocation".to_string(),
+            caused_by_correlation: "hook-correlation".to_string(),
+        };
+        let placement = crate::workspace::WorkspacePlacementDoc {
+            workspace_id: TASK_HOOK_WORKSPACE_ID.to_string(),
+            owner_agent_did: owner.to_string(),
+            host_path: host_path
+                .to_str()
+                .expect("utf-8 workspace host path")
+                .to_string(),
+            repository_placement_id: "hook-repo".to_string(),
+            adapter: crate::workspace::WorkspaceAdapterKind::GitWorktree
+                .as_str()
+                .to_string(),
+            adapter_version: "gents-workspace-adapter/1".to_string(),
+            dirty_base: false,
+            dirty_base_summary: String::new(),
+            provisioning_state: "provisioned".to_string(),
+            observed_tree_hash: String::new(),
+        };
+        let updated_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        for mutation in [
+            crate::workspace::isolated_workspace_upsert_mutation(&workspace),
+            crate::workspace::workspace_placement_upsert_mutation(&placement, &updated_at),
+        ] {
+            crate::config_client::ConfigAccess::write_local(
+                node,
+                "test.install_task_hook_workspace",
+                &mutation,
+            )
+            .await
+            .expect("install isolated workspace and placement");
+        }
+    }
+
+    async fn load_task_hook_bindings(
+        node: &defra_node::EmbeddedNode,
+        owner: &str,
+    ) -> Vec<crate::workspace::WorkspaceBindingDoc> {
+        let response = crate::graphql::graphql_with_transaction_retry(
+            node,
+            &format!(
+                r#"{{ WorkspaceBinding(filter: {{ workspace_id: {{ _eq: "{}" }}, owner_agent_did: {{ _eq: "{}" }} }}) {{ binding_id workspace_id request_id request_doc_id authority owner_agent_did seal_hash lifecycle_state }} }}"#,
+                crate::graphql::escape_graphql_string(TASK_HOOK_WORKSPACE_ID),
+                crate::graphql::escape_graphql_string(owner),
+            ),
+            "test.load_task_hook_bindings",
+        )
+        .await
+        .unwrap();
+        crate::graphql::rows(&response, "WorkspaceBinding").unwrap()
+    }
+
     async fn run_task_hook_request(hooks: serde_json::Value) -> (usize, serde_json::Value) {
+        let (provider_calls, row, _) = run_task_hook_scenario(hooks, false).await;
+        (provider_calls, row)
+    }
+
+    async fn run_task_hook_scenario(
+        hooks: serde_json::Value,
+        workspace_bound: bool,
+    ) -> (
+        usize,
+        serde_json::Value,
+        Vec<crate::workspace::WorkspaceBindingDoc>,
+    ) {
         let node = Arc::new(
             defra_node::EmbeddedNode::builder()
                 .data_path(
@@ -1289,8 +1393,38 @@ mod tests {
         );
         crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
         let behavior = test_behavior();
-        let request = create_task_hook_request(node.as_ref(), &behavior, hooks).await;
+        let owner = behavior.agent_did().to_string();
+        let workspace_id = workspace_bound.then_some(TASK_HOOK_WORKSPACE_ID);
+        let workspace_root =
+            workspace_bound.then(|| tempfile::tempdir().expect("workspace placement directory"));
+        if let Some(root) = &workspace_root {
+            install_task_hook_workspace(node.as_ref(), &owner, root.path()).await;
+        }
+        let request = create_task_hook_request(node.as_ref(), &behavior, hooks, workspace_id).await;
         let doc_id = request.doc_id.clone();
+        if workspace_bound {
+            crate::workspace::materialize_workspace_binding(
+                node.as_ref(),
+                &request.request_id,
+                &request.doc_id,
+                &owner,
+                &crate::lifecycle::WorkspaceLineage {
+                    workspace_id: request.workspace_id.clone(),
+                    workspace_authority: request.workspace_authority.clone(),
+                    workspace_owner_agent_did: request.workspace_owner_agent_did.clone(),
+                    workspace_seal_hash: request.workspace_seal_hash.clone(),
+                },
+            )
+            .await
+            .expect("materialize the writer binding");
+            assert!(
+                load_task_hook_bindings(node.as_ref(), &owner)
+                    .await
+                    .iter()
+                    .any(crate::workspace::WorkspaceBindingDoc::is_active_read_write),
+                "the fixture must start from the Active writer binding production materializes"
+            );
+        }
         let prompt_builder = LayeredPromptBuilder::for_behavior(
             &behavior.system_prompt,
             &behavior.behavior_id,
@@ -1342,10 +1476,15 @@ mod tests {
         let row: serde_json::Value = crate::graphql::first_row(&terminal, "AgentRequest")
             .unwrap()
             .expect("terminal AgentRequest row");
+        let bindings = match workspace_bound {
+            false => Vec::new(),
+            true => load_task_hook_bindings(node.as_ref(), &owner).await,
+        };
         let provider_calls = calls.load(Ordering::SeqCst);
         drop(daemon);
+        drop(workspace_root);
         node.shutdown().await;
-        (provider_calls, row)
+        (provider_calls, row, bindings)
     }
 
     #[tokio::test]
@@ -1395,6 +1534,36 @@ mod tests {
         assert!(
             reason.contains("verify") && reason.contains("verify refused"),
             "the operator must see the gate's own output: {reason:?}"
+        );
+    }
+
+    /// Claim admission refuses a ReadWrite workspace binding on a host with no
+    /// enforceable WorkspaceWrite sandbox, so the request this fences never
+    /// reaches its hooks there.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn a_failing_before_hook_releases_the_bound_workspace() {
+        let (provider_calls, row, bindings) = run_task_hook_scenario(
+            serde_json::json!([{
+                "hook_id": "prepare",
+                "phase": "before",
+                "command": ["sh", "-c", "exit 1"],
+                "timeout_secs": 30,
+            }]),
+            true,
+        )
+        .await;
+        assert_eq!(provider_calls, 0, "{row}");
+        assert_eq!(row["lifecycle_state"], "failed", "{row}");
+        assert!(
+            bindings.iter().all(|binding| !binding.is_active()),
+            "a terminal request must not keep the binding it was given: {row} {bindings:?}"
+        );
+        assert!(
+            !bindings
+                .iter()
+                .any(crate::workspace::WorkspaceBindingDoc::is_active_read_write),
+            "base freeze refuses any Active writer binding: {bindings:?}"
         );
     }
 
