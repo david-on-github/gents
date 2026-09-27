@@ -74,6 +74,9 @@ requirement about it.
   rejected and move in a different direction.
 - Write the instruction for the subject behavior, addressed to it, in
   the same voice and person the current instruction uses.
+- When the dossier says the instruction is a task's prompt template, it
+  is rendered when the task fires: keep every `{{ variable }}` of the
+  current template in the new one, spelled exactly as it is.
 
 ## How to reply
 

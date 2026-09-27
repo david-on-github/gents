@@ -4320,6 +4320,27 @@ pub(crate) fn parse_subject(raw: &str) -> Result<SubjectArg, String> {
     })
 }
 
+/// `--target context` (the subject behavior's system prompt) or
+/// `--target task:<task_id>` (the prompt template of that task of the
+/// subject behavior).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TargetArg {
+    Context,
+    Task(String),
+}
+
+pub(crate) fn parse_target(raw: &str) -> Result<TargetArg, String> {
+    match raw.trim() {
+        "context" => Ok(TargetArg::Context),
+        other => match other.strip_prefix("task:").map(str::trim) {
+            Some(task_id) if !task_id.is_empty() => Ok(TargetArg::Task(task_id.to_owned())),
+            _ => Err(format!(
+                "unknown target {raw:?}; pass --target context or --target task:<task_id>"
+            )),
+        },
+    }
+}
+
 /// `--proposer scripted:<file>` or `--proposer behavior:<pack>[:<behavior>]`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ProposerArg {
@@ -4397,6 +4418,10 @@ pub(crate) struct OptimizationRunArgs {
     /// behavior, the pack's only inference-slot behavior.
     #[arg(long, value_parser = parse_subject)]
     pub(crate) subject: SubjectArg,
+    /// `context`: the behavior's system prompt; `task:<task_id>`: the prompt
+    /// template of that task of the behavior.
+    #[arg(long, value_parser = parse_target, default_value = "context")]
+    pub(crate) target: TargetArg,
     #[arg(long, default_value_t = 3)]
     pub(crate) rounds: u32,
     #[arg(long, default_value_t = 2)]

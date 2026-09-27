@@ -14,6 +14,7 @@ use gents::eval::checks::CheckRegistry;
 use gents::eval::documents::default_breaker_threshold;
 use gents::eval::runner::embedded::EmbeddedExecutor;
 use gents::eval::runner::{run_dir, RunOptions};
+use gents::optimization::target::TargetField;
 use gents::optimization::{
     derive_state, job_dir, job_refused, load_job, promote_refused, removable, run_job,
     show as show_job, Budgets, JobOutcome, JobRequest, JobState, PolicyV2, Proposal, Proposer,
@@ -24,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cli::{
     OptimizationCommand, OptimizationDigestArgs, OptimizationRmArgs, OptimizationRunArgs,
-    OptimizationShowArgs, PolicyArg, ProposerArg,
+    OptimizationShowArgs, PolicyArg, ProposerArg, TargetArg,
 };
 use crate::commands::eval::init::install_pack_slot;
 use crate::commands::eval::init::turn::LiveTurn;
@@ -136,7 +137,7 @@ async fn behavior_proposer(
         );
     };
     crate::request_helpers::ensure_local_request_signer(args.scope.home.as_deref(), &ctx.owner)?;
-    let preamble = subject_preamble(subject_dir, subject_behavior)?;
+    let preamble = subject_preamble(subject_dir, subject_behavior, &args.target)?;
     let manifest = gents::pack::resolve_pack(pack)?.manifest;
     let [slot] = manifest.metadata.inference_slots.as_slice() else {
         anyhow::bail!(
@@ -165,10 +166,17 @@ async fn behavior_proposer(
 
 /// The session's first user turn: the subject's dossier, so a proposal
 /// names the subject's real tools and surfaces rather than guessing them.
-fn subject_preamble(subject_dir: &Path, behavior_id: &str) -> Result<String> {
+fn subject_preamble(subject_dir: &Path, behavior_id: &str, target: &TargetArg) -> Result<String> {
     let dossier = crate::commands::eval::init::dossier::render(subject_dir, Some(behavior_id))?;
+    let instruction = match target {
+        TargetArg::Context => "this behavior's system prompt".to_owned(),
+        TargetArg::Task(task_id) => format!(
+            "the prompt template of its task {task_id:?}, rendered when the task fires; \
+             every {{{{ variable }}}} of the current template must stay in the new one"
+        ),
+    };
     Ok(format!(
-        "{}\n\nThe instruction you will rewrite is this behavior's system prompt. \
+        "{}\n\nThe instruction you will rewrite is {instruction}. \
          Every later turn carries the current instruction and the training feedback.",
         dossier.text
     ))
@@ -256,11 +264,17 @@ async fn run(
         .job_id
         .clone()
         .unwrap_or_else(|| default_id(&args.definition_id));
+    let (target_field, task_id) = match &args.target {
+        TargetArg::Context => (TargetField::AgentContextSystemPrompt, None),
+        TargetArg::Task(task_id) => (TargetField::TaskPromptTemplate, Some(task_id.clone())),
+    };
     let request = JobRequest {
         job_id: job_id.clone(),
         owner: ctx.owner.clone(),
         evaluator_did: ctx.owner.clone(),
         behavior_id,
+        target_field,
+        task_id,
         definition_id: args.definition_id.clone(),
         inference_profile_id: args.profile.clone().unwrap_or_else(|| {
             default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
@@ -514,8 +528,7 @@ mod tests {
         accepted_job, delete_definition, optimization, optimization_command, optimization_with,
         proposer_file,
     };
-    use super::{execute, proposer_behavior_id, subject_preamble};
-    use crate::cli::args::TargetArg;
+    use super::{execute, proposer_behavior_id, subject_preamble, TargetArg};
     use crate::cli::Cli;
     use crate::commands::eval::testing::{deps, eval, executor, Fixture, DEFINITION};
     use crate::commands::eval::UNCALIBRATED_BANNER;
@@ -605,7 +618,7 @@ mod tests {
             task.contains("the prompt template of its task \"plan\""),
             "{task}"
         );
-        assert!(task.contains("{{ variables }}"), "{task}");
+        assert!(task.contains("every {{ variable }}"), "{task}");
     }
 
     #[tokio::test]
