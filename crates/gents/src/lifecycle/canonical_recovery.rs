@@ -414,8 +414,6 @@ pub(crate) async fn recover_expired_generation_with_facts(
                 )
                 .await?;
             }
-            // Tool accounting may publish retained bridge receipts.
-            let mut reader = session::TxnCanonicalReader::new(txn, agent, row.requester_did.as_deref());
             let mut eligible = headers.iter().filter(|header| {
                 header.message.role == MessageRole::Assistant
                     && matches!(header.message.publication,
