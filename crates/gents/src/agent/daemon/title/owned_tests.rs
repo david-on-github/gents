@@ -45,6 +45,9 @@ struct TitleProvider {
     stall: bool,
     calls: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
+    /// Moves the title request's execution generation before any output is
+    /// streamed, so every later auxiliary write is fenced out.
+    fence_generation: Option<(Arc<EmbeddedNode>, String, String)>,
 }
 
 #[derive(Default)]
@@ -68,6 +71,7 @@ impl TitleProvider {
             stall,
             calls: Arc::new(AtomicUsize::new(0)),
             entered: Arc::new(tokio::sync::Notify::new()),
+            fence_generation: None,
         }
     }
 }
@@ -95,6 +99,17 @@ impl CompletionModel for TitleProvider {
     ) -> Result<StreamingCompletionResponse<()>, CompletionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         crate::test_support::capture_scripted_provider_request(&request, "scripted").await?;
+        if let Some((node, doc_id, agent_did)) = &self.fence_generation {
+            let doc = crate::graphql::escape_graphql_string(doc_id);
+            let owner = crate::graphql::escape_graphql_string(agent_did);
+            ConfigAccess::Local(node.clone())
+                .write(
+                    "test.title_fence_generation",
+                    &format!(r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{doc}" }}, agent_did: {{ _eq: "{owner}" }} }}, input: {{ execution_generation: "fenced-title-generation" }}) {{ _docID }} }}"#),
+                )
+                .await
+                .expect("fence title generation");
+        }
         self.entered.notify_one();
         let items = self.events.iter().cloned().map(Ok::<_, CompletionError>);
         let inner: rig::streaming::StreamingResult<()> = if self.stall {
@@ -481,6 +496,15 @@ fn provider_events(
         events.push(RawStreamingChoice::Message("generated-title".into()));
         events.push(RawStreamingChoice::FinalResponse(()));
     }
+    events
+}
+
+/// A reasoning model that exhausts its turn before any visible title text.
+fn reasoning_only_events(
+    fields: &[(StreamPayload, String, u32, u32)],
+) -> Vec<RawStreamingChoice<()>> {
+    let mut events = provider_events(fields, false);
+    events.push(RawStreamingChoice::FinalResponse(()));
     events
 }
 
@@ -1065,4 +1089,216 @@ async fn title_audit_is_dispatched_once_by_watcher_router_and_daemon() {
             "title owner emitted WARN"
         );
     }
+}
+
+#[tokio::test]
+async fn reasoning_only_title_retains_each_attempt_and_uses_bounded_fallback() {
+    let capture = TitleWarningCapture::default();
+    let warnings = capture.0.clone();
+    let subscriber = tracing::Dispatch::new(Registry::default().with(capture));
+    let _subscriber_guard = tracing::dispatcher::set_default(&subscriber);
+    let (fields, outcome) = modeled_title_fields("title_live_partial_retains_received_reasoning");
+    assert_eq!(outcome, OutputOutcome::Partial);
+    let fixture = TitleFixture::new().await;
+    let provider = TitleProvider::new(reasoning_only_events(&fields), false);
+    let calls = provider.calls.clone();
+    let (_shutdown, rx) = tokio::sync::watch::channel(false);
+    fixture
+        .task(provider, true)
+        .run(fixture.title.clone(), rx)
+        .await
+        .expect("reasoning-only title is an ordinary provider result");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        usize::try_from(super::TITLE_GENERATION_MAX_ATTEMPTS).unwrap()
+    );
+    assert_title_audit(&fixture, &fields, outcome, 2, false).await;
+
+    let doc = crate::graphql::escape_graphql_string(&fixture.title.doc_id);
+    let response = ConfigAccess::Local(fixture.node.clone())
+        .execute(&format!("{{ AgentRequest(filter: {{ _docID: {{ _eq: \"{doc}\" }} }}, limit: 1) {{ execution_generation }} }}"))
+        .await
+        .unwrap();
+    let generation = response["data"]["AgentRequest"][0]["execution_generation"]
+        .as_str()
+        .expect("title execution generation")
+        .to_owned();
+    let (rows, _) = fixture.output_rows().await;
+    assert!(rows.iter().all(|row| matches!(
+        &row.segment.writer,
+        OutputWriter::RequestExecution { execution_generation } if *execution_generation == generation
+    )));
+
+    assert_eq!(
+        fixture.terminal_row().await,
+        (
+            RequestLifecycleState::Completed,
+            Some(gents_protocol::output::TerminalOutput::NoMessage)
+        )
+    );
+    let session = crate::graphql::escape_graphql_string(&fixture.parent.session_id);
+    let response = ConfigAccess::Local(fixture.node.clone())
+        .execute(&format!(
+            "{{ AgentSession(filter: {{ session_id: {{ _eq: \"{session}\" }} }}) {{ title }} }}"
+        ))
+        .await
+        .unwrap();
+    let title = &response["data"]["AgentSession"][0]["title"];
+    assert_eq!(
+        title["text"],
+        super::sanitize_generated_title("", &fixture.parent.content),
+        "fallback title: {title}"
+    );
+    assert_eq!(
+        warnings.lock().unwrap().len(),
+        usize::try_from(super::TITLE_GENERATION_MAX_ATTEMPTS).unwrap(),
+        "only the bounded attempt warnings are emitted"
+    );
+}
+
+#[tokio::test]
+async fn fenced_title_output_fails_closed_without_retry() {
+    let (fields, _) = modeled_title_fields("title_live_partial_retains_received_reasoning");
+    let fixture = TitleFixture::new().await;
+    let mut provider = TitleProvider::new(reasoning_only_events(&fields), false);
+    provider.fence_generation = Some((
+        fixture.node.clone(),
+        fixture.title.doc_id.clone(),
+        fixture.title.agent_did.clone(),
+    ));
+    let calls = provider.calls.clone();
+    let (_shutdown, rx) = tokio::sync::watch::channel(false);
+    let error = fixture
+        .task(provider, true)
+        .run(fixture.title.clone(), rx)
+        .await
+        .expect_err("a fenced auxiliary writer must fail the title");
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "storage failure retried");
+    assert!(
+        format!("{error:#}").contains("lost its live processing lease"),
+        "{error:#}"
+    );
+    let session = crate::graphql::escape_graphql_string(&fixture.parent.session_id);
+    let response = ConfigAccess::Local(fixture.node.clone())
+        .execute(&format!(
+            "{{ AgentSession(filter: {{ session_id: {{ _eq: \"{session}\" }} }}) {{ title }} }}"
+        ))
+        .await
+        .unwrap();
+    assert!(response["data"]["AgentSession"][0]["title"].is_null());
+}
+
+#[tokio::test]
+async fn title_output_cap_applies_only_when_reasoning_is_disabled_on_the_wire() {
+    use crate::config::ReasoningEffort;
+    use crate::OpenAiWireApi;
+    let fixture = TitleFixture::new().await;
+    let configured = Some(1024);
+    let capped = Some(super::TITLE_VISIBLE_MAX_TOKENS);
+    let mut behavior = (*fixture.behavior).clone();
+    let chat = OpenAiWireApi::ChatCompletions;
+    let responses = OpenAiWireApi::Responses;
+    for (kind, wire, effort, expected) in [
+        (
+            BackendProviderKind::OpenAiCompatible,
+            chat,
+            None,
+            configured,
+        ),
+        (
+            BackendProviderKind::OpenAiCompatible,
+            chat,
+            Some(ReasoningEffort::Low),
+            configured,
+        ),
+        (
+            BackendProviderKind::OpenAiCompatible,
+            chat,
+            Some(ReasoningEffort::None),
+            capped,
+        ),
+        (
+            BackendProviderKind::OpenAiCompatible,
+            responses,
+            None,
+            configured,
+        ),
+        (
+            BackendProviderKind::OpenAiCompatible,
+            responses,
+            Some(ReasoningEffort::High),
+            configured,
+        ),
+        (
+            BackendProviderKind::OpenAiCompatible,
+            responses,
+            Some(ReasoningEffort::None),
+            capped,
+        ),
+        (
+            BackendProviderKind::OpenRouter,
+            chat,
+            Some(ReasoningEffort::None),
+            capped,
+        ),
+        (
+            BackendProviderKind::ChatGptCodex,
+            responses,
+            None,
+            configured,
+        ),
+        (
+            BackendProviderKind::ChatGptCodex,
+            responses,
+            Some(ReasoningEffort::None),
+            capped,
+        ),
+        (
+            BackendProviderKind::XaiGrokOAuth,
+            chat,
+            Some(ReasoningEffort::None),
+            configured,
+        ),
+        (
+            BackendProviderKind::ClaudeCliSubscription,
+            chat,
+            Some(ReasoningEffort::None),
+            configured,
+        ),
+    ] {
+        behavior.backend_provider_kind = kind;
+        behavior.openai_wire_api = wire;
+        behavior.sampling.reasoning_effort = effort;
+        let config = crate::completion_factory::loop_config(
+            &behavior,
+            super::title_generation_preamble(),
+            0,
+            crate::rendered_request::CaptureScopeKind::Title,
+        );
+        assert_eq!(
+            super::title_max_tokens(config.additional_params.as_ref(), configured),
+            expected,
+            "{kind:?} {wire:?} {effort:?}"
+        );
+    }
+
+    // A later merge that re-enables thinking wins over the profile's
+    // reasoning-off setting, so the visible-title cap no longer applies.
+    behavior.backend_provider_kind = BackendProviderKind::OpenAiCompatible;
+    behavior.openai_wire_api = chat;
+    behavior.sampling.reasoning_effort = Some(ReasoningEffort::None);
+    let config = crate::completion_factory::loop_config(
+        &behavior,
+        super::title_generation_preamble(),
+        0,
+        crate::rendered_request::CaptureScopeKind::Title,
+    );
+    let overridden = crate::completion_factory::merge_optional_params(
+        config.additional_params,
+        Some(serde_json::json!({ "chat_template_kwargs": { "enable_thinking": true } })),
+    );
+    assert_eq!(
+        super::title_max_tokens(overridden.as_ref(), configured),
+        configured
+    );
 }

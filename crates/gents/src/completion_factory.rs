@@ -346,6 +346,26 @@ fn reasoning_profile_params(
     }
 }
 
+/// Whether final rendered provider params explicitly switch reasoning off.
+/// Reads the keys [`reasoning_profile_params`] writes, after every later merge,
+/// so an override of those keys wins. Claude's `output_config.effort` does not
+/// switch thinking off, and Grok receives no effort, so neither counts.
+pub(crate) fn params_disable_reasoning(params: Option<&serde_json::Value>) -> bool {
+    let Some(params) = params else {
+        return false;
+    };
+    if let Some(enabled) = params
+        .pointer("/chat_template_kwargs/enable_thinking")
+        .and_then(serde_json::Value::as_bool)
+    {
+        return !enabled;
+    }
+    params
+        .pointer("/reasoning/effort")
+        .and_then(serde_json::Value::as_str)
+        == Some(ReasoningEffort::None.as_str())
+}
+
 fn provider_additional_params(kind: BackendProviderKind) -> Option<serde_json::Value> {
     match kind {
         BackendProviderKind::OpenAiCompatible => None,
