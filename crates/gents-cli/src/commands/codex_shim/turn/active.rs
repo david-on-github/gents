@@ -580,9 +580,13 @@ fn codex_turn_root_and_depth<'a>(
 
 fn steering_parent_id(row: &AgentRequestRow) -> Option<String> {
     let queue = row.input.as_ref()?.queue.as_ref()?;
-    (queue.source == gents_protocol::request_input::QueueSource::Steering)
-        .then(|| queue.queued_after_request_id.clone())
-        .flatten()
+    matches!(
+        queue.source,
+        gents_protocol::request_input::QueueSource::User
+            | gents_protocol::request_input::QueueSource::Steering
+    )
+    .then(|| queue.queued_after_request_id.clone())
+    .flatten()
 }
 
 /// Request-only projection per `Proofs/Client/Types.lean`: supersession

@@ -1178,7 +1178,8 @@ fn request_only_control_link_is_corroborated(request: &TimelineRequestRow) -> bo
     request.input.queue.as_ref().is_some_and(|hints| {
         matches!(
             hints.source,
-            crate::lifecycle::queue::QueueSource::Steering
+            crate::lifecycle::queue::QueueSource::User
+                | crate::lifecycle::queue::QueueSource::Steering
                 | crate::lifecycle::queue::QueueSource::Goal
         )
     })
@@ -2322,16 +2323,23 @@ mod tests {
                 control_request("goal-child", "goal"),
                 control_request("steering-child", "steering"),
                 control_request("ordinary-child", "user"),
+                TimelineRequestRow {
+                    doc_id: Some("doc-unqueued-child".to_string()),
+                    request_id: "unqueued-child".to_string(),
+                    caused_by_parent_request_id: Some("req-root".to_string()),
+                    caused_by_parent_request_doc_id: Some("doc-root".to_string()),
+                    ..Default::default()
+                },
             ],
             ..Default::default()
         });
 
         assert_eq!(
             timeline.child_request_ids,
-            vec!["goal-child", "steering-child"]
+            vec!["goal-child", "ordinary-child", "steering-child"]
         );
         assert!(!timeline.events.iter().any(|event| {
-            matches!(event, RunTimelineEvent::Request(request) if request.request_id == "ordinary-child")
+            matches!(event, RunTimelineEvent::Request(request) if request.request_id == "unqueued-child")
         }));
     }
 

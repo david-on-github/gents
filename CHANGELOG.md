@@ -132,6 +132,9 @@ source consistency checks, not a separate runtime compatibility version.
 - A command that hits its own timeout no longer reports a duration shorter
   than that timeout: one arming instant now both sets the deadline and starts
   the measurement (#1929).
+- Codex shim steers now record the user-origin queue source, so cancelling a
+  subagent no longer drains a queued user steer as subagent-owned queue input
+  (#1930).
 
 - Stateless (`store:false`) Responses requests to xAI/Grok and ChatGPT Codex
   now always request `include: ["reasoning.encrypted_content"]`, even with no

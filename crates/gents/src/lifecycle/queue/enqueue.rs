@@ -52,7 +52,7 @@ pub(crate) async fn enqueue_admitted_steering_request(
         .as_ref()
         .context("atomic steering enqueue requires queue input")?;
     anyhow::ensure!(
-        queue.source == QueueSource::Steering
+        matches!(queue.source, QueueSource::Steering | QueueSource::User)
             && queue.policy == QueuePolicy::Append
             && queue.key.is_none(),
         "atomic steering enqueue requires an unkeyed append"

@@ -104,6 +104,19 @@ fn validate_accepts_steering_request_lineage_without_tool_call_link() {
 }
 
 #[test]
+fn validate_accepts_user_queue_lineage_without_tool_call_link() {
+    let req = AgentRequest {
+        subagent_depth: 1,
+        input: serde_json::from_str(r#"{"queue":{"source":"user","policy":"append","key":null,"queued_after_request_id":"parent-req-1"}}"#).unwrap(),
+        caused_by_parent_request_id: Some("parent-req-1".to_string()),
+        caused_by_parent_request_doc_id: Some("parent-req-doc-1".to_string()),
+        caused_by_parent_tool_call_id: None,
+        ..base_request()
+    };
+    assert!(validate_agent_request(&req).is_ok());
+}
+
+#[test]
 fn validate_accepts_background_completion_lineage_without_tool_call_link() {
     let req = AgentRequest {
         subagent_depth: 1,

@@ -389,9 +389,13 @@ fn steering_root_id(
 
 fn steering_parent_id(request: &AgentRequestRow) -> Option<String> {
     let queue = request.input.as_ref()?.queue.as_ref()?;
-    (queue.source == gents_protocol::request_input::QueueSource::Steering)
-        .then(|| queue.queued_after_request_id.clone())
-        .flatten()
+    matches!(
+        queue.source,
+        gents_protocol::request_input::QueueSource::User
+            | gents_protocol::request_input::QueueSource::Steering
+    )
+    .then(|| queue.queued_after_request_id.clone())
+    .flatten()
 }
 
 fn is_background_completion(request: &AgentRequestRow) -> bool {

@@ -3,6 +3,7 @@ use crate::config_client::{ConfigAccess, ConfigApplyTxn};
 use crate::identity::{AgentIdentity, KeyIdentity};
 use crate::lean_vocab_test::{
     LeanInterruptQueueCase, LeanInterruptQueueEntry, LeanInterruptQueueInput,
+    LeanInterruptQueueObservation,
 };
 use crate::lifecycle::queue::{
     persist_background_completion_with_message, QueuePolicy, QueueSource, RequestInput,
@@ -60,7 +61,7 @@ async fn rows(node: &EmbeddedNode, session: &str) -> Vec<Value> {
     let session = escape_graphql_string(session);
     let result = graphql_with_transaction_retry(
         node,
-        &format!("{{AgentRequest(filter:{{session_id:{{_eq:\"{session}\"}}}}){{_docID request_id agent_did requester_did lifecycle_state interrupt_requested_at input execution_origin}}}}"),
+        &format!("{{AgentRequest(filter:{{session_id:{{_eq:\"{session}\"}}}}){{_docID request_id agent_did requester_did lifecycle_state failure_reason interrupt_requested_at input execution_origin}}}}"),
         "interrupt queue test rows",
     )
     .await
@@ -118,6 +119,7 @@ async fn fixture_with_http(
         &node,
         json!({"request_id":active,"agent_did":did,"requester_did":did,
             "session_id":session,"behavior_id":BEHAVIOR,"content":"active",
+            "purpose":"normal",
             "lifecycle_state":"processing","execution_origin":"interactive",
             "created_at":"2026-09-01T00:00:00Z"}),
     )
@@ -733,6 +735,87 @@ async fn generated_http_overlap_cases_preserve_cutoff() {
         );
         node.shutdown().await;
     }
+}
+
+#[tokio::test]
+async fn a_user_sourced_local_steer_enqueue_survives_the_subagent_owned_queue_drain() {
+    let case = LeanInterruptQueueCase {
+        name: "shim_user_steer_owner_boundary".into(),
+        agent_id: 1,
+        requester_id: Some(1),
+        session_id: 4101,
+        active_request_id: Some(4101),
+        inputs: Vec::new(),
+        expected: LeanInterruptQueueObservation {
+            pending: Vec::new(),
+            terminal: Vec::new(),
+            latched: false,
+        },
+    };
+    let (node, _dir, parent) = fixture(&case).await;
+    let local_steer_input = |source: QueueSource| RequestInput {
+        queue: Some(RequestQueue {
+            source,
+            policy: QueuePolicy::Append,
+            key: None,
+            queued_after_request_id: Some(parent.request_id.clone()),
+            interrupted_request_id: None,
+            background_completion_wake_version: None,
+        }),
+        ..Default::default()
+    };
+    let user_steer = crate::lifecycle::enqueue_local_steering_request(
+        &node,
+        &parent.request_id,
+        &parent.doc_id,
+        "user steer",
+        local_steer_input(QueueSource::User),
+    )
+    .await
+    .unwrap();
+    let subagent_steer = crate::lifecycle::enqueue_local_steering_request(
+        &node,
+        &parent.request_id,
+        &parent.doc_id,
+        "subagent steer",
+        local_steer_input(QueueSource::Steering),
+    )
+    .await
+    .unwrap();
+
+    let drained = cancel_subagent_session_queue(
+        &node,
+        &parent.session_id,
+        &parent.agent_did,
+        parent.requester_did.as_deref(),
+        "parent no longer needs this work",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        drained, 1,
+        "the subagent-owned drain must reach exactly the steering-labelled row"
+    );
+
+    let actual = rows(&node, &parent.session_id).await;
+    let row_for = |request_id: &str| {
+        actual
+            .iter()
+            .find(|row| row["request_id"] == request_id)
+            .unwrap_or_else(|| panic!("no durable row for {request_id}"))
+            .clone()
+    };
+    let user_row = row_for(&user_steer.request_id);
+    assert_eq!(
+        user_row["lifecycle_state"], "pending",
+        "user-origin queued input is not subagent-owned queue work"
+    );
+    let subagent_row = row_for(&subagent_steer.request_id);
+    assert_eq!(subagent_row["lifecycle_state"], "interrupted");
+    assert!(subagent_row["failure_reason"]
+        .as_str()
+        .is_some_and(|reason| reason.contains("parent no longer needs this work")));
+    node.shutdown().await;
 }
 
 #[tokio::test]
