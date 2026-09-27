@@ -307,8 +307,10 @@ test.describe("desktop live browser smoke", () => {
       const liveProse = () =>
         liveAssistant.evaluate((element) => {
           const prose = element.cloneNode(true) as HTMLElement;
-          // The animated Thinking line is UI state, not retained model output.
-          prose.querySelectorAll(".highlight").forEach((node) => node.remove());
+          // Activity status is UI state, not retained model output.
+          prose
+            .querySelectorAll('[data-testid="activity-status"]')
+            .forEach((node) => node.remove());
           return (prose.textContent ?? "").trim();
         });
       await expect
