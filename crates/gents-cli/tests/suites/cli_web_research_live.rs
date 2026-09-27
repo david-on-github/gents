@@ -472,6 +472,7 @@ async fn full_stack_web_deep_research_consumes_real_search_and_inference() -> Re
         init_args.push("--api-key-env-var".to_string());
         init_args.push("GENTS_CLI_E2E_API_KEY".to_string());
     }
+    init_args.push("--inference-url".to_string());
     init_args.push(model_endpoint.clone());
     let init_arg_refs = init_args.iter().map(String::as_str).collect::<Vec<_>>();
     let init = run_init_json(&home_dir, &init_arg_refs)?;
