@@ -7,12 +7,14 @@ mod replication;
 #[path = "live_fixture/workspace.rs"]
 mod workspace;
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::Result;
+use gents::config_client::ConfigAccess;
+use gents::graphql::escape_graphql_string;
 use gents_desktop_core::client::{ClientCore, ClientCoreOptions, DesktopPaths, PeerRecord};
 use gents_desktop_core::local_runtime::DesktopInitSummary;
 use tokio::runtime::Runtime;
@@ -159,9 +161,15 @@ impl LiveBridgeFixture {
         let desktop_paths = DesktopPaths::from_root(tempdir.path().join("desktop"));
         let agent_home = tempdir.path().join("agent-home");
 
+        let port_probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let operator_addr = port_probe.local_addr()?;
+        drop(port_probe);
+        let operator_graphql = format!("http://{operator_addr}/api/v0/graphql");
+        let mut remote_options = live_core_options();
+        remote_options.http_addr = Some(operator_addr);
         let remote_core = Arc::new(runtime.block_on(ClientCore::start_with_paths_and_options(
             remote_paths,
-            live_core_options(),
+            remote_options,
         ))?);
 
         let agent_key = tempdir.path().join("agent").join("fleet-e2e-agent.key");
@@ -172,6 +180,10 @@ impl LiveBridgeFixture {
             &backend,
             subagent_backend.as_ref(),
         ))?;
+        runtime.block_on(wait_for_operator_graphql(
+            &operator_graphql,
+            &running_agent.did,
+        ))?;
 
         let remote_addr = runtime.block_on(wait_for_connectable_iroh_addr(
             remote_core.as_ref(),
@@ -181,7 +193,7 @@ impl LiveBridgeFixture {
             DEFAULT_DEPLOYMENT_LABEL,
             &remote_addr,
             &running_agent.did,
-            "http://127.0.0.1:1/graphql",
+            &operator_graphql,
         );
         // This fixture owns both nodes and installs both directional
         // replicators below. Keep the durable route truthful while the normal
@@ -451,6 +463,38 @@ fn live_runtime() -> Result<Arc<Runtime>> {
             .thread_stack_size(STACK_BYTES)
             .build()?,
     ))
+}
+
+async fn wait_for_operator_graphql(endpoint: &str, agent_did: &str) -> Result<()> {
+    let access = ConfigAccess::Graphql(endpoint.to_string());
+    let escaped_did = escape_graphql_string(agent_did);
+    let query = format!(
+        r#"{{ AgentPrincipal(filter: {{ agent_did: {{ _eq: "{escaped_did}" }} }}) {{ agent_did }} }}"#
+    );
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        match access.execute(&query).await {
+            Ok(response)
+                if response
+                    .pointer("/data/AgentPrincipal")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|rows| rows.iter().any(|row| row["agent_did"] == agent_did)) =>
+            {
+                return Ok(());
+            }
+            Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Ok(response) => {
+                anyhow::bail!(
+                    "live operator GraphQL {endpoint} did not expose agent {agent_did}: {response}"
+                );
+            }
+            Err(error) => {
+                anyhow::bail!("live operator GraphQL {endpoint} was not ready: {error:#}");
+            }
+        }
+    }
 }
 
 fn live_core_options() -> ClientCoreOptions {

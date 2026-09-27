@@ -10,7 +10,7 @@ mod writes;
 mod tests;
 
 use std::collections::{BTreeMap, HashMap};
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::RwLock as StdRwLock;
 use std::time::{Duration, SystemTime};
@@ -50,6 +50,9 @@ const DESKTOP_P2P_RATE_LIMIT_RATE: f64 = 500.0;
 pub struct ClientCoreOptions {
     pub port: u16,
     pub bind_addr: Option<IpAddr>,
+    /// Defra's HTTP listener lives until its Tokio runtime stops;
+    /// `EmbeddedNode::shutdown` alone does not release it.
+    pub http_addr: Option<SocketAddr>,
     pub relay_mode: IrohRelayModeConfig,
     pub discovery: IrohDiscoveryConfig,
     pub load_persisted_collections: bool,
@@ -66,6 +69,7 @@ impl Default for ClientCoreOptions {
         Self {
             port: 0,
             bind_addr: None,
+            http_addr: None,
             relay_mode: IrohRelayModeConfig::default(),
             discovery: IrohDiscoveryConfig::default(),
             load_persisted_collections: false,

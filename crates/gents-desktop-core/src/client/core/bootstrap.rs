@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use defra_node::{EmbeddedNode, NodeBuilder, P2PConfig, StorageBackend};
+use defra_node::{EmbeddedNode, HttpConfig, NodeBuilder, P2PConfig, StorageBackend};
 use defra_p2p_adapter::P2POperations as P2POps;
 use p2p::iroh::parse_public_peer_addr;
 use tokio::sync::{mpsc, watch};
@@ -74,12 +74,16 @@ impl ClientCore {
 
         let principal = PrincipalIdentity::load_or_create(&paths).await?;
         checkpoint("paths_and_identity");
+        let mut node_builder = NodeBuilder::default()
+            .data_path(paths.node_data_dir())
+            .with_storage_backend(StorageBackend::Regolith)
+            .with_p2p(desktop_p2p_config(&paths, &options))
+            .with_node_identity_did(principal.did());
+        if let Some(http_addr) = options.http_addr {
+            node_builder = node_builder.with_http(HttpConfig::with_addr(http_addr));
+        }
         let node = Arc::new(
-            NodeBuilder::default()
-                .data_path(paths.node_data_dir())
-                .with_storage_backend(StorageBackend::Regolith)
-                .with_p2p(desktop_p2p_config(&paths, &options))
-                .with_node_identity_did(principal.did())
+            node_builder
                 .build()
                 .await
                 .context("starting embedded desktop node")?,
