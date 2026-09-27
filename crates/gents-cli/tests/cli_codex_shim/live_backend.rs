@@ -86,6 +86,7 @@ async fn codex_shim_live_gents_filesystem_tools_project_to_codex_items() -> Resu
 #[ignore = "requires the configured real OpenAI-compatible backend"]
 async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Result<()> {
     let prompt_token = "PROJLIVE";
+    let second_prompt_token = "GOALLIVE";
     let thread_name = format!("GENTS live projection {}", Uuid::new_v4().simple());
     let goal_objective = format!("exercise live projection {}", Uuid::new_v4().simple());
     let git_branch = "codex-shim-live-projection".to_string();
@@ -137,25 +138,6 @@ async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Resul
     .await?;
     let _: codex::ThreadSettingsUpdateResponse =
         read_typed_response(&mut ws, request_id(403)).await?;
-
-    send_client_request(
-        &mut ws,
-        codex::ClientRequest::ThreadGoalSet {
-            request_id: request_id(404),
-            params: codex::ThreadGoalSetParams {
-                thread_id: thread_id.clone(),
-                objective: Some(goal_objective.clone()),
-                status: Some(codex::ThreadGoalStatus::Active),
-                token_budget: Some(Some(321)),
-            },
-        },
-    )
-    .await?;
-    let goal_set: codex::ThreadGoalSetResponse =
-        read_typed_response(&mut ws, request_id(404)).await?;
-    assert_eq!(goal_set.goal.thread_id, thread_id);
-    assert_eq!(goal_set.goal.objective, goal_objective);
-    assert_eq!(goal_set.goal.token_budget, Some(321));
 
     let expected_git_sha = init_test_git_repo(&smoke.home_dir, &git_branch)?;
     send_client_request(
@@ -259,13 +241,48 @@ async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Resul
         Some("user")
     );
 
+    // An empty thread stays ephemeral until its first turn creates the
+    // durable session, so the Goal is set between two real turns.
+    send_client_request(
+        &mut ws,
+        codex::ClientRequest::ThreadGoalSet {
+            request_id: request_id(404),
+            params: codex::ThreadGoalSetParams {
+                thread_id: thread_id.clone(),
+                objective: Some(goal_objective.clone()),
+                status: Some(codex::ThreadGoalStatus::Active),
+                token_budget: Some(Some(321)),
+            },
+        },
+    )
+    .await?;
+    let goal_set: codex::ThreadGoalSetResponse =
+        read_typed_response(&mut ws, request_id(404)).await?;
+    assert_eq!(goal_set.goal.thread_id, thread_id);
+    assert_eq!(goal_set.goal.objective, goal_objective);
+    assert_eq!(goal_set.goal.token_budget, Some(321));
+
+    let second_prompt =
+        format!("Reply with exactly this token and no extra words: {second_prompt_token}");
+    send_turn(&mut ws, &thread_id, &second_prompt).await?;
+    let (second_text, second_turn) = read_turn_to_completion(&mut ws).await?;
+    assert_eq!(
+        second_turn.status,
+        codex::TurnStatus::Completed,
+        "turn after goal/set did not complete: {second_turn:?}"
+    );
+    assert!(
+        second_text.contains(second_prompt_token),
+        "expected the turn after goal/set to contain {second_prompt_token}, got:\n{second_text}"
+    );
+
     send_client_request(
         &mut ws,
         codex::ClientRequest::ThreadRead {
             request_id: request_id(406),
             params: codex::ThreadReadParams {
                 thread_id: thread_id.clone(),
-                include_turns: false,
+                include_turns: true,
             },
         },
     )
@@ -292,8 +309,14 @@ async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Resul
         .find(|turn| turn.id == completed_turn.id)
         .ok_or_else(|| {
             anyhow!(
-                "live thread/read did not include turn {}",
-                completed_turn.id
+                "live thread/read did not include turn {}: {:?}",
+                completed_turn.id,
+                thread_read
+                    .thread
+                    .turns
+                    .iter()
+                    .map(|turn| (&turn.id, &turn.status, turn.items.len()))
+                    .collect::<Vec<_>>()
             )
         })?;
     assert_turn_has_user_text(history_turn, &prompt);
@@ -353,14 +376,16 @@ async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Resul
             "thread/name/set",
             "thread/memoryMode/set",
             "thread/settings/update",
-            "thread/goal/set",
             "thread/metadata/update",
+            "turn/start",
+            "thread/goal/set",
             "turn/start",
             "thread/read",
             "thread/list",
             "thread/goal/get",
         ],
     )?;
+    assert_shim_trace_method_count_at_least(&smoke.shim_trace, "turn/start", 2)?;
 
     Ok(())
 }
