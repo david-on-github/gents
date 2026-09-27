@@ -2,6 +2,9 @@ use std::time::{Duration, Instant};
 
 use gents::defra_node::EmbeddedNode;
 
+/// The node's loopback direct address. Test peers run in this process, and
+/// iroh may also advertise a NAT-PMP mapping from the LAN router first
+/// (`10.0.0.27:<port>`), which a local dial through that router times out on.
 pub async fn wait_for_listen_addr(node: &EmbeddedNode) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -11,11 +14,14 @@ pub async fn wait_for_listen_addr(node: &EmbeddedNode) -> String {
             .listen_addresses()
             .await
             .expect("listen addresses");
-        if let Some(addr) = addrs.first() {
+        if let Some(addr) = addrs
+            .iter()
+            .find(|addr| addr.starts_with("127.0.0.1:") || addr.starts_with("[::1]:"))
+        {
             return addr.clone();
         }
         if Instant::now() >= deadline {
-            panic!("node never exposed a P2P listen address; last_addrs={addrs:?}");
+            panic!("node never exposed a loopback P2P listen address; last_addrs={addrs:?}");
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

@@ -8,6 +8,7 @@ use gents::agent::p2p_reconcile::{
 };
 use serde_json::Value;
 
+use crate::support::p2p_waits::wait_for_listen_addr;
 use crate::support::test_p2p_db;
 
 /// Peer principal the conversation grant is written for. Transcript rows
@@ -195,23 +196,6 @@ async fn signed_conversation_pairing_replays_agent_config_over_p2p() {
         requests[0].get("requester_did").and_then(Value::as_str),
         Some(PEER_DID)
     );
-}
-
-async fn wait_for_listen_addr(node: &gents::defra_node::EmbeddedNode) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let addresses = node
-            .p2p()
-            .expect("P2P enabled")
-            .listen_addresses()
-            .await
-            .expect("listen addresses");
-        if let Some(address) = addresses.first() {
-            return address.clone();
-        }
-        assert!(Instant::now() < deadline, "P2P listen address timeout");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
 }
 
 async fn wait_for_config(node: &gents::defra_node::EmbeddedNode, timeout: Duration) -> Value {
