@@ -145,3 +145,55 @@ async fn session_list_and_show_include_request_count() -> Result<()> {
 
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_fork_against_a_running_server_refuses_with_the_holder_and_the_graphql_escape(
+) -> Result<()> {
+    let tempdir = tempfile::tempdir().context("creating tempdir")?;
+    let home_dir = tempdir.path().join("home");
+    fs::create_dir_all(&home_dir)?;
+
+    let model_name = format!("mock-session-fork-{}", Uuid::new_v4().simple());
+    let mock_endpoint = MockModelEndpoint::start(&model_name)?;
+    let port = allocate_port()?;
+    let agent_name = format!("cli-session-fork-{}", Uuid::new_v4().simple());
+
+    let init = run_init_json(
+        &home_dir,
+        &[
+            "--agent-name",
+            &agent_name,
+            "--model-name",
+            &model_name,
+            "--inference-url",
+            mock_endpoint.endpoint(),
+        ],
+    )?;
+    let agent_did = agent_did_from_init(&init)?;
+    let mut serve = spawn_server(&home_dir, port)?;
+    wait_for_port(port, &mut serve)?;
+
+    let stderr = run_cli_failure_stderr(
+        &home_dir,
+        &[
+            "session",
+            "fork",
+            "--agent-did",
+            &agent_did,
+            "--from",
+            "any-session",
+            "--at-user-turn",
+            "0",
+        ],
+    )?;
+    assert!(
+        stderr.contains("already using"),
+        "a fork against a running server names the holder: {stderr}"
+    );
+    assert!(
+        stderr.contains("--graphql"),
+        "a fork against a running server points at the graphql escape: {stderr}"
+    );
+
+    Ok(())
+}

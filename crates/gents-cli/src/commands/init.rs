@@ -78,7 +78,7 @@ fn lock_init_store(
     lock_init_store_for_user(home_dir, data_dir, overwrite, user_home.as_deref())
 }
 
-fn lock_init_store_for_user(
+pub(crate) fn lock_init_store_for_user(
     home_dir: &Path,
     data_dir: &Path,
     overwrite: bool,
