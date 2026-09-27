@@ -4,6 +4,12 @@
 // to the owner, which latches `interrupt_requested_at` and drains pending
 // automated wakes in the same transaction. It never reaches another
 // request; a session started by this one's tool call keeps running.
+//
+// The owner deliberately latches an exact physical row whatever its
+// lifecycle state. The refusal of a finished request below is this
+// adapter's best-effort pre-check, read before the owner's transaction: a
+// request that becomes terminal concurrently may still be latched, which
+// the runtime tolerates (the latch then only drains pending wakes).
 
 use std::sync::Arc;
 
@@ -107,8 +113,9 @@ pub async fn interrupt_request(
     if let Some(existing) = target.interrupt_requested_at {
         return Ok(result(Some(existing), true));
     }
-    // A stale button must not stamp a finished request: the latch is an
-    // operator action, and after the work is done none was taken.
+    // Best-effort, not atomic: a request already observed finished is not
+    // offered to the owner, but one that finishes between this read and the
+    // owner's transaction may still be latched.
     if target.terminal {
         return Err(format!(
             "request {} is already terminal and cannot be interrupted",
