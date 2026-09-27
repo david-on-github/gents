@@ -673,15 +673,7 @@ async fn create_document(
             let (mutation, variables) = (&mutation, &variables);
             Box::pin(async move {
                 let response = txn.execute_with_variables(mutation, variables).await?;
-                // The node answers under `add_<collection>`, as a list.
-                let created = response["data"]
-                    .as_object()
-                    .and_then(|data| data.values().next());
-                created
-                    .and_then(|created| created.get(0).unwrap_or(created).get("_docID"))
-                    .and_then(Value::as_str)
-                    .map(ToOwned::to_owned)
-                    .with_context(|| format!("create_{collection} returned no _docID: {response}"))
+                crate::graphql::created_doc_id(&response, collection)
             })
         })
         .await
