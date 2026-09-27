@@ -28,7 +28,7 @@ const call = (
 ): RenderedToolCallView =>
   ({
     itemKey: `item-${toolCallId}`,
-    toolName: action === "start" ? "create_session" : "send_message",
+    toolName: action === "start" ? "agent_new" : "agent_message",
     toolCallId,
     statusKind,
     requestId,

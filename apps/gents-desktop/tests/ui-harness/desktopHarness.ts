@@ -426,7 +426,7 @@ export function createDesktopUiHarness(
                 },
                 {
                   itemKey: "intro-subagent",
-                  toolName: "create_session",
+                  toolName: "agent_new",
                   toolCallId: "call-intro-subagent",
                   statusKind: "success",
                   reconstruction: HARNESS_READY_RECONSTRUCTION,

@@ -112,7 +112,7 @@ async fn load_agent_tool_calls_hydrates_background_projection_fields() {
                     request_id: "parent-1",
                     session_id: "session-1",
                     message_sequence: 1,
-                    tool_name: "create_session",
+                    tool_name: "agent_new",
                     tool_call_id: "start-1",
                     args: "{}",
                     result: "",

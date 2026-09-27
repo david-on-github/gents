@@ -151,8 +151,10 @@ pub enum ToolPresentationView {
         diff: Vec<ToolDiffLineView>,
         fallback_output: Option<String>,
     },
-    /// `create_session`/`send_message`: `name` is the addressed target and
-    /// `session_id` the session the call started or messaged.
+    /// The agents tools, by `action`: `start` (`agent_new`), `message`
+    /// (`agent_message`), `interrupt` (`agent_interrupt`) and `list`
+    /// (`agent_list`). `name` is the addressed target and `session_id` the
+    /// session the call started, messaged or interrupted.
     #[serde(rename_all = "camelCase")]
     Subagent {
         action: String,

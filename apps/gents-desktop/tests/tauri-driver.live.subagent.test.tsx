@@ -9,7 +9,7 @@ import {
 } from "./tauri-driver-live/helpers";
 
 const SUBAGENT_PROMPT =
-  "Use the configured local subagent target. Call create_session with that agent and ask it to read workspace/AGENTS.md and return the phrase live-subagent-smoke with one short finding. Then reply with one sentence saying it has started.";
+  "Use the configured local subagent target. Call agent_new with that agent and ask it to read workspace/AGENTS.md and return the phrase live-subagent-smoke with one short finding. Then reply with one sentence saying it has started.";
 const FOLLOW_UP_PROMPT =
   "Without calling tools, reply with one short sentence containing live-subagent-followup.";
 
@@ -69,8 +69,8 @@ describeLive("Tauri app live subagent sessions", () => {
         item.kind === "toolGroup" ? item.tools.map((tool) => tool.toolName) : [],
       );
       expect(
-        toolNames.some((name) => /create_session/i.test(name)),
-        `expected create_session in tool names: ${JSON.stringify(toolNames)}`,
+        toolNames.some((name) => /agent_new/i.test(name)),
+        `expected agent_new in tool names: ${JSON.stringify(toolNames)}`,
       ).toBe(true);
 
       await waitFor(

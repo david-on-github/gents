@@ -308,7 +308,7 @@ mod tests {
             tool_call_key: "start-1".to_string(),
             request_id: Some("parent-1".to_string()),
             message_sequence: Some(2),
-            tool_name: Some("create_session".to_string()),
+            tool_name: Some(gents::toolset::AGENT_NEW_TOOL_NAME.to_string()),
             tool_call_id: Some("start-1".to_string()),
             args: Some(r#"{"agent":"researcher","prompt":"trace the request flow"}"#.to_string()),
             partial_output_tail: None,
@@ -332,7 +332,7 @@ mod tests {
         };
         let rendered = render_tool_call(tool.clone());
 
-        assert_eq!(rendered.tool_name, "create_session");
+        assert_eq!(rendered.tool_name, "agent_new");
         assert_eq!(rendered.request_id.as_deref(), Some("parent-1"));
         assert_eq!(rendered.tool_call_id.as_deref(), Some("start-1"));
         assert_eq!(rendered.await_mode.as_deref(), Some("background"));
@@ -350,7 +350,7 @@ mod tests {
                 assert_eq!(session_id.as_deref(), Some("session-child"));
                 assert_eq!(description.as_deref(), Some("trace the request flow"));
             }
-            other => panic!("create_session must present as a subagent row: {other:?}"),
+            other => panic!("agent_new must present as a subagent row: {other:?}"),
         }
 
         let unresolved = render_tool_call(ToolCallView {

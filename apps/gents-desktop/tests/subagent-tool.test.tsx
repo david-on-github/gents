@@ -14,7 +14,7 @@ describe("subagent transcript tool", () => {
         tools: [
           {
             itemKey: "spawn-1",
-            toolName: "create_session",
+            toolName: "agent_new",
             status: "running",
             statusKind: "running",
             awaitMode: "background",
@@ -56,7 +56,7 @@ describe("subagent transcript tool", () => {
         tools: [
           {
             itemKey: "spawn-complete",
-            toolName: "send_message",
+            toolName: "agent_message",
             status: "completed",
             statusKind: "success",
             awaitMode: "background",

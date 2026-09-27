@@ -1,3 +1,7 @@
+use gents::toolset::{
+    AGENT_INTERRUPT_TOOL_NAME, AGENT_LIST_TOOL_NAME, AGENT_MESSAGE_TOOL_NAME, AGENT_NEW_TOOL_NAME,
+    AGENT_TOOL_NAMES,
+};
 use serde_json::{Map, Value};
 
 use super::super::types::{ToolCallView, ToolDiffLineKind, ToolDiffLineView, ToolPresentationView};
@@ -5,8 +9,6 @@ use super::super::types::{ToolCallView, ToolDiffLineKind, ToolDiffLineView, Tool
 const COMMAND_TOOLS: &[&str] = &["bash", "bash_unrestricted", "gents_exec", "exec_command"];
 const FILE_READ_TOOLS: &[&str] = &["read_file", "grep", "glob", "list_files"];
 const FILE_EDIT_TOOLS: &[&str] = &["write_file", "edit_file"];
-/// The session-message tools; the UX calls the sessions they reach subagents.
-const SUBAGENT_TOOLS: &[&str] = &["create_session", "send_message"];
 const PROCESS_TOOLS: &[&str] = &[
     "spawn_process",
     "wait_process",
@@ -26,7 +28,7 @@ pub(super) fn project_tool_presentation(tool: &ToolCallView) -> ToolPresentation
     if FILE_EDIT_TOOLS.contains(&name) {
         return project_file_edit(tool, name);
     }
-    if SUBAGENT_TOOLS.contains(&name) {
+    if AGENT_TOOL_NAMES.contains(&name) {
         return project_subagent(tool, name);
     }
     if PROCESS_TOOLS.contains(&name) {
@@ -429,7 +431,13 @@ fn project_subagent(tool: &ToolCallView, name: &str) -> ToolPresentationView {
     let result = json_object(tool.result.as_deref());
     let session_id = string_field(args.as_ref(), "session_id")
         .or_else(|| string_field(result.as_ref(), "session_id"));
-    let description = string_field(args.as_ref(), "prompt").or_else(|| {
+    /* `agent_new` carries its text as `prompt`, `agent_message` as `message` */
+    let body = if name == AGENT_NEW_TOOL_NAME {
+        "prompt"
+    } else {
+        "message"
+    };
+    let description = string_field(args.as_ref(), body).or_else(|| {
         args.as_ref()
             .and_then(|args| args.get("task"))
             .and_then(Value::as_object)
@@ -438,10 +446,12 @@ fn project_subagent(tool: &ToolCallView, name: &str) -> ToolPresentationView {
             .map(|task_id| format!("task {task_id}"))
     });
     ToolPresentationView::Subagent {
-        action: if name == "create_session" {
-            "start"
-        } else {
-            "message"
+        action: match name {
+            AGENT_NEW_TOOL_NAME => "start",
+            AGENT_MESSAGE_TOOL_NAME => "message",
+            AGENT_INTERRUPT_TOOL_NAME => "interrupt",
+            AGENT_LIST_TOOL_NAME => "list",
+            other => other,
         }
         .to_string(),
         name: string_field(args.as_ref(), "agent"),
@@ -713,5 +723,61 @@ mod tests {
             ToolPresentationView::Command { ref command, ref stdout, .. }
                 if command == "env" && stdout.contains("API_KEY=abc")
         ));
+    }
+
+    #[test]
+    fn agents_tools_present_as_subagent_rows_by_action() {
+        let presented = |name: &str, args: &str, result: &str| match project_tool_presentation(
+            &tool(name, args, result, "completed"),
+        ) {
+            ToolPresentationView::Subagent {
+                action,
+                name,
+                session_id,
+                description,
+                ..
+            } => (action, name, session_id, description),
+            other => panic!("{name} must present as a subagent row: {other:?}"),
+        };
+        assert_eq!(
+            presented(
+                AGENT_NEW_TOOL_NAME,
+                r#"{"agent":"researcher","prompt":"trace it"}"#,
+                r#"{"session_id":"s-new"}"#,
+            ),
+            (
+                "start".to_string(),
+                Some("researcher".to_string()),
+                Some("s-new".to_string()),
+                Some("trace it".to_string()),
+            )
+        );
+        assert_eq!(
+            presented(
+                AGENT_MESSAGE_TOOL_NAME,
+                r#"{"session_id":"s-old","message":"one more thing"}"#,
+                "{}",
+            ),
+            (
+                "message".to_string(),
+                None,
+                Some("s-old".to_string()),
+                Some("one more thing".to_string()),
+            )
+        );
+        assert_eq!(
+            presented(
+                AGENT_MESSAGE_TOOL_NAME,
+                r#"{"session_id":"s-old","task":{"task_id":"review"}}"#,
+                "{}",
+            )
+            .3,
+            Some("task review".to_string())
+        );
+        assert_eq!(
+            presented(AGENT_INTERRUPT_TOOL_NAME, r#"{"session_id":"s-new"}"#, "{}").0,
+            "interrupt"
+        );
+        assert_eq!(presented(AGENT_LIST_TOOL_NAME, "{}", "{}").0, "list");
     }
 }

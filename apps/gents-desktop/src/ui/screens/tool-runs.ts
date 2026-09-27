@@ -502,7 +502,13 @@ export function workerStory(tools: RenderedToolCallView[]): string {
     const p = tool.presentation;
     if (p.kind !== "subagent") continue;
     const verb =
-      p.action === "start" ? "started" : p.action === "message" ? "messaged" : p.action;
+      p.action === "start"
+        ? "started"
+        : p.action === "message"
+          ? "messaged"
+          : p.action === "interrupt"
+            ? "interrupted"
+            : p.action;
     counts.set(verb, (counts.get(verb) ?? 0) + 1);
   }
   return [...counts].map(([verb, n]) => (n > 1 ? `${verb} ×${n}` : verb)).join(" · ");

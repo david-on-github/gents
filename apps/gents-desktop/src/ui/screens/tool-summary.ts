@@ -121,7 +121,7 @@ export function toolSummary(t: RenderedToolCallView): {
     case "subagent":
       return {
         kind: `subagent · ${p.action}`,
-        primary: p.name ?? p.sessionId ?? "subagent",
+        primary: p.action === "list" ? "agents" : (p.name ?? p.sessionId ?? "subagent"),
         secondary: compact(p.description),
       };
     case "process":

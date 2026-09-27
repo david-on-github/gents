@@ -20,7 +20,7 @@ function pulse(deployment: DeploymentView, ops: DesktopOperationsSnapshot | null
   const tools = ops?.backgroundedTools ?? [];
   /* a started session is a background row of a session-message call */
   const subagent = (t: (typeof tools)[number]) =>
-    t.toolName === "create_session" || t.toolName === "send_message";
+    t.toolName === "agent_new" || t.toolName === "agent_message";
   const workers = tools.filter(subagent).length;
   const jobs = tools.length - workers;
   const overdue = tools.filter((t) => t.deadlineExpired).length;

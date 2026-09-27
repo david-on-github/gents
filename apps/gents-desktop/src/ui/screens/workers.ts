@@ -28,7 +28,7 @@ export type Subagent = {
   requests: CausedRequestView[];
 };
 
-/* what one create_session/send_message row reached */
+/* what one agent_new/agent_message row reached */
 export type Reached = {
   /* the request this row's call caused */
   request: CausedRequestView;

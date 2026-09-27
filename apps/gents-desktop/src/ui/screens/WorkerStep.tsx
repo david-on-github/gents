@@ -206,10 +206,13 @@ function Row({
   );
 }
 
+/* agent_new, agent_message and agent_interrupt name a session and read as
+   work on it; agent_list is a plain step */
 export function isWorkerStep(tool: RenderedToolCallView) {
   const p = tool.presentation;
   return (
-    p.kind === "subagent" || (p.kind === "process" && tool.awaitMode === "background")
+    (p.kind === "subagent" && p.action !== "list") ||
+    (p.kind === "process" && tool.awaitMode === "background")
   );
 }
 
@@ -267,12 +270,34 @@ export function WorkerStep({
       className="size-4 text-[8px]"
     />
   ) : undefined;
+  if (p.action === "interrupt") {
+    /* agent_interrupt causes no request: the call's own status is the fact */
+    const tone: Tone =
+      tool.statusKind === "running"
+        ? "running"
+        : tool.statusKind === "error"
+          ? "failed"
+          : "stopped";
+    return (
+      <Row
+        tone={tone}
+        verb="Interrupted"
+        mark={mark}
+        name={summary?.title ?? p.name ?? p.sessionId ?? "a session"}
+        state={tool.statusKind === "success" ? "interrupted" : tool.statusKind}
+        detail={firstLine(p.output)}
+        sessionId={p.sessionId}
+      >
+        <ToolBody tool={tool} />
+      </Row>
+    );
+  }
   const now = workerNow(tool, reached);
   return (
     <Row
       tone={now.tone}
-      /* a start whose session this one began is a subagent; any other call
-         only sent a message */
+      /* an agent_new whose session this one began is a subagent; any other
+         call only sent a message */
       verb={
         p.action === "start" && (!reached || reached.subagent) ? "Started" : "Messaged"
       }
@@ -281,7 +306,12 @@ export function WorkerStep({
       state={now.text}
       detail={now.detail ?? firstLine(p.description)}
       sessionId={sessionId}
-      menu={<RequestStop name={name} request={reached?.request ?? null} />}
+      /* agent_interrupt's rule (gents::session_message::agent_interrupt_allowed):
+         only the session that started a session may stop it, so only a
+         subagent's row offers Stop */
+      menu={
+        <RequestStop name={name} request={reached?.subagent ? reached.request : null} />
+      }
     >
       <ToolBody tool={tool} />
     </Row>

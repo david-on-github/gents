@@ -25,7 +25,7 @@ const call = (
 ): RenderedToolCallView =>
   ({
     itemKey: "tool-1",
-    toolName: action === "start" ? "create_session" : "send_message",
+    toolName: action === "start" ? "agent_new" : "agent_message",
     toolCallId: "call-1",
     requestId: "parent-req",
     statusKind,
@@ -173,6 +173,38 @@ describe("a subagent row", () => {
   it("labels a start as Started and a message as Messaged", () => {
     renderStep(call("success"), reached(caused("child-req", "completed")));
     expect(screen.getByText("Started")).toBeInTheDocument();
+  });
+
+  it("offers no Stop on a session this one did not start, as agent_interrupt refuses", () => {
+    const existing = reached(caused("req-existing", "processing"), null);
+    const actions = renderStep(call("running", "message"), existing);
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
+    expect(actions.interrupt).not.toBeCalled();
+  });
+
+  it("offers Stop on a message to a session this one started", () => {
+    const request = caused("child-req-3", "processing");
+    const actions = renderStep(call("running", "message"), reached(request));
+    screen.getByRole("button", { name: "Stop Reviewer" }).click();
+    expect(actions.interrupt).toHaveBeenCalledWith(request);
+  });
+
+  it("renders an agent_interrupt call as Interrupted, with no Stop", () => {
+    const interrupt = {
+      ...call("success"),
+      toolName: "agent_interrupt",
+      presentation: {
+        kind: "subagent",
+        action: "interrupt",
+        name: null,
+        sessionId: "child-session",
+        description: null,
+        output: null,
+      },
+    } as unknown as RenderedToolCallView;
+    renderStep(interrupt, null);
+    expect(screen.getByText("Interrupted")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
   });
 
   it("labels a message to a session this one did not start as Messaged", () => {
