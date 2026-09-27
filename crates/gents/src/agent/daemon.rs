@@ -5,6 +5,7 @@ use std::time::Duration;
 use anyhow::Result;
 use rig::completion::CompletionModel;
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::{JoinError, JoinSet};
 use tracing::Instrument;
 
 mod inference;
@@ -159,6 +160,20 @@ enum HandleRequestOutcome {
     Completed,
     FailedAfterResponse(anyhow::Error),
     Interrupted,
+}
+
+fn title_task_join_result(joined: std::result::Result<Result<()>, JoinError>) -> Result<()> {
+    match joined {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) if error.is::<ShutdownDrainFailure>() => Err(error),
+        Ok(Err(error)) => {
+            tracing::warn!(error = %error, "failed to resume owned conversation title request");
+            Ok(())
+        }
+        Err(error) => Err(anyhow::anyhow!(
+            "owned conversation title task join failed: {error}"
+        )),
+    }
 }
 
 impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
@@ -331,13 +346,24 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
             "gents behavior executor online"
         );
 
-        loop {
+        let mut title_tasks = JoinSet::new();
+        let run_result: Result<()> = loop {
+            if *shutdown.borrow() {
+                break Ok(());
+            }
             let request = tokio::select! {
                 biased;
 
                 _ = shutdown.changed() => {
                     tracing::info!(behavior_id = %self.behavior.behavior_id, "shutdown signal received");
-                    return Ok(());
+                    break Ok(());
+                }
+
+                Some(joined) = title_tasks.join_next(), if !title_tasks.is_empty() => {
+                    if let Err(error) = title_task_join_result(joined) {
+                        break Err(error);
+                    }
+                    continue;
                 }
 
                 req = async {
@@ -346,13 +372,13 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 } => {
                     match req {
                         Some(req) => req,
-                        None => return Ok(()),
+                        None => break Ok(()),
                     }
                 }
             };
 
             if request.purpose == gents_protocol::request_admission::RequestPurpose::TitleAudit {
-                self.spawn_title_audit_request(request, shutdown.clone());
+                self.spawn_title_audit_request(&mut title_tasks, request, shutdown.clone());
                 continue;
             }
 
@@ -368,14 +394,14 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 let cancellation = tokio_util::sync::CancellationToken::new();
                 let guard = tokio::select! {
                     biased;
-                    _ = shutdown.changed() => return Ok(()),
+                    _ = shutdown.changed() => break Ok(()),
                     guard = capacity.acquire_unbound(&cancellation) => guard,
                 };
                 match guard {
                     Ok(guard) => Some(guard),
                     Err(error) => {
                         tracing::warn!(behavior_id, error = %error, "request worker capacity admission stopped");
-                        return Ok(());
+                        break Ok(());
                     }
                 }
             } else {
@@ -408,10 +434,32 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         failure_class = tracing::field::Empty,
                     ));
             if let Some(guard) = active_guard {
-                scope_request_capacity(guard, process).await?;
+                if let Err(error) = scope_request_capacity(guard, process).await {
+                    break Err(error);
+                }
             } else {
-                process.await?;
+                if let Err(error) = process.await {
+                    break Err(error);
+                }
             }
+        };
+
+        let mut title_error = None;
+        while let Some(joined) = title_tasks.join_next().await {
+            if let Err(error) = title_task_join_result(joined) {
+                tracing::error!(error = %error, "owned conversation title task failed during daemon exit");
+                if title_error.is_none() {
+                    title_error = Some(error);
+                }
+            }
+        }
+        match (run_result, title_error) {
+            (Err(error), Some(title_error)) => {
+                Err(error.context(format!("owned title task also failed: {title_error:#}")))
+            }
+            (Err(error), None) => Err(error),
+            (Ok(()), Some(error)) => Err(error),
+            (Ok(()), None) => Ok(()),
         }
     }
 

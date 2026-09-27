@@ -6,8 +6,9 @@ use defra_node::EmbeddedNode;
 use gents_protocol::output::TerminalOutput;
 use gents_protocol::request_admission::RequestPurpose;
 use tokio::sync::watch;
+use tokio::task::JoinSet;
 
-use super::BehaviorDaemon;
+use super::{BehaviorDaemon, ShutdownDrainFailure};
 use crate::admission::{self, AdmissionCallContext, CallKind};
 use crate::lifecycle::{ClaimOutcome, RequestLifecycle, RequestTerminalOutcome, TerminalizeResult};
 use crate::session;
@@ -25,6 +26,25 @@ const TITLE_GENERATION_TIMEOUT_SECS: u64 = 10;
 /// the whole allowance before any visible text.
 const TITLE_VISIBLE_MAX_TOKENS: u64 = 24;
 const TITLE_GENERATION_PREAMBLE: &str = "Generate concise conversation titles. Return only a lowercase hyphenated 3-5 word title. Never call tools. Never explain.";
+
+async fn flush_received_title_partial(context: &str) -> Result<()> {
+    match tokio::time::timeout(
+        crate::config_client::EMBEDDED_TRANSACTION_STORAGE_STEP_TIMEOUT,
+        crate::rendered_request::scope::flush_received_auxiliary_partial(),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(error)) => Err(ShutdownDrainFailure {
+            reason: format!("title {context} partial output persistence failed: {error:#}"),
+        }
+        .into()),
+        Err(_) => Err(ShutdownDrainFailure {
+            reason: format!("title {context} partial output persistence exceeded the embedded storage-step deadline; commit outcome must be recovered from durable state"),
+        }
+        .into()),
+    }
+}
 
 struct TitleTask<M: rig::completion::CompletionModel> {
     node: Arc<EmbeddedNode>,
@@ -102,15 +122,12 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
 
     pub(super) fn spawn_title_audit_request(
         &self,
+        tasks: &mut JoinSet<Result<()>>,
         request: AgentRequest,
         shutdown: watch::Receiver<bool>,
     ) {
         let task = self.title_task();
-        tokio::spawn(Box::pin(async move {
-            if let Err(error) = task.run(request, shutdown).await {
-                tracing::warn!(%error, "failed to resume owned conversation title request");
-            }
-        }));
+        tasks.spawn(async move { task.run(request, shutdown).await });
     }
 }
 
@@ -190,6 +207,13 @@ impl<M: rig::completion::CompletionModel + 'static> TitleTask<M> {
         let result = self
             .execute(&mut lifecycle, &writer, title_request.clone(), shutdown)
             .await;
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error.is::<ShutdownDrainFailure>())
+        {
+            return result.map(|_| ());
+        }
         let (outcome, title, reason) = match result {
             Ok(TitleResult::Generated {
                 title,
@@ -361,7 +385,7 @@ impl<M: rig::completion::CompletionModel + 'static> TitleTask<M> {
                 _ = async {
                     let _ = shutdown.wait_for(|value| *value).await;
                 } => {
-                    crate::rendered_request::scope::flush_received_auxiliary_partial().await?;
+                    flush_received_title_partial("shutdown").await?;
                     return Ok(TitleResult::Interrupted);
                 }
                 result = tokio::time::timeout(Duration::from_secs(TITLE_GENERATION_TIMEOUT_SECS), run) => result,
@@ -374,14 +398,14 @@ impl<M: rig::completion::CompletionModel + 'static> TitleTask<M> {
                     })
                 }
                 Ok(Err(error)) => {
-                    crate::rendered_request::scope::flush_received_auxiliary_partial().await?;
+                    flush_received_title_partial("provider error").await?;
                     if !title_attempt_is_retryable(&error) {
                         return Err(error.context("title audit provider/output invariant failed"));
                     }
                     last_error = Some(error);
                 }
                 Err(_) => {
-                    crate::rendered_request::scope::flush_received_auxiliary_partial().await?;
+                    flush_received_title_partial("provider timeout").await?;
                     last_error = Some(anyhow::anyhow!(
                         "title inference timed out after {}s",
                         TITLE_GENERATION_TIMEOUT_SECS
