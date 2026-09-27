@@ -167,7 +167,9 @@ theorem cross_session_continuations_climb (own causeHop : Nat) :
   ⟨CausalHop.cross_session_exceeds_cause causeHop own,
     CausalHop.cross_session_exceeds_cause causeHop own⟩
 
-/-- Same-session continuations copy their predecessor's hop. -/
+/-- Same-session continuations — user steering, a recovery retry of a failed
+wake, a Goal continuation and a native completion wake — copy the session's
+current hop. -/
 theorem own_session_continuations_copy (own : Nat) :
     ContinuationKind.userSteering.hop own = own ∧ ContinuationKind.retry.hop own = own ∧
       ContinuationKind.goal.hop own = own ∧
@@ -203,5 +205,10 @@ theorem spawner_may_interrupt (callerSession targetSession : String)
 theorem root_session_not_interruptible (callerSession targetSession : String) :
     interruptAllowed callerSession targetSession none = false := by
   simp [interruptAllowed]
+
+/-- A recovery retry copies the session's current hop (`CausalHop.WakeSession.retryWake`). -/
+theorem retry_copies_session_current_hop (own : Nat) :
+    ContinuationKind.retry.hop own = own := by
+  simp [ContinuationKind.hop, ContinuationKind.cause, CausalHop.nextHop]
 
 end DurableLineage

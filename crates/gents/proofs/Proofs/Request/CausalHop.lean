@@ -225,6 +225,19 @@ theorem later_native_wake_after_refusal_is_refused :
     (s.nativeWake.claim defaultMaxRequestHop).1 = some false := by
   native_decide
 
+/-- A recovery retry of a failed wake (`DurableLineage.ContinuationKind.retry`)
+copies the session's current hop, like every same-session continuation. -/
+def WakeSession.retryWake (s : WakeSession) : WakeSession :=
+  s.enqueue (nextHop .continuation s.currentHop)
+
+/-- A retry of the refused over-bound wake copies its hop and is refused
+again: recovery never runs a refused result below the bound. -/
+theorem retry_after_refusal_is_refused :
+    let s : WakeSession := (((⟨3, some 3⟩ : WakeSession).crossWake 8).claim
+      defaultMaxRequestHop).2
+    (s.retryWake.claim defaultMaxRequestHop).1 = some false := by
+  native_decide
+
 /-- The reviewer's loop: A messages B and starts a background process each
 turn; B's completion wakes A, and so does A's process. Each round records
 whether B's request, A's completion wake and A's process wake are admitted.
