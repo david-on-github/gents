@@ -36,9 +36,10 @@ use coalescing::{
 };
 pub(crate) use draining::drain_automated_wakeups_in_txn;
 pub use enqueue::enqueue_local_steering_request;
+#[cfg(test)]
+pub(crate) use enqueue::enqueue_steering_request;
 pub(crate) use enqueue::{
-    append_prepared_steering_in_txn, enqueue_steering_request, prepare_steering_append,
-    PreparedSteering,
+    append_prepared_steering_in_txn, prepare_steering_append, PreparedSteering,
 };
 pub use gents_protocol::request_input::{
     GoalContinuationInput, QueuePolicy, QueueSource, RequestInput, RequestQueue,

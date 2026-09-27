@@ -50,6 +50,9 @@ pub(crate) use observations::{
 pub use observations::{load_latest_request_in_txn, SessionRequestFact};
 #[cfg(test)]
 pub(crate) use output::count_request_output_scans;
+#[cfg(test)]
+pub(crate) use output::load_canonical_payload_from_node;
+pub(crate) use output::load_canonical_payload_in_txn;
 pub use output::{
     load_canonical_message, load_canonical_message_from_node, CanonicalOutputReadError,
 };
@@ -57,7 +60,6 @@ pub(crate) use output::{
     load_canonical_message_in_txn, load_request_headers_in_txn, resolve_canonical_replay_tags,
     validate_canonical_replay_boundary, CanonicalReplayScope, TxnCanonicalReader,
 };
-pub(crate) use output::{load_canonical_payload_from_node, load_canonical_payload_in_txn};
 pub use query::{
     decode_session_row, public_request_filter, session_scope_filter, AGENT_SESSION_FIELDS,
 };

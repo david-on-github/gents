@@ -267,6 +267,7 @@ pub async fn load_canonical_message_from_node(
     .await
 }
 
+#[cfg(test)]
 /// Reconstruct one exact payload reference inside an authorized physical
 /// request. Callers must first obtain the reference from its canonical owner;
 /// this reader never searches by logical labels or chooses a latest stream.

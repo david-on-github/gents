@@ -1,7 +1,7 @@
 mod final_output;
 pub(crate) mod r4c_args;
 
-use crate::llm::message::{AssistantContent, Message, Text, UserContent};
+use crate::llm::message::{AssistantContent, Message, Text};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use defra_node::EmbeddedNode;
@@ -822,7 +822,9 @@ mod tests {
             CanonicalToolOutputObservation::Closed(String::new())
         );
     }
-    use crate::llm::message::{AssistantContent, Reasoning, Text, ToolCall, ToolFunction};
+    use crate::llm::message::{
+        AssistantContent, Reasoning, Text, ToolCall, ToolFunction, UserContent,
+    };
 
     #[test]
     fn process_control_requester_absence_is_exact_not_empty_string() {

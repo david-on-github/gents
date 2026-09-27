@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use gents::defra_node::EmbeddedNode;
 use gents::{
-    ensure_agent_principal, AgentIdentity, BackendProviderKind, BehaviorToolConfig, KeyIdentity,
-    ResolvedBehavior, RuntimePrincipal,
+    ensure_agent_principal, BackendProviderKind, BehaviorToolConfig, KeyIdentity, ResolvedBehavior,
+    RuntimePrincipal,
 };
 
 pub fn test_identity(name: &str) -> KeyIdentity {

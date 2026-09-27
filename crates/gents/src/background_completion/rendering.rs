@@ -1,5 +1,3 @@
-use super::*;
-
 /// Bytes of normalized output a completion notification summarizes. The
 /// notification wakes the session; `read_process` pages the full output, so
 /// the summary stays small even when a tool's own output budget is larger.
