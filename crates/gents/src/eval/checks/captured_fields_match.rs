@@ -152,8 +152,82 @@ impl Check for CapturedFieldsMatch {
         }
     }
 
-    fn evaluate(&self, _params: &Value, _stage: &StageEvidence) -> CheckVerdict {
-        grader("bad_params", "unimplemented")
+    fn evaluate(&self, params: &Value, stage: &StageEvidence) -> CheckVerdict {
+        let params: Params = match serde_json::from_value(params.clone()) {
+            Ok(params) => params,
+            Err(error) => return grader("bad_params", error.to_string()),
+        };
+        if params.expect.is_empty() {
+            return grader("bad_params", "expect names no field");
+        }
+        let tests = match params
+            .expect
+            .into_iter()
+            .map(test)
+            .collect::<Result<Vec<_>, _>>()
+        {
+            Ok(tests) => tests,
+            Err(detail) => return grader("bad_params", detail),
+        };
+        let name = &params.name;
+        let rows = match stage.captures.get(name) {
+            Some(CaptureResult::Documents { rows }) => rows,
+            Some(CaptureResult::Files { .. }) => {
+                return grader(
+                    "missing_capture",
+                    format!("capture {name} holds files, not documents"),
+                )
+            }
+            None => {
+                return grader(
+                    "missing_capture",
+                    format!("the stage produced no capture named {name}"),
+                )
+            }
+        };
+        let row_count = rows.len().max(params.min_rows);
+        let total = tests.len() * row_count;
+        if total == 0 {
+            return graded(1, 1, None);
+        }
+        let mut satisfied = 0;
+        let mut lines = Vec::new();
+        let mut hidden = 0;
+        for (index, row) in rows.iter().enumerate() {
+            let mut mismatched = false;
+            for (field, test) in &tests {
+                let actual = lookup(row, field);
+                if actual.is_some_and(|actual| test.holds(actual)) {
+                    satisfied += 1;
+                    continue;
+                }
+                mismatched = true;
+                if index < SHOWN_ROWS {
+                    let got = actual.map_or("absent".to_string(), |actual| {
+                        excerpt(&actual.to_string(), EXCERPT_CHARS)
+                    });
+                    lines.push(format!(
+                        "row {index}: {field} expected {}, got {got}",
+                        excerpt(&test.describe(), EXCERPT_CHARS)
+                    ));
+                }
+            }
+            hidden += usize::from(mismatched && index >= SHOWN_ROWS);
+        }
+        if hidden > 0 {
+            lines.push(format!("… {hidden} more rows with a mismatch"));
+        }
+        if rows.len() < params.min_rows {
+            lines.push(format!(
+                "missing rows: {name} holds {} rows, {} required; rows {}..{} absent",
+                rows.len(),
+                params.min_rows,
+                rows.len(),
+                params.min_rows - 1
+            ));
+        }
+        let feedback = (!lines.is_empty()).then(|| lines.join("\n"));
+        graded(satisfied, total, feedback)
     }
 }
 
