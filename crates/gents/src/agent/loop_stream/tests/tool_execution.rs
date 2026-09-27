@@ -98,8 +98,95 @@ async fn dispatch_receipt_loss_gates_real_hook_loop_invocation() {
     }
 }
 
-/// The read-only command owner rejects the call; the generated settlement
-/// fixes what the durable row must show afterwards.
+/// Each native policy owner that can deny a call. The modeled settlement is
+/// the expectation for every one of them; nothing here is a fixture constant.
+enum PolicyDeniedOwner {
+    ReadOnlyBash,
+    CliArgvPrefix,
+    McpAllowlist,
+}
+
+struct PolicyDeniedCall {
+    tool_name: &'static str,
+    arguments: serde_json::Value,
+    tools: Vec<Box<dyn ToolDyn>>,
+}
+
+impl PolicyDeniedOwner {
+    const ALL: [PolicyDeniedOwner; 3] = [
+        PolicyDeniedOwner::ReadOnlyBash,
+        PolicyDeniedOwner::CliArgvPrefix,
+        PolicyDeniedOwner::McpAllowlist,
+    ];
+
+    fn owner(&self) -> &'static str {
+        match self {
+            Self::ReadOnlyBash => "read_only_bash",
+            Self::CliArgvPrefix => "cli_argv_prefix",
+            Self::McpAllowlist => "mcp_allowlist",
+        }
+    }
+
+    fn denied_call(
+        &self,
+        node: &Arc<defra_node::EmbeddedNode>,
+        root: &std::path::Path,
+    ) -> PolicyDeniedCall {
+        match self {
+            Self::ReadOnlyBash => PolicyDeniedCall {
+                tool_name: "bash",
+                arguments: serde_json::json!({"command": "rm", "args": ["-rf", "."]}),
+                tools: vec![crate::toolset::read_only_bash_for_test(
+                    root,
+                    vec!["ls".into()],
+                )],
+            },
+            Self::CliArgvPrefix => PolicyDeniedCall {
+                tool_name: "git",
+                arguments: serde_json::json!({"argv": ["push", "--force"]}),
+                tools: vec![crate::toolset::cli_tool_for_test(
+                    crate::toolset::CliToolConfig {
+                        name: "git".into(),
+                        binary_path: "/bin/echo".into(),
+                        description: String::new(),
+                        allowed_argv_prefixes: vec![vec!["status".into()]],
+                        env_vars: std::collections::HashMap::new(),
+                        working_dir: Some(root.to_path_buf()),
+                        timeout_secs: 5,
+                        max_output_chars: 4096,
+                    },
+                )],
+            },
+            Self::McpAllowlist => PolicyDeniedCall {
+                tool_name: "call_tool",
+                arguments: serde_json::json!({
+                    "service_id": "selected-service",
+                    "tool_name": "unselected-tool",
+                    "arguments": {}
+                }),
+                tools: vec![Box::new(crate::meta_tools::CallToolTool::new(
+                    crate::meta_tools::MetaToolContext {
+                        node: node.clone(),
+                        mcp_pool: crate::mcp_pool::McpPool::new().for_agent("did:test:test"),
+                        health: crate::health_checker::ServiceHealthMap::new(),
+                        local_hostname: "local".into(),
+                        local_subnet: None,
+                        agent_did: "did:test:test".into(),
+                        allowed_mcp_service_ids: vec!["selected-service".into()],
+                        remote_tools: crate::document_config::RemoteTools {
+                            services: vec![crate::document_config::RemoteServiceTools {
+                                mcp_service_id: "selected-service".into(),
+                                tool_names: vec!["selected-tool".into()],
+                                ..Default::default()
+                            }],
+                        },
+                    },
+                ))],
+            },
+        }
+    }
+}
+
 #[tokio::test]
 async fn policy_rejection_settles_pending_call_without_dispatch_election() {
     let cases: Vec<_> = crate::lean_vocab_test::lean_contract_snapshot()
@@ -118,87 +205,97 @@ async fn policy_rejection_settles_pending_call_without_dispatch_election() {
             .iter()
             .all(|input| input.acknowledged && !input.policy_allows));
         for policy in [FailurePolicy::FailOpen, FailurePolicy::FailClosed] {
-            let (node, hook, writer, mut lifecycle) = owned_test_hook_with_policy(policy).await;
-            let root = tempfile::tempdir().unwrap();
-            let model = ScriptedModel::new_turns(vec![
-                vec![
-                    RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
-                        "policy-call".into(),
-                        "bash".into(),
-                        serde_json::json!({"command": "rm", "args": ["-rf", "."]}),
-                    )),
-                    RawStreamingChoice::FinalResponse(()),
-                ],
-                vec![
-                    RawStreamingChoice::Message("done".into()),
-                    RawStreamingChoice::FinalResponse(()),
-                ],
-            ]);
-            let tools = vec![crate::toolset::read_only_bash_for_test(
-                root.path(),
-                vec!["ls".into()],
-            )];
-            let stream = run_loop_stream(
-                model,
-                Some(hook.clone()),
-                TaggedMessage::unassociated(Message::user("remove everything")),
-                Vec::new(),
-                Arc::new(tools),
-                owned_config(4),
-            );
-            let collect = collect_owned_scripted_stream(
-                stream,
-                &hook,
-                &writer,
-                &mut lifecycle,
-                gents_loop::provider_input::ProviderInputProfile::OpenAiChatCompletions,
-            );
-            let (collected, fired) =
-                crate::config_client::ConfigApplyTxn::with_post_commit_receipt_loss_for_operation(
-                    Some("tool_call.start_running_canonical"),
-                    collect,
-                )
-                .await;
-            assert_eq!(
-                fired,
-                case.expected.iter().any(|expected| expected.running),
-                "{}: the dispatch election commits only for a modeled Running call",
-                case.name
-            );
-            assert!(collected.error.is_none(), "{:?}", collected.error);
-            assert_eq!(collected.tool_results.len(), 1);
-            assert_eq!(collected.final_text.as_deref(), Some("done"));
-            assert!(root.path().exists());
+            for owner in PolicyDeniedOwner::ALL {
+                let (node, hook, writer, mut lifecycle) =
+                    owned_test_hook_with_policy(policy).await;
+                let root = tempfile::tempdir().unwrap();
+                let denied = owner.denied_call(&node, root.path());
+                let model = ScriptedModel::new_turns(vec![
+                    vec![
+                        RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
+                            "policy-call".into(),
+                            denied.tool_name.into(),
+                            denied.arguments,
+                        )),
+                        RawStreamingChoice::FinalResponse(()),
+                    ],
+                    vec![
+                        RawStreamingChoice::Message("done".into()),
+                        RawStreamingChoice::FinalResponse(()),
+                    ],
+                ]);
+                let stream = run_loop_stream(
+                    model,
+                    Some(hook.clone()),
+                    TaggedMessage::unassociated(Message::user("run the denied call")),
+                    Vec::new(),
+                    Arc::new(denied.tools),
+                    owned_config(4),
+                );
+                let collect = collect_owned_scripted_stream(
+                    stream,
+                    &hook,
+                    &writer,
+                    &mut lifecycle,
+                    gents_loop::provider_input::ProviderInputProfile::OpenAiChatCompletions,
+                );
+                let (collected, fired) = crate::config_client::ConfigApplyTxn::
+                    with_post_commit_receipt_loss_for_operation(
+                        Some("tool_call.start_running_canonical"), collect,
+                    ).await;
 
-            let rows = crate::config_client::ConfigAccess::Local(node.clone())
-                .execute("query { AgentToolCall { lifecycle_state started_at tool_failure_class } }")
-                .await
-                .unwrap();
-            let rows = rows["data"]["AgentToolCall"].as_array().unwrap();
-            assert_eq!(rows.len(), 1, "publication precedes admission");
-            let row = &rows[0];
-            assert_eq!(row["lifecycle_state"] == "failed", settlement.failed);
-            assert_eq!(row["lifecycle_state"] == "running", settlement.running);
-            assert_eq!(row["started_at"].is_string(), settlement.started);
-            assert_eq!(
-                row["tool_failure_class"].as_str(),
-                settlement.failure_class.as_deref()
-            );
+                let rows = crate::config_client::ConfigAccess::Local(node.clone())
+                    .execute("query { AgentToolCall { lifecycle_state started_at tool_failure_class } }")
+                    .await
+                    .unwrap();
+                let rows = rows["data"]["AgentToolCall"].as_array().unwrap();
+                assert_eq!(rows.len(), 1, "publication precedes admission");
+                let row = &rows[0];
+                assert_eq!(
+                    (
+                        row["lifecycle_state"] == "failed",
+                        row["lifecycle_state"] == "running",
+                        row["started_at"].is_string(),
+                        row["tool_failure_class"].as_str(),
+                    ),
+                    (
+                        settlement.failed,
+                        settlement.running,
+                        settlement.started,
+                        settlement.failure_class.as_deref(),
+                    ),
+                    "{}/{}: policy {policy:?}",
+                    case.name,
+                    owner.owner(),
+                );
+                assert_eq!(
+                    fired,
+                    case.expected.iter().any(|expected| expected.running),
+                    "{}/{}: the dispatch election commits only for a modeled Running call",
+                    case.name,
+                    owner.owner(),
+                );
+                assert!(collected.error.is_none(), "{:?}", collected.error);
+                assert_eq!(collected.tool_results.len(), 1);
+                assert_eq!(collected.final_text.as_deref(), Some("done"));
+                assert!(root.path().exists());
 
-            let completion = lifecycle
-                .terminalize_owned(
-                    crate::lifecycle::RequestTerminalOutcome::Completed,
-                    writer.terminal_output(&lifecycle.request().doc_id).await,
-                    None,
-                )
-                .await;
-            assert_eq!(
-                completion.is_ok(),
-                settlement.completion_accepted,
-                "{}: {completion:?}",
-                case.name
-            );
-            node.shutdown().await;
+                let completion = lifecycle
+                    .terminalize_owned(
+                        crate::lifecycle::RequestTerminalOutcome::Completed,
+                        writer.terminal_output(&lifecycle.request().doc_id).await,
+                        None,
+                    )
+                    .await;
+                assert_eq!(
+                    completion.is_ok(),
+                    settlement.completion_accepted,
+                    "{}/{}: {completion:?}",
+                    case.name,
+                    owner.owner(),
+                );
+                node.shutdown().await;
+            }
         }
     }
 }

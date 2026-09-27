@@ -87,4 +87,19 @@ impl ToolDyn for FlatRemoteTool {
             .map_err(CallToolTool::into_dyn_error)
         })
     }
+
+    fn admit(&self, args: &str) -> Result<(), ToolError> {
+        let Ok(arguments) = crate::llm::tool::parse_tool_args::<serde_json::Value>(args) else {
+            return Ok(());
+        };
+        Tool::admit(
+            &CallToolTool::new(self.context.clone()),
+            &CallToolArgs {
+                service_id: self.service_id.clone(),
+                tool_name: self.tool_name.clone(),
+                arguments,
+            },
+        )
+        .map_err(CallToolTool::into_dyn_error)
+    }
 }

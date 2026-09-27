@@ -48,19 +48,37 @@ impl ToolDyn for CliTool {
         })
     }
 
+    fn admit(&self, args: &str) -> Result<(), ToolError> {
+        let Ok(args) = serde_json::from_str::<CliToolArgs>(args) else {
+            return Ok(());
+        };
+        admit_argv_policy(&self.config, &args.argv).map_err(LocalToolError::into_dispatch_error)
+    }
+
     fn call(&self, args: String) -> BoxFuture<'_, Result<String, ToolError>> {
         let config = self.config.clone();
         Box::pin(async move {
             deny_artifact_scope().map_err(LocalToolError::into_dispatch_error)?;
             let args: CliToolArgs = serde_json::from_str(&args).map_err(ToolError::JsonError)?;
-            validate_argv_policy(&config, &args.argv)
-                .map_err(|error| ToolError::ToolCallError(Box::new(LocalToolError::from(error))))?;
+            admit_argv_policy(&config, &args.argv).map_err(LocalToolError::into_dispatch_error)?;
             let output = run_cli_command(&config, &args.argv)
                 .await
                 .map_err(LocalToolError::into_dispatch_error)?;
             serde_json::to_string(&output).map_err(ToolError::JsonError)
         })
     }
+}
+
+/// The argv-prefix rejection is the modeled tool-policy denial, so it must
+/// carry that failure class wherever it is evaluated: the loop settles it
+/// before the dispatch election, from the same validator `call` applies.
+fn admit_argv_policy(config: &CliToolConfig, argv: &[String]) -> Result<(), LocalToolError> {
+    validate_argv_policy(config, argv).map_err(|error| {
+        LocalToolError::reported_failure(
+            crate::tool_call_lifecycle::FailureClass::PolicyDenied,
+            format!("{error:#}"),
+        )
+    })
 }
 
 fn validate_argv_policy(config: &CliToolConfig, argv: &[String]) -> Result<()> {

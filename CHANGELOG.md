@@ -241,6 +241,11 @@ source consistency checks, not a separate runtime compatibility version.
   `spawn_process` admits a background command. Tool calls settled before
   dispatch (policy rejection, pre-dispatch failure or cancellation) no longer
   record a made-up `started_at` or `latency_ms` (#1801).
+- A CLI tool call outside its approved argv prefixes, and a `call_tool` or
+  `describe_tool` call on an MCP service or tool this behavior did not select,
+  no longer become `running` first: both policies are now checked before
+  dispatch, so the call goes straight from `pending` to `failed`
+  (`policyDenied`), including as a `spawn_process` target (#1893).
 - A background subagent spawned on this runtime's own principal no longer
   fails after 60 seconds while it waits to be claimed; it stays queued and
   attached to its spawn. A cross-principal spawn that no host claims in time

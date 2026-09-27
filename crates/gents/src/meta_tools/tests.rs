@@ -192,6 +192,16 @@ async fn scoped_discovery_and_flat_dispatch_have_identical_permissions() {
             .await
             .unwrap_err();
         assert!(denial.to_string().contains("tool_not_allowed"));
+        let admission = Tool::admit(
+            &dispatcher,
+            &CallToolArgs {
+                service_id: "shared".into(),
+                tool_name: "hidden".into(),
+                arguments: serde_json::json!({"value":1}),
+            },
+        )
+        .unwrap_err();
+        assert!(admission.to_string().contains("tool_not_allowed"));
         let flat = super::flat::FlatRemoteTool {
             definition: crate::llm::tool::ToolDefinition {
                 name: "test".into(),
@@ -207,6 +217,14 @@ async fn scoped_discovery_and_flat_dispatch_have_identical_permissions() {
             .unwrap_err();
         assert!(matches!(
             denial,
+            crate::llm::tool::ToolError::ReportedFailure {
+                class: crate::tool_call_lifecycle::FailureClass::PolicyDenied,
+                ..
+            }
+        ));
+        let admission = crate::llm::tool::ToolDyn::admit(&flat, "{}").unwrap_err();
+        assert!(matches!(
+            admission,
             crate::llm::tool::ToolError::ReportedFailure {
                 class: crate::tool_call_lifecycle::FailureClass::PolicyDenied,
                 ..
