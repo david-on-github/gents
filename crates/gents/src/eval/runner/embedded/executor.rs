@@ -891,14 +891,17 @@ fn provider_reason(
 /// render, so the subject can cause the error and it counts against it as
 /// [`OutcomeKind::Runtime`]. A status that could not be read leaves the pass
 /// unproven, which is the harness failing: [`OutcomeKind::Infrastructure`].
-async fn trigger_failure(
-    node: &EmbeddedNode,
-    agent_did: &str,
-    _since: &str,
-) -> Option<OutcomeKind> {
+///
+/// Only errors attempted since `since` (the stage's start, in the trigger
+/// writers' whole-second RFC 3339 form) count. A trigger writes its status
+/// asynchronously after the fire, so an error recorded after the stage is read
+/// is attributed to the next stage, and one recorded after the final stage is
+/// not attributed at all.
+async fn trigger_failure(node: &EmbeddedNode, agent_did: &str, since: &str) -> Option<OutcomeKind> {
     let agent_did = escape_graphql_string(agent_did);
+    let since = escape_graphql_string(since);
     let query = format!(
-        r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{agent_did}" }}, last_status: {{ _eq: "error" }} }}) {{ trigger_id last_error }} }}"#
+        r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{agent_did}" }}, last_status: {{ _eq: "error" }}, last_attempt_at: {{ _geq: "{since}" }} }}) {{ trigger_id last_error }} }}"#
     );
     let errored =
         match graphql_with_transaction_retry(node, &query, "eval trial trigger status").await {
