@@ -78,48 +78,59 @@ async fn seed_titled_session(
     node: &defra_node::EmbeddedNode,
     request: &AgentRequest,
     behavior: &ResolvedBehavior,
-) {
+) -> anyhow::Result<()> {
     // A session that already has a title keeps generated-title work off the
     // provider, so a zero provider-call count is a fact about this test rather
     // than a race with the title task.
-    let session = gents_protocol::session::AgentSession {
-        session_id: request.session_id.clone(),
-        agent_did: request.agent_did.clone(),
-        requester_did: request.requester_did.clone(),
-        behavior_id: behavior.behavior_id.clone(),
-        created_at: request.created_at.clone(),
-        closed_at: None,
-        title: Some(gents_protocol::session::SessionTitle {
-            text: "pre-inference interrupt".into(),
-            source: gents_protocol::session::SessionTitleSource::Task,
-        }),
-        tags: vec![],
-        provenance: None,
-        observation: None,
+    let title = gents_protocol::session::SessionTitle {
+        text: "pre-inference interrupt".into(),
+        source: gents_protocol::session::SessionTitleSource::Task,
     };
-    let input =
-        gents_protocol::graphql::graphql_input_literal(&serde_json::to_value(session).unwrap())
-            .unwrap();
-    let seeded = node
-        .execute(&format!(
-            "mutation {{ create_AgentSession(input: {input}) {{_docID}} }}"
-        ))
-        .await;
-    assert!(!seeded.has_errors(), "{:?}", seeded.errors);
+    let created = crate::config_client::ConfigAccess::transact_local(
+        node,
+        None,
+        "session.create",
+        move |txn| {
+            let title = title.clone();
+            Box::pin(async move {
+                crate::session::ensure_session_in_txn(
+                    txn,
+                    &request.session_id,
+                    &request.agent_did,
+                    &behavior.behavior_id,
+                    request.requester_did.as_deref(),
+                    Some(title),
+                    None,
+                    &request.created_at,
+                )
+                .await
+            })
+        },
+    )
+    .await?;
+    // The writer preserves an existing document untouched, so only a create
+    // establishes the title this test depends on.
+    anyhow::ensure!(created, "seeded session already existed without this title");
+    Ok(())
 }
 
 async fn request_terminal_row(
     node: &defra_node::EmbeddedNode,
     request_doc_id: &str,
-) -> serde_json::Value {
+) -> anyhow::Result<serde_json::Value> {
+    use anyhow::Context;
+
     let doc_id = crate::graphql::escape_graphql_string(request_doc_id);
-    let response = node
-        .execute(&format!(
+    let response = crate::graphql::graphql_with_transaction_retry(
+        node,
+        &format!(
             r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{doc_id}" }} }}, limit: 1) {{
                 lifecycle_state failure_reason terminalized_at interrupt_requested_at
             }} }}"#
-        ))
-        .await;
+        ),
+        "pre_inference_interrupt_request_row",
+    )
+    .await?;
     response
         .data
         .as_ref()
@@ -127,7 +138,7 @@ async fn request_terminal_row(
         .and_then(|rows| rows.as_array())
         .and_then(|rows| rows.first())
         .cloned()
-        .expect("request row")
+        .context("AgentRequest read selected no row for the claimed request")
 }
 
 /// An interrupt latched while a claimed request is still preparing its provider
@@ -180,7 +191,9 @@ async fn interrupt_while_preparing_provider_input_terminalizes_through_the_owner
     let request = create_routed_request(&node, &behavior, &agent_did).await;
     let request_doc_id = request.doc_id.clone();
     let requester_did = request.requester_did.clone();
-    seed_titled_session(node.as_ref(), &request, &behavior).await;
+    seed_titled_session(node.as_ref(), &request, &behavior)
+        .await
+        .expect("seed a titled session through the session writer");
 
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let process = daemon.process_request(request, shutdown_rx);
@@ -189,7 +202,9 @@ async fn interrupt_while_preparing_provider_input_terminalizes_through_the_owner
     let settled_in = tokio::time::timeout(Duration::from_secs(20), async {
         let reach_pre_inference_window = async {
             loop {
-                let row = request_terminal_row(node.as_ref(), &request_doc_id).await;
+                let row = request_terminal_row(node.as_ref(), &request_doc_id)
+                    .await
+                    .expect("read the claimed request row");
                 if entered.load(Ordering::SeqCst) && row["lifecycle_state"] == "claimed" {
                     return;
                 }
@@ -228,7 +243,9 @@ async fn interrupt_while_preparing_provider_input_terminalizes_through_the_owner
         crate::config::DEFAULT_STREAM_LIVENESS_TIMEOUT_SECS,
     );
 
-    let row = request_terminal_row(node.as_ref(), &request_doc_id).await;
+    let row = request_terminal_row(node.as_ref(), &request_doc_id)
+        .await
+        .expect("read the terminalized request row");
     assert_eq!(row["lifecycle_state"], "interrupted");
     assert!(
         !row["terminalized_at"].is_null(),

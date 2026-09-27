@@ -157,16 +157,19 @@ enum HandleRequestOutcome {
 
 /// How much provider work the interrupt caught, read from provider-call
 /// admission: the request's inference and its pre-inference compaction share one
-/// minted-call counter, so a single read covers both. Published output cannot
-/// answer this — a request may call a provider and publish nothing.
+/// minted-call counter, so a single read covers both. Admission mints a sequence
+/// before it validates the backend binding and before it acquires a permit, so
+/// the count is of attempted calls — zero rules a provider call out, a nonzero
+/// count claims only that one was attempted. Published output cannot answer
+/// this — a request may call a provider and publish nothing.
 #[derive(Debug, Clone, Copy)]
 struct InterruptEvidence {
     provider_calls: u64,
 }
 
 impl InterruptEvidence {
-    /// Outside a request admission scope no provider call can be minted, so an
-    /// absent counter is zero rather than unknown.
+    /// Outside a request admission scope no sequence can be minted, so an absent
+    /// counter is zero rather than unknown.
     fn observed() -> Self {
         Self {
             provider_calls: crate::admission::current_request_provider_call_count().unwrap_or(0),

@@ -136,6 +136,55 @@ async fn current_call_join_reflects_the_minted_call() {
     assert!(super::current_call_join().is_none());
 }
 
+/// The interrupt terminal reason reads this counter, so what it guarantees runs
+/// one way only: `acquire_current_call` mints a sequence before it validates the
+/// backend binding and before it acquires a permit, so zero rules a provider
+/// call out while a nonzero count says only that one was attempted. The
+/// compaction and title sub-scopes clone the request's counter, so one read
+/// covers every provider call the request can attempt.
+#[tokio::test]
+async fn provider_call_count_counts_attempted_admissions() {
+    assert_eq!(super::current_request_provider_call_count(), None);
+
+    let registry = AdmissionRegistry::new(test_node().await);
+    let context = AdmissionCallContext::for_request(&request("req-count"), "default", "");
+    scope_request(context, async {
+        assert_eq!(
+            super::current_request_provider_call_count(),
+            Some(0),
+            "a request scope that has minted nothing reports zero, not absence"
+        );
+
+        let compaction = scope_call(CallKind::Compaction, 1, async {
+            registry.acquire_current_call_for_test().await
+        })
+        .await;
+        assert!(
+            compaction.is_err(),
+            "an empty backend binding admits no call"
+        );
+        assert_eq!(
+            super::current_request_provider_call_count(),
+            Some(1),
+            "a call refused for its backend binding has already consumed a sequence"
+        );
+
+        let title = scope_call(CallKind::OneOff, 1, async {
+            registry.acquire_current_call_for_test().await
+        })
+        .await;
+        assert!(title.is_err(), "an empty backend binding admits no call");
+        assert_eq!(
+            super::current_request_provider_call_count(),
+            Some(2),
+            "the title sub-scope advances the same request counter"
+        );
+    })
+    .await;
+
+    assert_eq!(super::current_request_provider_call_count(), None);
+}
+
 #[tokio::test]
 async fn concurrent_call_scopes_return_their_own_exact_join() {
     let context = AdmissionCallContext::for_request(&request("req-scopes"), "default", "backend-1");

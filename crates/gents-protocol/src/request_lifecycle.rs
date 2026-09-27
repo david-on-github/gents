@@ -13,16 +13,19 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// transition; the reason is the native request-row adapter's only durable
 /// record of what the interrupt caught.
 pub mod interrupt_terminal_reason {
-    /// An interrupt that landed once at least one provider call had been
-    /// admitted for the request.
+    /// An interrupt that landed once the request had attempted at least one
+    /// provider call. Admission mints a call sequence before it validates the
+    /// backend binding and before it acquires a permit, so this reason asserts
+    /// only that a call was attempted, never that one reached a provider.
     pub const AFTER_PROVIDER_CALL: &str = "interrupted";
 
-    /// Positive evidence that no provider call was admitted for the request
-    /// before the interrupt landed. Provider-call admission mints one call
-    /// sequence per call, and a request's inference, pre-inference compaction
-    /// and generated-title calls share that one counter, so a zero count covers
-    /// all three. Absent output is not evidence: a request can call a provider
-    /// and publish nothing.
+    /// Positive evidence that the request attempted no provider call before the
+    /// interrupt landed. Admission mints one call sequence per attempt ahead of
+    /// every step that could reach a provider, and a request's inference,
+    /// pre-inference compaction and generated-title calls share that one
+    /// counter, so a zero count rules a provider call out for all three. Absent
+    /// output is not evidence: a request can call a provider and publish
+    /// nothing.
     pub const BEFORE_ANY_PROVIDER_CALL: &str = "interrupted before any provider call";
 }
 
