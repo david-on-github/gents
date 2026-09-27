@@ -1,9 +1,6 @@
 use super::*;
 use crate::identity::AgentIdentity;
 
-/// The generated spawned-target case fixes what the parent row, the spawned
-/// rows and request completion must show once a real target owner denies the
-/// target. Every background target's own policy owner is a denial source.
 #[tokio::test]
 async fn spawn_process_rejects_target_policy_before_spawned_admission() {
     let cases = crate::lean_vocab_test::lean_canonical_spawned_target_rejection_cases();

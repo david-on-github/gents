@@ -70,8 +70,8 @@ impl ToolDyn for CliTool {
 }
 
 /// The argv-prefix rejection is the modeled tool-policy denial, so it must
-/// carry that failure class wherever it is evaluated: the loop settles it
-/// before the dispatch election, from the same validator `call` applies.
+/// carry `PolicyDenied` explicitly; `classify_error_text` would otherwise
+/// class its text as `ToolReturnedError`.
 fn admit_argv_policy(config: &CliToolConfig, argv: &[String]) -> Result<(), LocalToolError> {
     validate_argv_policy(config, argv).map_err(|error| {
         LocalToolError::reported_failure(

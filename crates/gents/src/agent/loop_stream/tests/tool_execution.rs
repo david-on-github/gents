@@ -98,8 +98,6 @@ async fn dispatch_receipt_loss_gates_real_hook_loop_invocation() {
     }
 }
 
-/// Each native policy owner that can deny a call. The modeled settlement is
-/// the expectation for every one of them; nothing here is a fixture constant.
 enum PolicyDeniedOwner {
     ReadOnlyBash,
     CliArgvPrefix,
