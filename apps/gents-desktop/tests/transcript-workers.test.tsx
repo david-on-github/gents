@@ -102,7 +102,7 @@ function shellFor(
     selectedSession: { sessionId, timelineItems },
     selectedDeployment: {
       agentDid: AGENT,
-      sessions: sessions ?? [{ sessionId, requesterDid: PERSON }],
+      sessions: sessions ?? [{ agentDid: AGENT, sessionId, requesterDid: PERSON }],
     },
   } as unknown as Shell;
 }
@@ -137,7 +137,21 @@ describe("subagents of a session", () => {
         ],
         [origin],
       ),
-      [{ sessionId: "session-a", title: "Explorer" } as never],
+      [
+        {
+          agentDid: AGENT,
+          sessionId: "session-a",
+          requesterDid: null,
+          title: "Explorer",
+        },
+        /* the same label under another requester is another session */
+        {
+          agentDid: AGENT,
+          sessionId: "session-a",
+          requesterDid: PERSON,
+          title: "Other",
+        },
+      ] as never,
     );
     expect(all.map((s) => s.sessionId)).toEqual(["session-a"]);
     expect(all[0]!.requests.map((r) => r.requestId)).toEqual(["r-a1", "r-a2"]);
@@ -195,13 +209,33 @@ describe("subagents of a session", () => {
     expect(api.sessionProvenance).not.toHaveBeenCalled();
   });
 
+  it("does not ask while two listed scopes share the session's label", async () => {
+    const api = apiWith(async () => view([]));
+    renderHook(() =>
+      useBoth(
+        shellFor(api, [group(call("req-1", "call-1"))], {
+          sessions: [
+            { agentDid: AGENT, sessionId: "parent-session", requesterDid: PERSON },
+            { agentDid: AGENT, sessionId: "parent-session", requesterDid: null },
+          ],
+        }),
+      ),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(api.sessionProvenance).not.toHaveBeenCalled();
+  });
+
   it("joins a call only through the lineage, never through a summary's latest request", async () => {
     const api = apiWith(async () => view([]));
     const unknown = call("req-1", "call-unknown", "running");
     const shell = shellFor(api, [group(unknown)], {
       sessions: [
-        { sessionId: "parent-session", requesterDid: PERSON },
-        { sessionId: "unrelated-session", latestRequestId: "call-unknown" },
+        { agentDid: AGENT, sessionId: "parent-session", requesterDid: PERSON },
+        {
+          agentDid: AGENT,
+          sessionId: "unrelated-session",
+          latestRequestId: "call-unknown",
+        },
       ],
     });
     const { result } = renderHook(() => useBoth(shell));
@@ -244,7 +278,7 @@ describe("subagent lineage freshness", () => {
     );
     const tool = call("req-1", "call-1", "success");
     const items = [group(tool)];
-    const own = { sessionId: "parent-session", requesterDid: PERSON };
+    const own = { agentDid: AGENT, sessionId: "parent-session", requesterDid: PERSON };
     const { result, rerender } = renderHook(
       ({ sessions }: { sessions: unknown[] }) =>
         useBoth(shellFor(api, items, { sessions })),

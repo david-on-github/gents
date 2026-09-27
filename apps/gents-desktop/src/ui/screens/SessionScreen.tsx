@@ -94,7 +94,13 @@ import {
 import { Markdown } from "./Markdown";
 import { ToolBody } from "./tool-views";
 import { SubagentList, WorkerStep, isWorkerStep } from "./WorkerStep";
-import { NO_WORKERS, useSessionProvenance, useWorkers, type Workers } from "./workers";
+import {
+  NO_WORKERS,
+  listedSession,
+  useSessionProvenance,
+  useWorkers,
+  type Workers,
+} from "./workers";
 import { useParentWork, type ParentWork } from "./parentWork";
 import { WorkerActionsContext, type WorkerActions } from "./WorkerActions";
 import { ArrowUpRight } from "lucide-react";
@@ -970,11 +976,14 @@ export function SessionScreen({ shell }: { shell: Shell }) {
       window.removeEventListener("resize", publish);
     };
   }, []);
-  /* a person killing a background row from here: the runtime that owns the
-     row stops it within this session's exact scope. A subagent row's kill
-     interrupts only the request that row's call caused. */
-  const sessionScope = deployment?.sessions.find(
-    (x) => x.sessionId === session?.sessionId,
+  /* a person stopping running work from here. A native process row is
+     killed by the runtime that owns it, within this session's exact scope.
+     A session-message row stops by interrupting the one request its call
+     caused; the row settles when that request is terminal. */
+  const sessionScope = listedSession(
+    deployment?.sessions,
+    deployment?.agentDid ?? null,
+    session?.sessionId ?? null,
   );
   const workerActions = useMemo<WorkerActions>(
     () => ({
@@ -997,6 +1006,17 @@ export function SessionScreen({ shell }: { shell: Shell }) {
             },
             (e: unknown) =>
               toast(`Couldn't stop: ${e instanceof Error ? e.message : String(e)}`),
+          );
+      },
+      interrupt: (request) => {
+        void shell.api
+          .interruptRequest({
+            requestId: request.requestId,
+            agentDid: request.agentDid,
+            cause: "userCancelled",
+          })
+          .catch((e: unknown) =>
+            toast(`Couldn't stop: ${e instanceof Error ? e.message : String(e)}`),
           );
       },
     }),

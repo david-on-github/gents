@@ -93,13 +93,17 @@ function workersWith(r: Reached | null): Workers {
   };
 }
 
-function renderStep(tool: RenderedToolCallView, r: Reached | null, kill = vi.fn()) {
+function renderStep(
+  tool: RenderedToolCallView,
+  r: Reached | null,
+  actions = { kill: vi.fn(), interrupt: vi.fn() },
+) {
   render(
-    <WorkerActionsContext.Provider value={{ kill }}>
+    <WorkerActionsContext.Provider value={actions}>
       <WorkerStep tool={tool} workers={workersWith(r)} />
     </WorkerActionsContext.Provider>,
   );
-  return kill;
+  return actions;
 }
 
 describe("a subagent row", () => {
@@ -143,16 +147,26 @@ describe("a subagent row", () => {
     });
   });
 
-  it("kills this row's background call, whichever request the session is on", () => {
-    const tool = call("running");
-    const kill = renderStep(tool, reached(caused("child-req", "processing")));
+  it("stops by interrupting only the request this row's call caused", () => {
+    /* the session has moved on to a later request; Stop names this call's */
+    const request = caused("child-req", "processing");
+    const actions = renderStep(call("running"), reached(request));
     screen.getByRole("button", { name: "Stop Reviewer" }).click();
-    expect(kill).toHaveBeenCalledTimes(1);
-    expect(kill).toHaveBeenCalledWith(tool);
+    expect(actions.interrupt).toHaveBeenCalledTimes(1);
+    expect(actions.interrupt).toHaveBeenCalledWith(request);
+    expect(
+      actions.kill,
+      "a session-message row is never process-killed",
+    ).not.toBeCalled();
   });
 
-  it("offers no Stop once the background row has settled", () => {
-    renderStep(call("success"), reached(caused("child-req", "processing")));
+  it("offers no Stop once the caused request is terminal, even while the row runs", () => {
+    renderStep(call("running"), reached(caused("child-req", "completed")));
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
+  });
+
+  it("offers no Stop without a caused request to interrupt", () => {
+    renderStep(call("running"), null);
     expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
   });
 
@@ -202,9 +216,10 @@ describe("a background process row", () => {
 
   it("offers Stop while it runs and kills that row", () => {
     const tool = process("running");
-    const kill = renderStep(tool, null);
+    const actions = renderStep(tool, null);
     screen.getByRole("button", { name: "Stop cargo test" }).click();
-    expect(kill).toHaveBeenCalledWith(tool);
+    expect(actions.kill).toHaveBeenCalledWith(tool);
+    expect(actions.interrupt).not.toBeCalled();
   });
 
   it("offers no Stop once it has settled", () => {

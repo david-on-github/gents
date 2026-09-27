@@ -23,7 +23,7 @@ import { duration } from "./tool-summary";
 import { when } from "./time";
 import { isLive } from "@/lib/live";
 import type { Reached, Subagent, Workers } from "./workers";
-import { WorkerStop } from "./WorkerActions";
+import { ProcessStop, RequestStop } from "./WorkerActions";
 
 type Tone = "running" | "done" | "failed" | "stopped" | "unknown";
 
@@ -245,7 +245,7 @@ export function WorkerStep({
         }
         detail={bg?.nativeExecutor ? `pid ${bg.nativeExecutor.pid}` : null}
         sessionId={null}
-        menu={<WorkerStop name={p.target ?? tool.toolName} tool={tool} />}
+        menu={<ProcessStop name={p.target ?? tool.toolName} tool={tool} />}
       >
         <ToolBody tool={tool} />
       </Row>
@@ -281,7 +281,7 @@ export function WorkerStep({
       state={now.text}
       detail={now.detail ?? firstLine(p.description)}
       sessionId={sessionId}
-      menu={<WorkerStop name={name} tool={tool} />}
+      menu={<RequestStop name={name} request={reached?.request ?? null} />}
     >
       <ToolBody tool={tool} />
     </Row>

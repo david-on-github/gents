@@ -57,9 +57,29 @@ const byCreation = (a: CausedRequestView, b: CausedRequestView) =>
   (a.createdAt ?? "").localeCompare(b.createdAt ?? "") ||
   a.requestId.localeCompare(b.requestId);
 
-/* A session is identified by its whole scope, not its label alone. */
-const scopeKey = (r: CausedRequestView) =>
-  `${r.agentDid ?? ""}\u0000${r.sessionId ?? ""}\u0000${r.requesterDid ?? ""}`;
+/* A session is identified by its whole scope (agent, label, requester),
+   never by its label alone. */
+const scopeKey = (r: {
+  agentDid: string | null;
+  sessionId: string | null;
+  requesterDid: string | null;
+}) => `${r.agentDid ?? ""}\u0000${r.sessionId ?? ""}\u0000${r.requesterDid ?? ""}`;
+
+const summariesByScope = (sessions: readonly SessionSummary[] | undefined) =>
+  new Map((sessions ?? []).map((s) => [scopeKey(s), s]));
+
+/* The listed session with this agent and label. Two listed scopes under one
+   label are ambiguous, and neither is picked. */
+export function listedSession(
+  sessions: readonly SessionSummary[] | undefined,
+  agentDid: string | null,
+  sessionId: string | null,
+): SessionSummary | null {
+  const matches = (sessions ?? []).filter(
+    (s) => s.agentDid === agentDid && s.sessionId === sessionId,
+  );
+  return matches.length === 1 ? matches[0]! : null;
+}
 
 /* The subagents in a provenance view: one per started session, with every
    request this session caused in it. */
@@ -67,14 +87,14 @@ export function subagentsOf(
   provenance: Pick<SessionProvenanceView, "started" | "sent">,
   sessions: readonly SessionSummary[] | undefined,
 ): Subagent[] {
-  const summaries = new Map((sessions ?? []).map((s) => [s.sessionId, s]));
+  const summaries = summariesByScope(sessions);
   return [...provenance.started]
     .filter((origin) => origin.sessionId)
     .sort(byCreation)
     .map((origin) => ({
       sessionId: origin.sessionId!,
       agentDid: origin.agentDid,
-      summary: summaries.get(origin.sessionId!) ?? null,
+      summary: summaries.get(scopeKey(origin)) ?? null,
       origin,
       requests: provenance.sent
         .filter((r) => scopeKey(r) === scopeKey(origin))
@@ -99,7 +119,7 @@ export function useSessionProvenance(shell: Shell): SessionProvenanceView | null
   const sessionId = session?.sessionId ?? null;
   const agentDid = shell.selectedDeployment?.agentDid ?? null;
   const sessions = shell.selectedDeployment?.sessions;
-  const summary = sessions?.find((s) => s.sessionId === sessionId) ?? null;
+  const summary = listedSession(sessions, agentDid, sessionId);
   const listed = summary !== null;
   const requesterDid = summary?.requesterDid ?? null;
   const scope = `${agentDid ?? ""}\u0000${sessionId ?? ""}\u0000${requesterDid ?? ""}`;
@@ -186,7 +206,7 @@ export function useWorkers(
     if (!provenance && !ops) return NO_WORKERS;
     const all = provenance ? subagentsOf(provenance, sessions) : [];
     const byScope = new Map(all.map((s) => [scopeKey(s.origin), s]));
-    const summaries = new Map((sessions ?? []).map((s) => [s.sessionId, s]));
+    const summaries = summariesByScope(sessions);
     const backgrounded = ops?.backgroundedTools ?? [];
     return {
       loaded: true,
@@ -201,9 +221,7 @@ export function useWorkers(
         if (!request) return null;
         return {
           request,
-          summary: request.sessionId
-            ? (summaries.get(request.sessionId) ?? null)
-            : null,
+          summary: summaries.get(scopeKey(request)) ?? null,
           subagent: byScope.get(scopeKey(request)) ?? null,
         };
       },
