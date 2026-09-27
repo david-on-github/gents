@@ -2858,7 +2858,7 @@ fn safe_to_reduce_accepts_reused_provider_ids_across_complete_turns() {
         tool_result_msg("call-1", "pub fn library() {}"),
         text_msg("assistant", "second turn complete"),
     ];
-    assert!(safe_to_reduce(GROUPED_PROFILE, &messages));
+    assert!(safe_to_reduce(&messages));
 }
 
 #[test]
@@ -2867,15 +2867,51 @@ fn safe_to_reduce_requires_a_sanitizer_fixed_point_and_turn_boundary() {
         tool_call_msg("read_file", r#"{"path": "/src/main.rs"}"#),
         tool_result_msg("call-1", "fn main() {}"),
     ];
-    assert!(!safe_to_reduce(GROUPED_PROFILE, &incomplete_turn));
+    assert!(!safe_to_reduce(&incomplete_turn));
 
     let unstable = vec![
         tool_call_msg("read_file", r#"{"path": "/src/main.rs"}"#),
         text_msg("assistant", "ordinary boundary after an unpaired call"),
     ];
-    assert!(!safe_to_reduce(GROUPED_PROFILE, &unstable));
+    assert!(!safe_to_reduce(&unstable));
 
-    assert!(!safe_to_reduce(GROUPED_PROFILE, &[]));
+    assert!(!safe_to_reduce(&[]));
+
+    let orphaned_result = vec![
+        tool_result_msg("call-1", "no call announced this result"),
+        text_msg("user", "go"),
+        text_msg("assistant", "done"),
+    ];
+    assert!(!safe_to_reduce(&orphaned_result));
+}
+
+/// A grouped wire persists GLM's completed turn in native emission order; the
+/// send boundary groups it, so it must not close the stable-prefix gate.
+#[test]
+fn safe_to_reduce_accepts_a_native_order_reasoning_text_turn() {
+    let native_turn = Message::Assistant {
+        id: None,
+        content: vec![
+            AssistantContent::Reasoning(crate::llm::message::Reasoning::new("thinking")),
+            AssistantContent::Text(Text {
+                text: "done".to_string(),
+            }),
+        ],
+    };
+    let messages = vec![text_msg("user", "go"), native_turn.clone()];
+    assert_ne!(
+        super::history::normalize_assistant_content_order(GROUPED_PROFILE, messages.clone()),
+        messages,
+        "the fixture must differ from its provider order, or this proves nothing"
+    );
+    assert!(safe_to_reduce(&messages));
+
+    let unfinished = vec![
+        text_msg("user", "go"),
+        native_turn,
+        tool_call_msg("read_file", r#"{"path": "/src/main.rs"}"#),
+    ];
+    assert!(!safe_to_reduce(&unfinished));
 }
 
 #[tokio::test]

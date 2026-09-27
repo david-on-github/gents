@@ -68,7 +68,7 @@ pub use one_shot::{
 pub use repeated_tool_failure::REPEATED_TOOL_FAILURE_PREFIX;
 pub use request_assembly::{assemble_new_messages, is_request_context_message};
 pub use request_assembly::{
-    assemble_provider_request, provider_messages, provider_view_tagged,
+    assemble_provider_request, association_reduction, provider_messages, provider_view_tagged,
     replay_compaction_prefix_bound, sanitize_tagged_history, select_tagged_assistant_blocks,
 };
 // Not `#[cfg(test)]`: gents' own loop_stream test suite (crates/gents/src/
@@ -1283,10 +1283,8 @@ fn assemble_rig_chat_history(
         .chain(std::iter::once(prompt))
         .cloned()
         .collect();
-    let ordered = crate::compaction::history::normalize_assistant_content_order(
-        config.provider_input_counter.profile(),
-        messages,
-    );
+    let ordered =
+        request_assembly::provider_order(config.provider_input_counter.profile(), messages);
     config
         .preamble
         .as_ref()

@@ -326,21 +326,12 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                             "exact reduction split disagrees with source-index provider view"
                         );
                         let split = exact.compacted_prefix.len();
-                        let (prefix_native, suffix_native) = (
-                            provider_view[..split]
-                                .iter()
-                                .map(|row| row.message.clone())
-                                .collect::<Vec<_>>(),
-                            provider_view[split..]
-                                .iter()
-                                .map(|row| row.message.clone())
-                                .collect::<Vec<_>>(),
-                        );
-                        let exact = exact.over_association_view(
+                        let native = crate::agent::loop_stream::association_reduction(
                             provider_profile,
-                            &prefix_native,
-                            &suffix_native,
+                            &provider_view,
+                            exact,
                         )?;
+                        let exact = native.exact();
                         let associations =
                             crate::provider_context_reduction::ReplayAssociations::from_tagged_split(
                                 compaction_request.required,

@@ -557,7 +557,31 @@ pub fn provider_view_tagged(
 /// Row count and row order are unchanged, so a positional split of this list
 /// is a split of `rows`.
 pub fn provider_messages(profile: ProviderInputProfile, rows: &[TaggedMessage]) -> Vec<Message> {
-    crate::compaction::history::normalize_assistant_content_order(profile, message_values(rows))
+    provider_order(profile, message_values(rows))
+}
+
+/// The single entry point of the provider order stage; see [`provider_messages`].
+pub(super) fn provider_order(
+    profile: ProviderInputProfile,
+    messages: Vec<Message>,
+) -> Vec<Message> {
+    crate::compaction::history::normalize_assistant_content_order(profile, messages)
+}
+
+/// Native-order rows of an exact provider-ordered reduction over `rows`, for
+/// durable checkpoints whose persisted block indices align only with them.
+pub fn association_reduction(
+    profile: ProviderInputProfile,
+    rows: &[TaggedMessage],
+    exact: crate::compaction::ExactReduction<'_>,
+) -> anyhow::Result<crate::compaction::AssociationReduction> {
+    let split = exact.compacted_prefix.len();
+    anyhow::ensure!(
+        split <= rows.len(),
+        "exact reduction split exceeds its association rows"
+    );
+    let (prefix, suffix) = rows.split_at(split);
+    exact.over_association_view(profile, message_values(prefix), message_values(suffix))
 }
 
 fn assistant_rows(rows: &[TaggedMessage]) -> (Vec<usize>, Vec<TaggedAssistantRow>) {

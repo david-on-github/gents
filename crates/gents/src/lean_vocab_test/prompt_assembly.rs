@@ -62,6 +62,7 @@ pub(crate) struct LeanPromptAssemblyModeSanitizeCase {
     pub(crate) expected: Vec<LeanPromptAssemblyRow>,
     pub(crate) expected_twice: Vec<LeanPromptAssemblyRow>,
     pub(crate) association: Vec<LeanPromptAssemblyRow>,
+    pub(crate) association_indices: Vec<Vec<usize>>,
 }
 
 /// `sanitize` applied to a suffix of the input, for split-stability.

@@ -942,28 +942,65 @@ fn generated_mode_sanitize_cases_bind_composed_provider_view() {
         let twice = sanitize_history_for_provider(profile, once);
         assert_eq!(rows_of(&twice), case.expected_twice, "{}", case.name);
 
-        // The tagged owners carry replay association on the native-order view
-        // and apply the provider order once, at the send boundary.
+        // Physical assistant rows carry their source and persisted block
+        // indices through the daemon's projection and then the loop entry's;
+        // both passes must keep the modelled association, and the provider
+        // order is applied once, at the send boundary.
         let tagged = messages_of(&case.input)
             .into_iter()
-            .map(gents_loop::loop_stream::TaggedMessage::unassociated)
+            .enumerate()
+            .map(|(row, message)| match &message {
+                Message::Assistant { content, .. } => gents_loop::loop_stream::TaggedMessage {
+                    block_indices: (0..content.len()).collect(),
+                    source: Some(physical_replay_tag(row)),
+                    physical_header: Some(format!("header-{row}")),
+                    message,
+                },
+                _ => gents_loop::loop_stream::TaggedMessage::unassociated(message),
+            })
             .collect::<Vec<_>>();
-        let association =
-            gents_loop::loop_stream::sanitize_tagged_history(tagged).expect("association view");
-        let native = association
+        let daemon = gents_loop::loop_stream::provider_view_tagged(tagged)
+            .unwrap_or_else(|error| panic!("{}: daemon projection: {error}", case.name));
+        let entry = gents_loop::loop_stream::sanitize_tagged_history(daemon.clone())
+            .unwrap_or_else(|error| panic!("{}: loop entry projection: {error}", case.name));
+        assert_eq!(entry, daemon, "{}: second tagged pass", case.name);
+        let native = entry
             .iter()
             .map(|row| row.message.clone())
             .collect::<Vec<_>>();
         assert_eq!(rows_of(&native), case.association, "{}", case.name);
         assert_eq!(
-            rows_of(&gents_loop::loop_stream::provider_messages(
-                profile,
-                &association
-            )),
+            entry
+                .iter()
+                .map(|row| row.block_indices.clone())
+                .collect::<Vec<_>>(),
+            case.association_indices,
+            "{}",
+            case.name
+        );
+        assert!(
+            entry.iter().all(|row| row.source.is_some()
+                == matches!(row.message, Message::Assistant { .. })),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            rows_of(&gents_loop::loop_stream::provider_messages(profile, &entry)),
             case.expected,
             "{}",
             case.name
         );
+    }
+}
+
+fn physical_replay_tag(row: usize) -> gents_loop::claude_messages_body::ReplayTag {
+    gents_loop::claude_messages_body::ReplayTag {
+        request_doc_id: "request-doc".to_string(),
+        source: gents_protocol::output::OutputSource::ProviderTurn {
+            scope: "inference.1".parse().expect("modeled provider scope"),
+            turn_index: row.try_into().expect("witness row fits"),
+            attempt: 0,
+        },
     }
 }
 

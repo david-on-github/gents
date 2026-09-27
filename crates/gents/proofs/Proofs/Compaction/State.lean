@@ -154,7 +154,11 @@ def rowPublished (v : PromptView) (row : MessageRow) : Bool :=
 /-- Executable stable-prefix gate. Besides reconstructed publication, the prefix
 must already be a fixpoint of provider-input sanitization and end at a turn
 boundary. Therefore reduction never blesses an orphan merely because its header
-is immutable. -/
+is immutable. The sanitization fixpoint is over rows (pairing and drops) only;
+assistant content order is not a stability condition. The native gate checks
+the native-order association view, which is row-stable under the provider's
+send-boundary order
+(`PromptAssembly.Provider.project_sanitizeForProviderGlobalFor_of_association_fixpoint`). -/
 def safeToReduce (v : PromptView) : Prop :=
   endsAtTurnBoundary v.messages = true ∧
     PromptAssembly.sanitizeTurn v.messages = v.messages ∧

@@ -255,7 +255,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                     // tail. The projected view is intentionally a fixpoint;
                     // checking only that view would make this gate vacuous.
                     let canonical_prefix_is_stable =
-                        compaction::safe_to_reduce(provider_profile, &durable_history);
+                        compaction::safe_to_reduce(&durable_history);
                     // The sourced projection below performs this same file
                     // activity extraction before stripping tool results.
                     let file_activity = compaction::history::extract_file_activity(&durable_history);
@@ -374,15 +374,11 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                             let associations = crate::provider_context_reduction::ReplayAssociations::from_tagged_split(
                                 replay.required.clone(), prefix, suffix,
                             );
-                            let (prefix_native, suffix_native) = (
-                                prefix.iter().map(|row| row.message.clone()).collect::<Vec<_>>(),
-                                suffix.iter().map(|row| row.message.clone()).collect::<Vec<_>>(),
-                            );
-                            let native = exact.over_association_view(
-                                provider_profile, &prefix_native, &suffix_native,
+                            let native = crate::agent::loop_stream::association_reduction(
+                                provider_profile, &projected, exact,
                             )?;
                             crate::provider_context_reduction::validate_replay_associations(
-                                &associations, native.compacted_prefix, native.retained_suffix, &request.doc_id,
+                                &associations, native.exact().compacted_prefix, native.exact().retained_suffix, &request.doc_id,
                             )?;
                             suffix.to_vec()
                         } else {

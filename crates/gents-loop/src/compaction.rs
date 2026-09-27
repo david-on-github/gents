@@ -371,31 +371,44 @@ impl ExactReduction<'_> {
     }
 }
 
-impl<'a> ExactReduction<'a> {
-    /// The same exact split over the native-order association rows this
-    /// provider-ordered reduction was computed from. A durable checkpoint stores
-    /// these rows beside their persisted block indices, which only stay aligned
-    /// with the unordered content.
-    pub fn over_association_view<'b>(
+/// An [`ExactReduction`] re-expressed over the native-order association rows
+/// it was ordered from. A durable checkpoint stores these rows beside their
+/// persisted block indices, which only stay aligned with the unordered content.
+#[derive(Debug, Clone)]
+pub struct AssociationReduction {
+    compacted_prefix: Vec<Message>,
+    retained_suffix: Vec<Message>,
+    checkpoint: String,
+}
+
+impl AssociationReduction {
+    pub fn exact(&self) -> ExactReduction<'_> {
+        ExactReduction {
+            compacted_prefix: &self.compacted_prefix,
+            retained_suffix: &self.retained_suffix,
+            checkpoint: &self.checkpoint,
+        }
+    }
+}
+
+impl ExactReduction<'_> {
+    pub fn over_association_view(
         &self,
         profile: ProviderInputProfile,
-        compacted_prefix: &'b [Message],
-        retained_suffix: &'b [Message],
-    ) -> Result<ExactReduction<'b>>
-    where
-        'a: 'b,
-    {
+        compacted_prefix: Vec<Message>,
+        retained_suffix: Vec<Message>,
+    ) -> Result<AssociationReduction> {
         anyhow::ensure!(
-            history::normalize_assistant_content_order(profile, compacted_prefix.to_vec())
+            history::normalize_assistant_content_order(profile, compacted_prefix.clone())
                 == self.compacted_prefix
-                && history::normalize_assistant_content_order(profile, retained_suffix.to_vec())
+                && history::normalize_assistant_content_order(profile, retained_suffix.clone())
                     == self.retained_suffix,
             "exact reduction is not the provider order of its association rows"
         );
-        Ok(ExactReduction {
+        Ok(AssociationReduction {
             compacted_prefix,
             retained_suffix,
-            checkpoint: self.checkpoint,
+            checkpoint: self.checkpoint.to_string(),
         })
     }
 }
@@ -1173,13 +1186,19 @@ pub fn split_for_summary(
 
 /// Runtime counterpart of Lean `PromptView.safeToReduce`. Canonical loading
 /// has already reconstructed the selected immutable headers and payloads, so
-/// reduction requires an ordinary turn boundary and a provider-view fixpoint.
-pub fn safe_to_reduce(profile: ProviderInputProfile, messages: &[Message]) -> bool {
+/// reduction requires an ordinary turn boundary and a fixpoint of the pairing
+/// and drop stages (`sanitizeTurn`). The provider content order is not part
+/// of stability: a completed native `[reasoning, text]` row on a grouped wire
+/// is reordered only at the send boundary and is a stable prefix.
+pub fn safe_to_reduce(messages: &[Message]) -> bool {
     let Some(last) = messages.last() else {
         return false;
     };
     is_ordinary_message(last)
-        && sanitize_history_for_provider(profile, messages.to_vec()) == messages
+        && sanitize_association_with_sources(messages.to_vec())
+            .into_iter()
+            .map(|sourced| sourced.message)
+            .eq(messages.iter().cloned())
 }
 
 fn is_ordinary_message(message: &Message) -> bool {
