@@ -1,9 +1,11 @@
-// Operator kill of one background tool row. The live execution belongs to
-// the runtime process, so the bridge asks that runtime through its local HTTP
-// control plane; the runtime's `cancel_session_background_process` owner
-// authorizes the session scope and decides the outcome.
+// Operator kill of one native background process row. The live execution
+// belongs to the runtime process, so the bridge asks that runtime through its
+// local HTTP control plane (loopback only); the runtime's
+// `cancel_session_background_process` owner authorizes the session scope and
+// decides the outcome.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use gents_desktop_core::client::ClientCore;
 
@@ -11,6 +13,10 @@ use crate::types::{BackgroundCancelResultView, DesktopCancelBackgroundProcessReq
 
 /// The runtime route, served by `gents serve` beside its GraphQL.
 pub const BACKGROUND_CANCEL_PATH: &str = "/sessions/background/cancel";
+
+/// The owner waits for an observed stop before it answers; a runtime that
+/// does not answer within this bound is reported, not waited on.
+const BACKGROUND_CANCEL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The runtime's cancel route for the control-plane GraphQL URL it
 /// published (`http://host:port/api/v0/graphql`).
@@ -37,14 +43,46 @@ pub async fn cancel_background_process(
         .ok_or_else(|| {
             format!("no local runtime hosts {agent_did}; its background work is stopped there")
         })?;
-    post_background_cancel(&background_cancel_url(&graphql)?, request).await
+    let url = background_cancel_url(&graphql)?;
+    tracing::info!(
+        target: "gents_desktop::operator_control",
+        agent_did,
+        session_id = %request.session_id,
+        tool_call_id = %request.tool_call_id,
+        runtime = %url,
+        "desktop background kill requested"
+    );
+    let result = post_background_cancel(&url, request).await;
+    match &result {
+        Ok(result) => tracing::info!(
+            target: "gents_desktop::operator_control",
+            agent_did,
+            session_id = %request.session_id,
+            tool_call_id = %request.tool_call_id,
+            outcome = %result.outcome,
+            "desktop background kill completed"
+        ),
+        Err(error) => tracing::warn!(
+            target: "gents_desktop::operator_control",
+            agent_did,
+            session_id = %request.session_id,
+            tool_call_id = %request.tool_call_id,
+            error,
+            "desktop background kill failed"
+        ),
+    }
+    result
 }
 
 pub async fn post_background_cancel(
     url: &reqwest::Url,
     request: &DesktopCancelBackgroundProcessRequest,
 ) -> Result<BackgroundCancelResultView, String> {
-    let response = reqwest::Client::new()
+    let client = reqwest::Client::builder()
+        .timeout(BACKGROUND_CANCEL_TIMEOUT)
+        .build()
+        .map_err(|error| format!("building the runtime client: {error}"))?;
+    let response = client
         .post(url.clone())
         .json(&serde_json::json!({
             "session_id": request.session_id,

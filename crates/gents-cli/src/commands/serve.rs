@@ -733,7 +733,11 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
         &bind_probe_path,
         bind_probe_token.clone(),
     ))
-    .merge(crate::http::explorer::explorer_router());
+    .merge(crate::http::explorer::explorer_router())
+    .merge(crate::http::background_cancel::background_cancel_router(
+        activation_runtime.clone(),
+        http_addr.ip(),
+    ));
     let mut node_builder = crate::persistent_node_builder(&data_dir)?
         .with_http(defra_node::HttpConfig::with_addr(http_addr).with_extra_routes(extra_routes));
     if let Some(node_identity_did) = server_identity.node_identity_did.as_ref() {
