@@ -14,7 +14,7 @@ use crate::tool_call_lifecycle::CausedRequestTerminal;
 
 /// The durable terminal of one exact caused request, or `None` while it is
 /// live or its terminal output selection has not replicated yet.
-pub(crate) async fn load_caused_request_terminal(
+pub async fn load_caused_request_terminal(
     node: &EmbeddedNode,
     caused_request_doc_id: &str,
 ) -> Result<Option<CausedRequestTerminal>> {

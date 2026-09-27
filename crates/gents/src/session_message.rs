@@ -720,7 +720,7 @@ pub fn agent_interrupt_allowed(
 
 /// Refusal reason when the calling session may not interrupt `target`
 /// (Lean `DurableLineage.interruptAllowed`, through the stored provenance).
-pub(crate) async fn interrupt_refusal(
+pub async fn interrupt_refusal(
     node: &Arc<EmbeddedNode>,
     caller: &SessionScope,
     target: &SessionScope,
@@ -738,7 +738,7 @@ pub(crate) async fn interrupt_refusal(
 
 /// Stop `target`'s current turn through the single-session interrupt owner.
 /// Returns the interrupted request id, or `None` when the session is idle.
-pub(crate) async fn interrupt_session(
+pub async fn interrupt_session(
     node: &EmbeddedNode,
     target: &SessionScope,
 ) -> Result<Option<String>> {

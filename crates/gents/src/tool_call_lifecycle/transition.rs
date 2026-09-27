@@ -138,7 +138,7 @@ impl ToolCallLifecycle {
 
 mod cancel;
 mod session_message;
-pub(crate) use session_message::CausedRequestTerminal;
+pub use session_message::CausedRequestTerminal;
 mod mode_policy;
 mod native;
 

@@ -571,7 +571,7 @@ fn bridge_state_is_terminal(status: &str) -> bool {
     )
 }
 
-pub(crate) use final_output::load_caused_request_terminal;
+pub use final_output::load_caused_request_terminal;
 
 fn render_assistant_message_text(message: &Message) -> Result<String> {
     let Message::Assistant { content, .. } = message else {

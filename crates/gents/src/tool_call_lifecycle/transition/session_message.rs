@@ -4,7 +4,7 @@ use super::*;
 /// caused (Lean `Recovery.SessionMessageRecoveryCause`): the row's only
 /// terminal cause.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum CausedRequestTerminal {
+pub enum CausedRequestTerminal {
     Completed { output: String },
     Failed { reason: String },
     Dead,

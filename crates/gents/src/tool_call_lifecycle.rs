@@ -194,7 +194,7 @@ pub use recovery::{
     deadline_at_is_expired, deadline_is_expired, BackgroundCompletionSideEffectReport,
     OrphanedBackgroundToolReport, TerminalParentToolReport, ToolCallRecoveryReport,
 };
-pub(crate) use transition::CausedRequestTerminal;
+pub use transition::CausedRequestTerminal;
 pub use transition::IllegalToolCallTransition;
 
 /// State machine struct for an individual tool call. Mirrors `RequestLifecycle`
