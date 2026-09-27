@@ -99,6 +99,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                     // provider call can have been attempted.
                     return Ok(HandleRequestOutcome::Interrupted(
                         super::InterruptEvidence::observed(),
+                        super::InterruptSource::Claimed,
                     ));
                 }
             };
@@ -535,6 +536,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                 crate::interrupt::InterruptiblePreparation::Interrupted => {
                     return Ok(HandleRequestOutcome::Interrupted(
                         super::InterruptEvidence::observed(),
+                        super::InterruptSource::Preparation,
                     ));
                 }
             };
@@ -650,6 +652,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                 .await?;
                 return Ok(HandleRequestOutcome::Interrupted(
                     super::InterruptEvidence::observed(),
+                    super::InterruptSource::MidFlight,
                 ));
             }
 

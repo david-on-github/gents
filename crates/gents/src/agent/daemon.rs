@@ -152,7 +152,7 @@ pub(super) struct BehaviorDaemon<M: CompletionModel> {
 enum HandleRequestOutcome {
     Completed,
     FailedAfterResponse(anyhow::Error),
-    Interrupted(InterruptEvidence),
+    Interrupted(InterruptEvidence, InterruptSource),
 }
 
 /// How much provider work the interrupt caught, read from provider-call
@@ -185,6 +185,40 @@ impl InterruptEvidence {
         }
     }
 }
+
+/// The window a request was in when its interrupt was observed. The durable
+/// row records only the outcome, so this label is the only post-hoc record of
+/// that window.
+///
+/// The label names the window and nothing else: provider-call facts belong to
+/// [`InterruptEvidence`], so "preparation" can carry a nonzero count when
+/// pre-inference compaction ran and "mid_flight" can carry zero. `Claimed`
+/// spells `RequestLifecycleState::as_str()` so the label joins the durable
+/// state vocabulary. The proofs distinguish only `interrupt_claimed` from
+/// `interrupt_processing`; splitting the processing window into `Preparation`
+/// and `MidFlight` is native, naming whether the request's inference turn had
+/// begun.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterruptSource {
+    Claimed,
+    Preparation,
+    MidFlight,
+}
+
+impl InterruptSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::Preparation => "preparation",
+            Self::MidFlight => "mid_flight",
+        }
+    }
+}
+
+/// The durable interrupt row keeps only the outcome and its provider-call
+/// reason, so the event on this target is the sole record of the window the
+/// interrupt caught.
+pub(crate) const REQUEST_INTERRUPT_EVENT_TARGET: &str = "gents.request.interrupt";
 
 impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
     pub(super) fn new(
@@ -449,7 +483,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
         stream_writer: &DefraStreamWriter,
         request: &AgentRequest,
         evidence: InterruptEvidence,
-        cancellation_source: &'static str,
+        source: InterruptSource,
     ) {
         record_current_request_outcome("interrupted");
         match terminalize_request(
@@ -480,10 +514,11 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
             );
         }
         tracing::info!(
+            target: REQUEST_INTERRUPT_EVENT_TARGET,
             behavior_id = %self.behavior.behavior_id,
             request_id = %request.request_id,
             session_id = %request.session_id,
-            cancellation_source,
+            cancellation_source = source.as_str(),
             provider_calls = evidence.provider_calls,
             "request interrupted"
         );
@@ -697,7 +732,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     &stream_writer,
                     &request,
                     InterruptEvidence::observed(),
-                    "pre_inference",
+                    InterruptSource::Claimed,
                 )
                 .await;
                 return;
@@ -864,13 +899,13 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         "failed to atomically terminalize completed request and response");
                 }
             }
-            Ok(HandleRequestOutcome::Interrupted(evidence)) => {
+            Ok(HandleRequestOutcome::Interrupted(evidence, source)) => {
                 self.finish_interrupted_request(
                     &mut lifecycle,
                     &stream_writer,
                     &request,
                     evidence,
-                    "mid_flight",
+                    source,
                 )
                 .await;
             }

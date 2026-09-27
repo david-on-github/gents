@@ -593,6 +593,8 @@ async fn daemon_interrupt_completion_preserves_wake_published_after_latch() {
         .unwrap();
 
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (interrupt_events, dispatch) = interrupt_source_capture();
+    let _capture_guard = tracing::dispatcher::set_default(&dispatch);
     let process = daemon.process_request(request, shutdown_rx);
     tokio::pin!(process);
     let escaped_request_doc = crate::graphql::escape_graphql_string(&request_doc_id);
@@ -693,6 +695,19 @@ async fn daemon_interrupt_completion_preserves_wake_published_after_latch() {
         "interrupted"
     );
     assert!(!result["data"]["AgentRequestParent"][0]["terminal_output"].is_null());
+
+    let reported = interrupt_events.reported();
+    assert_eq!(
+        reported.len(),
+        1,
+        "the owner must report its interrupt source exactly once per terminalization"
+    );
+    assert_eq!(
+        reported[0].cancellation_source.as_deref(),
+        Some("mid_flight"),
+        "an interrupt observed with the request's inference turn already running must report the mid-flight window: {:?}",
+        reported
+    );
     node.shutdown().await;
 }
 

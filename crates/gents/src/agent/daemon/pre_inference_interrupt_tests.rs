@@ -1,4 +1,74 @@
 // Included in inference.rs's test module to reuse its real daemon harness.
+use tracing::field::{Field, Visit};
+use tracing_subscriber::layer::{Context as LayerContext, SubscriberExt};
+use tracing_subscriber::{Layer, Registry};
+
+fn lock<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Collects the interrupt-source events the owner emitted.
+///
+/// The durable row keeps only the outcome and its provider-call reason, so the
+/// window an interrupt caught is observable nowhere but the owner's event on
+/// `REQUEST_INTERRUPT_EVENT_TARGET`.
+#[derive(Clone, Default)]
+struct InterruptSourceCapture {
+    reported: std::sync::Arc<std::sync::Mutex<Vec<InterruptSourceFields>>>,
+}
+
+impl InterruptSourceCapture {
+    fn reported(&self) -> Vec<InterruptSourceFields> {
+        lock(&self.reported).clone()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct InterruptSourceFields {
+    cancellation_source: Option<String>,
+    provider_calls: Option<u64>,
+}
+
+impl Visit for InterruptSourceFields {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        if field.name() == "cancellation_source" {
+            self.cancellation_source = Some(value.to_owned());
+        }
+    }
+
+    fn record_u64(&mut self, field: &Field, value: u64) {
+        if field.name() == "provider_calls" {
+            self.provider_calls = Some(value);
+        }
+    }
+
+    fn record_debug(&mut self, _field: &Field, _value: &dyn std::fmt::Debug) {}
+}
+
+impl<S> Layer<S> for InterruptSourceCapture
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _context: LayerContext<'_, S>) {
+        if event.metadata().target() != crate::agent::daemon::REQUEST_INTERRUPT_EVENT_TARGET {
+            return;
+        }
+        let mut fields = InterruptSourceFields::default();
+        event.record(&mut fields);
+        if fields.cancellation_source.is_some() {
+            lock(&self.reported).push(fields);
+        }
+    }
+}
+
+fn interrupt_source_capture() -> (InterruptSourceCapture, tracing::Dispatch) {
+    crate::test_support::enable_scoped_event_capture();
+    let capture = InterruptSourceCapture::default();
+    let dispatch = tracing::Dispatch::new(Registry::default().with(capture.clone()));
+    (capture, dispatch)
+}
 
 /// Parks the request inside provider-input estimation. `build_request` awaits
 /// every tool definition, so this future holds the daemon in the window between
@@ -196,6 +266,8 @@ async fn interrupt_while_preparing_provider_input_terminalizes_through_the_owner
         .expect("seed a titled session through the session writer");
 
     let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let (interrupt_events, dispatch) = interrupt_source_capture();
+    let _capture_guard = tracing::dispatcher::set_default(&dispatch);
     let process = daemon.process_request(request, shutdown_rx);
     tokio::pin!(process);
 
@@ -263,6 +335,19 @@ async fn interrupt_while_preparing_provider_input_terminalizes_through_the_owner
         provider_calls.load(Ordering::SeqCst),
         0,
         "no provider call may run in the pre-inference window"
+    );
+
+    let reported = interrupt_events.reported();
+    assert_eq!(
+        reported.len(),
+        1,
+        "the owner must report its interrupt source exactly once per terminalization"
+    );
+    assert_eq!(
+        reported[0].cancellation_source.as_deref(),
+        Some("preparation"),
+        "an interrupt observed while assembling provider input must report the preparation window, not an inference window it never reached: {:?}",
+        reported
     );
 }
 
@@ -389,13 +474,20 @@ async fn interrupt_latched_at_the_claim_terminalizes_before_execution_begins() {
         "the window decides on the durable latch: {latched}"
     );
 
+    let (interrupt_events, dispatch) = interrupt_source_capture();
+    let _capture_guard = tracing::dispatcher::set_default(&dispatch);
     let outcome = daemon
         .handle_request(&mut lifecycle, &stream_writer, shutdown_rx, interrupt_rx)
         .await
         .expect("the claimed request's owner returns an outcome");
-    let crate::agent::daemon::HandleRequestOutcome::Interrupted(evidence) = outcome else {
+    let crate::agent::daemon::HandleRequestOutcome::Interrupted(evidence, source) = outcome else {
         panic!("an observable latch must interrupt the claimed request");
     };
+    assert_eq!(
+        source,
+        crate::agent::daemon::InterruptSource::Claimed,
+        "an interrupt observed in the admission window must report the window it fired from"
+    );
 
     let undecided = request_terminal_row(node.as_ref(), &request_doc_id)
         .await
@@ -411,7 +503,7 @@ async fn interrupt_latched_at_the_claim_terminalizes_before_execution_begins() {
             &stream_writer,
             &request,
             evidence,
-            "pre_inference",
+            source,
         )
         .await;
 
@@ -435,5 +527,24 @@ async fn interrupt_latched_at_the_claim_terminalizes_before_execution_begins() {
         provider_calls.load(Ordering::SeqCst),
         0,
         "no provider call may run before execution begins"
+    );
+
+    let reported = interrupt_events.reported();
+    assert_eq!(
+        reported.len(),
+        1,
+        "terminalizing the claimed interrupt must report its source window exactly once"
+    );
+    assert_eq!(
+        reported[0].cancellation_source.as_deref(),
+        Some("claimed"),
+        "the reported window must be the state the interrupt fired from, not a later execution window: {:?}",
+        reported
+    );
+    assert_eq!(
+        reported[0].provider_calls,
+        Some(0),
+        "an interrupt observed before execution began must report zero provider calls: {:?}",
+        reported
     );
 }
