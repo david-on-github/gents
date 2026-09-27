@@ -249,10 +249,11 @@ pub(crate) mod tests {
         )
     }
 
-    pub(crate) const FIXTURE_TEMPLATE: &str = "Plan {{ args.goal }} for {{ doc.owner }}.\n";
+    pub(crate) const FIXTURE_TEMPLATE: &str = "Plan {{ doc.goal }} for {{ doc.owner }}.\n";
 
     /// The fixture pack with one task of the monitor behavior, its prompt
-    /// template in a sidecar or inline in `pack_config.json`.
+    /// template in a sidecar or inline in `pack_config.json`, fired by an
+    /// event trigger whose source has no group.
     pub(crate) fn write_task_fixture_pack(root: &Path, inline: bool) {
         write_fixture_pack(root);
         let manifest_path = root.join("manifest.json");
@@ -281,6 +282,15 @@ pub(crate) mod tests {
             "task_id": "plan",
             "behavior_id": "monitor",
             "prompt_template": template,
+        }]);
+        config["event_sources"] = json!([{
+            "event_source_id": "plan-source",
+            "source_collection": "PlanItem",
+        }]);
+        config["triggers"] = json!([{
+            "trigger_id": "plan-trigger",
+            "task_id": "plan",
+            "source": {"kind": "event", "event_source_id": "plan-source"},
         }]);
         std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
     }

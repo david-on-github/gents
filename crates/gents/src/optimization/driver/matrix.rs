@@ -701,8 +701,7 @@ pub(crate) async fn accepting_harness(job_id: &str) -> (Harness, JobRequest) {
     (harness, request)
 }
 
-pub(crate) const CANDIDATE_TEMPLATE: &str =
-    "Do {{ args.goal }} for {{ doc.owner }}, and say why.\n";
+pub(crate) const CANDIDATE_TEMPLATE: &str = "Do {{ doc.goal }} for {{ doc.owner }}, and say why.\n";
 
 /// [`accepting_harness`] for a task prompt template target: the live task
 /// `plan` of the monitor behavior and a pack holding it as a sidecar.
@@ -710,15 +709,34 @@ pub(crate) async fn accepting_task_harness(job_id: &str) -> (Harness, JobRequest
     use crate::optimization::subject::tests::{write_task_fixture_pack, FIXTURE_TEMPLATE};
     let harness = Harness::new().await;
     harness
-        .install(vec![(
-            Collection::Task,
-            json!({
-                "task_id": "plan",
-                "agent_did": OWNER,
-                "behavior_id": "monitor",
-                "prompt_template": FIXTURE_TEMPLATE,
-            }),
-        )])
+        .install(vec![
+            (
+                Collection::Task,
+                json!({
+                    "task_id": "plan",
+                    "agent_did": OWNER,
+                    "behavior_id": "monitor",
+                    "prompt_template": FIXTURE_TEMPLATE,
+                }),
+            ),
+            (
+                Collection::EventSource,
+                json!({
+                    "event_source_id": "plan-source",
+                    "agent_did": OWNER,
+                    "source_collection": "PlanItem",
+                }),
+            ),
+            (
+                Collection::Trigger,
+                json!({
+                    "trigger_id": "plan-trigger",
+                    "agent_did": OWNER,
+                    "task_id": "plan",
+                    "source": {"kind": "event", "event_source_id": "plan-source"},
+                }),
+            ),
+        ])
         .await;
     let pack = harness.jobs_dir.parent().unwrap().join("task-subject");
     write_task_fixture_pack(&pack, false);

@@ -338,7 +338,7 @@ mod tests {
         }
     }
 
-    const TEMPLATE: &str = "Do {{ args.goal }} for {{ doc.owner }}, and say why.\n";
+    const TEMPLATE: &str = "Do {{ doc.goal }} for {{ doc.owner }}, and say why.\n";
 
     #[test]
     fn a_one_field_task_candidate_passes_in_a_sidecar_and_inline() {
@@ -389,7 +389,7 @@ mod tests {
     #[test]
     fn a_task_candidate_that_drops_a_template_variable_is_rejected() {
         let task = task_fixture(false);
-        let rejection = text_gate(&task.baseline, "Do {{ args.goal }}.\n", 32 * 1024).unwrap_err();
+        let rejection = text_gate(&task.baseline, "Do {{ doc.goal }}.\n", 32 * 1024).unwrap_err();
         assert_eq!(rejection.reason, "template_variables_dropped");
         assert!(
             rejection.detail.contains("doc.owner"),
@@ -397,7 +397,7 @@ mod tests {
             rejection.detail
         );
         assert!(
-            !rejection.detail.contains("args.goal"),
+            !rejection.detail.contains("doc.goal"),
             "{}",
             rejection.detail
         );
@@ -405,7 +405,7 @@ mod tests {
         text_gate(&task.baseline, TEMPLATE, 32 * 1024).unwrap();
         text_gate(
             &task.baseline,
-            "{{ doc.owner }}: {{ args.goal }} {{ args.extra }}\n",
+            "{{ doc.owner }}: {{ doc.goal }} {{ doc.extra }} at {{ ctx.now }}\n",
             32 * 1024,
         )
         .unwrap();
@@ -413,6 +413,28 @@ mod tests {
         // A context prompt is not a template: braces there are only text.
         let context = fixture(false);
         text_gate(&context.baseline, "Watch {{ nothing }}.\n", 32 * 1024).unwrap();
+    }
+
+    /// The owner's install-time checks run on the candidate: a `node.*` or
+    /// `ctx.*` variable the catalog lacks, or a root the task's trigger source
+    /// forbids, would be refused at promotion and must not spend a trial.
+    #[test]
+    fn a_task_candidate_the_owner_would_refuse_at_install_is_rejected() {
+        let task = task_fixture(false);
+        for (text, variable) in [
+            (
+                "Do {{ doc.goal }} for {{ doc.owner }} on {{ node.bogus }}.\n",
+                "node.bogus",
+            ),
+            (
+                "Do {{ doc.goal }} for {{ doc.owner }} as {{ args.mode }}.\n",
+                "args.mode",
+            ),
+        ] {
+            let rejection = text_gate(&task.baseline, text, 32 * 1024).unwrap_err();
+            assert_eq!(rejection.reason, "template_invalid", "{text}");
+            assert!(rejection.detail.contains(variable), "{}", rejection.detail);
+        }
     }
 
     #[test]
