@@ -801,7 +801,9 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     .iter()
                     .map(|(slot, profile)| format!("{slot}={profile}"))
                     .collect();
-                super::graph::install(
+                super::graph::install_with_access(
+                    &access,
+                    &owner,
                     PackInstallArgs {
                         package: dependency.manifest.name,
                         bindings: None,
