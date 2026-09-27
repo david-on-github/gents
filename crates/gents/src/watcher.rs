@@ -166,7 +166,8 @@ pub fn validate_agent_request(req: &AgentRequest) -> Result<()> {
             || req.input.queue.as_ref().is_some_and(|queue| {
                 matches!(
                     queue.source,
-                    gents_protocol::request_input::QueueSource::Steering
+                    gents_protocol::request_input::QueueSource::User
+                        | gents_protocol::request_input::QueueSource::Steering
                         | gents_protocol::request_input::QueueSource::Goal
                         | gents_protocol::request_input::QueueSource::BackgroundCompletion
                 )

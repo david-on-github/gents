@@ -1188,7 +1188,8 @@ fn request_only_control_link_is_corroborated(request: &TimelineRequestRow) -> bo
     request.input.queue.as_ref().is_some_and(|hints| {
         matches!(
             hints.source,
-            crate::lifecycle::queue::QueueSource::Steering
+            crate::lifecycle::queue::QueueSource::User
+                | crate::lifecycle::queue::QueueSource::Steering
                 | crate::lifecycle::queue::QueueSource::Goal
         )
     })
@@ -2311,16 +2312,20 @@ mod tests {
     }
 
     #[test]
-    fn request_only_steering_and_goal_links_are_included_without_tool_bridges() {
-        let control_request = |request_id: &str, source: &str| {
+    fn request_only_queued_links_are_included_without_tool_bridges() {
+        let control_request = |request_id: &str, source: Option<&str>| {
+            let input = source.map_or_else(
+                || serde_json::json!({}),
+                |source| serde_json::json!({"queue": {"source":source,"policy":"append","queued_after_request_id":"req-root"}}),
+            );
             TimelineRequestRow {
-            doc_id: Some(format!("doc-{request_id}")),
-            request_id: request_id.to_string(),
-            input: serde_json::from_value(serde_json::json!({"queue": {"source":source,"policy":"append","queued_after_request_id":"req-root"}})).unwrap(),
-            caused_by_parent_request_id: Some("req-root".to_string()),
-            caused_by_parent_request_doc_id: Some("doc-root".to_string()),
-            ..Default::default()
-        }
+                doc_id: Some(format!("doc-{request_id}")),
+                request_id: request_id.to_string(),
+                input: serde_json::from_value(input).unwrap(),
+                caused_by_parent_request_id: Some("req-root".to_string()),
+                caused_by_parent_request_doc_id: Some("doc-root".to_string()),
+                ..Default::default()
+            }
         };
         let timeline = build_run_timeline(RunTimelineRows {
             request: TimelineRequestRow {
@@ -2329,16 +2334,17 @@ mod tests {
                 ..Default::default()
             },
             requests: vec![
-                control_request("goal-child", "goal"),
-                control_request("steering-child", "steering"),
-                control_request("ordinary-child", "user"),
+                control_request("goal-child", Some("goal")),
+                control_request("steering-child", Some("steering")),
+                control_request("queued-user-child", Some("user")),
+                control_request("ordinary-child", None),
             ],
             ..Default::default()
         });
 
         assert_eq!(
             timeline.child_request_ids,
-            vec!["goal-child", "steering-child"]
+            vec!["goal-child", "queued-user-child", "steering-child"]
         );
         assert!(!timeline.events.iter().any(|event| {
             matches!(event, RunTimelineEvent::Request(request) if request.request_id == "ordinary-child")
