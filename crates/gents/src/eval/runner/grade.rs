@@ -292,6 +292,28 @@ mod tests {
             .all(|r| r.kind == OutcomeKind::SkippedPrerequisite && r.score_bp == Some(0)));
     }
 
+    /// The proposer reads feedback only; a failed stage runs no check, so its
+    /// synthetic row is where the failure is named.
+    #[test]
+    fn a_failed_stage_row_carries_feedback_naming_the_failure() {
+        let ev = ScriptedExecutor::failed_evidence("did:x", "s1", OutcomeKind::Deadline, None);
+        let rows = grade(
+            &case(&[(
+                "s1",
+                &[("captured_rows_count", json!({"name":"items","min":1}))],
+            )]),
+            &ev,
+            &CheckRegistry::builtin(),
+        );
+        assert_eq!(
+            (rows[0].kind, rows[0].score_bp, rows[0].tier),
+            (OutcomeKind::Deadline, Some(0), EvalTier::Acceptance)
+        );
+        assert_eq!(rows[0].raw["reason_code"], "stage_failed");
+        let feedback = rows[0].feedback.as_deref().unwrap_or_default();
+        assert!(feedback.contains("failure_kind deadline"), "{feedback}");
+    }
+
     #[test]
     fn a_provider_failure_without_a_reason_is_downgraded_to_unknown() {
         let ev = ScriptedExecutor::failed_evidence("did:x", "s1", OutcomeKind::Provider, None);
