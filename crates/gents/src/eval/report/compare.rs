@@ -798,11 +798,12 @@ mod tests {
             max_rounds: 2,
             ..PolicyV2::uncalibrated()
         };
-        assert!(super::is_placeholder(&policy));
-        assert!(!super::is_placeholder(&PolicyV2 {
+        assert!(policy.is_placeholder());
+        assert!(!PolicyV2 {
             min_pairs: 1,
             ..policy.clone()
-        }));
+        }
+        .is_placeholder());
         let (comparison, _) = against_the_optimizer(&SIX, 0, &policy);
         assert!(!comparison.policy.unwrap().calibrated);
     }
