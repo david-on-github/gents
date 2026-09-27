@@ -395,23 +395,26 @@ pub(super) async fn seed_canonical_tool_call(
     let spawned_by = spawned_by_tool_call_doc_id
         .map(|id| format!("\"{}\"", gents::graphql::escape_graphql_string(id)))
         .unwrap_or_else(|| "null".into());
-    let response = node.execute(&format!(r#"mutation {{ create_AgentToolCall(input: {{
+    let response = node
+        .execute(&format!(
+            r#"mutation {{ create_AgentToolCall(input: {{
         tool_call_key: "{}:{}", request_id: "{}", request_doc_id: "{}",
         agent_did: "{}", requester_did: {requester}, session_id: "{}",
         tool_call_id: "{}", tool_name: "{}", message_sequence: {sequence},
         lifecycle_state: "{}", spawned_by_tool_call_doc_id: {spawned_by}, started_at: "{}"
     }}) {{_docID}} }}"#,
-        gents::graphql::escape_graphql_string(request_doc_id),
-        gents::graphql::escape_graphql_string(tool_call_id),
-        gents::graphql::escape_graphql_string(&request.request_id),
-        gents::graphql::escape_graphql_string(request_doc_id),
-        gents::graphql::escape_graphql_string(agent_did),
-        gents::graphql::escape_graphql_string(session_id),
-        gents::graphql::escape_graphql_string(tool_call_id),
-        gents::graphql::escape_graphql_string(tool_name),
-        gents::graphql::escape_graphql_string(lifecycle_state),
-        gents::graphql::escape_graphql_string(&created_at),
-    )).await;
+            gents::graphql::escape_graphql_string(request_doc_id),
+            gents::graphql::escape_graphql_string(tool_call_id),
+            gents::graphql::escape_graphql_string(&request.request_id),
+            gents::graphql::escape_graphql_string(request_doc_id),
+            gents::graphql::escape_graphql_string(agent_did),
+            gents::graphql::escape_graphql_string(session_id),
+            gents::graphql::escape_graphql_string(tool_call_id),
+            gents::graphql::escape_graphql_string(tool_name),
+            gents::graphql::escape_graphql_string(lifecycle_state),
+            gents::graphql::escape_graphql_string(&created_at),
+        ))
+        .await;
     assert!(
         !response.has_errors(),
         "tool row seed: {:?}",
