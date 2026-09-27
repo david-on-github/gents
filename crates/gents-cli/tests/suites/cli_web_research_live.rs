@@ -25,6 +25,7 @@ async fn register_real_web_research_service(graphql: &str, agent_did: &str) -> R
         r#"mutation {{
             create_ToolServiceRegistry(input: {{
                 service_id: "{service_id}",
+                agent_did: "{agent_did}",
                 display_name: "Real Web Research MCP",
                 description: "Live SearXNG and Firecrawl evidence gateway for {agent_did}",
                 hostname: "{hostname}",
