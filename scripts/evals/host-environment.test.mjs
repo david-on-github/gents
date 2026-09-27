@@ -7,6 +7,7 @@ import {
   validateRuntimeRevision,
   resolveRuntimeImage,
   parseMemoryObservation,
+  formatDockerCommandFailure,
 } from "./host-environment.mjs";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -14,6 +15,36 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { capacity, control } from "./host-control.mjs";
+
+test("failed fixture commands retain bounded exit and output diagnostics", async () => {
+  const execute = promisify(execFile);
+  let failure;
+  try {
+    await execute(process.execPath, [
+      "-e",
+      "process.stderr.write('fixture stderr'); process.stdout.write('fixture stdout'); process.exit(23)",
+    ]);
+  } catch (error) {
+    failure = error;
+  }
+  assert.ok(failure, "fixture command must fail");
+  const diagnostic = formatDockerCommandFailure(failure).stack;
+  assert.match(diagnostic, /exit_code=23 signal=none/);
+  assert.match(diagnostic, /stderr: fixture stderr/);
+  assert.match(diagnostic, /stdout: fixture stdout/);
+  assert.doesNotMatch(diagnostic, /process\.exit\(23\)/);
+
+  const bounded = formatDockerCommandFailure({
+    code: 1,
+    signal: "SIGTERM",
+    stderr: `${"x".repeat(10_000)}last-stderr`,
+    stdout: `${"y".repeat(10_000)}last-stdout`,
+  }).message;
+  assert.match(bounded, /exit_code=1 signal=SIGTERM/);
+  assert.match(bounded, /bytes omitted\]x+last-stderr/);
+  assert.match(bounded, /bytes omitted\]y+last-stdout/);
+  assert.ok(bounded.length < 4300);
+});
 
 test(
   "candidate runtime forks an offline home without changing the original host",

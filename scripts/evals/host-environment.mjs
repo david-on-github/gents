@@ -11,6 +11,25 @@ import { randomUUID } from "node:crypto";
 const execute = promisify(execFile);
 const image = "gents-eval-host:v1";
 const context = fileURLToPath(new URL("./host-fixture/", import.meta.url));
+const dockerDiagnosticLimit = 2048;
+
+function boundedDockerOutput(value) {
+  const bytes = Buffer.from(value ?? "");
+  if (bytes.length === 0) return "(empty)";
+  if (bytes.length <= dockerDiagnosticLimit) return bytes.toString("utf8");
+  return `[${bytes.length - dockerDiagnosticLimit} bytes omitted]${bytes
+    .subarray(-dockerDiagnosticLimit)
+    .toString("utf8")}`;
+}
+
+// Only isolated fixture Docker commands use this formatter; it must not include argv.
+export function formatDockerCommandFailure(error) {
+  return new Error(
+    `Host fixture Docker command failed: exit_code=${error.code ?? "unknown"} signal=${error.signal ?? "none"}\n` +
+      `stderr: ${boundedDockerOutput(error.stderr)}\n` +
+      `stdout: ${boundedDockerOutput(error.stdout)}`,
+  );
+}
 
 export function hostMemoryPlan(memoryBytes, concurrency) {
   if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > 30)
@@ -141,11 +160,15 @@ export async function archiveContainerDirectory(id, source, directory) {
 }
 
 async function docker(args) {
-  const { stdout } = await execute("docker", args, {
-    timeout: 120_000,
-    maxBuffer: 1024 * 1024,
-  });
-  return stdout.trim();
+  try {
+    const { stdout } = await execute("docker", args, {
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024,
+    });
+    return stdout.trim();
+  } catch (error) {
+    throw formatDockerCommandFailure(error);
+  }
 }
 
 // Coordinator-only fixture control. Never register this interface as an agent tool.
