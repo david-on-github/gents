@@ -1113,6 +1113,65 @@ fn native_tagged_message(
     }
 }
 
+/// Each tool result adopts the identity the modeled assistant announces. Pair
+/// closure is keyed on that identity, so a result still naming the fixture's own
+/// call id would present the modeled round as orphaned.
+fn native_modeled_provider_view(
+    messages: &[Message],
+    rows: &[crate::lean_vocab_test::LeanClaudeTaggedReplayRow],
+) -> Vec<gents_loop::loop_stream::TaggedMessage> {
+    let mut modeled = rows.iter();
+    let mut announced: std::collections::VecDeque<ToolCall> = std::collections::VecDeque::new();
+    let mut view = Vec::new();
+    for message in messages {
+        match message {
+            Message::Assistant { .. } => {
+                let tagged =
+                    native_tagged_message(modeled.next().expect("one modeled row per assistant"));
+                if let Message::Assistant { content, .. } = &tagged.message {
+                    announced = content
+                        .iter()
+                        .filter_map(|item| match item {
+                            AssistantContent::ToolCall(call) => Some(call.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                }
+                view.push(tagged);
+            }
+            Message::User { content } => {
+                let content = content
+                    .iter()
+                    .map(|item| match item {
+                        UserContent::ToolResult(result) => {
+                            let call = announced
+                                .pop_front()
+                                .expect("a modeled tool call for every fixture tool result");
+                            UserContent::ToolResult(ToolResult {
+                                id: call.id,
+                                call_id: call.call_id,
+                                content: result.content.clone(),
+                            })
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+                view.push(gents_loop::loop_stream::TaggedMessage::unassociated(
+                    Message::User { content },
+                ));
+            }
+            other => view.push(gents_loop::loop_stream::TaggedMessage::unassociated(
+                other.clone(),
+            )),
+        }
+    }
+    assert!(
+        modeled.next().is_none(),
+        "every modeled row needs an assistant position"
+    );
+    view
+}
+
 #[test]
 fn generated_replay_shape_cases_bind_source_index_projection() {
     use crate::lean_vocab_test::lean_prompt_assembly_replay_shape_cases;
@@ -1274,37 +1333,23 @@ fn replay_checkpoint_outcome(
 #[test]
 fn generated_protected_replay_compaction_cases_bind_native_split_and_checkpoint() {
     use crate::lean_vocab_test::lean_protected_replay_compaction_cases;
-    use gents_loop::claude_messages_body::{prepare_replay_checkpoint, TaggedAssistantRow};
+    use gents_loop::claude_messages_body::prepare_replay_checkpoint;
     use gents_loop::compaction::history::protected_pair_safe_split_index;
 
     let cases = lean_protected_replay_compaction_cases();
     assert_eq!(cases.len(), 6);
     for case in cases {
-        let messages =
-            super::streaming_compaction::compaction_messages_for_count(case.message_count);
-        let assistant_count = messages
+        let roles = super::streaming_compaction::compaction_messages_for_count(case.message_count);
+        let assistant_count = roles
             .iter()
             .filter(|message| matches!(message, Message::Assistant { .. }))
             .count();
         assert_eq!(case.rows.len(), assistant_count, "{}", case.name);
 
-        // The modeled tagged rows are the assistant projection of this same
-        // fixture, so the provider view carries their sources in order.
-        let mut modeled = case.rows.iter();
-        let provider_view = messages
+        let provider_view = native_modeled_provider_view(&roles, &case.rows);
+        let messages = provider_view
             .iter()
-            .map(|message| match message {
-                Message::Assistant { .. } => {
-                    let row = modeled.next().expect("one modeled row per assistant");
-                    gents_loop::loop_stream::TaggedMessage {
-                        message: message.clone(),
-                        source: row.source.as_ref().map(native_replay_tag),
-                        physical_header: row.physical_header.clone(),
-                        block_indices: row.block_indices.clone(),
-                    }
-                }
-                _ => gents_loop::loop_stream::TaggedMessage::unassociated(message.clone()),
-            })
+            .map(|row| row.message.clone())
             .collect::<Vec<_>>();
         let required = case
             .required
@@ -1352,17 +1397,7 @@ fn generated_protected_replay_compaction_cases_bind_native_split_and_checkpoint(
                     .iter()
                     .filter(|message| matches!(message, Message::Assistant { .. }))
                     .count();
-                let rows = case
-                    .rows
-                    .iter()
-                    .map(|row| TaggedAssistantRow {
-                        source: row.source.as_ref().map(native_replay_tag),
-                        physical_header: row.physical_header.clone(),
-                        block_indices: row.block_indices.clone(),
-                        id: None,
-                        content: native_claude_replay_content(&row.blocks),
-                    })
-                    .collect();
+                let rows = case.rows.iter().map(native_tagged_replay_row).collect();
                 match prepare_replay_checkpoint(
                     case.required.iter().map(native_replay_tag).collect(),
                     rows,
