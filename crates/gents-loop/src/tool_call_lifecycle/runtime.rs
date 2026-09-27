@@ -12,7 +12,7 @@
 
 use std::future::Future;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::tool::{ToolDyn, ToolError, UnparseableArgsKind};
 use chrono::{DateTime, Utc};
@@ -461,7 +461,7 @@ pub fn current_tool_runtime_context() -> Option<CurrentToolRuntimeContext> {
         })
 }
 
-/// The deadline/cancellation/live-output triple every managed subprocess
+/// The deadline/cancellation/live-output bounds every managed subprocess
 /// spawn needs, derived once from the ambient runtime context so `bash` and
 /// `CliTool` (and any future managed-exec caller) share one computation
 /// instead of each re-deriving it: the request's deadline (if any) minned
@@ -471,6 +471,19 @@ pub struct ToolExecutionBounds {
     pub deadline_at: Option<DateTime<Utc>>,
     pub cancellation_token: CancellationToken,
     pub live_output: Option<LiveToolOutputWriter>,
+    /// Monotonic origin of the arming moment `deadline_at` is derived from,
+    /// sampled before that wall clock so a duration measured from here cannot
+    /// undershoot the armed timeout; a caller that sampled its own, later
+    /// instant would report a timed-out command as shorter than its own
+    /// timeout by the gap between the two samples.
+    ///
+    /// `deadline_at` stays wall clock because managed exec and the durable
+    /// record consume it there, so the deadline and this origin share no clock
+    /// source. Ordering the two reads bounds their offset at arming, not the
+    /// drift afterwards: a forward wall-clock step or a wall clock slewed fast
+    /// against the monotonic clock still expires the deadline early relative to
+    /// this origin, by the divergence accumulated over the timeout.
+    pub armed_at: Instant,
     /// The owning request's own deadline, unminned with the command
     /// timeout — callers that need to distinguish "the request's deadline
     /// elapsed" (the envelope's concern) from "the tool's local timeout
@@ -482,6 +495,7 @@ pub struct ToolExecutionBounds {
 pub fn tool_execution_bounds(command_timeout: Duration) -> ToolExecutionBounds {
     let runtime = current_tool_runtime_context();
     let request_deadline = runtime.as_ref().and_then(|runtime| runtime.deadline_at);
+    let armed_at = Instant::now();
     let command_deadline = Utc::now()
         + chrono::Duration::from_std(command_timeout)
             .unwrap_or_else(|_| chrono::Duration::days(36_500));
@@ -496,6 +510,7 @@ pub fn tool_execution_bounds(command_timeout: Duration) -> ToolExecutionBounds {
         deadline_at,
         cancellation_token,
         live_output,
+        armed_at,
         request_deadline_at: request_deadline,
     }
 }
@@ -910,6 +925,34 @@ mod tests {
         assert!(deadline <= after + chrono::Duration::seconds(30));
         assert!(!bounds.cancellation_token.is_cancelled());
         assert!(bounds.live_output.is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_execution_bounds_arms_the_measurement_no_later_than_the_deadline() {
+        let timeout = Duration::from_secs(30);
+        let bounds = tool_execution_bounds(timeout);
+        // Read the wall clock before the monotonic clock here, the opposite of
+        // the order inside the call: the wall-side span then ends no later than
+        // the monotonic-side span, so the monotonic span can only fall short of
+        // the wall span if the arming origin trails the deadline's origin. Both
+        // spans cover the same few microseconds, so clock rate divergence
+        // cannot decide the comparison, and the tolerance absorbs the host wall
+        // clock's granularity while staying far below the scheduling-sized gap
+        // that costs a timed-out command whole milliseconds.
+        let closing_wall = Utc::now();
+        let closing_mono = Instant::now();
+        let granularity = Duration::from_micros(100);
+        let deadline_origin = bounds.deadline_at.expect("deadline")
+            - chrono::Duration::from_std(timeout).expect("representable timeout");
+        let wall_span = (closing_wall - deadline_origin)
+            .to_std()
+            .expect("the deadline origin precedes the closing wall reading");
+        let mono_span = closing_mono - bounds.armed_at;
+        assert!(
+            wall_span <= mono_span + granularity,
+            "the arming origin trails the deadline origin by {:?}, so a command stopped at its deadline would report less than its own timeout",
+            wall_span - mono_span
+        );
     }
 
     #[tokio::test]

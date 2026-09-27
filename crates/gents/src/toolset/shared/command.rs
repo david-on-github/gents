@@ -438,7 +438,7 @@ pub(crate) async fn run_command(
     let bounds = tool_execution_bounds(timeout);
     let live_output = bounds.live_output.clone();
     let request_deadline = bounds.request_deadline_at;
-    let started = Instant::now();
+    let started = bounds.armed_at;
     let outcome = run_managed_exec(ManagedExecRequest {
         argv: std::iter::once(program)
             .chain(command_args)
