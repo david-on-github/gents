@@ -90,6 +90,59 @@ pub mod xai_oauth_refresh;
 /// Shared in-crate test utilities.
 #[cfg(test)]
 pub(crate) mod test_support {
+    /// Event targets a scoped subscriber in this crate's tests reads back.
+    ///
+    /// A target left out of this list stays subject to the interest cache
+    /// described on [`enable_scoped_event_capture`], so a test that captures a
+    /// new target must add it here. Enabling every callsite instead would leave
+    /// the whole suite dispatching the runtime's per-operation logging, which
+    /// costs it an order of magnitude.
+    const CAPTURED_EVENT_TARGETS: &[&str] = &[
+        crate::config_client::write_telemetry::WRITE_ATTEMPT_EVENT_TARGET,
+        crate::runtime_status::RECONCILE_PHASE_EVENT_TARGET,
+    ];
+
+    /// Keeps the captured targets enabled so a scoped subscriber observes them.
+    ///
+    /// `tracing` caches one interest per callsite for the whole process,
+    /// computed from the default subscriber of whichever thread reaches that
+    /// callsite first. Tests share the process and run concurrently, so a
+    /// callsite first reached by a thread with no subscriber is cached as
+    /// disabled, and a scoped subscriber installed before that first reach then
+    /// receives nothing. A global default that admits the captured targets
+    /// keeps their callsites enabled; each scoped subscriber still sees only the
+    /// events raised while it is the default, and this one discards the rest.
+    /// Call this before installing a scoped subscriber a test reads from.
+    pub(crate) fn enable_scoped_event_capture() {
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            tracing::subscriber::set_global_default(CapturedTargetSubscriber)
+                .expect("no other global tracing default in this test binary");
+        });
+    }
+
+    struct CapturedTargetSubscriber;
+
+    impl tracing::Subscriber for CapturedTargetSubscriber {
+        fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
+            CAPTURED_EVENT_TARGETS.contains(&metadata.target())
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+
+        fn event(&self, _event: &tracing::Event<'_>) {}
+
+        fn enter(&self, _span: &tracing::Id) {}
+
+        fn exit(&self, _span: &tracing::Id) {}
+    }
+
     /// Scripted providers have no HTTP transport. Persist their actual request
     /// through the capture owner before returning synthetic provider output,
     /// rather than bypassing the owned loop's armed-capture requirement.

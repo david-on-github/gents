@@ -139,6 +139,12 @@ async fn fetch_runtime_status_if_present(
     })
 }
 
+/// Waits for a phase the runtime comes to rest in.
+///
+/// Each iteration is a database round trip, which can take longer than the
+/// watcher holds a phase it is only passing through, so a phase such as
+/// `debouncing` is unobservable here however long the deadline is. Assert those
+/// through the reconcile-phase event stream instead.
 pub(super) async fn wait_for_runtime_reconcile_phase(
     node: &defra_node::EmbeddedNode,
     agent_did: &str,
