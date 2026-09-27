@@ -121,7 +121,11 @@ mod tests {
     fn an_example_that_invents_a_check_is_caught() {
         let example = worked_example(AUTHOR_PROMPT);
         let registry = CheckRegistry::builtin();
-        let first = registry.names()[0];
+        let first = registry
+            .names()
+            .into_iter()
+            .find(|name| example.contains(name))
+            .expect("the example names a registered check");
         let invented = example.replace(first, "invented_check");
         let violations = example_violations(&invented, &registry);
         assert!(
