@@ -4,7 +4,7 @@ namespace Recovery
 
 open ToolExecution
 
-/-- A `create_session`/`send_message` row ends on the terminal of the request
+/-- An `agent_new`/`agent_message` row ends on the terminal of the request
     it caused, or fails closed when it cannot name that request. No parent
     terminal is a cause, because the started session is an ordinary agent's
     session, not a subordinate; and the row carries no deadline, because

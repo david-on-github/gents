@@ -5,7 +5,7 @@ import Mathlib.Data.Finset.Card
 Local request-worker capacity, distinct from backend inference admission.
 
 A worker is held only by running work. No request parks a worker while it
-waits on another session: `create_session`/`send_message` never block their
+waits on another session: `agent_new`/`agent_message` never block their
 caller (`ToolCallContext.Transition.foreground` excludes them), and the started session's
 result arrives as a completion notification that wakes the caller later. The
 request/lease/tool owners remain authoritative; capacity operations cannot

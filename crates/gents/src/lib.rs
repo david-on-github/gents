@@ -299,6 +299,7 @@ pub mod schema;
 pub mod self_config;
 pub mod session;
 pub(crate) mod session_message;
+pub mod session_origin;
 pub mod skills;
 pub mod streaming;
 pub mod template;

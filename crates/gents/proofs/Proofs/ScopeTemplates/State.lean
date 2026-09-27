@@ -131,7 +131,7 @@ def machineCollections : List String :=
   conversationCollections ++
     ["MailboxItem", "SessionHydrationRequest", "AgentDirectoryEntry"]
 
-/-- A remote `create_session` is an ordinary Peer AgentRequest authored on the
+/-- A remote `agent_new` is an ordinary Peer AgentRequest authored on the
 caller node with `agent_did = target` and `requester_did = caller`. The
 coordinator leg (caller → host) therefore carries only that request, selected
 by the target's `agent_did`; no tool-call row is needed to name the host. -/

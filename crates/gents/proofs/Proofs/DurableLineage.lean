@@ -10,7 +10,7 @@ the ingest boundary for request lineage:
 
 * logical and physical halves of an edge are either both present or absent;
 * a request is a root, a session-message request (the full calling request
-  and tool call edge written by `create_session`/`send_message`), or an
+  and tool call edge written by `agent_new`/`agent_message`), or an
   explicitly marked request-only control continuation;
 * malformed replicated rows are rejected individually, without preventing a
   later well-formed row from being considered; and
@@ -131,7 +131,7 @@ theorem goal_continuation_is_admissible (depth : Nat) :
     depthCoherent, goalContinuation]
 
 /-- The request-only continuations. Two are caused by another session's
-action and carry that cause's hop: a `send_message` steering a busy session
+action and carry that cause's hop: an `agent_message` steering a busy session
 (the calling request) and a session-message completion wake (the caused
 request that finished). The rest continue their own session's work. -/
 inductive ContinuationKind where
@@ -171,5 +171,35 @@ theorem own_session_continuations_copy (own : Nat) :
       ContinuationKind.goal.hop own = own ∧
       ContinuationKind.nativeCompletionWake.hop own = own := by
   simp [ContinuationKind.hop, ContinuationKind.cause, CausalHop.nextHop]
+
+/-- Interrupting another agent's session — `agent_message` with
+    `interrupt`, or `agent_interrupt` — is allowed in 0.20 only to the session
+    that started it: the target session's origin (its first public request's
+    `caused_by_parent_*`, read through `gents::session_origin`) names the
+    caller's session. `targetOriginCause` is that origin's calling session,
+    `none` for a root session. General interrupt permissions are deferred to a
+    later release. -/
+def interruptAllowed (callerSession targetSession : String)
+    (targetOriginCause : Option String) : Bool :=
+  targetSession != callerSession && targetOriginCause == some callerSession
+
+/-- A caller that did not start the target session is refused. -/
+theorem non_spawner_interrupt_refused (callerSession targetSession : String)
+    (targetOriginCause : Option String)
+    (h : targetOriginCause ≠ some callerSession) :
+    interruptAllowed callerSession targetSession targetOriginCause = false := by
+  simp [interruptAllowed, h]
+
+/-- The session that started another session may interrupt it. -/
+theorem spawner_may_interrupt (callerSession targetSession : String)
+    (h : targetSession ≠ callerSession) :
+    interruptAllowed callerSession targetSession (some callerSession) = true := by
+  simp [interruptAllowed, h]
+
+/-- A root session, which no session started, cannot be interrupted by an
+    agent. -/
+theorem root_session_not_interruptible (callerSession targetSession : String) :
+    interruptAllowed callerSession targetSession none = false := by
+  simp [interruptAllowed]
 
 end DurableLineage

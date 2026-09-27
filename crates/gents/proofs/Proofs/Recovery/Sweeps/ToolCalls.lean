@@ -6,7 +6,7 @@ namespace Recovery
 
 open ToolExecution
 
-/-- A `create_session`/`send_message` row: no host process backs it; its
+/-- An `agent_new`/`agent_message` row: no host process backs it; its
 terminal is the caused request's terminal output. -/
 def isSessionMessageCall (call : ToolCallContext) : Prop :=
   call.operation = .sessionMessage

@@ -64,7 +64,7 @@ def toolCallModeSamples : List ToolExecution.ToolCallContext :=
 
 /-- Named transition rows for the ToolCall machine. Mode flips are
 state-preserving on `ToolCallState`, so the pair-based `legalTransitions` list
-cannot express them. A `create_session`/`send_message` row closes through the
+cannot express them. An `agent_new`/`agent_message` row closes through the
 same `complete`/`fail` edges as every other row; there are no bridge edges. -/
 def toolCallNamedTransitions : List NamedTransition :=
   [ { name := "complete"

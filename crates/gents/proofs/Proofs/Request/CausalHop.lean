@@ -19,7 +19,7 @@ completion wakes) copy their predecessor. Every chain of agent-to-agent causes
 therefore climbs by at least one per send, so a loop between agents — two
 sessions messaging each other, or one agent waking itself through a session
 it started — is refused after a bounded number of sends, with no cascade,
-fence or tree walk. A `send_message` to the caller's own current session is
+fence or tree walk. An `agent_message` to the caller's own current session is
 refused outright: it would be a same-session steering continuation with no
 hop increase.
 -/
@@ -34,7 +34,7 @@ inductive Cause where
   /-- A user, trigger or schedule root. -/
   | root
   /-- Caused by another session's action at hop `causeHop`: a
-  `create_session`/`send_message` request or steering continuation (the cause
+  `agent_new`/`agent_message` request or steering continuation (the cause
   is the calling request), or a session-message completion wake (the cause is
   the caused request that finished). -/
   | crossSession (causeHop : Nat)
@@ -55,7 +55,7 @@ def nextHop : Cause → Nat → Nat
 replication of the predecessor, or cooperation of the sender is needed. -/
 def admitHop (maxHop hop : Nat) : Bool := decide (hop ≤ maxHop)
 
-/-- `send_message` never addresses the caller's own current session. -/
+/-- `agent_message` never addresses the caller's own current session. -/
 def sendTargetAllowed (callerSession targetSession : String) : Bool :=
   callerSession != targetSession
 
@@ -164,9 +164,9 @@ theorem ping_pong_halts_at_max :
 /-- What a session-message completion does when its wake would exceed the
 woken principal's bound: the notification is still appended, so the result is
 never lost, and only the wake is refused with a visible reason; the session
-waits for its user. An admitted wake coalesces only with pending wakes at its
-own hop, so a completion caused by another session never rides a lower-hop
-wake. -/
+waits for its user. The next wake claim consumes every pending notification
+of the session, so the one pending wake carries the highest hop they require:
+a lower pending wake is superseded by one at the higher hop, never joined. -/
 inductive CompletionWake where
   | notifyAndWake
   | notifyOnlyHopBound

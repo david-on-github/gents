@@ -15,8 +15,8 @@ garbage collector, migration conversion or data wipe is introduced here.
 `Execution/WorkerCapacity` composes local worker capacity with
 `SessionComposition.Trace`: acquire respects the bound, release frees it, and
 the application trace cannot spend or manufacture a ticket. No request parks a
-worker while waiting on another session, because `create_session` and
-`send_message` never block their caller. The model does not prove fair
+worker while waiting on another session, because `agent_new` and
+`agent_message` never block their caller. The model does not prove fair
 scheduling or bounded progress.
 
 Branch `feat/1571-canonical-transcript-lean` targets
@@ -72,7 +72,7 @@ Usage belongs to `InferenceCall` and the existing aggregate-budget owner:
 retry proofs preserve accounted usage but do not prove provider reporting or
 exactly-once ingestion of those reports.
 
-Sessions started by `create_session`/`send_message` carry no copied arguments
+Sessions started by `agent_new`/`agent_message` carry no copied arguments
 or delegated workspace: the started request is materialized by its own owner
 under the target's behavior, and its `caused_by_parent_*` lineage is provenance
 only, never a hydration root.
@@ -645,7 +645,7 @@ Provider-input assembly for Claude: the body's `system[]` order and tools omissi
 | `Proofs/P2PBackpressure.lean` | Obligation model (no conformance bridge): success-ack backing, pending-DAG capacity, strict push-slot release on timeout |
 | `Proofs/PeerRegistryDiscovery/DirectoryProjection.lean` | Agent directory projection (machine index v1): source-owned membership, foreign-row preservation, idempotent convergence, write-free settled fixpoint, retraction soundness. Fence: `tests/conformance/directory_projection.rs`. |
 | `Proofs/PeerRegistryDiscovery/RootAdmission.lean` | Canonical component-and-anchor containment plus operator-local `WorkspaceRoot` publication: no-document ceiling default, explicit-root narrowing, and all-disabled revocation without fallback. Filesystem resolution and execution-boundary re-resolution are Rust refinement obligations; the model makes no TOCTOU claim. Fence: generated `root_admission_cases` consumed by `tests/conformance/persona_request.rs`. |
-| `Proofs/Background/` | Background tool rows (native processes and `create_session`/`send_message` rows): admission budget, terminal CAS and notification delivery, completion continuation (independent of Goal presence), canonical output paging, process control and the foreground interrupt scope, which never cascades |
+| `Proofs/Background/` | Background tool rows (native processes and `agent_new`/`agent_message` rows): admission budget, terminal CAS and notification delivery, completion continuation (independent of Goal presence), canonical output paging, process control and the foreground interrupt scope, which never cascades |
 | `Proofs/Recovery/` | Recovery sweep contracts (`RecoverySweep`), the registered sweep registry, per-collection sweeps including session-message rows and the startup restart-disposition classifier (#937), and the startup sweep ordering contract |
 | `Proofs/Session/` | Session queue model: queue sources (`background_completion`, steering), coalesce policy/keys, automated wake-up drain |
 | `Proofs/Compaction/` | Transcript reduction (#993) plus durable request-local provider reduction (#1127): canonical provider-view sanitation, pair-safe split correspondence, immutable create-and-compare identity, persist-before-activate, and exact crash restoration. Fences: `tests/conformance/streaming_compaction.rs` and `tests/conformance/durable_reduction.rs`. |
@@ -1171,7 +1171,7 @@ scheduling conformance tests (`serial_gate_is_scoped_by_agent_did`,
 ### Background tool rows
 
 Background work is one row vocabulary (`await_mode`) with two tool kinds. A
-native process has a host owner; a `create_session`/`send_message` row has none,
+native process has a host owner; an `agent_new`/`agent_message` row has none,
 and its terminal is the caused request's terminal output. The runtime encodes
 no hierarchy between agents: nothing cascades from a caller to a session it
 started, and there is no foreground wait on another session.

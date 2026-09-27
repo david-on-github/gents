@@ -18,7 +18,7 @@ executable model of that classifier:
   completion notification and coalesced background-completion wake; the
   reason distinguishes restart interruption and deadline expiry, never the
   parent's state;
-* **session-message row** (`create_session`/`send_message`) → **leave running**
+* **session-message row** (`agent_new`/`agent_message`) → **leave running**
   under every parent observation and stored deadline. No host process backs
   it and it carries no deadline: the started session is an ordinary agent's
   session, and its caused request's terminal later terminalizes the row
@@ -89,7 +89,7 @@ end ParentObservation
 
 /-- One running `AgentToolCall` row as the startup classifier sees it. The
     sweep scope is `lifecycle_state = "running"`, so the state itself is not
-    a field. `sessionMessage` is the `create_session`/`send_message` tool kind. -/
+    a field. `sessionMessage` is the `agent_new`/`agent_message` tool kind. -/
 structure RestartRow where
   awaitMode : AwaitMode
   sessionMessage : Bool

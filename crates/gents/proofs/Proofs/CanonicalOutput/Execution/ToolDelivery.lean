@@ -92,7 +92,7 @@ theorem tool_write_preserves_composed_control {before after : World}
 inductive CloseAuthority where
   /-- A confirmed native lifecycle result. A cancellation request by itself is
   not this evidence; `.cancelDuringRun` means the host stop was confirmed. For
-  a `create_session`/`send_message` row the action is projected from the
+  an `agent_new`/`agent_message` row the action is projected from the
   caused request's durable terminal output by the completion observer. -/
   | native (action : ToolExecution.ToolCallContext.Action)
   /-- A terminal lifecycle already committed by the cancellation/recovery

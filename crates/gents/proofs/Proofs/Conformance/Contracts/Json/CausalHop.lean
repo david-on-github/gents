@@ -1,4 +1,5 @@
 import Proofs.Request.CausalHop
+import Proofs.DurableLineage
 import Proofs.Conformance.Contracts.Json.Helpers
 
 /-! Executable causal-hop rows. Every expectation evaluates `CausalHop.nextHop`
@@ -98,10 +99,43 @@ def chainCaseJson (c : ChainCase) : String :=
     ++ ",\"expected_admitted\":"
       ++ jsonArray (hops.map (toString ∘ CausalHop.admitHop c.maxRequestHop)) ++ "}"
 
+/-- One agent-interrupt permission question (`DurableLineage.interruptAllowed`). -/
+structure InterruptCase where
+  name : String
+  callerSession : String
+  targetSession : String
+  targetOriginCause : Option String
+
+def interruptCases : List InterruptCase :=
+  [ ⟨"spawner_may_interrupt", "caller", "started", some "caller"⟩
+  , ⟨"another_session_started_it", "caller", "started", some "other"⟩
+  , ⟨"target_started_the_caller", "caller", "parent", none⟩
+  , ⟨"messaged_root_session", "caller", "root", none⟩
+  , ⟨"own_session", "caller", "caller", some "caller"⟩ ]
+
+def interruptCaseJson (c : InterruptCase) : String :=
+  "{\"name\":" ++ jsonString c.name
+    ++ ",\"caller_session\":" ++ jsonString c.callerSession
+    ++ ",\"target_session\":" ++ jsonString c.targetSession
+    ++ ",\"target_origin_cause\":"
+      ++ (match c.targetOriginCause with | some s => jsonString s | none => "null")
+    ++ ",\"expected_allowed\":"
+      ++ toString (DurableLineage.interruptAllowed c.callerSession c.targetSession
+        c.targetOriginCause) ++ "}"
+
+/-- The interrupt fixture covers both verdicts. -/
+theorem interrupt_cases_cover_both_verdicts :
+    interruptCases.any (fun c => DurableLineage.interruptAllowed c.callerSession
+      c.targetSession c.targetOriginCause) = true ∧
+    interruptCases.any (fun c => !DurableLineage.interruptAllowed c.callerSession
+      c.targetSession c.targetOriginCause) = true := by
+  native_decide
+
 def contractJson : String :=
   "{\"default_max_request_hop\":" ++ toString CausalHop.defaultMaxRequestHop
     ++ ",\"step_cases\":" ++ jsonArray (stepCases.map stepCaseJson)
-    ++ ",\"chain_cases\":" ++ jsonArray (chainCases.map chainCaseJson) ++ "}"
+    ++ ",\"chain_cases\":" ++ jsonArray (chainCases.map chainCaseJson)
+    ++ ",\"interrupt_cases\":" ++ jsonArray (interruptCases.map interruptCaseJson) ++ "}"
 
 /-- The fixture exercises every cause and both admission outcomes. -/
 theorem step_cases_cover_causes_and_outcomes :

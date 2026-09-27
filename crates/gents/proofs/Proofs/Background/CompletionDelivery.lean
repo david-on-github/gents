@@ -9,7 +9,7 @@ with the existing session wake owner, including its canonical Goal exclusion.
 namespace Background.CompletionDelivery
 
 /-!
-A background row (a native process or a `create_session`/`send_message`
+A background row (a native process or an `agent_new`/`agent_message`
 row, whose terminal is its caused request's terminal output) is terminalized
 with a compare-and-set. A concurrent
 recovery or cancellation may win that CAS first. The losing executor must not

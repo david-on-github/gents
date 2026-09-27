@@ -20,7 +20,7 @@ composes those seams into the model-facing background-completion contract:
 5. when that wake is claimed, the continuation still carries the transcript
    containing both rows in the correct order.
 
-Native background processes and `create_session`/`send_message` rows converge
+Native background processes and `agent_new`/`agent_message` rows converge
 on a terminal `ToolCallState`, so they share this continuation model.
 -/
 

@@ -51,7 +51,7 @@ def backgroundReceiptMessage : MessageEnvelope :=
     blocks := [.toolResult 600 "native-call" none
       [.text ⟨⟨702, 0⟩, .composed [.literal [91], .range 0 1, .literal [93]]⟩]] }
 
-/-- A `create_session`/`send_message` row. Its closing authority is the
+/-- An `agent_new`/`agent_message` row. Its closing authority is the
 native action projected from the caused request's terminal output. -/
 def sessionMessageAdmission : ToolAdmission :=
   ⟨600, { foregroundToolContext with operation := .sessionMessage }⟩

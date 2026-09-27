@@ -9,8 +9,8 @@ background work or another session:
 
 * a pending intent was never dispatched and is cancelled;
 * a running foreground call is cancelled with cause `interrupted`;
-* running background work (native processes and `create_session` /
-  `send_message` rows) and terminal rows are untouched.
+* running background work (native processes and `agent_new` /
+  `agent_message` rows) and terminal rows are untouched.
 -/
 
 namespace Background
@@ -33,7 +33,7 @@ end Disposition
 
 /-- The per-row interrupt disposition. There is no cascade: interrupting a
 session stops only that thread's foreground work. A session it started with
-`create_session` is an ordinary agent's session, addressed directly, and keeps
+`agent_new` is an ordinary agent's session, addressed directly, and keeps
 running; only `cancel_process` or the UI kill on that one background row
 interrupts that one request. Jack's 0.20 decision: the runtime encodes no
 hierarchy between agents, so no parent fate is a cancel signal for another

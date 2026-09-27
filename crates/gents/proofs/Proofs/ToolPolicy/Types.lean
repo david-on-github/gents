@@ -59,8 +59,9 @@ structure Surface where
   memory : Bool
   sessionHistory : Bool
   contextBudget : Bool
-  /-- `create_session`/`send_message` over the `subagentTargets` allowlist
-  (`SubagentTools.enabled`). -/
+  /-- The agents tool group (`SubagentTools.enabled`): `agent_new` over the
+  `subagentTargets` allowlist, `agent_message`, `agent_interrupt` and
+  `agent_list`. -/
   sessionMessages : Bool
   skills : Bool
   lsp : Bool

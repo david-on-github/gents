@@ -19,7 +19,7 @@ inductive AgentRequestAdmissionKind where
   | localSelf
   | runtimeInternal
   /-- A request authored by another principal's agent: a cross-principal
-  `create_session`/`send_message`. The requester signs, the target differs
+  `agent_new`/`agent_message`. The requester signs, the target differs
   from the requester, and the target's `PeerAdmissionAuthority` document ACP
   authorizes the requester DID. Premise: DefraDB authenticates the requester
   DID and enforces that ACP; the runtime adds no bridge row, claim fence,

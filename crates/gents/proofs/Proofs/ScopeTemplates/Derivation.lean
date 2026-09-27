@@ -354,7 +354,7 @@ theorem subagentHost_filters_requester_lineage (peerDid localDid : Did) :
   simp [scopeFilter, subagentHostTemplate, subagentHostRules]
 
 /-- The caller → host leg carries exactly the Peer AgentRequest a remote
-`create_session` authors on the caller, selected by the target's `agent_did`. -/
+`agent_new` authors on the caller, selected by the target's `agent_did`. -/
 theorem subagentCoordinator_carries_exactly_target_request (peerDid localDid : Did) :
     subagentCoordinatorTemplate.collections = {"AgentRequest"} ∧
     scopeFilter subagentCoordinatorTemplate.scope [] peerDid localDid

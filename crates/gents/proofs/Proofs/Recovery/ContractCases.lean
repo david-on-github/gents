@@ -73,7 +73,7 @@ def orphanedBackgroundRecoveryCase
   }
 
 /-- Session-message recovery witness: the recovering owner observed `cause`
-    for a running `create_session`/`send_message` row. The exported post-state
+    for a running `agent_new`/`agent_message` row. The exported post-state
     is computed by `sessionMessageRecover`, and the observed cause is exported
     so the native fixture builds that exact premise. -/
 def sessionMessageRecoveryCase

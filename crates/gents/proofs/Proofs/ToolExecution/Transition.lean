@@ -53,7 +53,7 @@ inductive Transition : ToolCallContext → ToolCallContext → Prop where
       : Transition pre post
 
   /-- Reacquiring a background row in the foreground is a wait. A
-  `create_session`/`send_message` row never becomes foreground: its result
+  `agent_new`/`agent_message` row never becomes foreground: its result
   arrives only as a completion notification. Jack's 0.20 decision removes the
   foreground wait on another session because it couples the caller's turn to
   another agent's lifetime, which is the privileged parent position the runtime
