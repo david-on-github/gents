@@ -651,6 +651,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
 
     // Lane 3: a managed session. Each step is its own request so the test
     // observes the started session still blocked at every step.
+    assert_not_started(&managed_child_release);
     let managed_agent_session_id = "session-live-managed-background-agent";
     let managed_create_request_id = "req-live-managed-background-agent-create";
     create_runtime_request(
@@ -1842,6 +1843,7 @@ reply exactly BLOCKED_JOB_DONE. Do not call any other tool."
     .await?;
     let agent = boot_loaded_document_agent(&db, loaded).await;
 
+    assert_not_started(&release);
     let spawner_session = "session-live-interrupt-spawner";
     let start_request_id = "req-live-interrupt-start";
     create_runtime_request(
@@ -2715,6 +2717,16 @@ async fn wait_for_caused_request(
 /// also writes the marker here.
 fn started_path(release: &Path) -> std::path::PathBuf {
     release.with_extension("started")
+}
+
+/// The sentinel lives in this run's own temporary workspace; it must not
+/// exist before the blocked command is launched, so only that shell can
+/// create it.
+fn assert_not_started(release: &Path) {
+    assert!(
+        !started_path(release).exists(),
+        "started sentinel exists before its command was launched"
+    );
 }
 
 async fn wait_for_started_marker(release: &Path, marker: &str, timeout: Duration) {
