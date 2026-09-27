@@ -675,6 +675,52 @@ pub(super) async fn seed_caused_running_request(
         .as_deref()
         .map(|did| format!(r#"requester_did: "{}","#, escape_graphql_string(did)))
         .unwrap_or_default();
+    // The session is opened by an agent_new call on the parent request.
+    let parent = graphql_query(
+        graphql,
+        &format!(
+            r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 2) {{ session_id }} }}"#,
+            escape_graphql_string(&parent_doc_id),
+        ),
+    )
+    .await?;
+    let parent_session_id = parent
+        .pointer("/data/AgentRequest/0/session_id")
+        .and_then(Value::as_str)
+        .context("parent request binding missing session")?
+        .to_string();
+    // The call is lineage evidence only; no assistant header is projected.
+    let sequence = 1_000;
+    let tool_call_id = format!("codex-agent-new-{}", Uuid::new_v4().simple());
+    let tool = graphql_query(
+        graphql,
+        &format!(
+            r#"mutation {{
+                create_AgentToolCall(input: {{
+                    tool_call_key: "{session}:{tool_call_id}",
+                    request_id: "{parent_request_id}",
+                    request_doc_id: "{parent_doc_id}",
+                    session_id: "{session}",
+                    agent_did: "{agent_did}",
+                    {requester_field}
+                    message_sequence: {sequence},
+                    tool_name: "agent_new",
+                    tool_call_id: "{tool_call_id}",
+                    status: "called",
+                    lifecycle_state: "running",
+                    started_at: "{now}",
+                    await_mode: "background"
+                }}) {{ _docID }}
+            }}"#,
+            session = escape_graphql_string(&parent_session_id),
+            parent_request_id = escape_graphql_string(parent_request_id),
+            parent_doc_id = escape_graphql_string(&parent_doc_id),
+            agent_did = escape_graphql_string(&agent_did),
+            now = escape_graphql_string(&chrono::Utc::now().to_rfc3339()),
+        ),
+    )
+    .await?;
+    let tool_call_doc_id = doc_id_from_create(&tool, "add_AgentToolCall")?;
     let mutation = format!(
         r#"mutation {{
             create_AgentRequest(input: {{
@@ -686,7 +732,8 @@ pub(super) async fn seed_caused_running_request(
                 session_id: "{session_id}",
                 caused_by_parent_request_id: "{parent_request_id}",
                 caused_by_parent_request_doc_id: "{parent_doc_id}",
-                caused_by_parent_tool_call_id: "codex-caused-interrupt",
+                caused_by_parent_tool_call_id: "{tool_call_id}",
+                caused_by_parent_tool_call_doc_id: "{tool_call_doc_id}",
                 content: "caused work",
                 lifecycle_state: "processing",
                 backend_id: "",
@@ -703,6 +750,8 @@ pub(super) async fn seed_caused_running_request(
         session_id = escape_graphql_string(&session_id),
         parent_request_id = escape_graphql_string(parent_request_id),
         parent_doc_id = escape_graphql_string(&parent_doc_id),
+        tool_call_id = escape_graphql_string(&tool_call_id),
+        tool_call_doc_id = escape_graphql_string(&tool_call_doc_id),
         now = escape_graphql_string(&chrono::Utc::now().to_rfc3339()),
     );
     graphql_query(graphql, &mutation).await?;

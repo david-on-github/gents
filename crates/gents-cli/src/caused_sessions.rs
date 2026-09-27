@@ -11,7 +11,7 @@ use gents::defra_node::EmbeddedNode;
 use gents::graphql::escape_graphql_string;
 use gents::session::{load_latest_request_in_txn, public_request_filter, session_scope_filter};
 pub(crate) use gents::session_origin::SessionScope;
-use gents::session_origin::{lineage, load_session, started_by, SessionLink};
+use gents::session_origin::{caused_requests, lineage, load_session, started_by, SessionLink};
 use gents_protocol::row::AgentRequestRow;
 use serde_json::Value;
 
@@ -143,32 +143,60 @@ pub(crate) async fn load_caused_session(
     view(node, started, parent.scope, root, depth).await
 }
 
-/// The public request that started a linked session: the earliest one in
-/// that session carrying the link's causing request.
+/// The public request that started a linked session. The causing request's
+/// `agent_new` calls name the requests they caused
+/// (`session_origin::caused_requests`); the one of those in the linked
+/// session is the opening request. A later message into the same session
+/// from the same request is caused by an `agent_message` call instead.
 pub(crate) async fn starting_request(
     access: &ConfigAccess,
     link: &SessionLink,
 ) -> Result<Option<AgentRequestRow>> {
+    let calls = access
+        .execute(&format!(
+            r#"{{AgentToolCall(filter: {{ request_doc_id: {{ _eq: "{}" }}, tool_name: {{ _eq: "{}" }} }}) {{ _docID }}}}"#,
+            escape_graphql_string(&link.cause_request_doc_id),
+            escape_graphql_string(gents::toolset::AGENT_NEW_TOOL_NAME),
+        ))
+        .await?;
+    let call_doc_ids = calls
+        .pointer("/data/AgentToolCall")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("_docID")?.as_str())
+        .collect::<Vec<_>>();
+    let caused = caused_requests(access, call_doc_ids.iter().copied()).await?;
+    if caused.is_empty() {
+        return Ok(None);
+    }
     let filter = public_request_filter(&format!(
-        r#"{}, caused_by_parent_request_doc_id: {{ _eq: "{}" }}"#,
+        "{}, request_id: {{ _in: [{}] }}",
         session_scope_filter(
             &link.scope.agent_did,
             &link.scope.session_id,
             link.scope.requester_did.as_deref(),
         ),
-        escape_graphql_string(&link.cause_request_doc_id)
+        caused
+            .values()
+            .map(|id| format!("\"{}\"", escape_graphql_string(id)))
+            .collect::<Vec<_>>()
+            .join(",")
     ));
     let mut rows = request_rows(
         access,
         &format!("{{AgentRequest(filter: {{{filter}}}) {{{REQUEST_FIELDS}}}}}"),
     )
     .await?;
-    rows.sort_by(|left, right| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left.request_id.cmp(&right.request_id))
+    rows.retain(|row| {
+        row.caused_by_parent_request_doc_id.as_deref() == Some(&link.cause_request_doc_id)
     });
-    Ok(rows.into_iter().next())
+    anyhow::ensure!(
+        rows.len() <= 1,
+        "session {} has more than one opening request",
+        link.scope.session_id
+    );
+    Ok(rows.pop())
 }
 
 /// The sessions this exact request started, with each one's starting request.

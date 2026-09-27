@@ -4286,6 +4286,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opening_request_is_the_agent_new_call_not_a_same_second_message() {
+        let (_tempdir, node, agent_did) = test_node().await;
+        let behavior = gents::default_behavior_id_for_agent(&agent_did);
+        let response = node.execute(&format!(r#"mutation {{create_AgentRequest(input: {{
+            request_id:"open-root", purpose:"normal", session_id:"session-1", agent_did:"{agent_did}", requester_did:"{agent_did}", behavior_id:"{behavior}", lifecycle_state:"processing"
+        }}) {{_docID}} }}"#)).await;
+        ensure_no_errors(&response, "seed opening parent").unwrap();
+        let parent_doc = gents_protocol::graphql::extract_mutation_doc_id(
+            &json!({"data":response.data}),
+            "AgentRequest",
+        )
+        .unwrap();
+        let parent: gents_protocol::row::AgentRequestRow = serde_json::from_value(json!({"_docID":parent_doc,"request_id":"open-root","agent_did":agent_did,"requester_did":agent_did,"behavior_id":behavior,"session_id":"session-1"})).unwrap();
+        let open_call =
+            seed_tool_call(&node, &parent, "call-open", "agent_new", "running", "").await;
+        let message_call = seed_tool_call(
+            &node,
+            &parent,
+            "call-message",
+            "agent_message",
+            "running",
+            "",
+        )
+        .await;
+        crate::commands::grok_shim::test_fixtures::seed_started_session(
+            &node,
+            &agent_did,
+            "opened",
+            Some(&agent_did),
+            &behavior,
+            &parent_doc,
+        )
+        .await;
+        // Same second, and the follow-up's request id orders first.
+        for (request_id, call_id, call_doc) in [
+            ("zz-opening", "call-open", &open_call),
+            ("aa-message", "call-message", &message_call),
+        ] {
+            let response = node.execute(&format!(r#"mutation {{create_AgentRequest(input: {{
+                request_id:"{request_id}", purpose:"normal", session_id:"opened", agent_did:"{agent_did}", requester_did:"{agent_did}", behavior_id:"{behavior}", lifecycle_state:"processing", created_at:"2026-09-27T00:00:00Z",
+                caused_by_parent_request_id:"open-root", caused_by_parent_request_doc_id:"{parent_doc}", caused_by_parent_tool_call_id:"{call_id}", caused_by_parent_tool_call_doc_id:"{call_doc}"
+            }}) {{_docID}} }}"#)).await;
+            ensure_no_errors(&response, "seed opened session request").unwrap();
+        }
+        let started = crate::caused_sessions::load_direct_caused_sessions(&node, &parent)
+            .await
+            .unwrap();
+        assert_eq!(started.len(), 1);
+        assert_eq!(started[0].scope.session_id, "opened");
+        assert_eq!(started[0].first.request_id, "zz-opening");
+        assert_eq!(
+            started[0]
+                .first
+                .caused_by_parent_tool_call_doc_id
+                .as_deref(),
+            Some(open_call.as_str())
+        );
+    }
+
+    #[tokio::test]
     async fn child_pane_streams_followups_before_finish_and_excludes_foreign_requester() {
         let (_tempdir, node, agent_did) = test_node().await;
         let manager = TurnManager::new(node.clone(), test_config(String::new(), &agent_did));
@@ -4801,11 +4861,12 @@ mod tests {
             let request_id = wait_for_pending_request(&node_for_seed, &principal_for_seed).await;
             // Stage 1: an in-flight tool call and a running child request —
             // observed by at least one non-terminal poll.
+            // The call that opens the child session is its agent_new call.
             let tool_doc = seed_tool_call(
                 &node_for_seed,
                 &request_id,
                 "call-1",
-                "read_file",
+                "agent_new",
                 "running",
                 "",
             )
