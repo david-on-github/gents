@@ -22,8 +22,9 @@ inductive BackgroundState where
 /-- The waited process's result is not yet in the session: it is still
 running, or it ended and its completion notification and wake are still
 owed. Continuing the Goal now would run without that result, and the wake
-would then run as well; recovery redrives an owed delivery, so the deferral
-ends, and the Goal continues from the wake. -/
+would then run as well. This predicate only decides local admission. That the
+deferral ends rests on a premise not proved here: recovery redrives an owed
+delivery, and the Goal continues from that wake. -/
 def BackgroundState.resultOwed : BackgroundState → Bool
   | .running | .completionPending => true
   | _ => false
