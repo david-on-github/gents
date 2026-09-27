@@ -38,7 +38,7 @@ use crate::support::live_inference::{bind_target, boot_live_agent, live_target};
 use crate::support::{first_optional_row, test_p2p_db_with_admission, TestDb, TestP2pAdmission};
 
 const CONCURRENT_WAVES: usize = 4;
-const REPLICATED: &[&str] = &["AgentRequest", "AgentResponse", "AgentMessage"];
+const REPLICATED: &[&str] = &["AgentRequest", "AgentOutputSegment", "AgentMessage"];
 
 fn live_enabled() -> bool {
     std::env::var("GENTS_LIVE_P2P_ADMISSION").as_deref() == Ok("1")

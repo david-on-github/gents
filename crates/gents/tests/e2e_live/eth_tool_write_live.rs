@@ -500,7 +500,7 @@ async fn create_write_eth_tool(
 }
 
 async fn wait_for_tool_result(
-    node: &EmbeddedNode,
+    node: &Arc<EmbeddedNode>,
     request_id: &str,
     tool_name: &str,
     timeout: Duration,
@@ -509,7 +509,7 @@ async fn wait_for_tool_result(
     loop {
         let rows = fetch_tool_calls(node, request_id).await;
         if let Some(row) = rows.into_iter().find(|row| {
-            row.tool_name.as_deref() == Some(tool_name)
+            row.tool_name == tool_name
                 && row
                     .result
                     .as_deref()
@@ -697,13 +697,8 @@ async fn eth_tool_live_model_writes_on_local_chain() {
         terminal, "completed",
         "native transfer request must complete; last={terminal}"
     );
-    let transfer_result = wait_for_tool_result(
-        db.node.as_ref(),
-        transfer_id,
-        "send_eth",
-        Duration::from_secs(30),
-    )
-    .await;
+    let transfer_result =
+        wait_for_tool_result(&db.node, transfer_id, "send_eth", Duration::from_secs(30)).await;
     assert!(
         transfer_result.contains("confirmed_success") && transfer_result.contains("0x"),
         "send_eth must confirm on chain, result={transfer_result}"
@@ -740,7 +735,7 @@ async fn eth_tool_live_model_writes_on_local_chain() {
         "counter increment request must complete; last={terminal}"
     );
     let increment_result = wait_for_tool_result(
-        db.node.as_ref(),
+        &db.node,
         increment_id,
         "counter_increment",
         Duration::from_secs(30),

@@ -4434,11 +4434,7 @@ mod tests {
             .iter()
             .any(|call| call.result_contains.iter().any(|n| n == "FileToolMode")));
         for (file, symbol, result_needle) in [
-            (
-                "crates/gents/src/toolset/shared/command.rs",
-                "meet",
-                "Disabled",
-            ),
+            ("crates/gents-loop/src/tool_policy.rs", "meet", "Disabled"),
             (
                 "crates/gents/src/toolset/lsp/auth.rs",
                 "lsp_advertised",

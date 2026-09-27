@@ -110,6 +110,7 @@ pub async fn create_runtime_request(
         session_id,
         None,
         "interactive",
+        None,
         content,
     )
     .await
@@ -132,6 +133,7 @@ pub async fn create_runtime_request_with_valid_until(
         session_id,
         Some(valid_until),
         "interactive",
+        None,
         content,
     )
     .await
@@ -154,6 +156,30 @@ pub async fn create_runtime_request_with_execution_origin(
         session_id,
         None,
         execution_origin,
+        None,
+        content,
+    )
+    .await
+}
+
+pub async fn create_runtime_request_caused_by_source(
+    node: &EmbeddedNode,
+    agent_did: &str,
+    behavior_id: &str,
+    request_id: &str,
+    session_id: &str,
+    caused_by_source_doc_id: &str,
+    content: &str,
+) -> String {
+    create_runtime_request_inner(
+        node,
+        agent_did,
+        behavior_id,
+        request_id,
+        session_id,
+        None,
+        "interactive",
+        Some(caused_by_source_doc_id),
         content,
     )
     .await
@@ -167,6 +193,7 @@ async fn create_runtime_request_inner(
     session_id: &str,
     valid_until: Option<&str>,
     execution_origin: &str,
+    caused_by_source_doc_id: Option<&str>,
     content: &str,
 ) -> String {
     ensure_generated_session(node, agent_did, behavior_id, session_id).await;
@@ -186,6 +213,7 @@ async fn create_runtime_request_inner(
     );
     create.max_retries = i64::from(gents::lifecycle::DEFAULT_REQUEST_MAX_RETRIES);
     create.valid_until = valid_until.map(str::to_string);
+    create.caused_by_source_doc_id = caused_by_source_doc_id.map(str::to_string);
     gents::sign_agent_request_create_as_registered_target(&mut create)
         .await
         .expect("sign local-self runtime test request");

@@ -441,6 +441,16 @@ pub struct ToolCallSnapshot {
 impl ToolCallSnapshot {
     /// Read the exact canonical invocation reply, never a retired row payload.
     pub async fn load_result(&self, node: std::sync::Arc<EmbeddedNode>) -> String {
+        self.try_load_result(node)
+            .await
+            .expect("snapshot tool must have an exact canonical invocation reply")
+    }
+
+    /// The canonical invocation reply, or an error while it is undelivered.
+    pub async fn try_load_result(
+        &self,
+        node: std::sync::Arc<EmbeddedNode>,
+    ) -> anyhow::Result<String> {
         let message = gents::tool_call_lifecycle::load_tool_call_result(
             &gents::config_client::ConfigAccess::Local(node),
             &self.doc_id,
@@ -448,22 +458,74 @@ impl ToolCallSnapshot {
             &self.session_id,
             self.requester_did.as_deref(),
         )
-        .await
-        .expect("snapshot tool must have an exact canonical invocation reply");
+        .await?;
         gents::tool_call_lifecycle::render_tool_result(&message)
-            .expect("render canonical snapshot tool reply")
     }
+
+    /// The canonical JSON arguments accepted for this physical call.
+    pub async fn try_load_arguments(
+        &self,
+        node: std::sync::Arc<EmbeddedNode>,
+    ) -> anyhow::Result<String> {
+        gents::tool_call_lifecycle::load_tool_call_arguments(
+            &gents::config_client::ConfigAccess::Local(node),
+            &self.doc_id,
+            &self.agent_did,
+            &self.session_id,
+            self.requester_did.as_deref(),
+        )
+        .await
+    }
+}
+
+/// One tool call with its payloads reconstructed through the tool-call owner.
+/// `arguments`/`result` are `None` until the owner can reconstruct them.
+#[derive(Debug, Clone)]
+pub struct ToolCallPayload {
+    pub tool_name: String,
+    pub status: Option<String>,
+    pub lifecycle_state: Option<String>,
+    pub arguments: Option<String>,
+    pub result: Option<String>,
+}
+
+pub async fn fetch_tool_call_payloads_for_request(
+    node: &std::sync::Arc<EmbeddedNode>,
+    request_id: &str,
+) -> Vec<ToolCallPayload> {
+    let filter = format!(
+        r#"request_id: {{ _eq: "{}" }}"#,
+        escape_graphql_string(request_id)
+    );
+    let mut payloads = Vec::new();
+    for call in fetch_tool_call_snapshots(node, &filter).await {
+        payloads.push(ToolCallPayload {
+            arguments: call.try_load_arguments(node.clone()).await.ok(),
+            result: call.try_load_result(node.clone()).await.ok(),
+            tool_name: call.tool_name,
+            status: call.status,
+            lifecycle_state: call.lifecycle_state,
+        });
+    }
+    payloads
 }
 
 pub async fn fetch_tool_call_snapshots_for_session(
     node: &EmbeddedNode,
     session_id: &str,
 ) -> Vec<ToolCallSnapshot> {
-    let session_id = escape_graphql_string(session_id);
+    let filter = format!(
+        r#"session_id: {{ _eq: "{}" }}"#,
+        escape_graphql_string(session_id)
+    );
+    fetch_tool_call_snapshots(node, &filter).await
+}
+
+async fn fetch_tool_call_snapshots(node: &EmbeddedNode, filter: &str) -> Vec<ToolCallSnapshot> {
     let query = format!(
         r#"{{
             AgentToolCall(
-                filter: {{ session_id: {{ _eq: "{session_id}" }} }},
+                filter: {{ {filter} }},
                 order: {{ message_sequence: ASC }}
             ) {{
                 _docID agent_did requester_did tool_call_key request_id session_id message_sequence tool_name tool_call_id child_request_id

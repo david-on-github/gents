@@ -16,7 +16,7 @@
     "job_id_field": "job_id",
     "prompt_field": "prompt"
   },
-  "default_prompt": "This workspace is the Gents repository. Use the lsp tool and do not guess types or comments.\n\n1. Call lsp action=hover on crates/gents/src/toolset/shared/command.rs with symbol=meet. Quote the documented rank order.\n2. Call lsp action=hover on crates/gents/src/toolset/lsp/auth.rs with symbol=lsp_advertised. Quote the signature.\n\nQuote the hover text. Reply DONE.",
+  "default_prompt": "This workspace is the Gents repository. Use the lsp tool and do not guess types or comments.\n\n1. Call lsp action=symbols on crates/gents-loop/src/tool_policy.rs and read the line of the meet method inside impl CommandNetworkMode. Call lsp action=hover on that file with symbol=meet and that line. Quote the documented rank order.\n2. Call lsp action=hover on crates/gents/src/toolset/lsp/auth.rs with symbol=lsp_advertised. Quote the signature.\n\nQuote the hover text. Reply DONE.",
   "expect": {
     "trigger_ids": ["lsp-hover"],
     "tool_calls": [
@@ -24,7 +24,7 @@
         "trigger_id": "lsp-hover",
         "tool_name": "lsp",
         "action": "hover",
-        "file": "crates/gents/src/toolset/shared/command.rs",
+        "file": "crates/gents-loop/src/tool_policy.rs",
         "symbol": "meet",
         "result_contains": ["Disabled", "Inherit"]
       },

@@ -10,8 +10,8 @@ the line first. Do not guess types or comments.
 
 Required sequence:
 
-1. `action=symbols` on `crates/gents/src/toolset/shared/command.rs`.
-   Read the 1-indexed line for `meet`.
+1. `action=symbols` on `crates/gents-loop/src/tool_policy.rs`.
+   Read the 1-indexed line for the `meet` inside `impl CommandNetworkMode`.
 2. `action=hover` on that file with `symbol=meet` and that line.
    Quote the documented rank order.
 3. `action=symbols` on `crates/gents/src/toolset/lsp/auth.rs`.

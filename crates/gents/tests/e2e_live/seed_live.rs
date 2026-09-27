@@ -30,7 +30,7 @@ use crate::support::interrupt::create_runtime_request;
 use crate::support::live_inference::{
     bind_target, boot_live_agent, live_target, wait_for_assistant_answer, wait_for_request_terminal,
 };
-use crate::support::{create_agent_message, test_db};
+use crate::support::{create_agent_message_in_scope, test_db};
 
 const PROFILE_SEED: i64 = 424_242;
 
@@ -89,7 +89,7 @@ async fn live_seeds_reach_the_provider() {
         "Use the retained context and reply with the single lowercase word: compacted",
     )
     .await;
-    seed_compaction_history(db.node.as_ref(), compaction_session_id).await;
+    seed_compaction_history(db.node.as_ref(), &agent_did, compaction_session_id).await;
 
     let agent = boot_live_agent(&db, identity)
         .await
@@ -248,12 +248,16 @@ async fn configure_seed_and_compaction(
     .expect("configure live seed and compaction");
 }
 
-async fn seed_compaction_history(node: &EmbeddedNode, session_id: &str) {
+/// History is scoped to the signed LocalSelf request's agent and requester;
+/// rows under any other scope are invisible to its transcript.
+async fn seed_compaction_history(node: &EmbeddedNode, agent_did: &str, session_id: &str) {
     let timestamp = chrono::Utc::now().to_rfc3339();
     for turn in 0..10 {
         let sequence = turn * 2 + 1;
-        create_agent_message(
+        create_agent_message_in_scope(
             node,
+            agent_did,
+            Some(agent_did),
             session_id,
             sequence,
             "user",
@@ -261,8 +265,10 @@ async fn seed_compaction_history(node: &EmbeddedNode, session_id: &str) {
             &timestamp,
         )
         .await;
-        create_agent_message(
+        create_agent_message_in_scope(
             node,
+            agent_did,
+            Some(agent_did),
             session_id,
             sequence + 1,
             "assistant",

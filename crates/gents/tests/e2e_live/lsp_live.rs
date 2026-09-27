@@ -21,9 +21,7 @@ use std::time::Duration;
 
 use gents::defra_node::EmbeddedNode;
 use gents::document_config::{FileTools, HostTools, IntegrationTools, LspTools, Tools};
-use gents::graphql::escape_graphql_string;
 use gents::{DocumentRuntimeOptions, FileToolMode, Gents, ToolCeiling};
-use serde::Deserialize;
 
 use gents::AgentIdentity;
 
@@ -32,9 +30,10 @@ use crate::support::interrupt::{create_runtime_request, wait_for_runtime_ready, 
 use crate::support::live_inference::{
     bind_target, live_target, wait_for_assistant_answer, wait_for_request_terminal,
 };
+use crate::support::snapshots::fetch_tool_call_payloads_for_request;
 use crate::support::test_db;
 
-const MEET_FILE: &str = "crates/gents/src/toolset/shared/command.rs";
+const MEET_FILE: &str = "crates/gents-loop/src/tool_policy.rs";
 const ADVERTISED_FILE: &str = "crates/gents/src/toolset/lsp/auth.rs";
 
 fn live_lsp_enabled() -> bool {
@@ -124,7 +123,7 @@ impl Drop for CurrentDirGuard {
     }
 }
 
-#[derive(Clone, Deserialize, Debug)]
+#[derive(Clone, Debug)]
 struct ToolCallRow {
     tool_name: Option<String>,
     status: Option<String>,
@@ -133,36 +132,18 @@ struct ToolCallRow {
     result: Option<String>,
 }
 
-async fn fetch_tool_calls(node: &EmbeddedNode, request_id: &str) -> Vec<ToolCallRow> {
-    let escaped = escape_graphql_string(request_id);
-    let query = format!(
-        r#"{{
-            AgentToolCall(filter: {{ request_id: {{ _eq: "{escaped}" }} }}) {{
-                tool_name
-                status
-                lifecycle_state
-                args
-                result
-            }}
-        }}"#
-    );
-    let resp = node.execute(&query).await;
-    assert!(
-        !resp.has_errors(),
-        "tool call query failed: {:?}",
-        resp.errors
-    );
-    resp.data
-        .as_ref()
-        .and_then(|data| data.get("AgentToolCall"))
-        .and_then(|rows| rows.as_array())
-        .map(|rows| {
-            rows.iter()
-                .cloned()
-                .map(|value| serde_json::from_value(value).expect("decode AgentToolCall row"))
-                .collect()
+async fn fetch_tool_calls(node: &Arc<EmbeddedNode>, request_id: &str) -> Vec<ToolCallRow> {
+    fetch_tool_call_payloads_for_request(node, request_id)
+        .await
+        .into_iter()
+        .map(|call| ToolCallRow {
+            tool_name: Some(call.tool_name),
+            status: call.status,
+            lifecycle_state: call.lifecycle_state,
+            args: call.arguments,
+            result: call.result,
         })
-        .unwrap_or_default()
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -256,7 +237,7 @@ async fn lsp_live_model_uses_rust_analyzer() {
         terminal, "completed",
         "unscripted live lsp run must complete"
     );
-    let unscripted_calls = fetch_tool_calls(db.node.as_ref(), unscripted_request_id).await;
+    let unscripted_calls = fetch_tool_calls(&db.node, unscripted_request_id).await;
     let useful_semantic = unscripted_calls.iter().any(|call| {
         call.tool_name.as_deref() == Some("lsp")
             && call_completed(call)
@@ -306,7 +287,7 @@ async fn lsp_live_model_uses_rust_analyzer() {
         wait_for_request_terminal(db.node.as_ref(), request_id, Duration::from_secs(600)).await;
     assert_eq!(terminal, "completed", "live lsp run must complete");
 
-    let calls = fetch_tool_calls(db.node.as_ref(), request_id).await;
+    let calls = fetch_tool_calls(&db.node, request_id).await;
     let lsp_calls: Vec<_> = calls
         .iter()
         .filter(|call| call.tool_name.as_deref() == Some("lsp"))
@@ -316,23 +297,16 @@ async fn lsp_live_model_uses_rust_analyzer() {
         "model must persist at least one lsp tool call; calls: {:?}",
         summarize_calls(calls.iter())
     );
-    let meet_hover = find_hover(&lsp_calls, MEET_FILE, "meet");
-    let meet_text = meet_hover.result.as_deref().unwrap_or("");
-    assert!(
-        !result_is_error(meet_hover)
-            && meet_text.contains("Disabled")
-            && meet_text.contains("Inherit"),
-        "hover on CommandNetworkMode::meet must quote Disabled < Inherit; got:\n{meet_text}\nall: {:?}",
-        summarize_calls(lsp_calls.iter().copied())
-    );
+    let meet_hover = find_hover(&lsp_calls, MEET_FILE, "meet", &["Disabled", "Inherit"]);
+    assert!(!result_is_error(meet_hover));
 
-    let advertised_hover = find_hover(&lsp_calls, ADVERTISED_FILE, "lsp_advertised");
-    let advertised_text = advertised_hover.result.as_deref().unwrap_or("");
-    assert!(
-        !result_is_error(advertised_hover) && advertised_text.contains("FileToolMode"),
-        "hover on lsp_advertised must include FileToolMode; got:\n{advertised_text}\nall: {:?}",
-        summarize_calls(lsp_calls.iter().copied())
+    let advertised_hover = find_hover(
+        &lsp_calls,
+        ADVERTISED_FILE,
+        "lsp_advertised",
+        &["FileToolMode"],
     );
+    assert!(!result_is_error(advertised_hover));
 
     let answer =
         wait_for_assistant_answer(db.node.as_ref(), request_id, Duration::from_secs(10)).await;
@@ -345,7 +319,14 @@ async fn lsp_live_model_uses_rust_analyzer() {
     booted.shutdown().await;
 }
 
-fn find_hover<'a>(calls: &'a [&ToolCallRow], file: &str, symbol: &str) -> &'a ToolCallRow {
+/// `tool_policy.rs` defines several `meet` methods, so a hover on the right
+/// file and symbol is selected by the facts it must quote.
+fn find_hover<'a>(
+    calls: &'a [&ToolCallRow],
+    file: &str,
+    symbol: &str,
+    required: &[&str],
+) -> &'a ToolCallRow {
     calls
         .iter()
         .copied()
@@ -356,10 +337,14 @@ fn find_hover<'a>(calls: &'a [&ToolCallRow], file: &str, symbol: &str) -> &'a To
                     .is_some_and(|path| gents::toolset::result_path_matches(file, &path))
                 && symbol_of(call).as_deref() == Some(symbol)
                 && !result_is_error(call)
+                && call
+                    .result
+                    .as_deref()
+                    .is_some_and(|text| required.iter().all(|needle| text.contains(needle)))
         })
         .unwrap_or_else(|| {
             panic!(
-                "need a completed hover on {file} symbol={symbol}; lsp calls: {:?}",
+                "need a completed hover on {file} symbol={symbol} quoting {required:?}; lsp calls: {:?}",
                 summarize_calls(calls.iter().copied())
             )
         })
@@ -409,7 +394,7 @@ fn hover_selector_skips_completed_but_semantically_empty_retries() {
     };
     let calls = [&empty, &useful];
     assert!(std::ptr::eq(
-        find_hover(&calls, "src/lib.rs", "target"),
+        find_hover(&calls, "src/lib.rs", "target", &[]),
         &useful
     ));
 }
