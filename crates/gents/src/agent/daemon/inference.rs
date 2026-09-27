@@ -1222,13 +1222,17 @@ mod tests {
         .await
         .unwrap();
 
-        let triggers = node
-            .execute(&format!(
-                r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{}" }}, trigger_id: {{ _eq: "hook-trigger" }} }}, limit: 1) {{ _docID }} }}"#,
+        let triggers = crate::graphql::graphql_with_transaction_retry(
+            node,
+            &format!(
+                r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{}" }}, trigger_id: {{ _eq: "{}" }} }}, limit: 1) {{ _docID }} }}"#,
                 crate::graphql::escape_graphql_string(owner),
-            ))
-            .await;
-        assert!(!triggers.has_errors(), "{:?}", triggers.errors);
+                crate::graphql::escape_graphql_string("hook-trigger"),
+            ),
+            "test.load_task_hook_trigger",
+        )
+        .await
+        .unwrap();
         let trigger_doc_id: serde_json::Value = crate::graphql::first_row(&triggers, "Trigger")
             .unwrap()
             .expect("installed Trigger");
@@ -1259,18 +1263,14 @@ mod tests {
         crate::sign_agent_request_create(behavior.principal_identity().as_ref(), &mut create)
             .await
             .unwrap();
-        let response = node.execute(&create.graphql_mutation().unwrap()).await;
-        assert!(
-            !response.has_errors(),
-            "create task-hook AgentRequest failed: {:?}",
-            response.errors
-        );
-        let doc_id = crate::graphql::single_mutation_document(&response, "create_AgentRequest")
-            .unwrap()
-            .expect("created request receipt")["_docID"]
-            .as_str()
-            .expect("created request physical ID")
-            .to_owned();
+        let response = ConfigAccess::write_local(
+            node,
+            "test.create_task_hook_request",
+            &create.graphql_mutation().unwrap(),
+        )
+        .await
+        .expect("create task-hook AgentRequest");
+        let doc_id = crate::graphql::created_doc_id(&response, "AgentRequest").unwrap();
         crate::request_admission::load_request_for_admission_test(node, &doc_id)
             .await
             .unwrap()
@@ -1329,13 +1329,16 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         daemon.process_request(request, shutdown_rx).await;
 
-        let terminal = node
-            .execute(&format!(
+        let terminal = crate::graphql::graphql_with_transaction_retry(
+            node.as_ref(),
+            &format!(
                 r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ lifecycle_state failure_reason }} }}"#,
                 crate::graphql::escape_graphql_string(&doc_id),
-            ))
-            .await;
-        assert!(!terminal.has_errors(), "{:?}", terminal.errors);
+            ),
+            "test.load_task_hook_terminal",
+        )
+        .await
+        .unwrap();
         let row: serde_json::Value = crate::graphql::first_row(&terminal, "AgentRequest")
             .unwrap()
             .expect("terminal AgentRequest row");
