@@ -941,6 +941,29 @@ fn generated_mode_sanitize_cases_bind_composed_provider_view() {
         assert_eq!(rows_of(&once), case.expected, "{}", case.name);
         let twice = sanitize_history_for_provider(profile, once);
         assert_eq!(rows_of(&twice), case.expected_twice, "{}", case.name);
+
+        // The tagged owners carry replay association on the native-order view
+        // and apply the provider order once, at the send boundary.
+        let tagged = messages_of(&case.input)
+            .into_iter()
+            .map(gents_loop::loop_stream::TaggedMessage::unassociated)
+            .collect::<Vec<_>>();
+        let association =
+            gents_loop::loop_stream::sanitize_tagged_history(tagged).expect("association view");
+        let native = association
+            .iter()
+            .map(|row| row.message.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(rows_of(&native), case.association, "{}", case.name);
+        assert_eq!(
+            rows_of(&gents_loop::loop_stream::provider_messages(
+                profile,
+                &association
+            )),
+            case.expected,
+            "{}",
+            case.name
+        );
     }
 }
 

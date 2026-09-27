@@ -257,6 +257,9 @@ structure PromptAssemblyModeSanitizeCase where
   input : List PromptAssemblyRowCase
   expected : List PromptAssemblyRowCase
   expectedTwice : List PromptAssemblyRowCase
+  /-- The native-order view replay association is carried on; `expected` is
+  its provider ordering (`Provider.sanitizeForProviderGlobalFor_orders_association_view`). -/
+  association : List PromptAssemblyRowCase
   deriving Repr
 
 private def modeSanitizeCase (name : String)
@@ -270,7 +273,9 @@ private def modeSanitizeCase (name : String)
   , input := rowCases rows
   , expected := rowCases once
   , expectedTwice := rowCases
-      (PromptAssembly.Provider.sanitizeForProviderGlobalFor mode once) }
+      (PromptAssembly.Provider.sanitizeForProviderGlobalFor mode once)
+  , association := rowCases
+      (PromptAssembly.Provider.sanitizeForProviderGlobalFor .nativePreserved rows) }
 
 private def interleavedCoherentRows : List ProviderRow :=
   [ mkRow 0 .assistant (.assistantToolCalls [1].toFinset)
@@ -278,10 +283,22 @@ private def interleavedCoherentRows : List ProviderRow :=
   , toolResult 1 1
   , userText 2 6 ]
 
+/-- A grouped-wire turn persisted in native emission order: reasoning, then
+text, then a call, closed by its result and followed by a later wake. -/
+private def reasoningTextCallRows : List ProviderRow :=
+  [ userText 0 3
+  , mkRow 1 .assistant (.assistantToolCalls [1].toFinset)
+      [Item.other 5, Item.text 4, Item.call 1]
+  , toolResult 2 1
+  , userText 3 6 ]
+
 def promptAssemblyModeSanitizeCases : List PromptAssemblyModeSanitizeCase :=
   [ modeSanitizeCase "paired-interleaved-grouped" .grouped interleavedCoherentRows
   , modeSanitizeCase "paired-interleaved-native-preserved" .nativePreserved
-      interleavedCoherentRows ]
+      interleavedCoherentRows
+  , modeSanitizeCase "reasoning-text-call-grouped" .grouped reasoningTextCallRows
+  , modeSanitizeCase "reasoning-text-call-native-preserved" .nativePreserved
+      reasoningTextCallRows ]
 
 private def witnessTranscripts : List (String × List ProviderRow) :=
   [ ("empty", [])

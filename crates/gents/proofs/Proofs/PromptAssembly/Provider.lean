@@ -528,6 +528,25 @@ def sanitizeForProviderGlobal (rows : List ProviderRow) : List ProviderRow :=
 @[simp] theorem sanitizeForProviderGlobalFor_grouped (rows : List ProviderRow) :
     sanitizeForProviderGlobalFor .grouped rows = sanitizeForProviderGlobal rows := rfl
 
+/-- The native-order view is the association view: replay tags and persisted
+block indices are carried on it, and the provider order stage runs once, at the
+send boundary. Grouping an associated row earlier would align its block sidecar
+with a permuted order that `ClaudeMap.replayRowIndicesValid` rejects, so every
+later projection pass over it would fail (`ClaudeMap.selectReplayBlocks_valid`). -/
+theorem sanitizeForProviderGlobalFor_orders_association_view
+    (mode : Content.OrderMode) (rows : List ProviderRow) :
+    sanitizeForProviderGlobalFor mode rows =
+      normalizeOrderFor mode (sanitizeForProviderGlobalFor .nativePreserved rows) := by
+  simp [sanitizeForProviderGlobalFor]
+
+/-- Row-level accounting (compaction counts, pairing, replay prefix bounds) is
+the same in the association view and in the provider-ordered view. -/
+theorem project_sanitizeForProviderGlobalFor_association
+    (mode : Content.OrderMode) (rows : List ProviderRow) :
+    project (sanitizeForProviderGlobalFor mode rows) =
+      project (sanitizeForProviderGlobalFor .nativePreserved rows) := by
+  rw [sanitizeForProviderGlobalFor_orders_association_view, project_normalizeOrderFor]
+
 section FilterReduction
 
 variable (pr : ProviderRow) (rest : List ProviderRow)

@@ -213,7 +213,7 @@ mod replay_error_tests {
     }
 
     #[test]
-    fn non_claude_reordering_carries_emitted_order_without_dropping_ordinary_text() {
+    fn association_rejects_a_provider_order_applied_before_it() {
         let original = TaggedMessage {
             message: Message::Assistant {
                 id: None,
@@ -241,12 +241,96 @@ mod replay_error_tests {
                 message: original.message.clone(),
             }],
         );
-        let projected = tagged_from_sourced(&[original], sourced).expect("indexed projection");
-        assert_eq!(projected[0].block_indices, [4, 2]);
-        let Message::Assistant { content, .. } = &projected[0].message else {
-            panic!("assistant projection")
-        };
-        assert!(matches!(&content[0], AssistantContent::Text(text) if text.text == "visible"));
+        assert!(
+            tagged_from_sourced(&[original], sourced).is_err(),
+            "a grouped reorder cannot be carried on persisted block identity"
+        );
+    }
+
+    /// A grouped-order wire persists GLM's native `[reasoning, text, call]`
+    /// turn; the daemon projects it once and the loop entry and repair
+    /// sanitize that projection again. Every pass must associate by the
+    /// persisted block identity and be a fixpoint of the first.
+    #[test]
+    fn grouped_projection_of_a_projected_row_keeps_persisted_block_identity() {
+        use gents_protocol::message::{ToolCall, ToolFunction, ToolResult, ToolResultContent};
+        let tag = provider_tag(0);
+        let persisted = vec![
+            TaggedMessage::unassociated(Message::user("start")),
+            TaggedMessage {
+                message: Message::Assistant {
+                    id: None,
+                    content: vec![
+                        AssistantContent::Reasoning(gents_protocol::message::Reasoning::new(
+                            "thinking",
+                        )),
+                        AssistantContent::Text(Text {
+                            text: "visible".into(),
+                        }),
+                        AssistantContent::ToolCall(ToolCall {
+                            id: "call-1".into(),
+                            call_id: Some("call-1".into()),
+                            function: ToolFunction {
+                                name: "read".into(),
+                                arguments: serde_json::json!({}),
+                            },
+                            signature: None,
+                            additional_params: None,
+                        }),
+                    ],
+                },
+                source: Some(tag.clone()),
+                physical_header: Some("physical-header".into()),
+                block_indices: vec![0, 1, 2],
+            },
+            TaggedMessage::unassociated(Message::User {
+                content: vec![UserContent::ToolResult(ToolResult {
+                    id: "call-1".into(),
+                    call_id: Some("call-1".into()),
+                    content: vec![ToolResultContent::text("ok")],
+                })],
+            }),
+            TaggedMessage::unassociated(Message::user("wake")),
+        ];
+        let once = provider_view_tagged(persisted.clone()).expect("first projection");
+        assert_eq!(
+            once[1], persisted[1],
+            "association keeps native order and indices"
+        );
+        let entry = sanitize_tagged_history(once.clone())
+            .expect("loop entry re-sanitizes the daemon's projection");
+        assert_eq!(entry, once);
+        let repaired = sanitize_tagged_history(entry.clone()).expect("repair re-sanitizes");
+        assert_eq!(repaired, once);
+        assert_eq!(provider_view_tagged(entry).expect("re-projection"), once);
+
+        let native = message_values(&once);
+        for profile in [
+            ProviderInputProfile::OpenAiChatCompletions,
+            ProviderInputProfile::OpenAiResponsesNormalized,
+        ] {
+            let ordered = provider_messages(profile, &once);
+            let Message::Assistant { content, .. } = &ordered[1] else {
+                panic!("assistant row")
+            };
+            assert!(
+                matches!(
+                    content.as_slice(),
+                    [
+                        AssistantContent::Text(_),
+                        AssistantContent::Reasoning(_),
+                        AssistantContent::ToolCall(_)
+                    ]
+                ),
+                "{profile:?} orders at the send boundary"
+            );
+            assert_eq!(ordered.len(), native.len());
+        }
+        assert_eq!(
+            provider_messages(ProviderInputProfile::ClaudeMessages, &once),
+            native,
+            "Claude keeps native block order"
+        );
     }
 
     #[tokio::test]
@@ -336,9 +420,10 @@ mod replay_error_tests {
     }
 }
 
-/// Select source blocks whose original physical indices are retained. This
-/// preserves source order even if the retained-index input is reordered or
-/// duplicated; actual upstream reordering is carried separately below.
+/// Lean `ClaudeMap.selectReplayBlocks`: select source blocks whose original
+/// physical indices are retained, in source order even if the retained-index
+/// input is reordered or duplicated. Shapers over associated rows only filter;
+/// the provider order is applied after association (`provider_messages`).
 pub fn select_tagged_assistant_blocks(
     source: &TaggedMessage,
     retained_original_indices: &[usize],
@@ -419,19 +504,19 @@ fn tagged_from_sourced(
                         block_indices: Vec::new(),
                     }
                 } else {
+                    if item.block_indices.windows(2).any(|pair| pair[0] >= pair[1]) {
+                        return Err(replay_input_error(
+                            "provider projection reordered associated assistant blocks",
+                        ));
+                    }
                     let original_indices = item.block_indices.iter().map(|position| {
                         original.block_indices.get(*position).copied().ok_or_else(|| {
                             replay_input_error("provider projection emitted an out-of-range assistant block index")
                         })
                     }).collect::<Result<Vec<_>, _>>()?;
-                    let mut selected = select_tagged_assistant_blocks(original, &original_indices).map_err(|error| {
+                    select_tagged_assistant_blocks(original, &original_indices).map_err(|error| {
                         replay_input_error(format!("provider projection: {error}"))
-                    })?;
-                    // A shaper may emit a different order than the source.
-                    // Keep its actual physical order so replay rejects an
-                    // unauthenticated/reordered reasoning run.
-                    selected.block_indices = original_indices;
-                    selected
+                    })?
                 };
                 selected.message = item.message;
                 Ok(selected)
@@ -447,24 +532,32 @@ fn tagged_from_sourced(
         .collect()
 }
 
+/// Tagged rows are the native-order association view on every wire; see
+/// [`provider_messages`] for the provider order.
 pub fn sanitize_tagged_history(
-    profile: ProviderInputProfile,
     rows: Vec<TaggedMessage>,
 ) -> Result<Vec<TaggedMessage>, StreamingError> {
     let messages = rows.iter().map(|row| row.message.clone()).collect();
     tagged_from_sourced(
         &rows,
-        crate::compaction::sanitize_history_with_sources(profile, messages),
+        crate::compaction::sanitize_association_with_sources(messages),
     )
 }
 
 pub fn provider_view_tagged(
-    profile: ProviderInputProfile,
     rows: Vec<TaggedMessage>,
 ) -> Result<Vec<TaggedMessage>, StreamingError> {
     let messages = rows.iter().map(|row| row.message.clone()).collect();
-    let (sourced, _) = crate::compaction::provider_view_with_sources(profile, messages);
+    let (sourced, _) = crate::compaction::association_view_with_sources(messages);
     tagged_from_sourced(&rows, sourced)
+}
+
+/// The provider order stage (Lean `Provider.normalizeOrderFor`) over
+/// association rows: what the wire, the token counters and the reducer see.
+/// Row count and row order are unchanged, so a positional split of this list
+/// is a split of `rows`.
+pub fn provider_messages(profile: ProviderInputProfile, rows: &[TaggedMessage]) -> Vec<Message> {
+    crate::compaction::history::normalize_assistant_content_order(profile, message_values(rows))
 }
 
 fn assistant_rows(rows: &[TaggedMessage]) -> (Vec<usize>, Vec<TaggedAssistantRow>) {
@@ -618,7 +711,6 @@ pub fn is_request_context_message(message: &Message) -> bool {
 struct ProviderInputRepairError;
 
 pub fn repair_provider_input(
-    profile: crate::provider_input::ProviderInputProfile,
     history: &mut Vec<TaggedMessage>,
     new_messages: &mut Vec<TaggedMessage>,
 ) -> Result<(), StreamingError> {
@@ -628,7 +720,7 @@ pub fn repair_provider_input(
     let mut provider_messages = std::mem::take(history);
     provider_messages.append(new_messages);
     repair_messages(&mut provider_messages);
-    let mut provider_messages = sanitize_tagged_history(profile, provider_messages)?;
+    let mut provider_messages = sanitize_tagged_history(provider_messages)?;
     let prompt = provider_messages.pop().ok_or_else(|| {
         StreamingError::Completion(CompletionError::RequestError(Box::new(
             ProviderInputRepairError,
@@ -1149,11 +1241,7 @@ pub(super) async fn repair_and_rebuild_request<M: CompletionModel>(
     tools: &[Box<dyn ToolDyn>],
     config: &LoopConfig,
 ) -> Result<CompletionRequest, StreamingError> {
-    repair_provider_input(
-        config.provider_input_counter.profile(),
-        history,
-        new_messages,
-    )?;
+    repair_provider_input(history, new_messages)?;
     strip_all_reasoning(history);
     strip_all_reasoning(new_messages);
     build_core(model, history, new_messages, tools, config).await

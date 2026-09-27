@@ -826,6 +826,37 @@ theorem selectReplayBlocks_keeps_physical_coordinates
     selectIndexedReplayBlocks_indices_sublist keep row.blockIndices row.blocks,
     selectIndexedReplayBlocks_blocks_sublist keep row.blockIndices row.blocks⟩
 
+theorem selectIndexedReplayBlocks_length
+    (keep : Nat → CanonicalOutput.MessageBlock (List UInt8) → Bool) :
+    ∀ (indices : List Nat) (blocks : List (CanonicalOutput.MessageBlock (List UInt8))),
+      indices.length = blocks.length →
+      (selectIndexedReplayBlocks keep indices blocks).1.length =
+        (selectIndexedReplayBlocks keep indices blocks).2.length
+  | [], _, _ => by simp [selectIndexedReplayBlocks]
+  | _ :: _, [], h => by simp at h
+  | index :: indices, block :: blocks, h => by
+      have ih := selectIndexedReplayBlocks_length keep indices blocks (by simpa using h)
+      by_cases hk : keep index block
+      · simp [selectIndexedReplayBlocks, hk, ih]
+      · simp [selectIndexedReplayBlocks, hk, ih]
+
+/-- Every projection pass over an associated row is admitted again by the next
+one. The native loop projects the same rows at request build, loop entry,
+compaction and repair, so a pass whose output this owner rejected would fail
+every later request of the session. Provider content order must therefore be
+applied after association (`Provider.sanitizeForProviderGlobalFor_orders_association_view`):
+a grouped reorder aligned with its sidecar makes the indices non-increasing. -/
+theorem selectReplayBlocks_valid
+    (keep : Nat → CanonicalOutput.MessageBlock (List UInt8) → Bool)
+    (row : TaggedReplayRow) (hvalid : replayRowIndicesValid row = true) :
+    ∃ selected, selectReplayBlocks keep row = .ok selected ∧
+      replayRowIndicesValid selected = true := by
+  refine ⟨_, by simp [selectReplayBlocks, hvalid]; rfl, ?_⟩
+  simp only [replayRowIndicesValid, strictlyIncreasingIndices, Bool.and_eq_true,
+    beq_iff_eq, decide_eq_true_eq] at hvalid ⊢
+  exact ⟨selectIndexedReplayBlocks_length keep _ _ hvalid.1,
+    hvalid.2.sublist (selectIndexedReplayBlocks_indices_sublist keep _ _)⟩
+
 theorem selectReplayRows_sublist (keep : TaggedReplayRow → Bool)
     (rows : List TaggedReplayRow) :
     List.Sublist (selectReplayRows keep rows) rows := by

@@ -73,7 +73,8 @@ def promptAssemblyModeSanitizeCaseJson
     ",\"order_mode\":" ++ jsonString witness.orderMode ++
     ",\"input\":" ++ promptAssemblyRowsJson witness.input ++
     ",\"expected\":" ++ promptAssemblyRowsJson witness.expected ++
-    ",\"expected_twice\":" ++ promptAssemblyRowsJson witness.expectedTwice ++ "}"
+    ",\"expected_twice\":" ++ promptAssemblyRowsJson witness.expectedTwice ++
+    ",\"association\":" ++ promptAssemblyRowsJson witness.association ++ "}"
 
 def promptAssemblyModeSanitizeCasesJson : String :=
   jsonArray (promptAssemblyModeSanitizeCases.map promptAssemblyModeSanitizeCaseJson)

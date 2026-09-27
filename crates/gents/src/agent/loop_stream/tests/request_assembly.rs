@@ -500,7 +500,6 @@ fn tagged_provider_view_uses_emitted_source_index_for_equal_assistant_rows() {
     let second = tag(2);
     let identical = Message::assistant("same native bytes");
     let projected = super::provider_view_tagged(
-        crate::provider_input::ProviderInputProfile::ClaudeMessages,
         vec![
             TaggedMessage {
                 message: identical.clone(),
@@ -1021,11 +1020,7 @@ fn repaired_arguments(arguments: serde_json::Value) -> serde_json::Value {
         .map(TaggedMessage::unassociated)
         .collect();
     let mut new_messages = Vec::new();
-    super::repair_provider_input(
-        crate::provider_input::ProviderInputProfile::OpenAiChatCompletions,
-        &mut history,
-        &mut new_messages,
-    )
+    super::repair_provider_input(&mut history, &mut new_messages)
     .unwrap();
     let repaired = history
         .iter()
@@ -1074,11 +1069,7 @@ fn repair_preserves_a_tool_pair_split_across_history_and_prompt() {
         .map(TaggedMessage::unassociated)
         .collect();
 
-    super::repair_provider_input(
-        crate::provider_input::ProviderInputProfile::OpenAiChatCompletions,
-        &mut history,
-        &mut new_messages,
-    )
+    super::repair_provider_input(&mut history, &mut new_messages)
     .unwrap();
 
     assert!(matches!(

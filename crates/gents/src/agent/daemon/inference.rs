@@ -246,7 +246,6 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                     let request_commit_cid = turn_request_commit_cid.clone();
                     Box::pin(async move {
                         let provider_view = crate::agent::loop_stream::provider_view_tagged(
-                            provider_profile,
                             compaction_request.messages,
                         )
                         .map_err(anyhow::Error::new)?;
@@ -254,10 +253,10 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                             crate::agent::loop_stream::replay_compaction_prefix_bound(
                                 &provider_view, &compaction_request.required,
                             )?;
-                        let native_messages = provider_view
-                            .iter()
-                            .map(|row| row.message.clone())
-                            .collect::<Vec<_>>();
+                        let native_messages = crate::agent::loop_stream::provider_messages(
+                            provider_profile,
+                            &provider_view,
+                        );
                         options.keep_recent_tokens = compactor.retention_target(
                             options.keep_recent_tokens,
                             &native_messages,
@@ -298,10 +297,10 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                                 call_id: join.call_id,
                                 call_seq: join.call_seq,
                             });
-                        let provider_values = provider_view
-                            .iter()
-                            .map(|row| row.message.clone())
-                            .collect::<Vec<_>>();
+                        let provider_values = crate::agent::loop_stream::provider_messages(
+                            provider_profile,
+                            &provider_view,
+                        );
                         let Some(exact) = result.exact_reduction() else {
                             if result.cannot_fit() {
                                 return Ok(
@@ -327,6 +326,21 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                             "exact reduction split disagrees with source-index provider view"
                         );
                         let split = exact.compacted_prefix.len();
+                        let (prefix_native, suffix_native) = (
+                            provider_view[..split]
+                                .iter()
+                                .map(|row| row.message.clone())
+                                .collect::<Vec<_>>(),
+                            provider_view[split..]
+                                .iter()
+                                .map(|row| row.message.clone())
+                                .collect::<Vec<_>>(),
+                        );
+                        let exact = exact.over_association_view(
+                            provider_profile,
+                            &prefix_native,
+                            &suffix_native,
+                        )?;
                         let associations =
                             crate::provider_context_reduction::ReplayAssociations::from_tagged_split(
                                 compaction_request.required,

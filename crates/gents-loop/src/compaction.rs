@@ -371,6 +371,35 @@ impl ExactReduction<'_> {
     }
 }
 
+impl<'a> ExactReduction<'a> {
+    /// The same exact split over the native-order association rows this
+    /// provider-ordered reduction was computed from. A durable checkpoint stores
+    /// these rows beside their persisted block indices, which only stay aligned
+    /// with the unordered content.
+    pub fn over_association_view<'b>(
+        &self,
+        profile: ProviderInputProfile,
+        compacted_prefix: &'b [Message],
+        retained_suffix: &'b [Message],
+    ) -> Result<ExactReduction<'b>>
+    where
+        'a: 'b,
+    {
+        anyhow::ensure!(
+            history::normalize_assistant_content_order(profile, compacted_prefix.to_vec())
+                == self.compacted_prefix
+                && history::normalize_assistant_content_order(profile, retained_suffix.to_vec())
+                    == self.retained_suffix,
+            "exact reduction is not the provider order of its association rows"
+        );
+        Ok(ExactReduction {
+            compacted_prefix,
+            retained_suffix,
+            checkpoint: self.checkpoint,
+        })
+    }
+}
+
 pub trait ReductionEngine: Send + Sync {
     fn retention_target(
         &self,
@@ -994,26 +1023,36 @@ pub fn provider_view_with_sources(
     (sanitized, activity)
 }
 
-/// The entry/repair sanitizer without tool-result stubbing, retaining the
-/// original row coordinate for an independently carried replay source.
-pub fn sanitize_history_with_sources(
-    profile: ProviderInputProfile,
+/// [`provider_view_with_sources`] before the provider order stage: Lean
+/// `Provider.sanitizeForProviderGlobalFor .nativePreserved`. Replay sources and
+/// persisted block indices are carried on this view, which only filters blocks,
+/// so every retained row keeps its native order and increasing indices. The
+/// provider order is applied once at the send boundary
+/// (`Provider.sanitizeForProviderGlobalFor_orders_association_view`); its rows
+/// are the same as the ordered view's.
+pub fn association_view_with_sources(
     messages: Vec<Message>,
-) -> Vec<history::SourcedMessage> {
+) -> (Vec<history::SourcedMessage>, FileActivity) {
     let sourced = history::source_messages(messages);
-    sanitize_sourced(profile, sourced)
+    let (stripped, activity) = history::strip_tool_results_sourced(sourced);
+    (pair_sourced(stripped), activity)
+}
+
+/// The entry/repair sanitizer without tool-result stubbing, over the same
+/// native-order association view as [`association_view_with_sources`].
+pub fn sanitize_association_with_sources(messages: Vec<Message>) -> Vec<history::SourcedMessage> {
+    pair_sourced(history::source_messages(messages))
+}
+
+fn pair_sourced(sourced: Vec<history::SourcedMessage>) -> Vec<history::SourcedMessage> {
+    history::drop_unpaired_tool_calls_sourced(history::drop_orphaned_tool_results_sourced(sourced))
 }
 
 fn sanitize_sourced(
     profile: ProviderInputProfile,
     sourced: Vec<history::SourcedMessage>,
 ) -> Vec<history::SourcedMessage> {
-    history::normalize_assistant_content_order_sourced(
-        profile,
-        history::drop_unpaired_tool_calls_sourced(history::drop_orphaned_tool_results_sourced(
-            sourced,
-        )),
-    )
+    history::normalize_assistant_content_order_sourced(profile, pair_sourced(sourced))
 }
 
 /// Find the inclusive canonical message cursor that denotes a provider-view
