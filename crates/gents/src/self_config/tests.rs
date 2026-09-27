@@ -2488,10 +2488,7 @@ async fn config_targets_owned_working_behavior_for_all_bound_documents() {
     .unwrap();
     assert_eq!(working["behavior"]["tags"], json!(["ui:review"]));
     assert_eq!(working["context"]["system_prompt"], "Review carefully.");
-    assert_eq!(
-        working["documents"]["Tools"]["subagents"]["enabled"],
-        false
-    );
+    assert_eq!(working["documents"]["Tools"]["subagents"]["enabled"], false);
     assert!(working["documents"]["Tools"]["remote"]["services"].is_null());
     assert!(
         working["documents"]["Tools"]["self_config"].is_null(),

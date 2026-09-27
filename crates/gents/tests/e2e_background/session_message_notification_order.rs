@@ -9,7 +9,9 @@ use serde_json::json;
 use crate::support::accepted_turn::{
     boot_prepared_accepted_turn, prepare_accepted_turn, AcceptedTurnSpec,
 };
-use crate::support::fixtures::{bind_behavior_backend, configure_subagent_behavior, subagent_target};
+use crate::support::fixtures::{
+    bind_behavior_backend, configure_subagent_behavior, subagent_target,
+};
 use crate::support::interrupt::{create_runtime_request, wait_for_runtime_ready, BootedAgent};
 use crate::support::streaming_backend::{
     MockStreamingBackend, StreamChunk, StreamPlan, StreamResponse, StreamScript,

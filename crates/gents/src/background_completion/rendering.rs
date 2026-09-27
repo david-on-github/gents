@@ -175,4 +175,3 @@ pub(super) fn xml_escape_text(value: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
-

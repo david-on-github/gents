@@ -1,6 +1,5 @@
 use super::*;
 
-
 pub(crate) async fn drain_automated_wakeups_in_txn(
     txn: &ConfigApplyTxn<'_>,
     session_id: &str,
@@ -22,7 +21,6 @@ pub(crate) async fn drain_automated_wakeups_in_txn(
 fn is_scheduled_automated_wakeup(row: &AgentRequestRow) -> bool {
     row.execution_origin.as_deref() == Some("scheduled") && row_is_automated_wakeup(row)
 }
-
 
 // SAFETY (#664): `agent_did` scopes both the pending-row scan and mutation.
 // A foreign-DID replica sharing `session_id` cannot be drained by this owner.

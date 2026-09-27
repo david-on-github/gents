@@ -36,7 +36,9 @@ pub(crate) async fn enqueue_steering_request(
         node,
         None,
         "lifecycle.enqueue_steering",
-        move |txn| Box::pin(async move { append_prepared_steering_in_txn(txn, parent, prepared).await }),
+        move |txn| {
+            Box::pin(async move { append_prepared_steering_in_txn(txn, parent, prepared).await })
+        },
     )
     .await
 }

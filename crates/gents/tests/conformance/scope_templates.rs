@@ -61,18 +61,64 @@ fn lean_collection_rules(definition: &str) -> Vec<(String, String, String)> {
         .collect()
 }
 
-/// The Lean `routeSelects`: the route resolved for `peer_did` selects an
-/// `AgentRequest` row whose `field` holds `row_did`.
-fn route_selects_request(
+/// Whether the route the real template owner resolves for `peer_did` selects
+/// the stored `AgentRequest` row `request_doc_id`. DefraDB evaluates the
+/// resolved filter, as it does for the replicator the route installs.
+async fn route_selects_request(
+    node: &gents::defra_node::EmbeddedNode,
     template: &ScopeTemplate,
-    field: &str,
-    row_did: &str,
+    request_doc_id: &str,
     peer_did: &str,
     local_did: &str,
 ) -> bool {
-    scope_filter(&template.scope, template.collections, peer_did, local_did)
-        .get("AgentRequest")
-        .is_some_and(|predicate| single_string_eq(predicate) == Some((field, row_did)))
+    let filters = scope_filter(&template.scope, template.collections, peer_did, local_did);
+    let Some(predicate) = filters.get("AgentRequest") else {
+        return false;
+    };
+    let conditions = filter_conditions(predicate).expect("route filter conditions");
+    let filter =
+        gents_protocol::graphql::graphql_input_literal(&serde_json::Value::Object(conditions))
+            .expect("render route filter");
+    let response = node
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{ _and: [{{ _docID: {{ _eq: "{}" }} }}, {filter}] }}) {{ _docID }} }}"#,
+            gents::graphql::escape_graphql_string(request_doc_id),
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    response
+        .data
+        .as_ref()
+        .and_then(|data| data["AgentRequest"].as_array())
+        .is_some_and(|rows| !rows.is_empty())
+}
+
+/// Store one `AgentRequest` whose Lean-named route fields hold the given DIDs.
+async fn store_request_row(
+    node: &gents::defra_node::EmbeddedNode,
+    fields: &[(&str, &str)],
+) -> String {
+    let input = fields
+        .iter()
+        .map(|(field, value)| {
+            format!(
+                r#"{field}: "{}""#,
+                gents::graphql::escape_graphql_string(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let response = node
+        .execute(&format!(
+            r#"mutation {{ create_AgentRequest(input: {{ request_id: "wave-request", {input} }}) {{ _docID }} }}"#
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    gents::graphql::single_mutation_document(&response, "create_AgentRequest")
+        .expect("stored request mutation")
+        .and_then(|document| document["_docID"].as_str())
+        .expect("stored request identity")
+        .to_owned()
 }
 
 fn assert_eq_filter(predicate: &FilterPredicate, field: &str, value: &str) {
@@ -547,8 +593,8 @@ fn subagent_host_message_filter_excludes_unrelated_host_history() {
     assert_eq_filter(predicate, "requester_did", "did:key:coord");
 }
 
-#[test]
-fn sixteen_peer_request_wave_is_reduced_to_one_target() {
+#[tokio::test]
+async fn sixteen_peer_request_wave_is_reduced_to_one_target() {
     let request_field = |rules_def: &str| {
         lean_collection_rules(rules_def)
             .into_iter()
@@ -556,26 +602,44 @@ fn sixteen_peer_request_wave_is_reduced_to_one_target() {
             .map(|(_, field, _)| field)
             .unwrap_or_else(|| panic!("Lean {rules_def} carries AgentRequest"))
     };
-
-    let coordinator = resolve_template("subagent-coordinator").expect("coordinator template");
     let target_field = request_field("subagentCoordinatorRules");
+    let requester_field = request_field("subagentHostRules");
     let caller = "did:key:coordinator-07";
     let target = "did:key:host-07";
-    let routed_to = (0..16)
-        .map(|index| format!("did:key:host-{index:02}"))
-        .filter(|host_did| {
-            route_selects_request(coordinator, &target_field, target, host_did, caller)
-        })
-        .collect::<Vec<_>>();
+
+    let node = gents::defra_node::EmbeddedNode::builder()
+        .build()
+        .await
+        .expect("route evaluation node");
+    node.add_schema(gents_protocol::schemas::AGENT_REQUEST)
+        .await
+        .expect("AgentRequest schema");
+    let request = store_request_row(
+        &node,
+        &[(&target_field, target), (&requester_field, caller)],
+    )
+    .await;
+
+    let coordinator = resolve_template("subagent-coordinator").expect("coordinator template");
+    let mut routed_to = Vec::new();
+    for index in 0..16 {
+        let host_did = format!("did:key:host-{index:02}");
+        if route_selects_request(&node, coordinator, &request, &host_did, caller).await {
+            routed_to.push(host_did);
+        }
+    }
     assert_eq!(routed_to, [target]);
 
     let host = resolve_template("subagent-host").expect("host template");
-    let requester_field = request_field("subagentHostRules");
-    let returned_to = (0..16)
-        .map(|index| format!("did:key:coordinator-{index:02}"))
-        .filter(|peer_did| route_selects_request(host, &requester_field, caller, peer_did, target))
-        .collect::<Vec<_>>();
+    let mut returned_to = Vec::new();
+    for index in 0..16 {
+        let peer_did = format!("did:key:coordinator-{index:02}");
+        if route_selects_request(&node, host, &request, &peer_did, target).await {
+            returned_to.push(peer_did);
+        }
+    }
     assert_eq!(returned_to, [caller]);
+    node.shutdown().await;
 }
 
 #[test]

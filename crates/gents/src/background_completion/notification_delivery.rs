@@ -160,9 +160,7 @@ pub(super) async fn ensure_notification_delivery(
     message_key: &str,
     native: Option<crate::lifecycle::queue::ToolNotificationPublication>,
 ) -> Result<SideEffects> {
-    let native = native.context(
-        "background notification requires its canonical provenance",
-    )?;
+    let native = native.context("background notification requires its canonical provenance")?;
     let enqueued = crate::lifecycle::queue::persist_background_completion_with_message_canonical(
         node,
         parent,

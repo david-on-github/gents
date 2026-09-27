@@ -47,8 +47,7 @@ pub(crate) use goal_continuation::{
     goal_continuation_behavior, goal_continuation_identity, prepare_goal_continuation,
 };
 pub(crate) use input::{
-    background_wake_queue, is_automated_wakeup, row_is_automated_wakeup,
-    row_queue,
+    background_wake_queue, is_automated_wakeup, row_is_automated_wakeup, row_queue,
 };
 #[cfg(test)]
 use input::{queue_is_automated_wakeup, BACKGROUND_COMPLETION_WAKE_VERSION};

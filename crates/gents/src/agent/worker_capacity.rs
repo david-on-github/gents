@@ -63,7 +63,9 @@ tokio::task_local! {
 enum RequestGuard {
     Unbound(UnboundActiveGuard),
     /// Held until the request scope ends; dropping it releases the slot.
-    Active { _guard: ActiveGuard },
+    Active {
+        _guard: ActiveGuard,
+    },
 }
 
 /// Slot generation scope shared by its fixed worker tasks. Tool and request

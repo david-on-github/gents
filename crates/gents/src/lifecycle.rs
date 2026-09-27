@@ -56,8 +56,8 @@ pub use materialize::{
 };
 pub(crate) use materialize::{
     build_session_message_request, write_pending_agent_request_with_lineage_and_conversation_title,
-    write_pending_agent_request_with_lineage_workspace_and_conversation_title,
-    SessionMessageCause, SessionMessageTarget,
+    write_pending_agent_request_with_lineage_workspace_and_conversation_title, SessionMessageCause,
+    SessionMessageTarget,
 };
 pub use queue::enqueue_local_steering_request;
 pub(crate) use task_title::task_goal_session_title;

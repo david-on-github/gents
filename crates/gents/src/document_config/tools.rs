@@ -1159,7 +1159,11 @@ mod tests {
         ] {
             assert!(document(value).validate().is_err());
         }
-        assert!(document(json!({"subagents":{"target_ids":["existing-target"],"enabled":true}})).validate().is_ok());
+        assert!(
+            document(json!({"subagents":{"target_ids":["existing-target"],"enabled":true}}))
+                .validate()
+                .is_ok()
+        );
         for retired in [
             "spawn_enabled",
             "background_enabled",

@@ -1631,7 +1631,9 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
         assert_eq!(goal_requests[0]["caused_by_parent_request_id"], parent);
         let wakes = requests
             .iter()
-            .filter(|row| row["request_id"] != parent && row["_docID"] != goal_requests[0]["_docID"])
+            .filter(|row| {
+                row["request_id"] != parent && row["_docID"] != goal_requests[0]["_docID"]
+            })
             .collect::<Vec<_>>();
         assert_eq!(
             wakes.len(),
