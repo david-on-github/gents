@@ -893,6 +893,7 @@ mod overlay_tests {
             enabled: true,
             created_at: None,
             created_by: None,
+            max_request_hop: None,
             tags: Vec::new(),
         }
     }
