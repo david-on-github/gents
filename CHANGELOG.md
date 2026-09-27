@@ -8,6 +8,22 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- Sub-agents are ordinary sessions, and 0.20.0 requires a fresh home (#1937).
+  `spawn_subagent`, `wait_subagent`, `read_subagent`, `list_subagents` and
+  `cancel_subagent` are replaced by two tools: `create_session {agent,
+  prompt | task, title?}` starts a session on an allowlisted `SubagentTarget`,
+  and `send_message {session_id, prompt | task}` messages a session the agent
+  owns or started. Both return a receipt immediately; the call stays a running
+  background tool until the request it caused ends, then the result arrives as
+  a background completion notification. There is no foreground wait, workspace
+  inheritance, cancel cascade or subagent bridge; interrupting a session stops
+  only that session. The caused request records its caller in
+  `caused_by_parent_*`, and `AgentPrincipal.max_request_hop` (default 8)
+  bounds the chain. A target on another principal is admitted there as a Peer
+  request. `Tools.subagents` is now `{target_ids, enabled}`; the spawn,
+  background, cross-principal and wait settings are rejected. `AgentToolCall`
+  loses its child, cascade and cancel-policy fields. Existing stores are not
+  migrated; update desktop and runtimes together.
 - Tools document timeouts now take effect, and the ones that could not are
   gone (#1768). `host.bash` `timeout_secs` and `max_timeout_secs` set the
   foreground default and maximum, clamped to the host's
