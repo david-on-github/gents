@@ -2,9 +2,10 @@
 //!
 //! A candidate is the baseline pack with exactly one field changed: the system
 //! prompt of the context the subject behavior names, or the prompt template of
-//! a task of that behavior. When the pack keeps that text in a sidecar asset — the shape every pack in this repository uses —
-//! the change is one file's bytes and nothing else, which is what makes the
-//! structural gate's "only the target moved" check a file comparison.
+//! a task of that behavior. When the pack keeps that text in a sidecar asset —
+//! the shape every pack in this repository uses — the change is one file's
+//! bytes and nothing else, which is what makes the structural gate's "only the
+//! target moved" check a file comparison.
 //!
 //! Both packs are ordinary directory packs, so the runner takes them through
 //! `CellSource::Directory` with no special case. They are loaded and digested
@@ -82,9 +83,8 @@ pub fn materialize_pack(
                 .find(|task| task.task_id == task_id && task.behavior_id == behavior_id)
                 .with_context(|| {
                     format!("pack declares no task {task_id:?} of behavior {behavior_id:?}")
-                })?
-                .task_id
-                .clone()
+                })?;
+            task_id.to_owned()
         }
     };
 
