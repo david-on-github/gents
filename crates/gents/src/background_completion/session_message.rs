@@ -1,19 +1,5 @@
 use super::*;
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct SessionMessageSettlementReport {
-    /// Rows settled from their caused request's durable terminal.
-    pub(crate) settled: usize,
-    /// Rows whose own deadline passed first.
-    pub(crate) timed_out: usize,
-}
-
-impl SessionMessageSettlementReport {
-    pub(crate) fn total(&self) -> usize {
-        self.settled + self.timed_out
-    }
-}
-
 #[derive(Debug, Deserialize)]
 struct SessionMessageRow {
     #[serde(rename = "_docID")]
@@ -38,15 +24,15 @@ fn running_session_message_filter(local_did: &str) -> String {
     )
 }
 
-/// Settle every running local `create_session`/`send_message` row whose own
-/// deadline passed or whose caused request reached a durable terminal (Lean
-/// `Recovery.sessionMessageRecoverySweep`). A row with neither observation
-/// keeps running: no parent fate settles it. The winner of a caused-terminal
-/// compare appends its completion notification and wake.
+/// Settle every running local `create_session`/`send_message` row whose
+/// caused request reached a durable terminal (Lean
+/// `Recovery.sessionMessageRecoverySweep`). Any other row keeps running: no
+/// parent fate or deadline settles it. The winner of the row's terminal compare
+/// appends its completion notification and wake. Returns the settled count.
 pub(crate) async fn settle_running_session_message_rows(
     node: &Arc<EmbeddedNode>,
     local_did: &str,
-) -> Result<SessionMessageSettlementReport> {
+) -> Result<usize> {
     let query = format!(
         r#"{{ AgentToolCall(filter: {{ {} }}) {{ {SESSION_MESSAGE_ROW_FIELDS} }} }}"#,
         running_session_message_filter(local_did)
@@ -58,12 +44,11 @@ pub(crate) async fn settle_running_session_message_rows(
     )
     .await?;
     let rows = crate::graphql::rows::<SessionMessageRow>(&response, "AgentToolCall")?;
-    let mut report = SessionMessageSettlementReport::default();
+    let mut settled = 0;
     for row in rows {
         match settle_row(node, &row).await {
-            Ok(Some(Settled::Terminal)) => report.settled += 1,
-            Ok(Some(Settled::TimedOut)) => report.timed_out += 1,
-            Ok(None) => {}
+            Ok(true) => settled += 1,
+            Ok(false) => {}
             Err(error) => tracing::warn!(
                 tool_call_doc_id = %row.doc_id,
                 error = %format!("{error:#}"),
@@ -71,7 +56,7 @@ pub(crate) async fn settle_running_session_message_rows(
             ),
         }
     }
-    Ok(report)
+    Ok(settled)
 }
 
 /// Observer arm: a request that reached a durable terminal may be the one a
@@ -100,17 +85,10 @@ pub(super) async fn settle_rows_after_request_update(
     if !terminal {
         return Ok(0);
     }
-    Ok(settle_running_session_message_rows(node, local_did)
-        .await?
-        .total())
+    settle_running_session_message_rows(node, local_did).await
 }
 
-enum Settled {
-    Terminal,
-    TimedOut,
-}
-
-async fn settle_row(node: &Arc<EmbeddedNode>, row: &SessionMessageRow) -> Result<Option<Settled>> {
+async fn settle_row(node: &Arc<EmbeddedNode>, row: &SessionMessageRow) -> Result<bool> {
     let Some(mut lifecycle) = ToolCallLifecycle::load_by_doc_id(
         node.clone(),
         &row.doc_id,
@@ -120,30 +98,25 @@ async fn settle_row(node: &Arc<EmbeddedNode>, row: &SessionMessageRow) -> Result
     )
     .await?
     else {
-        return Ok(None);
+        return Ok(false);
     };
     if !lifecycle.is_running() || !lifecycle.is_session_message() {
-        return Ok(None);
-    }
-    // Lean `RestartRow.notification` owes no completion for an expired
-    // session-message row: only the caused request's terminal is reported.
-    if lifecycle.is_deadline_expired(Utc::now()) {
-        return Ok(lifecycle.timeout().await?.then_some(Settled::TimedOut));
+        return Ok(false);
     }
     let Some(caused_doc_id) = crate::session_message::load_caused_request(node, &lifecycle)
         .await?
         .and_then(|caused| caused.doc_id)
     else {
-        return Ok(None);
+        return Ok(false);
     };
     let Some(terminal) =
         crate::background_tools::load_caused_request_terminal(node.as_ref(), &caused_doc_id)
             .await?
     else {
-        return Ok(None);
+        return Ok(false);
     };
     if !lifecycle.settle_session_message(&terminal).await? {
-        return Ok(None);
+        return Ok(false);
     }
     append_background_tool_completion(
         node.as_ref(),
@@ -156,5 +129,5 @@ async fn settle_row(node: &Arc<EmbeddedNode>, row: &SessionMessageRow) -> Result
         terminal.completion_reason(),
     )
     .await?;
-    Ok(Some(Settled::Terminal))
+    Ok(true)
 }

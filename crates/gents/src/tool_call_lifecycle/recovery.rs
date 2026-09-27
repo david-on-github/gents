@@ -148,7 +148,6 @@ impl super::ToolCallLifecycle {
         let tool_calls_recovered =
             crate::background_completion::settle_running_session_message_rows(node, agent_did)
                 .await?
-                .total()
                 + recover_stuck_running_tool_calls(node, agent_did).await?
                 + Self::reconcile_orphaned_background_tools(node, agent_did, executions)
                     .await?

@@ -583,16 +583,6 @@ impl ToolCallLifecycle {
         let name = self.tool_name.clone();
         let selected_tool_fields = self.selected_tool_fields_fragment();
         let await_mode = self.await_mode.as_str();
-        // A session-message row carries its own background backstop deadline,
-        // set before this one pending-to-running write.
-        let deadline_field = if self.is_session_message() {
-            format!(
-                r#"deadline_at: "{}", "#,
-                self.deadline_at.to_rfc3339_opts(SecondsFormat::Nanos, true)
-            )
-        } else {
-            String::new()
-        };
         let started_at = ConfigAccess::transact_local_idempotent(
             &self.node,
             None,
@@ -611,7 +601,6 @@ impl ToolCallLifecycle {
                 let call_id = call_id.clone();
                 let name = name.clone();
                 let selected_tool_fields = selected_tool_fields.clone();
-                let deadline_field = deadline_field.clone();
                 Box::pin(async move {
                     // This is sampled only after the transaction has acquired
                     // the mutation gate. A queued dispatcher must not use an
@@ -712,7 +701,7 @@ impl ToolCallLifecycle {
                         message_sequence: {{ _eq: {message_sequence} }},
                         lifecycle_state: {{ _eq: "pending" }}{requester_filter}
                     }}, input: {{ lifecycle_state: "running", started_at: "{started_at}",
-                        await_mode: "{await_mode}", {deadline_field}{selected_tool_fields}
+                        await_mode: "{await_mode}", {selected_tool_fields}
                     }}) {{ _docID }} }}"#,
                             escape_graphql_string(&doc_id),
                             escape_graphql_string(&session),
@@ -1002,14 +991,7 @@ impl ToolCallLifecycle {
         } else {
             Some(self.output_budget().await)
         };
-        // Lean `RestartRow.notification`: an expired session-message row owes
-        // no completion; only its caused request's terminal is reported.
-        let terminal_status =
-            if self.is_session_message() && fields.state == ToolCallState::TimedOut {
-                "completed".to_string()
-            } else {
-                self.terminal_persistence_status(fields.completion_reason)
-            };
+        let terminal_status = self.terminal_persistence_status(fields.completion_reason);
         let spawned_by_tool_call_doc_id = self.spawned_by_tool_call_doc_id.clone();
 
         let published = ConfigAccess::transact_local_idempotent(

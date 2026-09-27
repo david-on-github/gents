@@ -19,10 +19,11 @@ executable model of that classifier:
   reason distinguishes restart interruption and deadline expiry, never the
   parent's state;
 * **session-message row** (`create_session`/`send_message`) → **leave running**
-  under every resolvable parent unless its own deadline expired. No host
-  process backs it: the started session is an ordinary agent's session, and
-  its caused request's terminal later terminalizes the row through the
-  completion observer. A parent's fate is never a cancel signal for it;
+  under every parent observation and stored deadline. No host process backs
+  it and it carries no deadline: the started session is an ordinary agent's
+  session, and its caused request's terminal later terminalizes the row
+  through the completion observer, so that result always reaches the calling
+  session. A parent's fate is never a cancel signal for it;
 * an unresolved exact physical parent defers all terminalization, including
   deadline expiry;
 * deadline expiry takes precedence for resolvable parents;
@@ -135,6 +136,8 @@ instance (row : RestartRow) : Decidable row.isNativeBackgroundTool := by
 def restartDisposition (row : RestartRow) : RestartDisposition :=
   if row.parent = .missing then
     .leaveRunning
+  else if row.sessionMessage then
+    .leaveRunning
   else if row.isNativeBackgroundTool ∧ row.process = .stillRunning then
     .leaveRunning
   else if row.isNativeBackgroundTool ∧ row.process ≠ .stopped then
@@ -143,8 +146,6 @@ def restartDisposition (row : RestartRow) : RestartDisposition :=
     .terminalize .deadlineExceeded
   else if row.isNativeBackgroundTool then
     .terminalize .terminalizeBackgroundedAsInterrupted
-  else if row.sessionMessage then
-    .leaveRunning
   else if row.parent = .interrupted then
     .terminalize .parentInterrupted
   else if row.parent.observedTerminal then
@@ -252,7 +253,8 @@ theorem native_background_tool_interrupted_on_restart
     (h_process : row.process = .stopped) :
     restartDisposition row =
       .terminalize .terminalizeBackgroundedAsInterrupted := by
-  simp [restartDisposition, h_native, h_owner, h_deadline, h_process]
+  have h_session : row.sessionMessage = false := h_native.2
+  simp [restartDisposition, h_native, h_session, h_owner, h_deadline, h_process]
 
 /-- RB1: a native background tool with a live parent, no expiry, and an
     observed stop of its proven-owned process is interrupted on restart —
@@ -269,9 +271,10 @@ theorem native_background_tool_live_parent_interrupted_on_restart
       row.notification =
         some (restartNotificationObligation
           .terminalizeBackgroundedAsInterrupted) := by
+  have h_session : row.sessionMessage = false := h_native.2
   have h : restartDisposition row =
       .terminalize .terminalizeBackgroundedAsInterrupted := by
-    simp [restartDisposition, h_native, h_live, h_deadline, h_process]
+    simp [restartDisposition, h_native, h_session, h_live, h_deadline, h_process]
   refine ⟨h, ?_, ?_⟩
   · rw [h]; rfl
   · simp [RestartRow.notification, h_native, h_live, h]
@@ -292,8 +295,10 @@ theorem native_background_unstopped_process_settles_lost
     rcases h_process with h | h <;> simp [h]
   have h_not_stopped : row.process ≠ .stopped := by
     rcases h_process with h | h <;> simp [h]
+  have h_session : row.sessionMessage = false := h_native.2
   have h : restartDisposition row = .terminalize .processLost := by
-    simp [restartDisposition, h_owner, h_native, h_not_running, h_not_stopped]
+    simp [restartDisposition, h_owner, h_native, h_session, h_not_running,
+      h_not_stopped]
   refine ⟨h, ?_, ?_⟩
   · rw [h]; rfl
   · simp [RestartRow.notification, h_native, h_owner, h]
@@ -310,34 +315,18 @@ theorem native_background_still_running_left_running
   · simp [restartDisposition, h_owner]
   · simp [restartDisposition, h_owner, h_native, h_process]
 
-/-- RB2: a session-message row is left running under every resolvable parent
-    without expiry — live, interrupted or terminal. The started session is
-    addressed directly and owns its own lifetime; its caused request's
-    terminal later closes the row through the completion observer. -/
+/-- RB2: a session-message row is left running under every parent
+    observation and stored deadline — live, interrupted, terminal or expired.
+    The started session is addressed directly and owns its own lifetime; its
+    caused request's terminal later closes the row through the completion
+    observer, so no restart can drop that result. -/
 theorem session_message_row_left_running
     (row : RestartRow)
-    (h_session : row.sessionMessage = true)
-    (h_deadline : row.deadlineExpired = false) :
+    (h_session : row.sessionMessage = true) :
     restartDisposition row = .leaveRunning := by
-  have h_not_native : ¬ row.isNativeBackgroundTool := by
-    simp [RestartRow.isNativeBackgroundTool, h_session]
   by_cases h_owner : row.parent = .missing
   · simp [restartDisposition, h_owner]
-  · simp [restartDisposition, h_owner, h_not_native, h_deadline, h_session]
-
-/-- No parent observation ever terminalizes a session-message row: only its
-    own deadline does. -/
-theorem session_message_row_terminalizes_only_on_expiry
-    (row : RestartRow) (cause : ToolRecoveryCause)
-    (h_session : row.sessionMessage = true)
-    (h : restartDisposition row = .terminalize cause) :
-    cause = .deadlineExceeded := by
-  rcases row with ⟨awaitMode, sessionMessage, parent, deadlineExpired, process⟩
-  simp only at h_session
-  subst h_session
-  cases awaitMode <;> cases parent <;> cases deadlineExpired <;> cases process <;>
-    simp [restartDisposition, RestartRow.isNativeBackgroundTool,
-      ParentObservation.observedTerminal] at h <;> (subst h; rfl)
+  · simp [restartDisposition, h_owner, h_session]
 
 /-! ## Exhaustive characterizations
 
@@ -360,15 +349,15 @@ theorem restart_interrupt_iff_native_background_resolvable_parent
     cases deadlineExpired <;> cases process <;> decide
 
 /-- Leave-running fires exactly on the preserved shapes: a missing parent
-    regardless of expiry, a native background process still observed running,
-    and, without expiry, a session-message row or a non-native row under a
-    live parent. -/
+    regardless of expiry, any session-message row, a native background process
+    still observed running, and, without expiry, a non-native row under a live
+    parent. -/
 theorem leave_running_iff_preserved_shapes (row : RestartRow) :
     restartDisposition row = .leaveRunning ↔
-      (row.parent = .missing ∨
+      (row.parent = .missing ∨ row.sessionMessage = true ∨
         (row.isNativeBackgroundTool ∧ row.process = .stillRunning) ∨
         (row.deadlineExpired = false ∧ ¬ row.isNativeBackgroundTool ∧
-          (row.sessionMessage = true ∨ row.parent = .live))) := by
+          row.parent = .live)) := by
   rcases row with ⟨awaitMode, sessionMessage, parent, deadlineExpired, process⟩
   cases awaitMode <;> cases sessionMessage <;> cases parent <;>
     cases deadlineExpired <;> cases process <;> decide
@@ -392,15 +381,16 @@ theorem notification_iff_terminalized_native_background (row : RestartRow) :
   cases awaitMode <;> cases sessionMessage <;> cases parent <;>
     cases deadlineExpired <;> cases process <;> decide
 
-/-- Deadline expiry outranks the restart interrupt: an expired native
-    background tool times out (external failure) instead of reading as an
-    operator interrupt. -/
+/-- Deadline expiry outranks the restart interrupt: an expired row that is
+    not a session message times out (external failure) instead of reading as
+    an operator interrupt. -/
 theorem deadline_precedes_restart_interrupt
     (row : RestartRow)
+    (h_session : row.sessionMessage = false)
     (h_owner : row.parent ≠ .missing)
     (h_process : row.process = .stopped)
     (h_expired : row.deadlineExpired = true) :
     restartDisposition row = .terminalize .deadlineExceeded := by
-  simp [restartDisposition, h_owner, h_process, h_expired]
+  simp [restartDisposition, h_session, h_owner, h_process, h_expired]
 
 end Recovery

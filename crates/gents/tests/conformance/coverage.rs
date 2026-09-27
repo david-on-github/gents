@@ -188,7 +188,7 @@ pub(super) fn lean_executable_contracts_cover_initial_domains() {
     assert_eq!(lean_contract_snapshot().command_sandbox_cases.len(), 6);
     assert_eq!(lean_contract_snapshot().command_env_cases.len(), 14);
     assert_eq!(lean_queue_deadline_cases().len(), 5);
-    assert_eq!(lean_recovery_sweep_cases().len(), 29);
+    assert_eq!(lean_recovery_sweep_cases().len(), 28);
     // The synthetic RecoveryEquivalence contract was deleted from Lean; the
     // recovery sweep cases above are the actual recovery guarantee.
     assert_eq!(lean_transcript_cases().len(), 11);

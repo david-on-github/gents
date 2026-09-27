@@ -97,13 +97,9 @@ impl BackgroundCompletionObserver {
     }
 
     async fn settle_session_message_rows(&mut self) -> Result<()> {
-        let report = settle_running_session_message_rows(&self.node, &self.local_did).await?;
-        if report.total() > 0 {
-            tracing::debug!(
-                settled = report.settled,
-                timed_out = report.timed_out,
-                "settled session-message rows"
-            );
+        let settled = settle_running_session_message_rows(&self.node, &self.local_did).await?;
+        if settled > 0 {
+            tracing::debug!(settled, "settled session-message rows");
         }
         Ok(())
     }

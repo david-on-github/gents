@@ -151,8 +151,8 @@ async fn generated_native_missing_parent_restart_cases_defer() {
     }
 }
 
-/// A `create_session`/`send_message` row ends only on its own deadline or on
-/// the terminal of the request it caused. The Lean row carries the observed
+/// A `create_session`/`send_message` row ends only on the terminal of the
+/// request it caused. The Lean row carries the observed
 /// cause; the fixture builds exactly that premise on an accepted call whose
 /// caused request was materialized by the session-message owner.
 #[tokio::test]
@@ -183,15 +183,6 @@ async fn generated_session_message_recovery_cases_use_accepted_call() {
         let admission = &message.admission;
         let tool_doc_id = admission.tool.doc_id().unwrap().to_owned();
         let caused_state = match cause {
-            "deadlineExceeded" => {
-                update(
-                    &admission.node,
-                    &tool_doc_id,
-                    r#"deadline_at: "2020-01-01T00:00:00Z""#,
-                )
-                .await;
-                None
-            }
             "requestCompleted" => {
                 complete_child(
                     &admission.node,
@@ -239,10 +230,7 @@ async fn generated_session_message_recovery_cases_use_accepted_call() {
             "{name}"
         );
         assert_eq!(row["status"], "completed", "{name}");
-        if case.terminal_state == "timedOut" {
-            assert_eq!(row["cancel_cause"], "deadline", "{name}");
-            assert_eq!(row["tool_failure_class"], "external", "{name}");
-        } else if case.terminal_state == "cancelled" {
+        if case.terminal_state == "cancelled" {
             assert_eq!(row["cancel_cause"], "interrupted", "{name}");
         }
         let second = ToolCallLifecycle::recover_all(&admission.node, &admission.agent_did)
@@ -252,6 +240,85 @@ async fn generated_session_message_recovery_cases_use_accepted_call() {
         message.admission.node.shutdown().await;
         std::fs::remove_dir_all(&message.admission.path).expect("remove exact recovery fixture");
     }
+}
+
+/// A session-message row has no deadline: a restart and every settlement sweep
+/// leave it running past its stored `deadline_at`, and when the caused request
+/// ends later its result reaches the calling session exactly once.
+#[tokio::test]
+async fn caused_result_is_delivered_after_the_row_outlives_its_stored_deadline() {
+    let message = published_session_message(PublishedAdmissionOptions {
+        name: "session-message-outlives-deadline".to_owned(),
+        real_identity: true,
+        await_mode: AwaitMode::Background,
+        ..Default::default()
+    })
+    .await
+    .expect("publish accepted session message and materialize its request");
+    let admission = &message.admission;
+    let node = &admission.node;
+    let did = admission.agent_did.clone();
+    let tool_doc_id = admission.tool.doc_id().unwrap().to_owned();
+    let session_id = admission.tool.session_id().to_owned();
+    update(node, &tool_doc_id, r#"deadline_at: "2020-01-01T00:00:00Z""#).await;
+
+    let restart = ToolCallLifecycle::recover_all(node, &did).await.unwrap();
+    assert_eq!(restart.tool_calls_recovered, 0);
+    assert_eq!(
+        crate::background_completion::settle_running_session_message_rows(node, &did)
+            .await
+            .unwrap(),
+        0
+    );
+    let row = |node: Arc<crate::defra_node::EmbeddedNode>| {
+        let tool_doc_id = tool_doc_id.clone();
+        async move {
+            let response = node
+                .execute(&format!(
+                    r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ lifecycle_state cancel_cause }} }}"#,
+                    crate::graphql::escape_graphql_string(&tool_doc_id)
+                ))
+                .await;
+            assert!(!response.has_errors(), "{:?}", response.errors);
+            response.data.unwrap()["AgentToolCall"][0].clone()
+        }
+    };
+    assert_eq!(row(node.clone()).await["lifecycle_state"], "running");
+    let (notifications, _) = completion_obligations(node, &session_id, &did).await;
+    assert!(notifications.is_empty(), "{notifications:?}");
+
+    complete_child(node, &message.caused_request_id, &did, "late caused result").await;
+    assert_eq!(
+        crate::background_completion::settle_running_session_message_rows(node, &did)
+            .await
+            .unwrap(),
+        1
+    );
+    let settled = row(node.clone()).await;
+    assert_eq!(settled["lifecycle_state"], "completed");
+    assert!(settled["cancel_cause"].is_null());
+    let (notifications, wakes) = completion_obligations(node, &session_id, &did).await;
+    assert_eq!(notifications.len(), 1, "{notifications:?}");
+    assert!(notifications[0].contains("late caused result"));
+    assert_eq!(wakes.len(), 1);
+
+    assert_eq!(
+        ToolCallLifecycle::recover_all(node, &did)
+            .await
+            .unwrap()
+            .tool_calls_recovered,
+        0
+    );
+    assert_eq!(
+        crate::background_completion::settle_running_session_message_rows(node, &did)
+            .await
+            .unwrap(),
+        0
+    );
+    let (notifications, _) = completion_obligations(node, &session_id, &did).await;
+    assert_eq!(notifications.len(), 1, "delivered exactly once");
+    message.admission.node.shutdown().await;
+    std::fs::remove_dir_all(&message.admission.path).expect("remove exact recovery fixture");
 }
 
 #[cfg(unix)]

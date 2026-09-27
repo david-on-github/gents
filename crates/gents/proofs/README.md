@@ -1191,7 +1191,7 @@ Model → conformance → Rust bindings:
   total function (`restartDisposition`) with exhaustive characterizations
   (`restart_interrupt_iff_native_background_resolvable_parent`,
   `leave_running_iff_preserved_shapes`,
-  `session_message_row_terminalizes_only_on_expiry`,
+  `session_message_row_left_running`,
   `notification_iff_terminalized_native_background`,
   `deadline_precedes_restart_interrupt`). `restart_disposition_cases` rows are
   computed from the model.

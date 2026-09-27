@@ -227,12 +227,6 @@ impl DefraSessionHook {
                 invalid_tool_arguments_payload(tool_name, "/task", message)
             ),
         };
-        // The row outlives the calling request; its own deadline is only the
-        // background backstop. The caused request settles it first.
-        lifecycle.set_deadline_at(
-            chrono::Utc::now()
-                + chrono::Duration::seconds(crate::toolset::BACKGROUND_COMMAND_TIMEOUT_SECS as i64),
-        );
         lifecycle.start_running().await?;
         let receipt =
             match crate::session_message::commit(&self.node, &cause, &mut lifecycle, plan, !create)

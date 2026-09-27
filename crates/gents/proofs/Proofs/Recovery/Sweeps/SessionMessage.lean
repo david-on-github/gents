@@ -4,11 +4,13 @@ namespace Recovery
 
 open ToolExecution
 
-/-- A `create_session`/`send_message` row ends only on its own deadline or the
-    terminal of the request it caused: no parent terminal is a cause, because
-    the started session is an ordinary agent's session, not a subordinate. -/
+/-- A `create_session`/`send_message` row ends only on the terminal of the
+    request it caused. No parent terminal is a cause, because the started
+    session is an ordinary agent's session, not a subordinate; and the row
+    carries no deadline, because nothing waits on it and the caused request's
+    result is always delivered to the calling session. An explicit cancel ends
+    it by interrupting the caused request. -/
 inductive SessionMessageRecoveryCause where
-  | deadlineExceeded
   | requestCompleted
   | requestFailed
   | requestDead
@@ -19,7 +21,6 @@ inductive SessionMessageRecoveryCause where
 namespace SessionMessageRecoveryCause
 
 def toContract : SessionMessageRecoveryCause → String
-  | .deadlineExceeded => "deadlineExceeded"
   | .requestCompleted => "requestCompleted"
   | .requestFailed => "requestFailed"
   | .requestDead => "requestDead"
@@ -27,7 +28,6 @@ def toContract : SessionMessageRecoveryCause → String
   | .requestSuperseded => "requestSuperseded"
 
 def terminalState : SessionMessageRecoveryCause → ToolCallState
-  | .deadlineExceeded => .timedOut
   | .requestCompleted => .completed
   | .requestFailed => .failed
   | .requestDead => .failed
@@ -47,9 +47,8 @@ structure SessionMessageRecoveryRow where
   deriving Repr
 
 /-- Follows the existing `toolCallRecoverySweep` pattern: the row carries the
-cause observed by the recovering owner (the row's own deadline passed, or the
-caused request reached a durable terminal), and staleness is only the running
-session-message shape. Recovery never invents a cause; a row with neither
+cause observed by the recovering owner (the caused request reached a durable
+terminal), and staleness is only the running session-message shape. Recovery never invents a cause; a row with neither
 observation is not submitted to this sweep. -/
 def sessionMessageRecoveryStale (row : SessionMessageRecoveryRow) : Prop :=
   row.call.state = .running ∧ isSessionMessageCall row.call

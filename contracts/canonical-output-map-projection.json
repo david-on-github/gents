@@ -262,8 +262,8 @@
         "crates/gents-protocol/src/output.rs",
         "crates/gents-protocol/src/row.rs",
         "crates/gents/src/background_tools.rs",
-        "crates/gents/src/background_completion/projection.rs",
-        "crates/gents/src/hook/persistence/subagent_bridge.rs"
+        "crates/gents/src/background_tools/final_output.rs",
+        "crates/gents/src/background_completion/session_message.rs"
       ],
       "consumer_paths": [
         "crates/gents/src/tool_call_lifecycle/admission_fixture.rs",

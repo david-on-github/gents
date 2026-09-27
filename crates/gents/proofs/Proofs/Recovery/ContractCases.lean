@@ -194,8 +194,6 @@ def recoverySweepCases : List RecoverySweepCase :=
       "session_message_request_dead_to_failed" .requestDead
   , sessionMessageRecoveryCase
       "session_message_request_superseded_to_failed" .requestSuperseded
-  , sessionMessageRecoveryCase
-      "session_message_deadline_exceeded_to_timed_out" .deadlineExceeded
   , recoveryCase
       inferenceCallRecoverySweep
       "inference_queued_stale_to_cancelled"
@@ -299,9 +297,9 @@ def restartDispositionCases : List RestartDispositionCase :=
       .background true .cleanlyCompleted
       "Recovery.session_message_row_left_running"
   , restartDispositionCase
-      "restart_session_message_deadline_expired_times_out"
+      "restart_session_message_deadline_expired_left_running"
       .background true .live
-      "Recovery.session_message_row_terminalizes_only_on_expiry"
+      "Recovery.session_message_row_left_running"
       (deadlineExpired := true)
   , restartDispositionCase
       "restart_native_background_deadline_expired_times_out"
@@ -340,9 +338,9 @@ def restartDispositionCases : List RestartDispositionCase :=
     missing physical parent defers classification. -/
 theorem restartDispositionCases_cover_every_disposition :
     (restartDispositionCases.filter
-        (fun witness => witness.disposition = "leave_running")).length = 8 ∧
+        (fun witness => witness.disposition = "leave_running")).length = 9 ∧
       (restartDispositionCases.filter
-        (fun witness => witness.disposition = "terminalize")).length = 8 := by
+        (fun witness => witness.disposition = "terminalize")).length = 7 := by
   native_decide
 
 /-- Every terminal native background witness with a resolvable parent owes a

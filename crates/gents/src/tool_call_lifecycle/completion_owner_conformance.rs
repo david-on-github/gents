@@ -510,11 +510,7 @@ pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     let settled = crate::background_completion::settle_running_session_message_rows(node, did)
         .await
         .unwrap();
-    assert_eq!(
-        settled.total(),
-        1,
-        "the caused request's terminal settles its row"
-    );
+    assert_eq!(settled, 1, "the caused request's terminal settles its row");
 
     let notifications = notification_texts(&admission).await;
     assert_eq!(notifications.len(), 1);

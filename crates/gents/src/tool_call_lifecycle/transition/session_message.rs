@@ -1,8 +1,8 @@
 use super::*;
 
 /// The durable terminal of the request a `create_session`/`send_message` row
-/// caused (Lean `Recovery.SessionMessageRecoveryCause`, without the row's own
-/// deadline, which settles through `timeout`).
+/// caused (Lean `Recovery.SessionMessageRecoveryCause`): the row's only
+/// terminal cause.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CausedRequestTerminal {
     Completed { output: String },

@@ -62,8 +62,9 @@ inductive ToolOperation where
   | nativeCommand
   /-- `create_session` or `send_message`: materializes or steers a request in
   another session through `lifecycle::materialize`. The row has no host
-  process; its terminal is the caused request's terminal output, delivered to
-  the calling session as a completion notification. -/
+  process and no deadline; its only terminal is the caused request's terminal
+  output, always delivered to the calling session as a completion
+  notification. -/
   | sessionMessage
   deriving DecidableEq, Repr
 

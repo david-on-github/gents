@@ -441,7 +441,10 @@ impl ToolCallLifecycle {
 
     /// A `create_session`/`send_message` row (Lean
     /// `ToolOperation.sessionMessage`): no host process backs it, and its
-    /// terminal is the terminal output of the request it caused.
+    /// terminal is the terminal output of the request it caused. It has no
+    /// deadline (Lean `session_message_row_left_running`): the stored
+    /// `deadline_at` is the accepted dispatch deadline, never a terminal cause,
+    /// so the caused request's result always reaches the calling session.
     pub(crate) fn is_session_message(&self) -> bool {
         crate::toolset::is_session_message_tool(&self.tool_name)
     }
@@ -578,11 +581,6 @@ impl ToolCallLifecycle {
 
     /// Replace the in-memory deadline before the row's one pending-to-running
     /// transition persists it.
-    pub(crate) fn set_deadline_at(&mut self, deadline_at: chrono::DateTime<chrono::Utc>) {
-        debug_assert_eq!(self.state, ToolCallState::Pending);
-        self.deadline_at = deadline_at;
-    }
-
     #[cfg(test)]
     pub(crate) fn set_started_at(&mut self, t: Option<chrono::DateTime<chrono::Utc>>) {
         self.started_at = t;

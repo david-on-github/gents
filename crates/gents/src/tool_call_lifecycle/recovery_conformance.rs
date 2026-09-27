@@ -347,17 +347,6 @@ async fn generated_session_message_restart_dispositions_use_canonical_admission_
                 assert!(actual["cancel_cause"].is_null(), "{name}");
                 assert!(actual["tool_failure_class"].is_null(), "{name}");
             }
-            "terminalize" => {
-                assert_eq!(report.tool_calls_recovered, 1, "{name}");
-                assert_eq!(
-                    actual["lifecycle_state"],
-                    case.terminal_state.as_deref().unwrap(),
-                    "{name}"
-                );
-                assert_eq!(case.cause.as_deref(), Some("deadlineExceeded"), "{name}");
-                assert_eq!(actual["cancel_cause"], "deadline", "{name}");
-                assert_eq!(actual["tool_failure_class"], "external", "{name}");
-            }
             other => panic!("unsupported session-message restart disposition {other}"),
         }
         let session_id = format!("session-restart-{name}");

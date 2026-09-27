@@ -148,7 +148,7 @@ async fn generated_background_completion_queue_case_uses_accepted_session_messag
         crate::background_completion::settle_running_session_message_rows(&node, agent_did)
             .await
             .unwrap();
-    assert_eq!(settled.settled, 2);
+    assert_eq!(settled, 2);
     let post = queue_snapshot(node.as_ref(), &session_id, queue_key).await;
     assert!(
         case.post_pending_request_ids.is_empty(),
