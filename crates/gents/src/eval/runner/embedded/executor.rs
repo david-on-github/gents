@@ -746,7 +746,7 @@ async fn submit_and_observe(
     spec: &TrialSpec,
     cancel: &CancellationToken,
     home: &EmbeddedHome,
-    _runtime: &RunningRuntime,
+    runtime: &RunningRuntime,
     locator: &TrialLocator,
     stage: &StageSpec,
 ) -> ObservedStage {
@@ -763,7 +763,7 @@ async fn submit_and_observe(
         return ObservedStage::unsubmitted();
     }
 
-    let cancelled;
+    let stopped;
     let observed = tokio::select! {
         observed = await_terminal(
             &home.node,
@@ -772,12 +772,18 @@ async fn submit_and_observe(
             GRACE,
             POLL,
         ) => {
-            cancelled = false;
+            stopped = false;
             observed
         }
         () = cancel.cancelled() => {
-            cancelled = true;
+            stopped = true;
             interrupt_and_settle(&home.node, &request_id).await
+        }
+        // Nothing is left to settle the request, so its row would only be
+        // watched until the stage deadline and read as a deadline.
+        () = runtime_exited(runtime) => {
+            stopped = true;
+            Err(anyhow!("the trial runtime exited before the request settled"))
         }
     };
     let observed = match observed {
@@ -810,7 +816,7 @@ async fn submit_and_observe(
     ObservedStage {
         request_id: Some(request_id),
         terminal_state: observed.as_ref().map(|observed| observed.terminal_state),
-        failure_kind: stage_failure_kind(observed.as_ref(), collected, cancelled, &evidence),
+        failure_kind: stage_failure_kind(observed.as_ref(), collected, stopped, &evidence),
         evidence,
     }
 }
@@ -822,18 +828,19 @@ async fn submit_and_observe(
 /// arrived, so it is [`OutcomeKind::Infrastructure`] and the slot is owed
 /// another attempt. An observation that failed outright is the same kind of
 /// fault — the watch of the request broke, which says nothing about what the
-/// request did. Cancellation stays on the runtime boundary: there the request
-/// itself is what did not finish.
+/// request did. A stage stopped by cancellation or by its runtime exiting
+/// stays on the runtime boundary: there the request itself is what did not
+/// finish, and the subject can bring a runtime down.
 fn stage_failure_kind(
     observed: Option<&TerminalObservation>,
     collected: bool,
-    cancelled: bool,
+    stopped: bool,
     evidence: &RequestEvidence,
 ) -> Option<OutcomeKind> {
     if !collected {
         return Some(OutcomeKind::Infrastructure);
     }
-    if cancelled {
+    if stopped {
         return Some(OutcomeKind::Runtime);
     }
     match observed {
@@ -871,6 +878,12 @@ fn provider_reason(
         .iter()
         .filter_map(|call| call.failure_reason.as_deref())
         .find_map(provider_reason_from_failure)
+}
+
+async fn runtime_exited(runtime: &RunningRuntime) {
+    while !runtime.handle.is_finished() {
+        tokio::time::sleep(POLL).await;
+    }
 }
 
 /// Cancellation reaches a running stage through the same latch a deadline
