@@ -484,29 +484,95 @@ async fn trace_project_exports_live_inference_turn_as_adapter_artifacts() -> Res
         }),
         "live openai-codex projection missing completed root request item: {openai:#}"
     );
-    let read_file_position = items
+    let read_file_call_id = items
         .iter()
-        .position(|item| {
+        .find(|item| {
             item.get("type").and_then(Value::as_str) == Some("tool_call")
                 && item.get("name").and_then(Value::as_str) == Some("read_file")
                 && item.get("status").and_then(Value::as_str) == Some("completed")
         })
+        .and_then(|item| item.get("id").and_then(Value::as_str))
         .ok_or_else(|| {
             anyhow!(
                 "live openai-codex projection missing completed read_file tool item: {openai:#}"
             )
-        })?;
-    // The canonical terminal output is the run's last item: an assistant
-    // message of this request after its tool call, not an earlier header.
-    let final_item = items
-        .last()
-        .ok_or_else(|| anyhow!("live openai-codex projection has no items: {openai:#}"))?;
+        })?
+        .to_string();
+    // The request's terminal_output names its canonical terminal message;
+    // projection order is by timestamp, not terminal selection.
+    let request_row = graphql_query(
+        &graphql,
+        &format!(
+            r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{}" }} }}, limit: 2) {{
+                _docID terminal_output
+            }} }}"#,
+            escape_graphql_string(&request_id)
+        ),
+    )
+    .await?;
+    let request_row = first_graphql_row(&request_row, "AgentRequest")?.clone();
+    let terminal_output = match request_row.get("terminal_output") {
+        Some(Value::String(encoded)) => serde_json::from_str::<Value>(encoded)?,
+        Some(value) => value.clone(),
+        None => Value::Null,
+    };
+    assert_eq!(
+        terminal_output.get("kind").and_then(Value::as_str),
+        Some("message"),
+        "completed live request must name a terminal message: {request_row}"
+    );
+    let message_doc_id = terminal_output
+        .get("message_doc_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("terminal_output lacks message_doc_id: {terminal_output}"))?;
+    let rows = graphql_query(
+        &graphql,
+        &format!(
+            r#"{{
+                AgentMessage(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 2) {{
+                    session_id request_doc_id sequence role
+                }}
+                AgentToolCall(filter: {{ request_id: {{ _eq: "{}" }}, tool_call_id: {{ _eq: "{}" }} }}, limit: 2) {{
+                    message_sequence
+                }}
+            }}"#,
+            escape_graphql_string(message_doc_id),
+            escape_graphql_string(&request_id),
+            escape_graphql_string(&read_file_call_id),
+        ),
+    )
+    .await?;
+    let terminal_message = first_graphql_row(&rows, "AgentMessage")?;
+    assert_eq!(
+        terminal_message.get("role").and_then(Value::as_str),
+        Some("assistant")
+    );
+    assert_eq!(
+        terminal_message.get("request_doc_id"),
+        request_row.get("_docID"),
+        "terminal message must belong to the live request: {terminal_message}"
+    );
+    let terminal_sequence = terminal_message
+        .get("sequence")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("terminal message lacks a sequence: {terminal_message}"))?;
+    let read_file_sequence = first_graphql_row(&rows, "AgentToolCall")?
+        .get("message_sequence")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("read_file call lacks its message sequence: {rows}"))?;
     assert!(
-        final_item.get("type").and_then(Value::as_str) == Some("message")
-            && final_item.get("role").and_then(Value::as_str) == Some("assistant")
-            && final_item.get("request_id").and_then(Value::as_str) == Some(request_id.as_str())
-            && items.len() - 1 > read_file_position,
-        "live openai-codex projection must end with the request's final assistant message: {openai:#}"
+        terminal_sequence > read_file_sequence,
+        "terminal message {terminal_sequence} must follow the read_file call {read_file_sequence}"
+    );
+    let terminal_item_id = format!("{session_id}:message:{terminal_sequence}");
+    assert!(
+        items.iter().any(|item| {
+            item.get("type").and_then(Value::as_str) == Some("message")
+                && item.get("id").and_then(Value::as_str) == Some(terminal_item_id.as_str())
+                && item.get("role").and_then(Value::as_str) == Some("assistant")
+                && item.get("request_id").and_then(Value::as_str) == Some(request_id.as_str())
+        }),
+        "live openai-codex projection missing the terminal message {terminal_item_id}: {openai:#}"
     );
     let serialized_openai = serde_json::to_string(&openai)?;
     assert!(
