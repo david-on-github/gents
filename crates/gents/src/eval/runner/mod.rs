@@ -2281,6 +2281,9 @@ mod tests {
         let _held = holder.hold();
         let marker = request_cancel(&launching.runs_dir(), "run-held").unwrap();
 
+        // STALE_WINDOW is 3 s: refresh the holder before each look, or a slow
+        // machine sees it go stale mid-test.
+        holder.heartbeat(Duration::ZERO);
         let ran = run(
             &launching.access,
             &request,
@@ -2291,6 +2294,7 @@ mod tests {
         )
         .await
         .unwrap_err();
+        holder.heartbeat(Duration::ZERO);
         let resumed = resume(
             &launching.access,
             OWNER,
@@ -2309,6 +2313,7 @@ mod tests {
                 "{error:#}"
             );
         }
+        holder.heartbeat(Duration::ZERO);
         assert!(marker.exists(), "the holder's cancel request survives");
         assert!(running_elsewhere(&frozen.run_dir));
         assert!(load_trials(&launching.access, OWNER, "run-held")
