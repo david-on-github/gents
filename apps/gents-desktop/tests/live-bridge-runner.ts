@@ -221,6 +221,13 @@ export class LiveBridgeRunner implements TauriDriverBridge {
     );
   }
 
+  async fetchRetainedProviderReasoning(sessionId: string, requestId: string) {
+    return await this.postJson<{ requestDocId: string; reasoningBySource: string[] }>(
+      "/desktop/request/retained-reasoning",
+      { sessionId, requestId },
+    );
+  }
+
   private async fetchVersion() {
     const response = await this.getJson<VersionResponse>("/desktop/version");
     return response.version;

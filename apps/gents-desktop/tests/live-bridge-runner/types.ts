@@ -20,6 +20,17 @@ type ToolCallDiagnostics = {
   latestCompletedAt?: string | null;
 };
 
+type InferenceCallDiagnostics = {
+  callId: string;
+  requestId: string;
+  requestDocId: string;
+  agentDid: string;
+  backendId: string | null;
+  behaviorId: string | null;
+  callKind: string;
+  callState: string;
+};
+
 export type RequestDiagnostics = {
   source: string;
   sessionId: string;
@@ -46,6 +57,8 @@ export type RequestDiagnostics = {
     reasoningLen: number;
   } | null;
   toolCalls: ToolCallDiagnostics;
+  inferenceCalls?: InferenceCallDiagnostics[];
+  inferenceDiagnosticsError?: string | null;
   toolResultCount: number;
   messageCount: number;
   timelineCount: number;

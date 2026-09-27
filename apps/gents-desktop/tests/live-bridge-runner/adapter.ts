@@ -7,6 +7,8 @@ import type {
   DesktopClientSnapshot,
   DesktopOperationsSnapshot,
   DesktopSessionSnapshot,
+  InferenceDiscoveryResult,
+  InferenceModelRecommendation,
   InferenceSetupCatalog,
   InitSummary,
   InterruptRequestResult,
@@ -122,6 +124,21 @@ export function createBridgeHttpAdapter(
       ),
     getInferenceSetupCatalog: async () =>
       client.getJson<InferenceSetupCatalog>("/desktop/inference/setup/catalog"),
+    discoverInferenceModels: async (request) =>
+      client.postJson<InferenceDiscoveryResult>(
+        "/desktop/inference/models/discover",
+        request,
+      ),
+    getInferenceModelRecommendation: async (request) =>
+      client.postJson<InferenceModelRecommendation>(
+        "/desktop/inference/model/recommendation",
+        request,
+      ),
+    getInferenceBackendRecommendation: async (request) =>
+      client.postJson<InferenceModelRecommendation>(
+        "/desktop/inference/backend/recommendation",
+        request,
+      ),
     saveToolsConfig: async (request) =>
       client.postJson<DesktopClientSnapshot>("/desktop/tools/save", request),
     saveToolServiceConfig: async (request) =>
@@ -142,6 +159,8 @@ export function createBridgeHttpAdapter(
     },
     saveTriggerConfig: async (request) =>
       client.postJson<DesktopClientSnapshot>("/desktop/trigger/save", request),
+    saveEventSourceConfig: async (request) =>
+      client.postJson<DesktopClientSnapshot>("/desktop/event-source/save", request),
     deleteEventSourceConfig: async (request) =>
       client.postJson<DesktopClientSnapshot>("/desktop/event-source/delete", request),
     deleteTriggerConfig: async (request) =>
