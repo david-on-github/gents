@@ -2408,6 +2408,64 @@ def self_test_subagent_lifecycle_validators() -> dict[str, int]:
     return counters
 
 
+TERMINAL_TOOL_STATUSES = ("completed", "failed")
+
+
+def require_tool_call_progression(updates: list[dict[str, Any]], tool_call_id: str) -> None:
+    """Require one tool call's updates to settle exactly once.
+
+    A call may report any number of non-terminal updates, then exactly one
+    terminal update; nothing follows the terminal update.
+    """
+    statuses = [
+        message.get("params", {}).get("update", {}).get("status") for message in updates
+    ]
+    terminal = [index for index, status in enumerate(statuses) if status in TERMINAL_TOOL_STATUSES]
+    require(terminal, f"tool call {tool_call_id!r} never reported a terminal status: {statuses}")
+    require(
+        len(terminal) == 1,
+        f"tool call {tool_call_id!r} reported more than one terminal status: {statuses}",
+    )
+    require(
+        terminal[0] == len(statuses) - 1,
+        f"tool call {tool_call_id!r} reported updates after its terminal status: {statuses}",
+    )
+
+
+def self_test_tool_call_progression() -> dict[str, int]:
+    def update(status: str | None) -> dict[str, Any]:
+        body: dict[str, Any] = {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1"}
+        if status is not None:
+            body["status"] = status
+        return {"method": STANDARD_UPDATE_METHOD, "params": {"update": body}}
+
+    accepted = 0
+    for statuses in (
+        ["completed"],
+        ["in_progress", "in_progress", "completed"],
+        ["pending", None, "in_progress", "failed"],
+    ):
+        require_tool_call_progression([update(status) for status in statuses], "tc-1")
+        accepted += 1
+    rejected = 0
+    for statuses in (
+        [],
+        ["in_progress"],
+        ["in_progress", "pending"],
+        ["completed", "in_progress"],
+        ["completed", None],
+        ["in_progress", "completed", "completed"],
+        ["failed", "completed"],
+    ):
+        try:
+            require_tool_call_progression([update(status) for status in statuses], "tc-1")
+        except AssertionError:
+            rejected += 1
+        else:
+            raise AssertionError(f"tool call progression {statuses} was accepted")
+    return {"accepted": accepted, "rejected": rejected}
+
+
 def read_until(
     client: LeaderClient,
     observed: list[dict[str, Any]],
@@ -2630,10 +2688,9 @@ def probe_subagent(
     require_exact_finished_dto(finished_update)
     require_live_success_dto(finished_update)
 
-    # 5. The task terminal update with the same tool call id: a
-    #    flattened `tool_call_update` on the standard rail carrying the
-    #    terminal status for the task call id observed above.
-    terminal_task_updates = [
+    # 5. The agent_new call's `tool_call_update`s on the standard rail:
+    #    progress while the worker runs, then exactly one terminal status.
+    task_updates = [
         message
         for message in notifications
         if message.get("method") == STANDARD_UPDATE_METHOD
@@ -2641,16 +2698,11 @@ def probe_subagent(
         and message.get("params", {}).get("update", {}).get("toolCallId") == task_call_id
     ]
     require(
-        terminal_task_updates,
+        task_updates,
         f"no standard-rail tool_call_update carried the task tool call id {task_call_id!r}; "
         f"observed updates: {result['kinds']}",
     )
-    for message in terminal_task_updates:
-        status = message.get("params", {}).get("update", {}).get("status")
-        require(
-            status in ("completed", "failed"),
-            f"task tool_call_update must carry a terminal status; got {status!r}",
-        )
+    require_tool_call_progression(task_updates, task_call_id)
 
     # 6. Chronology: the agent_new tool_call precedes the extension spawn in
     #    the observations, because the call's row exists before the session
@@ -3202,6 +3254,7 @@ def main() -> int:
             "subagent_document_query_self_test": self_test_subagent_document_query(),
             "subprocess_document_self_test": self_test_persisted_subprocess_probe(),
             "document_poll_self_test": self_test_document_polling(),
+            "tool_call_progression_self_test": self_test_tool_call_progression(),
         }, indent=2, sort_keys=True))
         return 0
     require(args.socket, "--socket is required unless --edge offline is selected")
