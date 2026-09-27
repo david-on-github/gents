@@ -265,3 +265,186 @@ async fn interrupt_while_preparing_provider_input_terminalizes_through_the_owner
         "no provider call may run in the pre-inference window"
     );
 }
+
+/// The window that runs before `begin_owned_execution` decides on a request that
+/// is still `claimed`, and the owner terminalizes it from there. `can_finalize`
+/// admits a claimed request for every noncompleted outcome, so this is the
+/// modeled claimed-to-interrupted transition, not the processing one the prompt
+/// assembly window above reaches.
+///
+/// That window holds only durable reads, so there is nothing in it to park a
+/// barrier on the way the blocking tool definition parks prompt assembly.
+/// Racing a latch against reads that finish in milliseconds would decide which
+/// window fires by timing, so the latch is instead made observable before the
+/// window is entered: `prepare_unless_interrupted` checks the latch before it
+/// polls its work, and that check is the decision this asserts. The claim, the
+/// observer, the window and the terminal owner are all the production ones.
+#[tokio::test]
+async fn interrupt_latched_at_the_claim_terminalizes_before_execution_begins() {
+    let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
+    crate::ensure_runtime_schemas(&node).await.unwrap();
+    let behavior = pre_inference_behavior();
+    let agent_did = behavior.agent_did().to_owned();
+    let identity = behavior.principal_identity().clone();
+    let prompt = LayeredPromptBuilder::for_behavior(
+        &behavior.system_prompt,
+        &behavior.behavior_id,
+        &[],
+        false,
+        &[],
+    );
+    let provider_calls = Arc::new(AtomicUsize::new(0));
+    let daemon = BehaviorDaemon::new(
+        node.clone(),
+        behavior.clone(),
+        None,
+        Arc::new(ProviderCallCountingModel(provider_calls.clone())),
+        prompt.preamble().to_owned(),
+        Arc::new(Vec::<Box<dyn crate::llm::tool::ToolDyn>>::new()),
+        prompt,
+        FailurePolicy::default(),
+        None,
+        BackgroundToolRegistry::default(),
+        BackgroundExecutionRegistry::default(),
+        Arc::new(StartupBarrier::ready_for_test()),
+        crate::runtime_status::RuntimeStatusHandle::new(node.clone(), agent_did.clone()),
+        1,
+        crate::request_admission::AgentRequestAdmissionVerifier::new(
+            node.clone(),
+            identity,
+            crate::agent::p2p_reconcile::enrollment_authority_channel().1,
+        ),
+    )
+    .unwrap();
+    let request = create_routed_request(&node, &behavior, &agent_did).await;
+    let request_doc_id = request.doc_id.clone();
+    let requester_did = request.requester_did.clone();
+    seed_titled_session(node.as_ref(), &request, &behavior)
+        .await
+        .expect("seed a titled session through the session writer");
+
+    let stream_writer = crate::streaming::DefraStreamWriter::new(
+        node.clone(),
+        behavior.agent_did(),
+        Duration::from_millis(behavior.stream_batch_ms),
+    );
+    let origin =
+        crate::lifecycle::ExecutionOrigin::from_persisted(request.execution_origin.as_deref())
+            .expect("a created request carries a canonical execution origin");
+    let mut lifecycle = crate::lifecycle::RequestLifecycle::new_with_execution_binding(
+        node.clone(),
+        &behavior.behavior_id,
+        behavior.agent_did(),
+        request.clone(),
+        behavior.deadline_duration.as_secs(),
+        origin,
+        behavior.backend_id.clone().unwrap_or_default(),
+    );
+    lifecycle.set_execution_lease_duration(behavior.stream_liveness_timeout);
+    lifecycle.set_configured_max_total_tokens(behavior.max_total_tokens);
+    assert_eq!(
+        lifecycle
+            .claim_with_identity()
+            .await
+            .expect("claim the fresh request"),
+        crate::lifecycle::ClaimOutcome::Claimed,
+        "this runtime must win the claim to own the pre-execution window"
+    );
+    let claimed = request_terminal_row(node.as_ref(), &request_doc_id)
+        .await
+        .expect("read the claimed request row");
+    assert_eq!(
+        claimed["lifecycle_state"], "claimed",
+        "the window under test runs before execution begins: {claimed}"
+    );
+
+    let (interrupt_tx, mut interrupt_rx) =
+        tokio::sync::watch::channel::<Option<crate::interrupt::InterruptIntent>>(None);
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let _observer = crate::interrupt::ClaimedRequestInterruptObserver::new(
+        crate::interrupt::spawn_request_interrupt_observer(
+            node.clone(),
+            request_doc_id.clone(),
+            interrupt_tx,
+            shutdown_rx,
+        ),
+    );
+    crate::interrupt::interrupt_request_by_doc_id(
+        node.as_ref(),
+        &request_doc_id,
+        &agent_did,
+        requester_did.as_deref(),
+    )
+    .await
+    .expect("latch interrupt");
+    tokio::time::timeout(Duration::from_secs(20), async {
+        interrupt_rx
+            .wait_for(|intent| intent.is_some())
+            .await
+            .map(|_| ())
+    })
+    .await
+    .expect("the claim's observer must surface the durable latch")
+    .expect("the observer channel stays open while the claim is held");
+
+    // Both halves of the premise at once: the latch is observable, and the
+    // request it will be decided against has not left `claimed`.
+    let latched = request_terminal_row(node.as_ref(), &request_doc_id)
+        .await
+        .expect("read the latched request row");
+    assert_eq!(
+        latched["lifecycle_state"], "claimed",
+        "the latch must be observable while the request is still claimed: {latched}"
+    );
+    assert!(
+        !latched["interrupt_requested_at"].is_null(),
+        "the durable latch is what the window observes: {latched}"
+    );
+
+    // The same decision the pre-execution window makes, over the same read it
+    // wraps: a claimed request with an observable latch does not fall through.
+    let prepared = crate::interrupt::prepare_unless_interrupted(
+        &mut interrupt_rx,
+        crate::completion_factory::aggregate_token_budget_for_request(node.as_ref(), &request),
+    )
+    .await;
+    assert!(
+        matches!(
+            prepared,
+            crate::interrupt::InterruptiblePreparation::Interrupted
+        ),
+        "a claimed request with an observable latch must not proceed into preparation"
+    );
+
+    daemon
+        .finish_interrupted_request(
+            &mut lifecycle,
+            &stream_writer,
+            &request,
+            crate::agent::daemon::InterruptEvidence::observed(),
+            "pre_inference",
+        )
+        .await;
+
+    let terminal = request_terminal_row(node.as_ref(), &request_doc_id)
+        .await
+        .expect("read the terminalized request row");
+    assert_eq!(
+        terminal["lifecycle_state"], "interrupted",
+        "the owner terminalizes the claimed request rather than leaving it for recovery: {terminal}"
+    );
+    assert!(
+        !terminal["terminalized_at"].is_null(),
+        "owner terminalization must stamp terminalized_at: {terminal}"
+    );
+    assert_eq!(
+        terminal["failure_reason"],
+        gents_protocol::request_lifecycle::interrupt_terminal_reason::BEFORE_ANY_PROVIDER_CALL,
+        "a claim interrupted before execution began attempted no provider call: {terminal}"
+    );
+    assert_eq!(
+        provider_calls.load(Ordering::SeqCst),
+        0,
+        "no provider call may run before execution begins"
+    );
+}
