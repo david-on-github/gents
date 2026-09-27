@@ -821,7 +821,13 @@ mod tests {
             assert!(!response.has_errors(), "{:?}", response.errors);
             gate.1.notify_one();
         };
-        let (result, ()) = tokio::join!(promotion, edit);
+        // The seam fires once; a regression that fires it again would wait on
+        // the second gate forever, so a hang is a failure, not a stall.
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            tokio::join!(promotion, edit)
+        })
+        .await
+        .expect("the promotion and the edit finished");
 
         let error = result.unwrap_err();
         let refusal = promote_refused(&error).unwrap_or_else(|| panic!("{error:#}"));
