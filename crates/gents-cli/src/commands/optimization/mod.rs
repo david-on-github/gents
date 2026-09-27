@@ -130,7 +130,7 @@ async fn behavior_proposer(
     subject_dir: &Path,
     subject_behavior: &str,
 ) -> Result<BehaviorProposer<LiveTurn>> {
-    let gents::ConfigAccess::Graphql(graphql) = &ctx.access else {
+    let gents::ConfigAccess::Graphql(graphql) = &*ctx.access else {
         anyhow::bail!(
             "start `gents server` for this home and retry: a behavior proposer runs on a served home"
         );
