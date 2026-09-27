@@ -173,6 +173,22 @@ fn rejects_collection_and_correlation_mismatches() {
     assert!(has_code(&error, DiagnosticCode::InvalidCollection));
 }
 
+/// Capability ports come from installed packs, including registry packs an
+/// agent installs, so a port may not name a protected eval collection.
+#[test]
+fn rejects_ports_on_protected_collections() {
+    for protected in crate::document_config::PROTECTED_DATASTORE_COLLECTIONS {
+        let mut capabilities = catalog();
+        capabilities[0].output_ports[0].collection = (*protected).to_owned();
+        capabilities[1].input_ports[0].collection = (*protected).to_owned();
+        let error = compile(&linear_intent(), &capabilities).unwrap_err();
+        assert!(
+            has_code(&error, DiagnosticCode::InvalidCollection),
+            "{protected}"
+        );
+    }
+}
+
 #[test]
 fn rejects_unsafe_predicates_and_ambiguous_output_collections() {
     let mut intent = linear_intent();
