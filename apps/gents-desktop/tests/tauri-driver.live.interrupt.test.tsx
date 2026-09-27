@@ -46,6 +46,8 @@ describeLive("Tauri app live interrupt flow", () => {
         );
         logTurn("cancel button enabled");
 
+        let streamedContent = "";
+        let streamedReasoning = "";
         if (phase === "streaming") {
           await waitFor(
             async () => {
@@ -58,9 +60,10 @@ describeLive("Tauri app live interrupt flow", () => {
               const response = session?.timelineItems.find(
                 (item) => item.kind === "liveAssistant",
               );
-              expect(
-                (response?.content ?? "").length + (response?.reasoning ?? "").length,
-              ).toBeGreaterThan(0);
+              expect((response?.content ?? "").length).toBeGreaterThan(0);
+              expect((response?.reasoning ?? "").length).toBeGreaterThan(0);
+              streamedContent = response?.content ?? "";
+              streamedReasoning = response?.reasoning ?? "";
             },
             { timeout: 90_000 },
           );
@@ -72,33 +75,42 @@ describeLive("Tauri app live interrupt flow", () => {
 
         const finalSession = await runner.waitForRequestCompletion(submitted);
         const terminalObservedAt = performance.now();
+        if (phase === "streaming") {
+          const retained = await runner.fetchRetainedProviderReasoning(
+            submitted.sessionId,
+            submitted.requestId,
+          );
+          expect(retained.requestDocId.length).toBeGreaterThan(0);
+          expect(retained.reasoningBySource.length).toBeGreaterThan(0);
+          expect(
+            retained.reasoningBySource.some((reasoning) =>
+              reasoning.includes(streamedReasoning),
+            ),
+            JSON.stringify({ streamedReasoning, retained }),
+          ).toBe(true);
+        }
         const cancelCause = finalSession?.latestRequestOutcome?.cancelCause;
         if (cancelCause) {
           // Interrupt accepted: the canonical contract requires an actually
           // terminal interrupted turn, not just an acknowledged bridge call.
           expect(finalSession.turnState).toBe("interrupted");
+          expect(cancelCause.cause).toBe("userCancelled");
+          expect(cancelCause.source).toBe("requestInterrupt");
           if (phase === "streaming") {
-            expect(cancelCause.cause).toBe("interrupted");
-            // Partial provider output published before the interrupt stays
-            // observable in the terminal snapshot: the published turn remains
-            // history (contracts/canonical-output.md cancellation boundary).
-            const retained = finalSession.timelineItems.find(
-              (item) => item.kind === "liveAssistant",
+            const retained = finalSession.timelineItems.filter(
+              (item) => item.kind === "assistantMessage",
             );
-            expect(
-              (retained?.content ?? "").length + (retained?.reasoning ?? "").length,
-            ).toBeGreaterThan(0);
+            expect(retained.length).toBeGreaterThan(0);
+            expect(retained.map((item) => item.content ?? "").join("")).toContain(
+              streamedContent,
+            );
           }
           logTurn(`interrupt latched: cause=${cancelCause.cause}`);
           await waitFor(
             () => {
-              expect(
-                screen.getByText(
-                  new RegExp(
-                    `^Interrupted · ${cancelCauseLabel(cancelCause.cause)}(?: \\(|$)`,
-                  ),
-                ),
-              ).toBeInTheDocument();
+              expect(screen.getByTestId("stopped-notice")).toHaveTextContent(
+                "You stopped this response.",
+              );
             },
             { timeout: 30_000 },
           );
@@ -174,18 +186,3 @@ describeLive("Tauri app live interrupt flow", () => {
     600_000,
   );
 });
-
-function cancelCauseLabel(cause: string) {
-  switch (cause) {
-    case "userCancelled":
-      return "user cancelled";
-    case "interrupted":
-      return "interrupted";
-    case "deadline":
-      return "deadline expired";
-    case "unknown":
-      return "cause unknown";
-    default:
-      return cause;
-  }
-}

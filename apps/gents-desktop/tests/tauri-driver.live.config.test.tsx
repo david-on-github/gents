@@ -50,7 +50,8 @@ describeLive("Tauri app live bridge runner config flow", () => {
       await waitForConfigFlowReady(runner, ids);
 
       await driver.openConfigSection("tasks");
-      await driver.user.click(screen.getByTestId("task-run"));
+      await driver.openConfigItem(ids.taskId);
+      await driver.user.click(screen.getByRole("button", { name: "Run task" }));
       await waitFor(() => {
         expect(runner.taskRunResults).toHaveLength(1);
       });
@@ -69,6 +70,24 @@ describeLive("Tauri app live bridge runner config flow", () => {
       }
       expectCompletedSession("config task run", session);
       expect(session.latestRequestId).toBe(taskRun.requestId);
+      const diagnostics = await runner.fetchRequestDiagnostics(
+        taskRun.sessionId,
+        taskRun.requestId,
+      );
+      expect(diagnostics.remote.inferenceDiagnosticsError).toBeNull();
+      expect(diagnostics.remote.inferenceCalls).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            requestId: taskRun.requestId,
+            requestDocId: taskRun.requestDocId,
+            agentDid: runner.agentDid,
+            backendId: ids.backendId,
+            behaviorId: ids.behaviorId,
+            callKind: "inference",
+            callState: "completed",
+          }),
+        ]),
+      );
     });
   }, 600_000);
 });

@@ -32,6 +32,11 @@ use gents_desktop_bridge::snapshot::build_session_live_delta;
 use gents_desktop_bridge::snapshot::operations_snapshot::{
     project_backgrounded_tools, stuck_diagnostics_from_tool_calls, ToolCallRow,
 };
+use gents_desktop_bridge::tauri_commands::inference_setup::{
+    discover_inference_models_for_core, inference_backend_recommendation,
+    inference_model_recommendation, InferenceBackendRecommendationRequest,
+    InferenceDiscoveryRequest, InferenceRecommendationRequest,
+};
 use gents_desktop_bridge::tauri_commands::operations::{
     list_backends_with_health_for_core, subagent_tree_view_from_gents,
 };
@@ -154,6 +159,37 @@ pub(super) fn handle_request(
         ("GET", "/desktop/inference/setup/catalog") => Ok(HttpResponse::json_ok(
             serde_json::to_string(&gents::inference_setup::inference_setup_catalog())?,
         )),
+        ("POST", "/desktop/inference/models/discover") => {
+            let request = decode::<InferenceDiscoveryRequest>(
+                &request.body,
+                "decoding inference discovery request",
+            )?;
+            let result = runtime
+                .block_on(discover_inference_models_for_core(
+                    request,
+                    Some(fixture.desktop_core().as_ref()),
+                ))
+                .map_err(|error| anyhow!("{error}"))?;
+            Ok(HttpResponse::json_ok(serde_json::to_string(&result)?))
+        }
+        ("POST", "/desktop/inference/model/recommendation") => {
+            let request = decode::<InferenceRecommendationRequest>(
+                &request.body,
+                "decoding inference recommendation request",
+            )?;
+            let result =
+                inference_model_recommendation(request).map_err(|error| anyhow!("{error}"))?;
+            Ok(HttpResponse::json_ok(serde_json::to_string(&result)?))
+        }
+        ("POST", "/desktop/inference/backend/recommendation") => {
+            let request = decode::<InferenceBackendRecommendationRequest>(
+                &request.body,
+                "decoding backend recommendation request",
+            )?;
+            let result =
+                inference_backend_recommendation(request).map_err(|error| anyhow!("{error}"))?;
+            Ok(HttpResponse::json_ok(serde_json::to_string(&result)?))
+        }
         ("POST", "/desktop/init") => Ok(HttpResponse::json_ok(serde_json::to_string(
             &fixture.init_summary(),
         )?)),
@@ -331,6 +367,23 @@ pub(super) fn handle_request(
                 request_id,
             ));
             Ok(HttpResponse::json_ok(serde_json::to_string(&diagnostics)?))
+        }
+        ("POST", "/desktop/request/retained-reasoning") => {
+            let request = decode::<SessionSnapshotRequest>(
+                &request.body,
+                "decoding retained reasoning request",
+            )?;
+            let request_id = request
+                .request_id
+                .as_deref()
+                .ok_or_else(|| anyhow!("requestId is required"))?;
+            let result = runtime.block_on(retained_provider_reasoning(
+                fixture.remote_core().as_ref(),
+                fixture.agent_did(),
+                &request.session_id,
+                request_id,
+            ))?;
+            Ok(HttpResponse::json_ok(serde_json::to_string(&result)?))
         }
         ("POST", "/desktop/operations/snapshot") => {
             let request = decode::<DesktopOperationsSnapshotRequest>(
@@ -701,6 +754,126 @@ pub(super) fn handle_request(
         }
         _ => Ok(HttpResponse::json_error("404 Not Found", "not found")),
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RetainedProviderReasoning {
+    request_doc_id: String,
+    reasoning_by_source: Vec<String>,
+}
+
+async fn retained_provider_reasoning(
+    core: &ClientCore,
+    agent_did: &str,
+    session_id: &str,
+    request_id: &str,
+) -> Result<RetainedProviderReasoning> {
+    use gents::session::canonical_rows::{decode_output_segment_row, AGENT_OUTPUT_SEGMENT_FIELDS};
+    use gents_protocol::output::{
+        reconstruction::{reconstruct_stream, ObservedSegment},
+        OutputSource, PayloadRef, SourceClose, StreamPayload,
+    };
+
+    let agent = gents::graphql::escape_graphql_string(agent_did);
+    let session = gents::graphql::escape_graphql_string(session_id);
+    let logical = gents::graphql::escape_graphql_string(request_id);
+    let request_query = format!(
+        r#"{{ AgentRequest(filter: {{ agent_did: {{ _eq: "{agent}" }}, session_id: {{ _eq: "{session}" }}, request_id: {{ _eq: "{logical}" }} }}, limit: 2) {{ _docID }} }}"#
+    );
+    let response = gents::graphql::graphql_with_transaction_retry(
+        &core.node(),
+        &request_query,
+        "retained reasoning request lookup",
+    )
+    .await?;
+    let requests = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("AgentRequest"))
+        .and_then(serde_json::Value::as_array)
+        .context("retained reasoning request lookup returned no rows")?;
+    anyhow::ensure!(requests.len() == 1, "expected one exact physical request");
+    let request_doc_id = requests[0]
+        .get("_docID")
+        .and_then(serde_json::Value::as_str)
+        .context("request omitted physical _docID")?
+        .to_owned();
+    let physical = gents::graphql::escape_graphql_string(&request_doc_id);
+    let segment_query = format!(
+        r#"{{ AgentOutputSegment(filter: {{ agent_did: {{ _eq: "{agent}" }}, session_id: {{ _eq: "{session}" }}, request_doc_id: {{ _eq: "{physical}" }} }}) {{ {AGENT_OUTPUT_SEGMENT_FIELDS} }} }}"#
+    );
+    let response = gents::graphql::graphql_with_transaction_retry(
+        &core.node(),
+        &segment_query,
+        "retained reasoning segment lookup",
+    )
+    .await?;
+    let values = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("AgentOutputSegment"))
+        .and_then(serde_json::Value::as_array)
+        .context("retained reasoning segment lookup returned no rows")?;
+    let rows = values
+        .iter()
+        .map(decode_output_segment_row)
+        .collect::<Result<Vec<_>>>()?;
+    let mut sources = Vec::new();
+    for row in &rows {
+        if matches!(&row.segment.source, OutputSource::ProviderTurn { .. })
+            && !row.segment.source.is_auxiliary_audit()
+            && !sources.contains(&row.segment.source)
+        {
+            sources.push(row.segment.source.clone());
+        }
+    }
+    let mut reasoning_by_source = Vec::new();
+    for source in sources {
+        let facts = rows
+            .iter()
+            .filter(|row| row.segment.source == source)
+            .collect::<Vec<_>>();
+        let closes = facts
+            .iter()
+            .filter(|row| row.segment.close.is_some())
+            .collect::<Vec<_>>();
+        anyhow::ensure!(closes.len() == 1, "provider source lacks one exact closure");
+        let SourceClose::Closed { stream_bytes, .. } = closes[0].segment.close.as_ref().unwrap()
+        else {
+            continue;
+        };
+        let observed = facts
+            .iter()
+            .map(|row| ObservedSegment {
+                doc_id: &row.doc_id,
+                segment: &row.segment,
+            })
+            .collect::<Vec<_>>();
+        let mut reasoning = String::new();
+        for stream in 0..stream_bytes.len() {
+            let reconstructed = reconstruct_stream(
+                &observed,
+                &[],
+                &[],
+                &PayloadRef {
+                    close_doc_id: closes[0].doc_id.clone(),
+                    stream: stream as u32,
+                },
+            )?;
+            if matches!(
+                reconstructed.declaration.payload,
+                StreamPayload::Reasoning | StreamPayload::ReasoningSummary
+            ) {
+                reasoning.push_str(&reconstructed.text);
+            }
+        }
+        reasoning_by_source.push(reasoning);
+    }
+    Ok(RetainedProviderReasoning {
+        request_doc_id,
+        reasoning_by_source,
+    })
 }
 
 async fn operations_snapshot_response(

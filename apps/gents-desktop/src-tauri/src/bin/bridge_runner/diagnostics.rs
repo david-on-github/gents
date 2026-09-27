@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use gents::config_client::ConfigAccess;
+use gents::run_timeline_fetch::load_run_timeline_rows;
 use gents_desktop_core::client::ClientCore;
 use serde::Serialize;
 
@@ -50,6 +52,19 @@ pub(crate) struct ToolCallDiagnostics {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct InferenceCallDiagnostics {
+    call_id: String,
+    request_id: String,
+    request_doc_id: String,
+    agent_did: String,
+    backend_id: Option<String>,
+    behavior_id: Option<String>,
+    call_kind: String,
+    call_state: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct RequestDiagnostics {
     source: String,
     session_id: String,
@@ -65,6 +80,8 @@ pub(crate) struct RequestDiagnostics {
     matching_message_sequences: Vec<i64>,
     matching_response_statuses: Vec<String>,
     tool_calls: ToolCallDiagnostics,
+    inference_calls: Vec<InferenceCallDiagnostics>,
+    inference_diagnostics_error: Option<String>,
     tool_result_count: usize,
     message_count: usize,
     timeline_count: usize,
@@ -100,11 +117,8 @@ pub(crate) async fn build_desktop_client_snapshot(
     }
 }
 
-/// The live fixture owns the real runtime node, but deliberately advertises a
-/// dummy operator GraphQL URL because its P2P topology is managed in-process.
-/// Load that node directly through the normal query owner, then use the same
-/// operator overlay as production so runtime observations gain their truthful
-/// agent source instead of being mistaken for unscoped replica rows.
+/// The fixture owns both Defra nodes. Overlay the runtime's observed config
+/// onto the desktop projection so its source remains the runtime, not replica.
 async fn overlay_fixture_operator_config(fixture: &LiveBridgeFixture) -> anyhow::Result<()> {
     if let Some(error) = refresh_store_with_timeout(fixture.remote_core().as_ref()).await {
         anyhow::bail!(error);
@@ -216,24 +230,61 @@ pub(crate) async fn build_request_diagnostics_bundle(
     session_id: &str,
     request_id: &str,
 ) -> RequestDiagnosticsBundle {
-    RequestDiagnosticsBundle {
-        desktop: build_request_diagnostics(
-            "desktop",
-            fixture.desktop_core().as_ref(),
-            session_id,
-            request_id,
-            fixture.requester_scope(Some(fixture.agent_did()), session_id, Some(request_id)),
-        )
-        .await,
-        remote: build_request_diagnostics(
-            "remote",
-            fixture.remote_core().as_ref(),
-            session_id,
-            request_id,
-            fixture.requester_scope(Some(fixture.agent_did()), session_id, Some(request_id)),
-        )
-        .await,
+    let desktop = build_request_diagnostics(
+        "desktop",
+        fixture.desktop_core().as_ref(),
+        session_id,
+        request_id,
+        fixture.requester_scope(Some(fixture.agent_did()), session_id, Some(request_id)),
+    )
+    .await;
+    let mut remote = build_request_diagnostics(
+        "remote",
+        fixture.remote_core().as_ref(),
+        session_id,
+        request_id,
+        fixture.requester_scope(Some(fixture.agent_did()), session_id, Some(request_id)),
+    )
+    .await;
+    let access = ConfigAccess::Local(fixture.remote_core().node_arc());
+    match load_run_timeline_rows(&access, request_id).await {
+        Ok(rows)
+            if rows.request.request_id == request_id
+                && rows.request.session_id.as_deref() == Some(session_id)
+                && rows.request.agent_did.as_deref() == Some(fixture.agent_did()) =>
+        {
+            if let Some(request_doc_id) = rows.request.doc_id.as_deref() {
+                remote.inference_calls = rows
+                    .inference_calls
+                    .into_iter()
+                    .filter(|call| {
+                        call.request_doc_id.as_deref() == Some(request_doc_id)
+                            && call.request_id == request_id
+                            && call.agent_did.as_deref() == Some(fixture.agent_did())
+                    })
+                    .map(|call| InferenceCallDiagnostics {
+                        call_id: call.call_id,
+                        request_id: call.request_id,
+                        request_doc_id: request_doc_id.to_string(),
+                        agent_did: fixture.agent_did().to_string(),
+                        backend_id: call.backend_id,
+                        behavior_id: call.behavior_id,
+                        call_kind: call.call_kind,
+                        call_state: call.call_state,
+                    })
+                    .collect();
+            } else {
+                remote.inference_diagnostics_error =
+                    Some("timeline request has no physical document ID".to_string());
+            }
+        }
+        Ok(_) => {
+            remote.inference_diagnostics_error =
+                Some("timeline request does not match agent/session scope".to_string());
+        }
+        Err(error) => remote.inference_diagnostics_error = Some(error.to_string()),
     }
+    RequestDiagnosticsBundle { desktop, remote }
 }
 
 async fn build_request_diagnostics(
@@ -414,6 +465,8 @@ async fn build_request_diagnostics(
             latest_status: latest_tool_call.and_then(|row| row.status.clone()),
             latest_completed_at: latest_tool_call.and_then(|row| row.completed_at.clone()),
         },
+        inference_calls: Vec::new(),
+        inference_diagnostics_error: None,
         tool_result_count: session_snapshot
             .as_ref()
             .into_iter()

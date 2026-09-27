@@ -185,7 +185,7 @@ async fn observe_provider_accounts(
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct InferenceDiscoveryFailure {
+pub struct InferenceDiscoveryFailure {
     pub kind: String,
     pub message: String,
 }
@@ -193,7 +193,7 @@ pub(crate) struct InferenceDiscoveryFailure {
 #[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
-pub(crate) struct InferenceDiscoveryRequest {
+pub struct InferenceDiscoveryRequest {
     pub request_key: String,
     pub agent_did: String,
     pub provider: InferenceProviderId,
@@ -206,7 +206,7 @@ pub(crate) struct InferenceDiscoveryRequest {
 
 #[derive(Debug, Clone, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct InferenceDiscoveryResult {
+pub struct InferenceDiscoveryResult {
     pub request_key: String,
     pub contract_version: u32,
     pub defaults_version: String,
@@ -224,7 +224,7 @@ pub(crate) struct InferenceDiscoveryResult {
 #[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
-pub(crate) struct InferenceRecommendationRequest {
+pub struct InferenceRecommendationRequest {
     pub provider: InferenceProviderId,
     pub auth_method: InferenceAuthMethod,
     pub model_name: String,
@@ -238,7 +238,7 @@ pub(crate) struct InferenceRecommendationRequest {
 #[derive(Debug, Clone, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[serde(deny_unknown_fields)]
-pub(crate) struct InferenceBackendRecommendationRequest {
+pub struct InferenceBackendRecommendationRequest {
     pub provider_kind: gents::BackendProviderKind,
     pub endpoint: String,
     pub model_name: String,
@@ -256,6 +256,12 @@ pub(crate) fn desktop_inference_setup_catalog() -> InferenceSetupCatalog {
 
 #[tauri::command]
 pub(crate) fn desktop_inference_model_recommendation(
+    request: InferenceRecommendationRequest,
+) -> Result<InferenceModelRecommendation, BridgeError> {
+    inference_model_recommendation(request)
+}
+
+pub fn inference_model_recommendation(
     request: InferenceRecommendationRequest,
 ) -> Result<InferenceModelRecommendation, BridgeError> {
     let model_name = request.model_name.trim();
@@ -281,11 +287,17 @@ pub(crate) fn desktop_inference_model_recommendation(
 pub(crate) fn desktop_inference_backend_recommendation(
     request: InferenceBackendRecommendationRequest,
 ) -> Result<InferenceModelRecommendation, BridgeError> {
+    inference_backend_recommendation(request)
+}
+
+pub fn inference_backend_recommendation(
+    request: InferenceBackendRecommendationRequest,
+) -> Result<InferenceModelRecommendation, BridgeError> {
     let (provider, auth_method) = gents::inference_setup::provider_selection_for_backend(
         request.provider_kind,
         &request.endpoint,
     );
-    desktop_inference_model_recommendation(InferenceRecommendationRequest {
+    inference_model_recommendation(InferenceRecommendationRequest {
         provider,
         auth_method,
         model_name: request.model_name,
@@ -324,6 +336,14 @@ pub(crate) async fn desktop_inference_models_discover(
     request: InferenceDiscoveryRequest,
     state: State<'_, DesktopAppState>,
 ) -> Result<InferenceDiscoveryResult, BridgeError> {
+    let core = current_core(&state);
+    discover_inference_models_for_core(request, core.as_deref()).await
+}
+
+pub async fn discover_inference_models_for_core(
+    request: InferenceDiscoveryRequest,
+    core: Option<&gents_desktop_core::client::ClientCore>,
+) -> Result<InferenceDiscoveryResult, BridgeError> {
     let spec = gents::inference_setup::connection_spec(
         request.provider,
         request.auth_method,
@@ -340,8 +360,7 @@ pub(crate) async fn desktop_inference_models_discover(
     }
 
     let credential = if let Some(provider) = spec.oauth_provider {
-        let core = current_core(&state)
-            .ok_or_else(|| BridgeError::untyped("desktop client is not running"))?;
+        let core = core.ok_or_else(|| BridgeError::untyped("desktop client is not running"))?;
         let access = core.operator_access(request.agent_did.trim()).map_err(|error| {
             tracing::warn!(
                 target: LOG_TARGET,
