@@ -208,14 +208,7 @@ structure RestartNotificationObligation where
 
 def restartNotificationObligation
     (cause : ToolRecoveryCause) : RestartNotificationObligation :=
-  { notificationReason :=
-      match cause with
-      | .deadlineExceeded => "deadline_exceeded"
-      | .parentInterrupted => "parent_interrupted"
-      | .parentTerminal => "parent_terminal"
-      | .terminalizeBackgroundedAsInterrupted => "interrupted_on_restart"
-      | .processLost => "process_lost"
-      | .taskDeleted => "task_deleted"
+  { notificationReason := cause.notificationReason.getD ""
   , queueSource := "background_completion"
   , queueKeyPrefix := "background_completion:"
   }

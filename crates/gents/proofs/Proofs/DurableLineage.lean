@@ -18,12 +18,9 @@ the ingest boundary for request lineage:
   the prepared message belongs to the owned execution start, not this lineage
   ingest boundary (see `QueuedSteering`).
 
-`subagentDepth` is the causal hop (`CausalHop`). A session-message request and
-every continuation caused by another session's action (an agent-authored
-steering continuation, a session-message completion wake) take
-`max own (cause + 1)`; same-session continuations keep their predecessor's
-hop (`ContinuationKind.hop`). The edge is provenance only; it grants no
-hierarchy, cascade or authority over the calling session.
+`subagentDepth` is the causal hop, computed by `CausalHop.nextHop`. The edge
+is provenance only; it grants no hierarchy, cascade or authority over the
+calling session.
 -/
 
 namespace DurableLineage
@@ -73,7 +70,11 @@ theorem malformed_head_does_not_poison
     admissibleRows (bad :: rest) = admissibleRows rest := by
   simp [admissibleRows, hBad]
 
-def steeringContinuation (subagentDepth : Nat) : RawLineage :=
+/-- A request-only control continuation of the session's own work: user
+    steering, a retry, a Goal continuation or a completion wake. It keeps both
+    halves of the parent request edge and no tool-call edge, at any hop,
+    including zero for a top-level session. -/
+def controlContinuation (subagentDepth : Nat) : RawLineage :=
   { hasParentRequestId := true
   , hasParentRequestDocId := true
   , hasParentToolCallId := false
@@ -83,136 +84,77 @@ def steeringContinuation (subagentDepth : Nat) : RawLineage :=
   , controlAllowedAtDepthZero := true
   }
 
-/-- Steering is request-linked, not a new send.  Normalization keeps
-    both halves of the parent request edge and clears both halves of the old
-    tool-call bridge. -/
-theorem steering_continuation_is_admissible
-    (depth : Nat) :
-    admissible (steeringContinuation depth) = true := by
+theorem control_continuation_is_admissible (depth : Nat) :
+    admissible (controlContinuation depth) = true := by
   simp [admissible, edgePairsCoherent, pairCoherent, parentShapeCoherent,
-    depthCoherent, steeringContinuation]
+    depthCoherent, controlContinuation]
 
-def backgroundCompletionContinuation (subagentDepth : Nat) : RawLineage :=
-  { hasParentRequestId := true
-  , hasParentRequestDocId := true
-  , hasParentToolCallId := false
-  , hasParentToolCallDocId := false
-  , subagentDepth
-  , requestOnlyControl := true
-  , controlAllowedAtDepthZero := true
-  }
-
-/-- A background-completion wake is a control continuation, not a new
-    send.  It therefore preserves the parent's depth, including
-    depth zero for a top-level or goal-continuation session. -/
-theorem background_completion_continuation_is_admissible
-    (depth : Nat) :
-    admissible (backgroundCompletionContinuation depth) = true := by
-  simp [admissible, edgePairsCoherent, pairCoherent, parentShapeCoherent,
-    depthCoherent, backgroundCompletionContinuation]
-
-def goalContinuation (subagentDepth : Nat) : RawLineage :=
-  { hasParentRequestId := true
-  , hasParentRequestDocId := true
-  , hasParentToolCallId := false
-  , hasParentToolCallDocId := false
-  , subagentDepth
-  , requestOnlyControl := true
-  , controlAllowedAtDepthZero := true
-  }
-
-/-- A durable-goal continuation preserves the hop and carries both the
-    logical and physical parent request edge. It is controller work, not a new
-    send. Session and behavior preservation are runtime request-
-    construction obligations outside `RawLineage`. -/
-theorem goal_continuation_is_admissible (depth : Nat) :
-    admissible (goalContinuation depth) = true := by
-  simp [admissible, edgePairsCoherent, pairCoherent, parentShapeCoherent,
-    depthCoherent, goalContinuation]
-
-/-- The request-only continuations. Two are caused by another session's
-action and carry that cause's hop: an `agent_message` steering a busy session
-(the calling request) and a session-message completion wake (the caused
-request that finished). The rest continue their own session's work. -/
-inductive ContinuationKind where
-  | userSteering
-  | agentSteering (callerHop : Nat)
-  | retry
-  | goal
-  | nativeCompletionWake
-  | sessionMessageCompletionWake (causedHop : Nat)
+/-- How an `agent_new`/`agent_message` is delivered: a new request to an idle,
+    new or remote session, or a steering continuation of a busy local session. -/
+inductive Delivery where
+  | request
+  | steering
   deriving DecidableEq, Repr
 
-def ContinuationKind.cause : ContinuationKind → CausalHop.Cause
-  | .agentSteering callerHop => .crossSession callerHop
-  | .sessionMessageCompletionWake causedHop => .crossSession causedHop
-  | _ => .continuation
+/-- What a delivered session message is written with. Both deliveries carry
+    the full calling edge (the caller's request and tool call) and the hop
+    `CausalHop.nextHop (.crossSession callerHop) own`. A steering continuation
+    is additionally queued after the busy session's active request; that
+    request orders the queue and is never its origin. -/
+structure SessionMessageWrite where
+  lineage : RawLineage
+  queuedAfterActive : Bool
+  deriving DecidableEq, Repr
 
-/-- The hop a continuation is written with, from its session's current hop
-`own` (the hop of the session's latest request, not of an older request that
-scheduled the continuation). -/
-def ContinuationKind.hop (kind : ContinuationKind) (own : Nat) : Nat :=
-  CausalHop.nextHop kind.cause own
+def sessionMessageWrite (delivery : Delivery) (callerHop own : Nat) : SessionMessageWrite :=
+  { lineage :=
+      { hasParentRequestId := true
+      , hasParentRequestDocId := true
+      , hasParentToolCallId := true
+      , hasParentToolCallDocId := true
+      , subagentDepth := CausalHop.nextHop (.crossSession callerHop) own
+      , requestOnlyControl := false }
+  , queuedAfterActive := delivery == .steering }
 
-/-- Every continuation keeps the request-only control shape at any hop. -/
-theorem continuation_lineage_is_admissible (kind : ContinuationKind) (own : Nat) :
-    admissible (steeringContinuation (kind.hop own)) = true :=
-  steering_continuation_is_admissible _
-
-/-- Continuations caused by another session climb past that cause, so they
-cannot carry an agent loop past the admitting bound. -/
-theorem cross_session_continuations_climb (own causeHop : Nat) :
-    causeHop + 1 ≤ (ContinuationKind.agentSteering causeHop).hop own ∧
-      causeHop + 1 ≤ (ContinuationKind.sessionMessageCompletionWake causeHop).hop own :=
-  ⟨CausalHop.cross_session_exceeds_cause causeHop own,
-    CausalHop.cross_session_exceeds_cause causeHop own⟩
-
-/-- Same-session continuations — user steering, a recovery retry of a failed
-wake, a Goal continuation and a native completion wake — copy the session's
-current hop. -/
-theorem own_session_continuations_copy (own : Nat) :
-    ContinuationKind.userSteering.hop own = own ∧ ContinuationKind.retry.hop own = own ∧
-      ContinuationKind.goal.hop own = own ∧
-      ContinuationKind.nativeCompletionWake.hop own = own := by
-  simp [ContinuationKind.hop, ContinuationKind.cause, CausalHop.nextHop]
+/-- Every delivery is an admissible session-message request that names the
+    calling tool call, so its completion settles that call. -/
+theorem session_message_write_names_its_caller (delivery : Delivery) (callerHop own : Nat) :
+    admissible (sessionMessageWrite delivery callerHop own).lineage = true ∧
+      (sessionMessageWrite delivery callerHop own).lineage.hasParentToolCallDocId = true := by
+  simp [sessionMessageWrite, admissible, edgePairsCoherent, pairCoherent,
+    parentShapeCoherent, depthCoherent, CausalHop.nextHop]
+  omega
 
 /-- Interrupting another agent's session — `agent_message` with
     `interrupt`, or `agent_interrupt` — is allowed in 0.20 only to the session
-    that started it: the target session's origin (its first public request's
-    `caused_by_parent_*`, read through `gents::session_origin`) names the
-    caller's session. `targetOriginCause` is that origin's calling session,
-    `none` for a root session. General interrupt permissions are deferred to a
-    later release. -/
+    that started it: the target's stored `AgentSession.provenance`, written
+    once when the session is created from its first request and never
+    rewritten, names a request of the caller's session. A later message into
+    the session, even in the same second, cannot transfer this authority.
+    `targetOriginCause` is that starting session, `none` for a root session.
+    General interrupt permissions are deferred to a later release. -/
 def interruptAllowed (callerSession targetSession : String)
     (targetOriginCause : Option String) : Bool :=
-  targetSession != callerSession && targetOriginCause == some callerSession
+  CausalHop.sendTargetAllowed callerSession targetSession &&
+    targetOriginCause == some callerSession
 
 /-- A caller that did not start the target session is refused. -/
 theorem non_spawner_interrupt_refused (callerSession targetSession : String)
     (targetOriginCause : Option String)
     (h : targetOriginCause ≠ some callerSession) :
     interruptAllowed callerSession targetSession targetOriginCause = false := by
-  simp [interruptAllowed, h]
+  simp [interruptAllowed, CausalHop.sendTargetAllowed, h]
 
 /-- The session that started another session may interrupt it. -/
 theorem spawner_may_interrupt (callerSession targetSession : String)
     (h : targetSession ≠ callerSession) :
     interruptAllowed callerSession targetSession (some callerSession) = true := by
-  simp [interruptAllowed, h]
+  simp [interruptAllowed, CausalHop.sendTargetAllowed, Ne.symm h]
 
 /-- A root session, which no session started, cannot be interrupted by an
     agent. -/
 theorem root_session_not_interruptible (callerSession targetSession : String) :
     interruptAllowed callerSession targetSession none = false := by
   simp [interruptAllowed]
-
-/-- A recovery retry is written at the session's current hop
-(`CausalHop.sessionCurrentHop`, the highest hop of its latest second), so a
-retry after a refused wake carries that refused hop
-(`CausalHop.later_native_wake_after_refusal_is_refused`). -/
-theorem retry_copies_session_current_hop (rows : List CausalHop.RequestStamp) :
-    ContinuationKind.retry.hop (CausalHop.sessionCurrentHop rows) =
-      CausalHop.sessionCurrentHop rows := by
-  simp [ContinuationKind.hop, ContinuationKind.cause, CausalHop.nextHop]
 
 end DurableLineage

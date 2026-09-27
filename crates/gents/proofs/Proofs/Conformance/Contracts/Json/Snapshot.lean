@@ -68,10 +68,19 @@ import Proofs.Conformance.Contracts.Json.CausalHop
 import Proofs.Conformance.Contracts.Json.PayloadPresentation
 import Proofs.Conformance.Eval
 import Proofs.Conformance.Optimization
+import Proofs.ScopeTemplates.State
 
 namespace Conformance.Contracts
 
 open Conformance.ContractCases
+
+/-- The pairing route rules the native scope-template owner must resolve. -/
+def scopeRulesJson (rules : List ScopeTemplates.CollectionRule) : String :=
+  jsonArray (rules.map fun rule =>
+    "{\"collection\":" ++ jsonString rule.collection
+      ++ ",\"field\":" ++ jsonString rule.field
+      ++ ",\"source\":" ++ jsonString (match rule.source with
+          | .localDid => "localDid" | .peerDid => "peerDid" | .homeDid => "homeDid") ++ "}")
 
 def snapshotJson : String :=
   "{"
@@ -297,6 +306,10 @@ def snapshotJson : String :=
     ++ "\"recovery_sweep_cases\":"
       ++ jsonArray
         (Recovery.recoverySweepCases.map recoverySweepCaseJson) ++ ","
+    ++ "\"session_message_kill_cases\":"
+      ++ jsonArray (Recovery.killCases.map fun (observation, action) =>
+        "{\"observation\":" ++ jsonString observation.toContract
+          ++ ",\"action\":" ++ jsonString action.toContract ++ "}") ++ ","
     ++ "\"restart_disposition_cases\":"
       ++ jsonArray
         (Recovery.restartDispositionCases.map restartDispositionCaseJson) ++ ","
@@ -346,6 +359,10 @@ def snapshotJson : String :=
       ++ Conformance.RepeatedToolFailureContracts.casesJson ++ ","
     ++ "\"tool_timeout_cases\":"
       ++ Conformance.ToolTimeouts.casesJson ++ ","
+    ++ "\"scope_collection_rules\":{"
+      ++ "\"subagentCoordinatorRules\":"
+        ++ scopeRulesJson ScopeTemplates.subagentCoordinatorRules
+      ++ ",\"subagentHostRules\":" ++ scopeRulesJson ScopeTemplates.subagentHostRules ++ "},"
     ++ "\"causal_hop_contract\":"
       ++ Conformance.CausalHopContracts.contractJson ++ ","
     ++ "\"operator_base_freeze_cases\":"

@@ -43,14 +43,7 @@ def orphanedBackgroundRecoveryCase
   let cause := orphanedBackgroundToolCause row
   let notificationReason :=
     if row.parentLive || row.parentInterrupted || row.parentTerminal then
-      cause.map fun recoveryCause =>
-        match recoveryCause with
-        | .deadlineExceeded => "deadline_exceeded"
-        | .parentInterrupted => "parent_interrupted"
-        | .parentTerminal => "parent_terminal"
-        | .terminalizeBackgroundedAsInterrupted => "interrupted_on_restart"
-        | .processLost => "process_lost"
-        | .taskDeleted => "task_deleted"
+      cause.bind ToolRecoveryCause.notificationReason
     else
       none
   { (recoveryCase
@@ -74,23 +67,24 @@ def orphanedBackgroundRecoveryCase
 
 /-- Session-message recovery witness: the recovering owner observed `cause`
     for a running `agent_new`/`agent_message` row. The exported post-state
-    is computed by `sessionMessageRecover`, and the observed cause is exported
-    so the native fixture builds that exact premise. -/
+    and notification reason are computed by the model, and the observed cause
+    is exported so the native fixture builds that exact premise. -/
 def sessionMessageRecoveryCase
-    (name : String) (cause : SessionMessageRecoveryCause) : RecoverySweepCase :=
-  let row : SessionMessageRecoveryRow :=
+    (name : String) (cause : ToolRecoveryCause) : RecoverySweepCase :=
+  let row : ToolCallRecoveryRow :=
     { call := { r6NativeToolFixture with operation := .sessionMessage }
     , cause := cause }
-  let recovered := sessionMessageRecover row
+  let recovered := toolCallRecover row
   { (recoveryCase
       sessionMessageRecoverySweep
       name
       row.call.state.toDefraDB
       recovered.call.state.toDefraDB
       "session-message-stack-observer-arm"
-      (sessionMessageRecoveryMeasure row)
-      (sessionMessageRecoveryMeasure recovered)) with
+      (toolCallRecoveryMeasure true row)
+      (toolCallRecoveryMeasure true recovered)) with
     recoveryCause := some cause.toContract
+    notificationReason := cause.notificationReason
   }
 
 def recoverySweepCases : List RecoverySweepCase :=

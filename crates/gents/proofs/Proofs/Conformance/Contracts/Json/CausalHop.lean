@@ -131,11 +131,37 @@ theorem interrupt_cases_cover_both_verdicts :
       c.targetSession c.targetOriginCause) = true := by
   native_decide
 
+/-- One delivered session message (`DurableLineage.sessionMessageWrite`) into
+a session whose current hop is `ownHop`. -/
+structure WriteCase where
+  name : String
+  delivery : DurableLineage.Delivery
+  callerHop : Nat
+  ownHop : Nat
+
+def writeCases : List WriteCase :=
+  [ ⟨"idle_session_gets_a_request_past_its_caller", .request, 5, 1⟩
+  , ⟨"idle_session_keeps_its_higher_hop", .request, 0, 1⟩
+  , ⟨"busy_session_is_steered_past_its_caller", .steering, 3, 1⟩
+  , ⟨"busy_session_steering_keeps_its_higher_hop", .steering, 0, 1⟩ ]
+
+def writeCaseJson (c : WriteCase) : String :=
+  let write := DurableLineage.sessionMessageWrite c.delivery c.callerHop c.ownHop
+  "{\"name\":" ++ jsonString c.name
+    ++ ",\"delivery\":" ++ jsonString (match c.delivery with
+        | .request => "request" | .steering => "steering")
+    ++ ",\"caller_hop\":" ++ toString c.callerHop
+    ++ ",\"own_hop\":" ++ toString c.ownHop
+    ++ ",\"expected_hop\":" ++ toString write.lineage.subagentDepth
+    ++ ",\"names_caller_tool_call\":" ++ toString write.lineage.hasParentToolCallDocId
+    ++ ",\"queued_after_active\":" ++ toString write.queuedAfterActive ++ "}"
+
 def contractJson : String :=
   "{\"default_max_request_hop\":" ++ toString CausalHop.defaultMaxRequestHop
     ++ ",\"step_cases\":" ++ jsonArray (stepCases.map stepCaseJson)
     ++ ",\"chain_cases\":" ++ jsonArray (chainCases.map chainCaseJson)
-    ++ ",\"interrupt_cases\":" ++ jsonArray (interruptCases.map interruptCaseJson) ++ "}"
+    ++ ",\"interrupt_cases\":" ++ jsonArray (interruptCases.map interruptCaseJson)
+    ++ ",\"write_cases\":" ++ jsonArray (writeCases.map writeCaseJson) ++ "}"
 
 /-- The fixture exercises every cause and both admission outcomes. -/
 theorem step_cases_cover_causes_and_outcomes :

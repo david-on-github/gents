@@ -237,10 +237,10 @@ private def titleRequestAdmissionCase (name : String) (request : AgentRequestSem
   , runtimeEvidence := evidence, sessionBehavior
   , expectedAdmitted := decide (agentRequestAdmissible ({} : Enrollment.State)
       request admission none none false evidence branchFieldsExact pendingDeadlineAbsent
-      false CausalHop.defaultMaxRequestHop)
+      ⟨false, CausalHop.defaultMaxRequestHop⟩)
   , expectedClaimable := decide (agentRequestClaimable ({} : Enrollment.State)
       request admission none none false evidence branchFieldsExact pendingDeadlineAbsent
-      false CausalHop.defaultMaxRequestHop sessionBehavior []
+      ⟨false, CausalHop.defaultMaxRequestHop⟩ sessionBehavior []
       (fun _ => false) (fun _ => false))
   , expectedDisposition := titlePendingDisposition observationAvailable ({} : Enrollment.State)
       request admission evidence sessionBehavior branchFieldsExact pendingDeadlineAbsent

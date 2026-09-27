@@ -285,20 +285,26 @@ instance (request : AgentRequestSemantics) (admission : AgentRequestAdmission)
         simp only [requestPurposeAllowed, hpurpose, titlePurposeAllowed, hparent]
         infer_instance
 
+/-- What the target principal decides for a request it did not issue. -/
+structure TargetAuthority where
+  /-- The target's `PeerAdmissionAuthority` ACP verdict for the requester DID. -/
+  peerAuthorityAllows : Bool
+  /-- The target principal's configured `max_request_hop` (default
+  `CausalHop.defaultMaxRequestHop`); every branch bounds the signed causal hop
+  by it (`CausalHop.admitHop`). -/
+  maxRequestHop : Nat
+  deriving DecidableEq, Repr
+
 /--
 The executable router boundary. `authorizationFresh` is the current-clock
 lease check made during this admission attempt, not a cached observation.
-`peerAuthorityAllows` is the target's `PeerAdmissionAuthority` ACP verdict for
-the requester DID. `maxRequestHop` is the target principal's configured
-`max_request_hop` (default `CausalHop.defaultMaxRequestHop`), supplied by the
-caller; every branch bounds the signed causal hop by it (`CausalHop.admitHop`).
 -/
 def agentRequestAdmissible
     (s : State) (request : AgentRequestSemantics) (admission : AgentRequestAdmission)
     (enrollmentRequest : Option Request) (decision : Option Decision)
     (authorizationFresh : Bool) (runtimeEvidence : Option RuntimeInternalEvidence)
     (branchFieldsExact pendingDeadlineAbsent : Bool)
-    (peerAuthorityAllows : Bool) (maxRequestHop : Nat) : Prop :=
+    (target : TargetAuthority) : Prop :=
   admission.signatureValid = true ∧
   admission.signedFields = agentRequestAdmissionFields request admission ∧
   branchFieldsExact = true ∧
@@ -317,22 +323,21 @@ def agentRequestAdmissible
   | .peer =>
       admission.signerDid = request.requesterDid ∧
       request.requesterDid ≠ request.targetAgent ∧
-      peerAuthorityAllows = true
+      target.peerAuthorityAllows = true
   | .runtimeInternal =>
       match runtimeEvidence with
       | some evidence => exactRuntimeInternalEvidence request admission evidence
       | none => False) ∧
   requestPurposeAllowed request admission runtimeEvidence ∧
-  CausalHop.admitHop maxRequestHop request.hop = true
+  CausalHop.admitHop target.maxRequestHop request.hop = true
 
 instance (s : State) (request : AgentRequestSemantics) (admission : AgentRequestAdmission)
     (enrollmentRequest : Option Request) (decision : Option Decision)
     (authorizationFresh : Bool) (runtimeEvidence : Option RuntimeInternalEvidence)
-    (branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool)
-    (maxRequestHop : Nat) :
+    (branchFieldsExact pendingDeadlineAbsent : Bool) (target : TargetAuthority) :
     Decidable (agentRequestAdmissible s request admission enrollmentRequest decision
       authorizationFresh runtimeEvidence branchFieldsExact pendingDeadlineAbsent
-      peerAuthorityAllows maxRequestHop) := by
+      target) := by
   unfold agentRequestAdmissible
   cases admission.kind <;> cases enrollmentRequest <;> cases decision <;>
     cases runtimeEvidence <;> infer_instance
@@ -362,24 +367,24 @@ def agentRequestClaimable
     (s : State) (request : AgentRequestSemantics) (admission : AgentRequestAdmission)
     (enrollmentRequest : Option Request) (decision : Option Decision)
     (authorizationFresh : Bool) (runtimeEvidence : Option RuntimeInternalEvidence)
-    (branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool) (maxRequestHop : Nat)
+    (branchFieldsExact pendingDeadlineAbsent : Bool) (target : TargetAuthority)
     (sessionBehavior : String) (skillIds : List String)
     (cwdAllowed : String → Bool) (queueSourceAllowed : SessionQueue.QueueSource → Bool) : Prop :=
   behaviorMatchesSession request.behaviorId sessionBehavior = true ∧
   inputWithinContext request.input skillIds cwdAllowed queueSourceAllowed = true ∧
   agentRequestAdmissible s request admission enrollmentRequest decision authorizationFresh
-    runtimeEvidence branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows maxRequestHop ∧
+    runtimeEvidence branchFieldsExact pendingDeadlineAbsent target ∧
   requestGoalInputAllowed request admission runtimeEvidence = true
 
 instance (s : State) (request : AgentRequestSemantics) (admission : AgentRequestAdmission)
     (enrollmentRequest : Option Request) (decision : Option Decision)
     (authorizationFresh : Bool) (runtimeEvidence : Option RuntimeInternalEvidence)
-    (branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool) (maxRequestHop : Nat)
+    (branchFieldsExact pendingDeadlineAbsent : Bool) (target : TargetAuthority)
     (sessionBehavior : String) (skillIds : List String)
     (cwdAllowed : String → Bool) (queueSourceAllowed : SessionQueue.QueueSource → Bool) :
     Decidable (agentRequestClaimable s request admission enrollmentRequest decision
       authorizationFresh runtimeEvidence branchFieldsExact pendingDeadlineAbsent
-      peerAuthorityAllows maxRequestHop sessionBehavior skillIds cwdAllowed queueSourceAllowed) := by
+      target sessionBehavior skillIds cwdAllowed queueSourceAllowed) := by
   unfold agentRequestClaimable
   infer_instance
 
@@ -387,11 +392,11 @@ theorem claim_requires_authenticated_input
     {s : State} {request : AgentRequestSemantics} {admission : AgentRequestAdmission}
     {enrollmentRequest : Option Request} {decision : Option Decision}
     {fresh : Bool} {runtimeEvidence : Option RuntimeInternalEvidence}
-    {branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool} {maxRequestHop : Nat}
+    {branchFieldsExact pendingDeadlineAbsent : Bool} {target : TargetAuthority}
     {sessionBehavior : String} {skills : List String}
     {cwdAllowed : String → Bool} {queueAllowed : SessionQueue.QueueSource → Bool}
     (h : agentRequestClaimable s request admission enrollmentRequest decision fresh
-      runtimeEvidence branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows maxRequestHop
+      runtimeEvidence branchFieldsExact pendingDeadlineAbsent target
       sessionBehavior skills cwdAllowed queueAllowed) :
     admission.signatureValid = true ∧
     admission.signedFields = agentRequestAdmissionFields request admission ∧
@@ -403,11 +408,10 @@ theorem title_requires_runtime_parent_only
     {s : State} {request : AgentRequestSemantics} {admission : AgentRequestAdmission}
     {enrollmentRequest : Option Request} {decision : Option Decision} {fresh : Bool}
     {runtimeEvidence : Option RuntimeInternalEvidence}
-    {branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool} {maxRequestHop : Nat}
+    {branchFieldsExact pendingDeadlineAbsent : Bool} {target : TargetAuthority}
     (hpurpose : request.purpose = .titleAudit)
     (hadmit : agentRequestAdmissible s request admission enrollmentRequest decision fresh
-      runtimeEvidence branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows
-      maxRequestHop) :
+      runtimeEvidence branchFieldsExact pendingDeadlineAbsent target) :
     admission.kind = .runtimeInternal ∧
     admission.runtimeSourceKind = .localControl ∧
     request.requesterDid = request.targetAgent ∧
@@ -529,7 +533,7 @@ def titlePendingDisposition
   if request.purpose != .titleAudit then .deny
   else admissionDispositionFromResult observationAvailable <|
     decide (agentRequestClaimable s request admission none none false runtimeEvidence
-      branchFieldsExact pendingDeadlineAbsent false maxRequestHop sessionBehavior []
+      branchFieldsExact pendingDeadlineAbsent ⟨false, maxRequestHop⟩ sessionBehavior []
       (fun _ => false) (fun _ => false))
 
 def titlePendingStep?
@@ -600,11 +604,10 @@ theorem enrollment_requires_current_exact_generation
     {s : State} {request : AgentRequestSemantics} {admission : AgentRequestAdmission}
     {enrollmentRequest : Option Request} {decision : Option Decision} {fresh : Bool}
     {runtimeEvidence : Option RuntimeInternalEvidence}
-    {branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool} {maxRequestHop : Nat}
+    {branchFieldsExact pendingDeadlineAbsent : Bool} {target : TargetAuthority}
     (hkind : admission.kind = .enrollment)
     (hadmit : agentRequestAdmissible s request admission enrollmentRequest decision fresh
-      runtimeEvidence branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows
-      maxRequestHop) :
+      runtimeEvidence branchFieldsExact pendingDeadlineAbsent target) :
     ∃ enrolledRequest approval,
       enrollmentRequest = some enrolledRequest ∧ decision = some approval ∧
       currentApproval s enrolledRequest approval ∧
@@ -617,10 +620,10 @@ theorem enrollment_expiry_fails_closed
     (s : State) (request : AgentRequestSemantics) (admission : AgentRequestAdmission)
     (enrollmentRequest : Option Request) (decision : Option Decision)
     (runtimeEvidence : Option RuntimeInternalEvidence)
-    (branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool) (maxRequestHop : Nat)
+    (branchFieldsExact pendingDeadlineAbsent : Bool) (target : TargetAuthority)
     (hkind : admission.kind = .enrollment) :
     ¬ agentRequestAdmissible s request admission enrollmentRequest decision false runtimeEvidence
-      branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows maxRequestHop := by
+      branchFieldsExact pendingDeadlineAbsent target := by
   rcases enrollmentRequest with _ | enrolledRequest <;> rcases decision with _ | approval <;>
     simp [agentRequestAdmissible, hkind]
 
@@ -628,11 +631,10 @@ theorem local_self_requires_exact_principal
     {s : State} {request : AgentRequestSemantics} {admission : AgentRequestAdmission}
     {enrollmentRequest : Option Request} {decision : Option Decision} {fresh : Bool}
     {runtimeEvidence : Option RuntimeInternalEvidence}
-    {branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool} {maxRequestHop : Nat}
+    {branchFieldsExact pendingDeadlineAbsent : Bool} {target : TargetAuthority}
     (hkind : admission.kind = .localSelf)
     (hadmit : agentRequestAdmissible s request admission enrollmentRequest decision fresh
-      runtimeEvidence branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows
-      maxRequestHop) :
+      runtimeEvidence branchFieldsExact pendingDeadlineAbsent target) :
     admission.signerDid = request.requesterDid ∧ request.requesterDid = request.targetAgent := by
   simp only [agentRequestAdmissible, hkind] at hadmit
   rcases hadmit with ⟨_, _, _, _, ⟨hsigner, htarget⟩, _⟩
@@ -643,23 +645,22 @@ theorem local_self_admission_is_independent_of_enrollment_state
     (s₁ s₂ : State) (request : AgentRequestSemantics) (admission : AgentRequestAdmission)
     (enrollmentRequest : Option Request) (decision : Option Decision) (fresh : Bool)
     (runtimeEvidence : Option RuntimeInternalEvidence)
-    (branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool) (maxRequestHop : Nat)
+    (branchFieldsExact pendingDeadlineAbsent : Bool) (target : TargetAuthority)
     (hkind : admission.kind = .localSelf) :
     agentRequestAdmissible s₁ request admission enrollmentRequest decision fresh runtimeEvidence
-        branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows maxRequestHop ↔
+        branchFieldsExact pendingDeadlineAbsent target ↔
       agentRequestAdmissible s₂ request admission enrollmentRequest decision fresh runtimeEvidence
-        branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows maxRequestHop := by
+        branchFieldsExact pendingDeadlineAbsent target := by
   simp [agentRequestAdmissible, hkind]
 
 theorem runtime_internal_requires_owned_issue
     {s : State} {request : AgentRequestSemantics} {admission : AgentRequestAdmission}
     {enrollmentRequest : Option Request} {decision : Option Decision} {fresh : Bool}
     {runtimeEvidence : Option RuntimeInternalEvidence}
-    {branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool} {maxRequestHop : Nat}
+    {branchFieldsExact pendingDeadlineAbsent : Bool} {target : TargetAuthority}
     (hkind : admission.kind = .runtimeInternal)
     (hadmit : agentRequestAdmissible s request admission enrollmentRequest decision fresh
-      runtimeEvidence branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows
-      maxRequestHop) :
+      runtimeEvidence branchFieldsExact pendingDeadlineAbsent target) :
     ∃ evidence, runtimeEvidence = some evidence ∧
       exactRuntimeInternalEvidence request admission evidence := by
   simp only [agentRequestAdmissible, hkind] at hadmit
@@ -670,12 +671,12 @@ theorem runtime_internal_admission_is_independent_of_enrollment_state
     (s₁ s₂ : State) (request : AgentRequestSemantics) (admission : AgentRequestAdmission)
     (enrollmentRequest : Option Request) (decision : Option Decision) (fresh : Bool)
     (runtimeEvidence : Option RuntimeInternalEvidence)
-    (branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool) (maxRequestHop : Nat)
+    (branchFieldsExact pendingDeadlineAbsent : Bool) (target : TargetAuthority)
     (hkind : admission.kind = .runtimeInternal) :
     agentRequestAdmissible s₁ request admission enrollmentRequest decision fresh runtimeEvidence
-        branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows maxRequestHop ↔
+        branchFieldsExact pendingDeadlineAbsent target ↔
       agentRequestAdmissible s₂ request admission enrollmentRequest decision fresh runtimeEvidence
-        branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows maxRequestHop := by
+        branchFieldsExact pendingDeadlineAbsent target := by
   simp [agentRequestAdmissible, hkind]
 
 /-- A peer request is authored by another principal and authorized only by the
@@ -684,13 +685,12 @@ theorem peer_requires_foreign_signed_authorized_requester
     {s : State} {request : AgentRequestSemantics} {admission : AgentRequestAdmission}
     {enrollmentRequest : Option Request} {decision : Option Decision} {fresh : Bool}
     {runtimeEvidence : Option RuntimeInternalEvidence}
-    {branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool} {maxRequestHop : Nat}
+    {branchFieldsExact pendingDeadlineAbsent : Bool} {target : TargetAuthority}
     (hkind : admission.kind = .peer)
     (hadmit : agentRequestAdmissible s request admission enrollmentRequest decision fresh
-      runtimeEvidence branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows
-      maxRequestHop) :
+      runtimeEvidence branchFieldsExact pendingDeadlineAbsent target) :
     admission.signerDid = request.requesterDid ∧
-      request.requesterDid ≠ request.targetAgent ∧ peerAuthorityAllows = true := by
+      request.requesterDid ≠ request.targetAgent ∧ target.peerAuthorityAllows = true := by
   simp only [agentRequestAdmissible, hkind] at hadmit
   exact hadmit.2.2.2.2.1
 
@@ -699,11 +699,10 @@ theorem admitted_request_within_hop_bound
     {s : State} {request : AgentRequestSemantics} {admission : AgentRequestAdmission}
     {enrollmentRequest : Option Request} {decision : Option Decision} {fresh : Bool}
     {runtimeEvidence : Option RuntimeInternalEvidence}
-    {branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows : Bool} {maxRequestHop : Nat}
+    {branchFieldsExact pendingDeadlineAbsent : Bool} {target : TargetAuthority}
     (hadmit : agentRequestAdmissible s request admission enrollmentRequest decision fresh
-      runtimeEvidence branchFieldsExact pendingDeadlineAbsent peerAuthorityAllows
-      maxRequestHop) :
-    request.hop ≤ maxRequestHop := by
+      runtimeEvidence branchFieldsExact pendingDeadlineAbsent target) :
+    request.hop ≤ target.maxRequestHop := by
   simpa [CausalHop.admitHop] using hadmit.2.2.2.2.2.2
 
 end Enrollment
