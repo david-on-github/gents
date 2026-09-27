@@ -354,14 +354,29 @@ fn detail(stdout: &[u8], stderr: &[u8]) -> String {
 
 #[async_trait::async_trait]
 impl TaskHookExec for ManagedTaskHookExec {
+    /// Admission bounds a configured timeout only from below, so an admitted
+    /// value can exceed what `chrono` can add to the current instant. Such a
+    /// hook is refused before launch: the alternatives are a managed execution
+    /// with no deadline at all, or a panic inside the addition.
     async fn attempt(&self, hook: &TaskHook) -> HookAttempt {
-        let timeout = effective_timeout_secs(hook);
-        let deadline_at =
-            chrono::Duration::try_seconds(timeout as i64).map(|timeout| Utc::now() + timeout);
+        let timeout_secs = effective_timeout_secs(hook);
+        let Some(deadline_at) = i64::try_from(timeout_secs)
+            .ok()
+            .and_then(chrono::Duration::try_seconds)
+            .and_then(|timeout| Utc::now().checked_add_signed(timeout))
+        else {
+            return HookAttempt {
+                hook_id: hook.hook_id.clone(),
+                result: HookCommandResult::LaunchFailed,
+                detail: format!(
+                    "a timeout of {timeout_secs}s has no representable deadline on this host"
+                ),
+            };
+        };
         let outcome = run_managed_exec(ManagedExecRequest {
             argv: hook.command.clone(),
             cwd: self.cwd.clone(),
-            deadline_at,
+            deadline_at: Some(deadline_at),
             cancellation_token: self.cancellation.clone(),
             max_output_bytes: HOOK_OUTPUT_BYTE_CAP,
             stdin: Vec::new(),

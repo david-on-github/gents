@@ -76,6 +76,50 @@ async fn a_hook_past_its_timeout_is_a_hook_error() {
     assert!(!attempt.result.succeeded());
 }
 
+/// Both arms observe the host through the command itself: a launched command
+/// leaves the marker file, so its absence is the evidence nothing ran.
+async fn unrepresentable_deadline_case(timeout_secs: i64) {
+    let directory = tempfile::tempdir().expect("hook marker directory");
+    let marker = directory.path().join("launched");
+    let attempt =
+        ManagedTaskHookExec::new(directory.path().to_path_buf(), CancellationToken::new())
+            .attempt(&hook(
+                "unbounded",
+                &[
+                    "sh",
+                    "-c",
+                    &format!("touch {}", marker.to_str().expect("utf-8 marker path")),
+                ],
+                Some(timeout_secs),
+            ))
+            .await;
+    assert_eq!(
+        attempt.result,
+        HookCommandResult::LaunchFailed,
+        "a timeout of {timeout_secs}s must refuse the launch, not run unbounded"
+    );
+    assert!(!attempt.result.succeeded());
+    assert!(
+        attempt.detail.contains(&timeout_secs.to_string()),
+        "the operator must see the timeout that could not be applied, got {:?}",
+        attempt.detail
+    );
+    assert!(
+        !marker.exists(),
+        "no command may launch when its deadline cannot be represented"
+    );
+}
+
+#[tokio::test]
+async fn a_timeout_with_no_representable_duration_refuses_to_launch() {
+    unrepresentable_deadline_case(i64::MAX).await;
+}
+
+#[tokio::test]
+async fn a_timeout_past_the_representable_deadline_refuses_to_launch() {
+    unrepresentable_deadline_case(10_000_000_000_000).await;
+}
+
 #[tokio::test]
 async fn a_cancelled_hook_reports_an_unknown_outcome() {
     let cancellation = CancellationToken::new();
