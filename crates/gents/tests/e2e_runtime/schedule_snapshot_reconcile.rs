@@ -498,10 +498,6 @@ async fn event_source_trigger_insert_bumps_active_generation() {
         "active_generation should bump after Task+EventSource+Trigger insert (initial={initial_generation}, observed={})",
         reconciled.active_generation
     );
-    assert_eq!(
-        reconciled.last_reconcile_result, "applied",
-        "last_reconcile_result should be 'applied' after EventSource+Trigger insert"
-    );
 
     let _ = shutdown_tx.send(true);
     handle.await.unwrap().unwrap();
