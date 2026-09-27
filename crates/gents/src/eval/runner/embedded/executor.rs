@@ -931,12 +931,7 @@ async fn trigger_failure(node: &EmbeddedNode, agent_did: &str, since: &str) -> O
 /// The `Trigger` rows of a status read, or `None` when the response holds no
 /// such list: a read that returned nothing to read is not "no errors".
 fn errored_triggers(data: Option<&Value>) -> Option<Vec<Value>> {
-    Some(
-        data.and_then(|data| data.get("Trigger"))
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default(),
-    )
+    data?.get("Trigger")?.as_array().cloned()
 }
 
 async fn runtime_exited(runtime: &RunningRuntime) {
