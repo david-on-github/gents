@@ -1206,8 +1206,8 @@ fn project_unheaded_closed(
 }
 
 /// Reconstruct every stream declared by one sealed extent through the shared
-/// strict stream owner. The close owns the stream count; this live projection
-/// does not retain another byte or native-shape validator.
+/// strict extent owner, once. The close owns the stream count; this live
+/// projection does not retain another byte or native-shape validator.
 fn reconstruct_extent_streams(
     observation: &LiveObservation<'_>,
     closing: ObservedSegment<'_>,
@@ -1217,23 +1217,18 @@ fn reconstruct_extent_streams(
             detail: "live retained extent is not closed".to_owned(),
         });
     };
-    (0..stream_bytes.len())
-        .map(|stream| {
-            reconstruction::reconstruct_stream(
-                observation.records,
-                observation.denied_segments,
-                observation.dependency_denials,
-                &PayloadRef {
-                    close_doc_id: closing.doc_id.to_owned(),
-                    stream: u32::try_from(stream).map_err(|_| {
-                        ReconstructionError::InvalidStructure {
-                            detail: "sealed stream count exceeds protocol index".to_owned(),
-                        }
-                    })?,
-                },
-            )
-        })
-        .collect()
+    if stream_bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    reconstruction::reconstruct_extent_streams(
+        observation.records,
+        observation.denied_segments,
+        observation.dependency_denials,
+        &PayloadRef {
+            close_doc_id: closing.doc_id.to_owned(),
+            stream: 0,
+        },
+    )
 }
 
 /// Lean `projectPublished` over protocol types. The target envelope is

@@ -340,6 +340,114 @@ theorem absent_dependency_denial_is_not_loading (records : List Segment)
       .error (.lookup .denied) := by
   simp [reconstructPayload]
 
+/-- A closed record's sealed stream count, which bounds every reference to it. -/
+def closeStreamCount (closing : Segment) : Nat :=
+  match closing.close with
+  | some (.closed _ _ streamBytes) => streamBytes.length
+  | _ => 0
+
+/-- Close resolution depends on the stream index only through the sealed bound. -/
+theorem resolveClose_other_stream (records : List Segment) (denied : List DocId)
+    (closeId : DocId) (stream other : Nat) (closing : Segment)
+    (h : resolveClose records denied ⟨closeId, stream⟩ = .ok closing) :
+    resolveClose records denied ⟨closeId, other⟩ =
+      if other < closeStreamCount closing then .ok closing else .error .invalidReference := by
+  unfold resolveClose at h ⊢
+  cases hl : lookup records denied closeId with
+  | error error => simp [hl, Bind.bind, Except.bind] at h
+  | ok record =>
+    simp only [hl, Bind.bind, Except.bind] at h ⊢
+    cases hc : record.close with
+    | none => simp [hc] at h
+    | some close =>
+      cases close with
+      | retracted => simp [hc] at h
+      | closed outcome count bytes =>
+        simp only [hc] at h ⊢
+        split at h
+        · cases hu : uniqueRecord LookupError.conflictingClosures .conflictingClosures
+              (closures records record.coordinate) with
+          | error error => simp [hu] at h
+          | ok only =>
+            simp only [hu] at h
+            split at h
+            · rename_i heq
+              cases h
+              subst heq
+              simp [closeStreamCount, hc]
+            · contradiction
+        · contradiction
+
+/-- Native readers (`Extents` in `gents_protocol::output::reconstruction`)
+reconstruct each sealed extent once per invocation and select every reference
+through that close from it. This is the justification: once one reference
+through a close reconstructs, every reference through the same close is exactly
+the in-bounds selection from one fixed extent, or an invalid reference. Failing
+references share nothing and are evaluated by the per-reference definition. -/
+theorem reconstructPayload_shared_extent (records : List Segment) (denied : List DocId)
+    (dependencyDenials : List DependencyDenial) (closeId : DocId) (stream : Nat)
+    (payload : Declaration × List UInt8)
+    (h : reconstructPayload records denied ⟨closeId, stream⟩ dependencyDenials = .ok payload) :
+    ∃ streams : Streams, ∀ other,
+      reconstructPayload records denied ⟨closeId, other⟩ dependencyDenials =
+        match streams[other]? with
+        | some selected => .ok selected
+        | none => .error (.lookup .invalidReference) := by
+  unfold reconstructPayload at h ⊢
+  split at h
+  · contradiction
+  rename_i hdeny
+  have hd : dependencyDenials.any (fun d => d.rootCloseId == closeId) = false := by
+    simpa using hdeny
+  simp only [hd, Bool.false_eq_true, ↓reduceIte]
+  cases hr : resolveClose records denied ⟨closeId, stream⟩ with
+  | error error => simp [hr] at h
+  | ok closing =>
+    simp only [hr] at h
+    cases hcl : closing.close with
+    | none => simp [hcl] at h
+    | some close =>
+      cases close with
+      | retracted => simp [hcl] at h
+      | closed outcome count bytes =>
+        simp only [hcl] at h
+        split at h
+        · contradiction
+        rename_i hden
+        cases he : reconstructExtent records closing with
+        | error error => simp [he] at h
+        | ok streams =>
+          have hlen : streams.length = bytes.length := by
+            have hmap : streams.map (fun s => s.2.length) = bytes := by
+              unfold reconstructExtent at he
+              split at he
+              · contradiction
+              simp only [hcl] at he
+              split at he
+              · contradiction
+              cases hm : (List.range count).mapM
+                  (flushAt (extent records closing.coordinate count) closing.writer) with
+              | error error => simp [hm, Bind.bind, Except.bind] at he
+              | ok flushes =>
+                simp only [hm, Bind.bind, Except.bind] at he
+                cases hf : consumeFlushes flushes [] with
+                | error error => simp [hf] at he
+                | ok result =>
+                  simp only [hf] at he
+                  split at he
+                  · rename_i heq
+                    cases he
+                    exact heq
+                  · contradiction
+            simpa using congrArg List.length hmap
+          refine ⟨streams, fun other => ?_⟩
+          rw [resolveClose_other_stream records denied closeId stream other closing hr]
+          by_cases ho : other < bytes.length
+          · have hs : other < streams.length := hlen ▸ ho
+            simp [closeStreamCount, hcl, ho, hden, he, List.getElem?_eq_getElem hs]
+          · have hs : ¬ other < streams.length := hlen ▸ ho
+            simp [closeStreamCount, hcl, ho, List.getElem?_eq_none (Nat.le_of_not_lt hs)]
+
 /-- Recovery inputs retain unique source stream indexes and unique native
 declaration positions. Arrival order is deliberately irrelevant here. -/
 def recoveryDeclarationsValid : List (Nat × Declaration) → Bool

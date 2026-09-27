@@ -14,7 +14,9 @@ use crate::message::{
     Video,
 };
 use base64::Engine;
-use std::collections::{BTreeMap, BTreeSet};
+use std::cell::{OnceCell, RefCell};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ObservedSegment<'a> {
@@ -226,13 +228,11 @@ fn reference_allowed_by_publication(
 }
 
 fn validate_reference_source(
-    records: &[ObservedSegment<'_>],
-    denied: &[String],
-    dependency_denials: &[DependencyDenial],
+    extents: &Extents<'_, '_>,
     message: &TranscriptMessage,
     reference: &PayloadRef,
 ) -> Result<(), ReconstructionError> {
-    let closing = closing_for_reference(records, denied, dependency_denials, reference)?;
+    let closing = extents.closing(reference)?;
     if reference_allowed_by_publication(message, closing) {
         Ok(())
     } else {
@@ -242,13 +242,217 @@ fn validate_reference_source(
     }
 }
 
-fn reconstruct_extent_streams(
+/// A successfully reconstructed sealed extent with its reasoning signature
+/// streams indexed by native (block, part) position, in stream order.
+struct SealedExtent {
+    streams: Vec<ReconstructedStream>,
+    signatures: HashMap<(u32, u32), Vec<usize>>,
+}
+
+impl SealedExtent {
+    fn new(streams: Vec<ReconstructedStream>) -> Self {
+        let mut signatures: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+        for (index, stream) in streams.iter().enumerate() {
+            if matches!(
+                stream.declaration.payload,
+                StreamPayload::ReasoningSignature
+            ) {
+                signatures
+                    .entry((
+                        stream.declaration.block_index,
+                        stream.declaration.part_index,
+                    ))
+                    .or_default()
+                    .push(index);
+            }
+        }
+        Self {
+            streams,
+            signatures,
+        }
+    }
+}
+
+/// The observations grouped once, each group in observation order: by exact
+/// document identity (closing lookup) and by (request, source) (extent sweep).
+/// Both owners filter on exactly these keys, so a group is the subsequence
+/// they would select from the whole observation set.
+struct ObservationIndex<'a> {
+    by_doc: HashMap<&'a str, Vec<ObservedSegment<'a>>>,
+    by_source: HashMap<(&'a str, &'a OutputSource), Vec<ObservedSegment<'a>>>,
+}
+
+impl<'a> ObservationIndex<'a> {
+    fn new(records: &[ObservedSegment<'a>]) -> Self {
+        let mut by_doc: HashMap<&'a str, Vec<ObservedSegment<'a>>> = HashMap::new();
+        let mut by_source: HashMap<(&'a str, &'a OutputSource), Vec<_>> = HashMap::new();
+        for record in records {
+            by_doc.entry(record.doc_id).or_default().push(*record);
+            by_source
+                .entry((
+                    record.segment.request_doc_id.as_str(),
+                    &record.segment.source,
+                ))
+                .or_default()
+                .push(*record);
+        }
+        Self { by_doc, by_source }
+    }
+}
+
+/// One reconstruction invocation over a fixed observation set. Closing lookup
+/// and extent reconstruction depend on a reference only through its close
+/// document, except for the stream bound and error attribution, so a success
+/// is reused for every reference through the same close. Failures are never
+/// retained: each failing reference re-runs the per-reference definition and
+/// reports its own error. Nothing outlives the invocation.
+struct Extents<'s, 'a> {
+    records: &'s [ObservedSegment<'a>],
+    denied: &'s [String],
+    dependency_denials: &'s [DependencyDenial],
+    /// Tests disable reuse to evaluate the per-reference definition.
+    #[cfg(test)]
+    reuse: bool,
+    index: OnceCell<ObservationIndex<'a>>,
+    closings: RefCell<HashMap<&'a str, ObservedSegment<'a>>>,
+    extents: RefCell<HashMap<&'a str, Rc<SealedExtent>>>,
+    #[cfg(test)]
+    closing_scans: std::cell::Cell<usize>,
+    #[cfg(test)]
+    extent_builds: std::cell::Cell<usize>,
+}
+
+impl<'s, 'a> Extents<'s, 'a> {
+    fn new(
+        records: &'s [ObservedSegment<'a>],
+        denied: &'s [String],
+        dependency_denials: &'s [DependencyDenial],
+    ) -> Self {
+        Self {
+            records,
+            denied,
+            dependency_denials,
+            #[cfg(test)]
+            reuse: true,
+            index: OnceCell::new(),
+            closings: RefCell::default(),
+            extents: RefCell::default(),
+            #[cfg(test)]
+            closing_scans: Default::default(),
+            #[cfg(test)]
+            extent_builds: Default::default(),
+        }
+    }
+
+    fn reuses(&self) -> bool {
+        #[cfg(test)]
+        return self.reuse;
+        #[cfg(not(test))]
+        true
+    }
+
+    fn index(&self) -> &ObservationIndex<'a> {
+        self.index
+            .get_or_init(|| ObservationIndex::new(self.records))
+    }
+
+    fn closing(&self, reference: &PayloadRef) -> Result<ObservedSegment<'a>, ReconstructionError> {
+        if self.reuses() {
+            if let Some(closing) = self.closings.borrow().get(reference.close_doc_id.as_str()) {
+                return Ok(*closing);
+            }
+        }
+        #[cfg(test)]
+        self.closing_scans.set(self.closing_scans.get() + 1);
+        let candidates = if self.reuses() {
+            self.index()
+                .by_doc
+                .get(reference.close_doc_id.as_str())
+                .map_or(&[][..], Vec::as_slice)
+        } else {
+            self.records
+        };
+        let closing =
+            closing_for_reference(candidates, self.denied, self.dependency_denials, reference)?;
+        if self.reuses() {
+            self.closings.borrow_mut().insert(closing.doc_id, closing);
+        }
+        Ok(closing)
+    }
+
+    /// Equal to `reconstruct_extent_streams(.., reference)`, with `reference.stream`
+    /// guaranteed in bounds on success.
+    fn extent(&self, reference: &PayloadRef) -> Result<Rc<SealedExtent>, ReconstructionError> {
+        let reused = if self.reuses() {
+            self.extents
+                .borrow()
+                .get(reference.close_doc_id.as_str())
+                .cloned()
+        } else {
+            None
+        };
+        let extent = match reused {
+            Some(extent) => extent,
+            None => {
+                let closing = self.closing(reference)?;
+                #[cfg(test)]
+                self.extent_builds.set(self.extent_builds.get() + 1);
+                let same_source = if self.reuses() {
+                    self.index()
+                        .by_source
+                        .get(&(
+                            closing.segment.request_doc_id.as_str(),
+                            &closing.segment.source,
+                        ))
+                        .map_or(&[][..], Vec::as_slice)
+                } else {
+                    self.records
+                };
+                let extent = Rc::new(SealedExtent::new(extent_streams_from_closing(
+                    same_source,
+                    self.denied,
+                    closing,
+                    reference,
+                )?));
+                if self.reuses() {
+                    self.extents
+                        .borrow_mut()
+                        .insert(closing.doc_id, Rc::clone(&extent));
+                }
+                extent
+            }
+        };
+        if (reference.stream as usize) < extent.streams.len() {
+            Ok(extent)
+        } else {
+            Err(ReconstructionError::InvalidReference {
+                reference: reference.clone(),
+            })
+        }
+    }
+
+    /// Equal to `reconstruct_stream(.., reference)`.
+    fn stream(&self, reference: &PayloadRef) -> Result<ReconstructedStream, ReconstructionError> {
+        Ok(self.extent(reference)?.streams[reference.stream as usize].clone())
+    }
+}
+
+pub(super) fn reconstruct_extent_streams(
     records: &[ObservedSegment<'_>],
     denied: &[String],
     dependency_denials: &[DependencyDenial],
     reference: &PayloadRef,
 ) -> Result<Vec<ReconstructedStream>, ReconstructionError> {
     let closing = closing_for_reference(records, denied, dependency_denials, reference)?;
+    extent_streams_from_closing(records, denied, closing, reference)
+}
+
+fn extent_streams_from_closing(
+    records: &[ObservedSegment<'_>],
+    denied: &[String],
+    closing: ObservedSegment<'_>,
+    reference: &PayloadRef,
+) -> Result<Vec<ReconstructedStream>, ReconstructionError> {
     let Some(SourceClose::Closed {
         segments: count,
         stream_bytes,
@@ -456,26 +660,22 @@ fn is_arguments(payload: &StreamPayload) -> bool {
 }
 
 fn resolve_full(
-    records: &[ObservedSegment<'_>],
-    denied: &[String],
-    dependency_denials: &[DependencyDenial],
+    extents: &Extents<'_, '_>,
     reference: &PayloadRef,
     allowed: &[fn(&StreamPayload) -> bool],
     json: bool,
 ) -> Result<String, ReconstructionError> {
-    let stream = reconstruct_stream(records, denied, dependency_denials, reference)?;
+    let stream = extents.stream(reference)?;
     expect_payload(&stream, reference, allowed, true, json)?;
     Ok(stream.text)
 }
 
 fn resolve_presented(
-    records: &[ObservedSegment<'_>],
-    denied: &[String],
-    dependency_denials: &[DependencyDenial],
+    extents: &Extents<'_, '_>,
     payload: &PresentedPayload,
     allowed: &[fn(&StreamPayload) -> bool],
 ) -> Result<String, ReconstructionError> {
-    let stream = reconstruct_stream(records, denied, dependency_denials, &payload.output)?;
+    let stream = extents.stream(&payload.output)?;
     expect_payload(
         &stream,
         &payload.output,
@@ -487,13 +687,11 @@ fn resolve_presented(
 }
 
 fn media_data(
-    records: &[ObservedSegment<'_>],
-    denied: &[String],
-    dependency_denials: &[DependencyDenial],
+    extents: &Extents<'_, '_>,
     media: &super::MediaBlock,
 ) -> Result<DocumentSourceKind, ReconstructionError> {
     let media_stream = |reference: &PayloadRef| {
-        let stream = reconstruct_stream(records, denied, dependency_denials, reference)?;
+        let stream = extents.stream(reference)?;
         match &stream.declaration.payload {
             StreamPayload::Media { media_kind } if media_kind == &media.kind => Ok(stream.text),
             _ => Err(invalid_extent(reference, stream.text.len() as u64)),
@@ -527,9 +725,7 @@ fn validate_media_shape(media: &super::MediaBlock) -> bool {
 }
 
 fn reconstruct_media(
-    records: &[ObservedSegment<'_>],
-    denied: &[String],
-    dependency_denials: &[DependencyDenial],
+    extents: &Extents<'_, '_>,
     media: &super::MediaBlock,
 ) -> Result<(MediaKind, DocumentSourceKind), ReconstructionError> {
     if !validate_media_shape(media) {
@@ -537,10 +733,7 @@ fn reconstruct_media(
             detail: "media kind, media type, and detail are not a native combination".to_owned(),
         });
     }
-    Ok((
-        media.kind,
-        media_data(records, denied, dependency_denials, media)?,
-    ))
+    Ok((media.kind, media_data(extents, media)?))
 }
 
 fn validate_native_shape(message: &TranscriptMessage) -> Result<(), ReconstructionError> {
@@ -609,28 +802,22 @@ fn validate_native_shape(message: &TranscriptMessage) -> Result<(), Reconstructi
 }
 
 fn validate_reasoning_signature(
-    records: &[ObservedSegment<'_>],
-    denied: &[String],
-    dependency_denials: &[DependencyDenial],
+    extents: &Extents<'_, '_>,
     body_reference: &PayloadRef,
     signature: Option<&str>,
 ) -> Result<(), ReconstructionError> {
-    let streams = reconstruct_extent_streams(records, denied, dependency_denials, body_reference)?;
-    let body = &streams[body_reference.stream as usize];
-    let mut signatures = streams.iter().filter(|stream| {
-        stream.declaration.block_index == body.declaration.block_index
-            && stream.declaration.part_index == body.declaration.part_index
-            && matches!(
-                stream.declaration.payload,
-                StreamPayload::ReasoningSignature
-            )
-    });
+    let extent = extents.extent(body_reference)?;
+    let body = &extent.streams[body_reference.stream as usize];
+    let mut signatures = extent
+        .signatures
+        .get(&(body.declaration.block_index, body.declaration.part_index))
+        .into_iter()
+        .flatten()
+        .map(|index| &extent.streams[*index]);
     let Some(stream) = signatures.next() else {
         if signature.is_none()
             || matches!(
-                closing_for_reference(records, denied, dependency_denials, body_reference)?
-                    .segment
-                    .source,
+                extents.closing(body_reference)?.segment.source,
                 OutputSource::Authored { .. }
             )
         {
@@ -657,11 +844,17 @@ pub fn reconstruct_message(
     dependency_denials: &[DependencyDenial],
     message: &TranscriptMessage,
 ) -> Result<Message, ReconstructionError> {
+    reconstruct_message_with(&Extents::new(records, denied, dependency_denials), message)
+}
+
+fn reconstruct_message_with(
+    extents: &Extents<'_, '_>,
+    message: &TranscriptMessage,
+) -> Result<Message, ReconstructionError> {
     validate_native_shape(message)?;
 
-    let validate_reference = |reference: &PayloadRef| {
-        validate_reference_source(records, denied, dependency_denials, message, reference)
-    };
+    let validate_reference =
+        |reference: &PayloadRef| validate_reference_source(extents, message, reference);
     // Closures/source provenance are validated before native decoding.
     let mut provenance_failure = None;
     for reference in message.payload_references() {
@@ -679,9 +872,10 @@ pub fn reconstruct_message(
                               part: u32,
                               exact: bool|
      -> Result<(), ReconstructionError> {
-        let closing = closing_for_reference(records, denied, dependency_denials, reference)?;
+        let closing = extents.closing(reference)?;
         if let OutputSource::ProviderTurn { .. } = &closing.segment.source {
-            let stream = reconstruct_stream(records, denied, dependency_denials, reference)?;
+            let extent = extents.extent(reference)?;
+            let stream = &extent.streams[reference.stream as usize];
             if exact
                 && (stream.declaration.block_index != block
                     || stream.declaration.part_index != part)
@@ -817,13 +1011,7 @@ pub fn reconstruct_message(
         |block: &MessageBlock| -> Result<AssistantContent, ReconstructionError> {
             match block {
                 MessageBlock::Text { text } => Ok(AssistantContent::Text(Text {
-                    text: resolve_presented(
-                        records,
-                        denied,
-                        dependency_denials,
-                        text,
-                        &[is_text, is_tool_output],
-                    )?,
+                    text: resolve_presented(extents, text, &[is_text, is_tool_output])?,
                 })),
                 MessageBlock::Reasoning { id, parts } => {
                     Ok(AssistantContent::Reasoning(Reasoning {
@@ -833,29 +1021,18 @@ pub fn reconstruct_message(
                             .map(|part| match part {
                                 ReasoningPart::Text { text, signature } => {
                                     validate_reasoning_signature(
-                                        records,
-                                        denied,
-                                        dependency_denials,
+                                        extents,
                                         text,
                                         signature.as_deref(),
                                     )?;
                                     Ok(ReasoningContent::Text {
-                                        text: resolve_full(
-                                            records,
-                                            denied,
-                                            dependency_denials,
-                                            text,
-                                            &[is_reasoning],
-                                            false,
-                                        )?,
+                                        text: resolve_full(extents, text, &[is_reasoning], false)?,
                                         signature: signature.clone(),
                                     })
                                 }
                                 ReasoningPart::Encrypted { data } => {
                                     Ok(ReasoningContent::Encrypted(resolve_full(
-                                        records,
-                                        denied,
-                                        dependency_denials,
+                                        extents,
                                         data,
                                         &[is_reasoning_encrypted],
                                         false,
@@ -864,25 +1041,16 @@ pub fn reconstruct_message(
                                 ReasoningPart::Redacted { data } => {
                                     Ok(ReasoningContent::Redacted {
                                         data: resolve_full(
-                                            records,
-                                            denied,
-                                            dependency_denials,
+                                            extents,
                                             data,
                                             &[is_reasoning_redacted],
                                             false,
                                         )?,
                                     })
                                 }
-                                ReasoningPart::Summary { text } => {
-                                    Ok(ReasoningContent::Summary(resolve_full(
-                                        records,
-                                        denied,
-                                        dependency_denials,
-                                        text,
-                                        &[is_reasoning_summary],
-                                        false,
-                                    )?))
-                                }
+                                ReasoningPart::Summary { text } => Ok(ReasoningContent::Summary(
+                                    resolve_full(extents, text, &[is_reasoning_summary], false)?,
+                                )),
                             })
                             .collect::<Result<Vec<_>, _>>()?,
                     }))
@@ -896,8 +1064,7 @@ pub fn reconstruct_message(
                     additional_params,
                     ..
                 } => {
-                    let stream =
-                        reconstruct_stream(records, denied, dependency_denials, arguments)?;
+                    let stream = extents.stream(arguments)?;
                     if !matches!(&stream.declaration.payload, StreamPayload::ToolArguments { id: declared_id, call_id: declared_call_id, name: declared_name } if declared_id == id && declared_call_id == call_id && declared_name == name)
                     {
                         return Err(invalid_extent(arguments, stream.text.len() as u64));
@@ -922,7 +1089,7 @@ pub fn reconstruct_message(
                     }))
                 }
                 MessageBlock::Media(media) if media.kind == MediaKind::Image => {
-                    let (_, data) = reconstruct_media(records, denied, dependency_denials, media)?;
+                    let (_, data) = reconstruct_media(extents, media)?;
                     Ok(AssistantContent::Image(Image {
                         data,
                         media_type: match &media.media_type {
@@ -941,13 +1108,7 @@ pub fn reconstruct_message(
     match message.role {
         MessageRole::System => match &message.blocks[0] {
             MessageBlock::Text { text } => Ok(Message::System {
-                content: resolve_presented(
-                    records,
-                    denied,
-                    dependency_denials,
-                    text,
-                    &[is_text, is_tool_output],
-                )?,
+                content: resolve_presented(extents, text, &[is_text, is_tool_output])?,
             }),
             _ => unreachable!(),
         },
@@ -964,13 +1125,7 @@ pub fn reconstruct_message(
             for block in &message.blocks {
                 match block {
                     MessageBlock::Text { text } => content.push(UserContent::Text(Text {
-                        text: resolve_presented(
-                            records,
-                            denied,
-                            dependency_denials,
-                            text,
-                            &[is_text, is_tool_output],
-                        )?,
+                        text: resolve_presented(extents, text, &[is_text, is_tool_output])?,
                     })),
                     MessageBlock::ToolResult {
                         id, call_id, parts, ..
@@ -982,22 +1137,11 @@ pub fn reconstruct_message(
                             .map(|part| match part {
                                 ToolResultPart::Text { text } => {
                                     Ok(ToolResultContent::Text(Text {
-                                        text: resolve_presented(
-                                            records,
-                                            denied,
-                                            dependency_denials,
-                                            text,
-                                            &[is_tool_output],
-                                        )?,
+                                        text: resolve_presented(extents, text, &[is_tool_output])?,
                                     }))
                                 }
                                 ToolResultPart::Media(media) => {
-                                    let (_, data) = reconstruct_media(
-                                        records,
-                                        denied,
-                                        dependency_denials,
-                                        media,
-                                    )?;
+                                    let (_, data) = reconstruct_media(extents, media)?;
                                     Ok(ToolResultContent::Image(Image {
                                         data,
                                         media_type: match &media.media_type {
@@ -1012,8 +1156,7 @@ pub fn reconstruct_message(
                             .collect::<Result<Vec<_>, _>>()?,
                     })),
                     MessageBlock::Media(media) => {
-                        let (kind, data) =
-                            reconstruct_media(records, denied, dependency_denials, media)?;
+                        let (kind, data) = reconstruct_media(extents, media)?;
                         match (kind, &media.media_type) {
                             (MediaKind::Image, Some(MediaType::Image(media_type))) => {
                                 content.push(UserContent::Image(Image {
@@ -1167,7 +1310,7 @@ mod tests {
         records: &[(String, OutputSegment)],
         reference: &PayloadRef,
     ) -> Result<ReconstructedStream, ReconstructionError> {
-        reconstruct_stream(&observations(records), &[], &[], reference)
+        reconstruct_denied(records, &[], &[], reference)
     }
 
     fn reconstruct_denied(
@@ -1176,12 +1319,39 @@ mod tests {
         dependency_denials: &[DependencyDenial],
         reference: &PayloadRef,
     ) -> Result<ReconstructedStream, ReconstructionError> {
-        reconstruct_stream(
-            &observations(records),
-            denied,
-            dependency_denials,
-            reference,
-        )
+        let observed = observations(records);
+        let per_reference = reconstruct_stream(&observed, denied, dependency_denials, reference);
+        let extents = Extents::new(&observed, denied, dependency_denials);
+        assert_eq!(extents.stream(reference), per_reference);
+        assert_eq!(extents.stream(reference), per_reference);
+        per_reference
+    }
+
+    fn per_reference<'s, 'a>(
+        records: &'s [ObservedSegment<'a>],
+        denied: &'s [String],
+        dependency_denials: &'s [DependencyDenial],
+    ) -> Extents<'s, 'a> {
+        let mut extents = Extents::new(records, denied, dependency_denials);
+        extents.reuse = false;
+        extents
+    }
+
+    /// Shadows the public owner in every message fixture here: the reused-extent
+    /// path must return exactly what the per-reference definition returns,
+    /// including the error and its attribution.
+    fn reconstruct_message(
+        records: &[ObservedSegment<'_>],
+        denied: &[String],
+        dependency_denials: &[DependencyDenial],
+        message: &TranscriptMessage,
+    ) -> Result<Message, ReconstructionError> {
+        let reused = super::reconstruct_message(records, denied, dependency_denials, message);
+        assert_eq!(
+            reused,
+            reconstruct_message_with(&per_reference(records, denied, dependency_denials), message)
+        );
+        reused
     }
 
     fn reference(close_doc_id: &str, stream: u32) -> PayloadRef {
@@ -2307,5 +2477,201 @@ mod tests {
             reconstruct_message(&observations(&records), &[], &[], &delivery),
             Err(ReconstructionError::InvalidStructure { .. })
         ));
+    }
+
+    /// One provider extent with a reasoning part per flush; even parts also
+    /// retain a signature stream at the same native position.
+    fn many_part_reasoning(parts: u32) -> (Vec<(String, OutputSegment)>, TranscriptMessage) {
+        let mut records = Vec::new();
+        let mut message_parts = Vec::new();
+        let mut stream_bytes = Vec::new();
+        for part in 0..parts {
+            let body = format!("r{part}");
+            let mut runs = vec![run(
+                stream_bytes.len() as u32,
+                body.len() as u32,
+                Some(StreamDeclaration {
+                    block_index: 0,
+                    part_index: part,
+                    payload: StreamPayload::Reasoning,
+                }),
+            )];
+            let body_ref = reference("close-many", stream_bytes.len() as u32);
+            stream_bytes.push(body.len() as u64);
+            let mut payload = body;
+            let signature = (part % 2 == 0).then(|| format!("s{part}"));
+            if let Some(signature) = &signature {
+                runs.push(run(
+                    stream_bytes.len() as u32,
+                    signature.len() as u32,
+                    Some(StreamDeclaration {
+                        block_index: 0,
+                        part_index: part,
+                        payload: StreamPayload::ReasoningSignature,
+                    }),
+                ));
+                stream_bytes.push(signature.len() as u64);
+                payload.push_str(signature);
+            }
+            message_parts.push(ReasoningPart::Text {
+                text: body_ref,
+                signature,
+            });
+            let last = part + 1 == parts;
+            records.push(segment(
+                &if last {
+                    "close-many".to_owned()
+                } else {
+                    format!("flush-{part}")
+                },
+                Some(part),
+                runs,
+                &payload,
+                None,
+            ));
+        }
+        records.last_mut().expect("at least one part").1.close = closed(parts, stream_bytes);
+        let message = provider_message(vec![MessageBlock::Reasoning {
+            id: None,
+            parts: message_parts,
+        }]);
+        (records, message)
+    }
+
+    #[test]
+    fn many_part_message_reconstructs_each_extent_once() {
+        let parts = 3000;
+        let (records, message) = many_part_reasoning(parts);
+        let observed = observations(&records);
+        let extents = Extents::new(&observed, &[], &[]);
+        let Message::Assistant { content, .. } =
+            reconstruct_message_with(&extents, &message).expect("reconstructs")
+        else {
+            panic!("assistant message");
+        };
+        let [AssistantContent::Reasoning(reasoning)] = content.as_slice() else {
+            panic!("one reasoning block");
+        };
+        assert_eq!(reasoning.content.len(), parts as usize);
+        assert_eq!(
+            reasoning.content[2],
+            ReasoningContent::Text {
+                text: "r2".to_owned(),
+                signature: Some("s2".to_owned()),
+            }
+        );
+        // Work is linear in references: one closing scan and one extent
+        // reconstruction for the whole message, not one per part.
+        assert_eq!(extents.closing_scans.get(), 1);
+        assert_eq!(extents.extent_builds.get(), 1);
+    }
+
+    #[test]
+    fn many_part_message_matches_per_reference_definition_on_every_fault() {
+        let (records, message) = many_part_reasoning(96);
+        let observed = observations(&records);
+        assert!(reconstruct_message(&observed, &[], &[], &message).is_ok());
+        let per_reference_extents = per_reference(&observed, &[], &[]);
+        reconstruct_message_with(&per_reference_extents, &message).expect("reconstructs");
+        assert!(per_reference_extents.extent_builds.get() > 96);
+
+        // Known denial inside the extent, and an owner-verified dependency denial.
+        let denied = vec!["flush-40".to_owned()];
+        assert!(matches!(
+            reconstruct_message(&observed, &denied, &[], &message),
+            Err(ReconstructionError::AccessDenied { .. })
+        ));
+        let dependency = [DependencyDenial {
+            root_close_id: "close-many".to_owned(),
+            denied_doc_id: "flush-7".to_owned(),
+        }];
+        assert!(matches!(
+            reconstruct_message(&observed, &[], &dependency, &message),
+            Err(ReconstructionError::AccessDenied { .. })
+        ));
+
+        // Missing and twin ordinals inside the sealed extent.
+        let mut missing = records.clone();
+        missing.remove(50);
+        assert!(matches!(
+            reconstruct_message(&observations(&missing), &[], &[], &message),
+            Err(ReconstructionError::MissingSegment { ordinal: 50, .. })
+        ));
+        let mut twin = records.clone();
+        let mut other = twin[33].clone();
+        other.0 = "twin-33".to_owned();
+        twin.push(other);
+        assert!(matches!(
+            reconstruct_message(&observations(&twin), &[], &[], &message),
+            Err(ReconstructionError::ConflictingSegments { ordinal: 33, .. })
+        ));
+
+        let MessageBlock::Reasoning { parts, .. } = &message.blocks[0] else {
+            unreachable!()
+        };
+        let with_parts = |parts: Vec<ReasoningPart>| {
+            let mut changed = message.clone();
+            changed.blocks = vec![MessageBlock::Reasoning { id: None, parts }];
+            changed
+        };
+        // A late native position rewrite, out-of-range stream, wrong kind and
+        // wrong signature each keep the per-reference error and attribution.
+        let mut swapped = parts.clone();
+        swapped.swap(70, 71);
+        assert!(matches!(
+            reconstruct_message(&observed, &[], &[], &with_parts(swapped)),
+            Err(ReconstructionError::ExtentMismatch { .. })
+        ));
+        let mut out_of_range = parts.clone();
+        out_of_range[90] = ReasoningPart::Text {
+            text: reference("close-many", 10_000),
+            signature: None,
+        };
+        assert_eq!(
+            reconstruct_message(&observed, &[], &[], &with_parts(out_of_range)),
+            Err(ReconstructionError::InvalidReference {
+                reference: reference("close-many", 10_000),
+            })
+        );
+        let mut wrong_kind = parts.clone();
+        wrong_kind[81] = ReasoningPart::Summary {
+            text: match &parts[81] {
+                ReasoningPart::Text { text, .. } => text.clone(),
+                _ => unreachable!(),
+            },
+        };
+        assert!(matches!(
+            reconstruct_message(&observed, &[], &[], &with_parts(wrong_kind)),
+            Err(ReconstructionError::ExtentMismatch { .. })
+        ));
+        for (index, signature) in [
+            (60, None),
+            (61, Some("s61".to_owned())),
+            (62, Some("x".to_owned())),
+        ] {
+            let mut wrong = parts.clone();
+            if let ReasoningPart::Text {
+                signature: slot, ..
+            } = &mut wrong[index]
+            {
+                *slot = signature;
+            }
+            assert!(matches!(
+                reconstruct_message(&observed, &[], &[], &with_parts(wrong)),
+                Err(ReconstructionError::InvalidStructure { .. })
+            ));
+        }
+        // Unresolved close for one late reference among many resolvable ones.
+        let mut unresolved = parts.clone();
+        unresolved[95] = ReasoningPart::Text {
+            text: reference("close-absent", 0),
+            signature: None,
+        };
+        assert_eq!(
+            reconstruct_message(&observed, &[], &[], &with_parts(unresolved)),
+            Err(ReconstructionError::UnresolvedClose {
+                close_doc_id: "close-absent".to_owned(),
+            })
+        );
     }
 }
