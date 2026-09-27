@@ -204,11 +204,15 @@ pub(crate) struct CancelSubagentArgs {
     pub reason: Option<String>,
 }
 
+/// `spawn_process` input, decoded exactly as its advertised schema states:
+/// both fields required, `args` an object, nothing else. A wider decoder
+/// returns a running receipt for input the target cannot decode, and that
+/// target's rejection reaches the model only later, as a failed completion.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct BackgroundToolArgs {
     pub tool_name: String,
-    #[serde(default)]
-    pub args: serde_json::Value,
+    pub args: serde_json::Map<String, serde_json::Value>,
 }
 
 /// `wait_process` wait when neither the call nor the handle's Tools group
