@@ -1529,6 +1529,52 @@ mod tests {
         );
     }
 
+    /// Cancellation reaches a seed stage before it has a request: while it
+    /// waits for the event sources, writes the seed, or polls for the fire.
+    /// It ends the way a cancelled running stage does, as the request not
+    /// finishing, and never waits out the runtime-ready budget.
+    #[tokio::test]
+    async fn a_cancelled_seed_stage_is_runtime_before_any_request_exists() {
+        let home = EmbeddedHome::create_temp("seed-cancel").await.unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let stage = StageSpec {
+            stage_id: "fire".into(),
+            prompt: String::new(),
+            seed: Some(FixtureDocument {
+                collection: "NoSuchItem".into(),
+                document: json!({}),
+            }),
+            deadline_secs: 120,
+            captures: Vec::new(),
+        };
+        let locator = TrialLocator {
+            trial_agent_did: home.did().to_string(),
+            session_id: "s".into(),
+            home_hint: None,
+        };
+        // Never ready: only the cancel can end the wait.
+        let never_ready = watch::channel(false).1;
+        let observed = tokio::time::timeout(
+            Duration::from_secs(5),
+            submit_and_observe(
+                &TrialSpec::empty_for_tests("t1"),
+                &cancel,
+                &home,
+                &locator,
+                &stage,
+                &never_ready,
+            ),
+        )
+        .await
+        .expect("the cancel ends the stage at once");
+        assert_eq!(
+            (observed.request_id, observed.failure_kind),
+            (None, Some(OutcomeKind::Runtime))
+        );
+        assert_eq!(observed.terminal_state, None);
+    }
+
     /// A pack may only reference an inference slot, so installing one into a
     /// trial home has to bind that slot to the profile the run froze. Without
     /// the binding the behavior would reach the home still naming

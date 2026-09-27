@@ -50,6 +50,7 @@ const CANARY_ITEM_SDL: &str = "type CanaryItem {\n  item_id: String\n  label: St
 /// scripted backend's marker and the content the fired request must carry.
 const SEED_MARKER: &str = "Seeded item: wh-1";
 const SEED_ITEM_SDL: &str = "type SeedItem {\n  label: String\n}\n";
+const QUIET_ITEM_SDL: &str = "type QuietItem {\n  label: String\n}\n";
 
 #[tokio::test]
 async fn the_canary_runs_two_cases_end_to_end_on_an_embedded_home_with_a_scripted_model() {
@@ -247,6 +248,66 @@ async fn a_seed_stage_fires_the_pack_trigger_and_observes_the_task_request() {
         (verdicts[0].kind, &verdicts[0].raw["count"]),
         (OutcomeKind::Passed, &json!(1)),
         "the fired request is the stage's evidence: {verdicts:#?}"
+    );
+    // AC4: the captured request carries the task's rendered template.
+    let recorded = evidence_records(&canary.runs_dir(), &request.run_id, &trials);
+    assert_eq!(
+        recorded[0].1["stages"][0]["captures"]["fired"]["rows"],
+        json!([{"content": SEED_MARKER}]),
+        "{recorded:#?}"
+    );
+}
+
+/// A seed stage whose collection no trigger watches: nothing fires, so the
+/// stage ends unsubmitted once its own deadline passes, and the slot is owed
+/// another attempt rather than scored.
+#[tokio::test]
+async fn a_seed_stage_no_trigger_fires_for_ends_unsubmitted_at_its_deadline() {
+    let backend = MockStreamingBackend::start_with_plans(MODEL, Vec::new()).unwrap();
+    let (canary, mut request) = canary_request(backend.endpoint(), "run-seed-quiet").await;
+    canary
+        .install(vec![(
+            Collection::EvalDefinition,
+            quiet_seed_definition_document(&canary.owner),
+        )])
+        .await;
+    request.definition_id = "seed-quiet".into();
+    request.cells[0].source = CellSource::Directory(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval_runner/trigger_pack"),
+    );
+    request.cells[0].behavior_id = "seeded".into();
+    let executor = EmbeddedExecutor::new(DocumentRuntimeOptions::default(), canary.runs_dir());
+
+    let outcome = run(
+        &canary.access,
+        &request,
+        &executor,
+        &CheckRegistry::builtin(),
+        CancellationToken::new(),
+        &RunOptions::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!((outcome.completed, outcome.not_evidence), (1, 1));
+
+    let trials = load_trials(&canary.access, &request.owner, &request.run_id)
+        .await
+        .unwrap();
+    let completion = trial(&trials, "quiet").completion.clone().unwrap();
+    assert_eq!(completion.anchor.requests, 0, "{completion:#?}");
+    let verdicts = load_verdicts(&canary.access, &request.owner, &request.run_id)
+        .await
+        .unwrap();
+    assert_eq!(verdicts.len(), 1, "{verdicts:#?}");
+    assert_eq!(
+        (verdicts[0].kind, verdicts[0].provider_reason),
+        (OutcomeKind::Infrastructure, None),
+        "an unsubmitted stage is the harness's fault: {verdicts:#?}"
+    );
+    assert_eq!(
+        backend.observed_completion_bodies().len(),
+        0,
+        "no request reached the provider"
     );
 }
 
@@ -694,6 +755,40 @@ fn definition_document(owner: &str) -> Value {
                 ],
             },
         ],
+    })
+}
+
+/// One case whose stage seeds a `QuietItem` row, which no trigger of the pack
+/// watches, under a deadline short enough for the test to wait out.
+fn quiet_seed_definition_document(owner: &str) -> Value {
+    json!({
+        "definition_id": "seed-quiet",
+        "agent_did": owner,
+        "comparability_version": 1,
+        "title": "Eval runner seed stage without a trigger",
+        "subject": {"kind": "behavior", "inference_slots": ["primary"]},
+        "fixtures": {"schemas": [QUIET_ITEM_SDL]},
+        "cases": [{
+            "case_id": "quiet",
+            "split": "validation",
+            "stages": [{
+                "stage_id": "fire",
+                "seed": {"collection": "QuietItem", "document": {"label": "wh-2"}},
+                "deadline_secs": 2,
+                "capture": [{
+                    "kind": "documents",
+                    "name": "fired",
+                    "collection": "AgentRequest",
+                    "filter": {},
+                    "fields": ["content"]
+                }],
+                "checks": [{
+                    "check": "captured_rows_count",
+                    "params": {"name": "fired", "min": 1},
+                    "tier": "acceptance",
+                }],
+            }],
+        }],
     })
 }
 
