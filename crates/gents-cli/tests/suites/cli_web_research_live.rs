@@ -4,15 +4,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use gents::config::ReasoningEffort;
 use gents::config_client::{
     apply_desired_state_plan, read_desired_state_record_in_txn, ConfigAccess,
     DesiredStateApplyDocument, DesiredStateApplyPlan,
 };
-use gents::document_config::{InferenceExecution, InferenceProfile};
+use gents::document_config::{InferenceExecution, InferenceProfile, ToolServiceRegistry};
 use gents::Collection;
 use serde_json::Value;
 use uuid::Uuid;
@@ -21,32 +22,75 @@ const SERVICE_ID: &str = "web-research-mcp";
 const DEFAULT_RESEARCH_QUESTION: &str = "How should an organization design a production deployment of the Model Context Protocol in 2026 to minimize prompt-injection and credential risks? Compare current MCP authorization and security guidance, the OAuth security best-current-practice, and at least two independent security analyses. Distinguish normative requirements from recommendations, identify disagreements, and cite primary sources.";
 
 async fn register_real_web_research_service(graphql: &str, agent_did: &str) -> Result<()> {
-    let hostname = hostname::get()
-        .context("reading local hostname")?
-        .into_string()
-        .map_err(|_| anyhow!("local hostname is not UTF-8"))?;
+    graphql_query(graphql, &real_web_research_registry_mutation(agent_did)).await?;
+    Ok(())
+}
+
+fn real_web_research_registry_mutation(agent_did: &str) -> String {
     let service_id = escape_graphql_string(SERVICE_ID);
-    let hostname = escape_graphql_string(&hostname);
     let agent_did = escape_graphql_string(agent_did);
-    let mutation = format!(
+    format!(
         r#"mutation {{
             create_ToolServiceRegistry(input: {{
                 service_id: "{service_id}",
                 agent_did: "{agent_did}",
                 display_name: "Real Web Research MCP",
                 description: "Live SearXNG and Firecrawl evidence gateway for {agent_did}",
-                hostname: "{hostname}",
+                hostname: null,
                 tailscale_ip: null,
-                lan_ip: null,
+                lan_ip: "127.0.0.1",
                 mcp_port: 19213,
                 mcp_path: "/mcp",
                 send_agent_did: true,
+                enabled: true,
                 status: "online",
                 version: "0.1.10"
             }}) {{ _docID }}
         }}"#
+    )
+}
+
+#[tokio::test]
+async fn live_research_registry_matches_measured_loopback_endpoint() -> Result<()> {
+    let node = Arc::new(gents::defra_node::EmbeddedNode::builder().build().await?);
+    gents::ensure_runtime_schemas(node.as_ref()).await?;
+    let access = ConfigAccess::Local(node.clone());
+    let agent_did = "did:key:web-research-registry-test";
+    access
+        .write(
+            "test.web_research.registry",
+            &real_web_research_registry_mutation(agent_did),
+        )
+        .await?;
+    let (fields, _) =
+        gents::config_client::config_projection(Collection::ToolServiceRegistry, None)?;
+    let registry_rows = access
+        .execute(&format!(
+            r#"{{ ToolServiceRegistry(filter: {{ agent_did: {{ _eq: "{}" }} }}) {{ {} }} }}"#,
+            escape_graphql_string(agent_did),
+            fields.join(" ")
+        ))
+        .await?;
+    let registry: ToolServiceRegistry =
+        serde_json::from_value(first_graphql_row(&registry_rows, "ToolServiceRegistry")?.clone())?;
+    anyhow::ensure!(registry.enabled && registry.hostname.is_none());
+    anyhow::ensure!(registry.lan_ip.as_deref() == Some("127.0.0.1"));
+    access
+        .write(
+            "test.web_research.health",
+            &format!(
+                r#"mutation {{ create_ToolServiceHealthState(input: {{ agent_did: "{}", service_id: "{}", endpoint: "http://127.0.0.1:19213/mcp", status: "healthy", tool_count: 2 }}) {{ _docID }} }}"#,
+                escape_graphql_string(agent_did),
+                escape_graphql_string(SERVICE_ID)
+            ),
+        )
+        .await?;
+    anyhow::ensure!(
+        gents::tool_surface::measured_mcp_services_for_access(&access, agent_did, &[registry])
+            .await?
+            == [SERVICE_ID]
     );
-    graphql_query(graphql, &mutation).await?;
+    node.shutdown().await;
     Ok(())
 }
 
