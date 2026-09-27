@@ -63,7 +63,8 @@ pub use contract::{
     TurnCompactionOutcome, TurnCompactionRequest,
 };
 pub use one_shot::{
-    run_loop_to_text, run_loop_to_typed, AuxiliaryPersistenceFailure, OneShotProviderFailure,
+    run_loop_to_text, run_loop_to_typed, AuxiliaryPersistenceFailure, OneShotNoVisibleOutput,
+    OneShotProviderFailure,
 };
 pub use repeated_tool_failure::REPEATED_TOOL_FAILURE_PREFIX;
 pub use request_assembly::{assemble_new_messages, is_request_context_message};
@@ -102,6 +103,21 @@ pub use aggregate_budget::{
     aggregate_token_budget_exhaustion_message, AggregateTokenBudget,
     AGGREGATE_TOKEN_BUDGET_EXHAUSTED_PREFIX,
 };
+
+/// Prefix of the loop's own terminal error for a tool-free turn that returned
+/// no visible text (for example, reasoning only) after its resample budget.
+pub const NO_VISIBLE_OUTPUT_PREFIX: &str = "completion produced no visible output: ";
+
+/// Whether a stream error is the loop's terminal no-visible-output failure.
+/// This is an ordinary unusable model result, not an output-persistence or
+/// ownership invariant.
+pub fn is_no_visible_output_failure(error: &StreamingError) -> bool {
+    matches!(
+        error,
+        StreamingError::Completion(CompletionError::ProviderError(reason))
+            if reason.starts_with(NO_VISIBLE_OUTPUT_PREFIX)
+    )
+}
 
 pub fn run_loop_stream<M, H>(
     model: M,
@@ -816,7 +832,7 @@ where
                     MidStreamDirective::Fail { reason } => {
                         Err(StreamingError::Completion(
                             CompletionError::ProviderError(format!(
-                                "completion produced no visible output: {reason}; \
+                                "{NO_VISIBLE_OUTPUT_PREFIX}{reason}; \
                                  raw_output_preview=\"\"; \
                                  finish_metadata=unavailable_at_rig_streaming_boundary"
                             )),

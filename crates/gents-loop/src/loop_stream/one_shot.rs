@@ -20,6 +20,19 @@ pub struct OneShotProviderFailure {
     source: Option<anyhow::Error>,
 }
 
+/// The owned loop ended a tool-free turn without visible text (for example,
+/// reasoning only) after its resample budget. This is an unusable model
+/// result a caller may retry or replace, distinct from provider transport
+/// failures and from auxiliary persistence or ownership invariants. Reasoning
+/// the turn received was already emitted to the auxiliary sink before this
+/// error, and its partial closure goes through the ordinary cleanup owners.
+#[derive(Debug, thiserror::Error)]
+#[error("one-shot completion produced no visible output")]
+pub struct OneShotNoVisibleOutput {
+    #[source]
+    source: StreamingError,
+}
+
 fn persistence_failure(operation: &'static str, source: anyhow::Error) -> anyhow::Error {
     AuxiliaryPersistenceFailure { operation, source }.into()
 }
@@ -34,6 +47,9 @@ fn stream_failure(
             source: Some(anyhow::Error::new(error)),
         }
         .into(),
+        None if super::is_no_visible_output_failure(&error) => {
+            OneShotNoVisibleOutput { source: error }.into()
+        }
         None => anyhow::Error::new(error).context("one-shot loop stream error"),
     }
 }
@@ -688,6 +704,17 @@ mod tests {
         assert!(stream_failure(stream_error(), None)
             .downcast_ref::<OneShotProviderFailure>()
             .is_none());
+        let no_visible = StreamingError::Completion(CompletionError::ProviderError(format!(
+            "{}transport retry budget exhausted after 0 attempt(s)",
+            super::super::NO_VISIBLE_OUTPUT_PREFIX
+        )));
+        let no_visible = stream_failure(no_visible, None);
+        assert!(no_visible
+            .downcast_ref::<OneShotNoVisibleOutput>()
+            .is_some());
+        assert!(no_visible
+            .downcast_ref::<OneShotProviderFailure>()
+            .is_none());
         assert!(
             missing_final_failure(Some(InferenceError::PermanentFailure {
                 reason: "provider failed".into(),
@@ -700,7 +727,14 @@ mod tests {
             .is_none());
     }
 
-    async fn assert_failed_auxiliary_cleanup(provider_error: bool) {
+    #[derive(Clone, Copy)]
+    enum CleanupCase {
+        ProviderError,
+        NoVisibleOutput,
+        IdentityError,
+    }
+
+    async fn assert_failed_auxiliary_cleanup(case: CleanupCase) {
         let closes = Arc::new(AtomicUsize::new(0));
         let observed_closes = Arc::clone(&closes);
         let sink = AuxiliaryOutputSink {
@@ -746,20 +780,33 @@ mod tests {
             emit_auxiliary(identity, AuxiliaryOutputEvent::AttemptStarted)
                 .await
                 .unwrap();
-            let error = if provider_error {
-                close_received_auxiliary_after_error(missing_final_failure(Some(
-                    InferenceError::TransientFailure {
-                        reason: "provider failed".into(),
-                    },
-                )))
-                .await
-            } else {
-                let identity_error =
-                    ensure_auxiliary_identity(Some(identity), (identity.0, 0, 1)).unwrap_err();
-                finish_one_shot_result::<String>(Err(identity_error))
+            let error = match case {
+                CleanupCase::ProviderError => {
+                    close_received_auxiliary_after_error(missing_final_failure(Some(
+                        InferenceError::TransientFailure {
+                            reason: "provider failed".into(),
+                        },
+                    )))
                     .await
-                    .expect_err("cleanup failure must dominate identity error")
+                }
+                CleanupCase::NoVisibleOutput => {
+                    let no_visible =
+                        StreamingError::Completion(CompletionError::ProviderError(format!(
+                            "{}transport retry budget exhausted after 0 attempt(s)",
+                            super::super::NO_VISIBLE_OUTPUT_PREFIX
+                        )));
+                    close_received_auxiliary_after_error(stream_failure(no_visible, None)).await
+                }
+                CleanupCase::IdentityError => {
+                    let identity_error =
+                        ensure_auxiliary_identity(Some(identity), (identity.0, 0, 1)).unwrap_err();
+                    finish_one_shot_result::<String>(Err(identity_error))
+                        .await
+                        .expect_err("cleanup failure must dominate identity error")
+                }
             };
+            assert!(error.downcast_ref::<OneShotProviderFailure>().is_none());
+            assert!(error.downcast_ref::<OneShotNoVisibleOutput>().is_none());
             assert!(error
                 .downcast_ref::<AuxiliaryPersistenceFailure>()
                 .is_some());
@@ -776,7 +823,8 @@ mod tests {
 
     #[tokio::test]
     async fn failed_auxiliary_cleanup_dominates_provider_and_identity_errors_without_retry() {
-        assert_failed_auxiliary_cleanup(true).await;
-        assert_failed_auxiliary_cleanup(false).await;
+        assert_failed_auxiliary_cleanup(CleanupCase::ProviderError).await;
+        assert_failed_auxiliary_cleanup(CleanupCase::NoVisibleOutput).await;
+        assert_failed_auxiliary_cleanup(CleanupCase::IdentityError).await;
     }
 }

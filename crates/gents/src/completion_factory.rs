@@ -346,6 +346,20 @@ fn reasoning_profile_params(
     }
 }
 
+/// Whether the profile's reasoning setting reaches the provider as an explicit
+/// reasoning-off request (`enable_thinking: false` or `reasoning.effort:
+/// "none"`). Unset effort, Grok (which never receives effort), and Claude
+/// (whose effort does not switch thinking off) leave reasoning possible.
+pub(crate) fn reasoning_disabled_on_wire(behavior: &ResolvedBehavior) -> bool {
+    behavior.sampling.reasoning_effort == Some(ReasoningEffort::None)
+        && matches!(
+            behavior.backend_provider_kind,
+            BackendProviderKind::OpenAiCompatible
+                | BackendProviderKind::OpenRouter
+                | BackendProviderKind::ChatGptCodex
+        )
+}
+
 fn provider_additional_params(kind: BackendProviderKind) -> Option<serde_json::Value> {
     match kind {
         BackendProviderKind::OpenAiCompatible => None,

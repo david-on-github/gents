@@ -19,6 +19,11 @@ const GENERATED_TITLE_MAX_WORDS: usize = 5;
 const GENERATED_TITLE_MAX_LEN: usize = 48;
 const TITLE_GENERATION_MAX_ATTEMPTS: i64 = 2;
 const TITLE_GENERATION_TIMEOUT_SECS: u64 = 10;
+/// Output allowance for the visible title alone. Providers count reasoning
+/// against the same `max_tokens`, so this cap applies only when the provider
+/// was explicitly told not to reason; otherwise a reasoning model can spend
+/// the whole allowance before any visible text.
+const TITLE_VISIBLE_MAX_TOKENS: u64 = 24;
 const TITLE_GENERATION_PREAMBLE: &str = "Generate concise conversation titles. Return only a lowercase hyphenated 3-5 word title. Never call tools. Never explain.";
 
 struct TitleTask<M: rig::completion::CompletionModel> {
@@ -111,6 +116,28 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
 
 fn title_generation_allowed(max_total_tokens: Option<i64>) -> bool {
     max_total_tokens.is_none()
+}
+
+/// Reasoning-capable titles keep the behavior's configured output budget
+/// (bounded in time by `TITLE_GENERATION_TIMEOUT_SECS`), so a reasoning run
+/// is not truncated into a reasoning-only result by the visible-title cap.
+fn title_max_tokens(
+    behavior: &crate::config::ResolvedBehavior,
+    configured: Option<u64>,
+) -> Option<u64> {
+    if crate::completion_factory::reasoning_disabled_on_wire(behavior) {
+        Some(TITLE_VISIBLE_MAX_TOKENS)
+    } else {
+        configured
+    }
+}
+
+/// Only unusable provider results use the bounded retry and fallback title.
+/// Auxiliary persistence, ownership, and other one-shot invariants fail the
+/// title request closed.
+fn title_attempt_is_retryable(error: &anyhow::Error) -> bool {
+    error.is::<crate::agent::loop_stream::OneShotProviderFailure>()
+        || error.is::<crate::agent::loop_stream::OneShotNoVisibleOutput>()
 }
 
 impl<M: rig::completion::CompletionModel + 'static> TitleTask<M> {
@@ -281,7 +308,7 @@ impl<M: rig::completion::CompletionModel + 'static> TitleTask<M> {
                     crate::rendered_request::CaptureScopeKind::Title,
                 );
                 config.temperature = Some(0.0);
-                config.max_tokens = Some(24);
+                config.max_tokens = title_max_tokens(&self.behavior, config.max_tokens);
                 config.max_turns = 1;
                 config.retry_policy =
                     crate::agent::completion_retry::CompletionRetryPolicy::no_retry();
@@ -347,10 +374,7 @@ impl<M: rig::completion::CompletionModel + 'static> TitleTask<M> {
                 }
                 Ok(Err(error)) => {
                     crate::rendered_request::scope::flush_received_auxiliary_partial().await?;
-                    if error
-                        .downcast_ref::<crate::agent::loop_stream::OneShotProviderFailure>()
-                        .is_none()
-                    {
+                    if !title_attempt_is_retryable(&error) {
                         return Err(error.context("title audit provider/output invariant failed"));
                     }
                     last_error = Some(error);

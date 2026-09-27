@@ -557,8 +557,7 @@ fn request_is_session_title(body: &str) -> bool {
     let Ok(body) = serde_json::from_str::<serde_json::Value>(body) else {
         return false;
     };
-    body.get("max_tokens").and_then(serde_json::Value::as_u64) == Some(24)
-        && body.get("tools").is_none()
+    body.get("tools").is_none()
         && body
             .get("messages")
             .and_then(serde_json::Value::as_array)

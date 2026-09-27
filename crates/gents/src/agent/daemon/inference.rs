@@ -909,7 +909,7 @@ mod tests {
             // AdmittedCompletionModel call-kind wrapper. Route only the title
             // owner's exact preamble and request shape; reject disagreement.
             let title_preamble = super::super::title::title_generation_preamble();
-            let title_shape = request.max_tokens == Some(24) && request.tools.is_empty();
+            let title_shape = request.temperature == Some(0.0) && request.tools.is_empty();
             let title_preamble_present = json_contains_text(&history, &title_preamble);
             let text = match (title_shape, title_preamble_present) {
                 (true, true) => {
