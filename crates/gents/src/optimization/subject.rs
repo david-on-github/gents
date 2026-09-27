@@ -88,6 +88,7 @@ pub fn materialize_pack(
         }
     };
 
+    reject_shared_sidecars(&pack.files)?;
     let prompt_asset = sidecar_prompt_asset(&pack.manifest, &pack.files, target, &target_id)?;
 
     Ok(MaterializedPack {
@@ -116,6 +117,35 @@ fn raw_target<'a>(
         .flatten()
         .find(|document| document[id_key].as_str() == Some(target_id))
         .map(|document| &mut document[field])
+}
+
+/// A sidecar read by more than one config field would change every document
+/// that reads it in a trial, while promotion writes only the target.
+fn reject_shared_sidecars(files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
+    fn count<'a>(value: &'a Value, seen: &mut BTreeMap<&'a str, usize>) {
+        match value {
+            Value::String(text) if text.starts_with("./") => *seen.entry(text).or_default() += 1,
+            Value::Array(items) => items.iter().for_each(|item| count(item, seen)),
+            Value::Object(fields) => fields.values().for_each(|field| count(field, seen)),
+            _ => {}
+        }
+    }
+    let Some(bytes) = files.get(CONFIG_ASSET) else {
+        return Ok(());
+    };
+    let raw: Value = serde_json::from_slice(bytes).context("parsing pack_config.json")?;
+    let mut seen = BTreeMap::new();
+    count(&raw, &mut seen);
+    let shared: Vec<&str> = seen
+        .into_iter()
+        .filter(|(_, uses)| *uses > 1)
+        .map(|(path, _)| path)
+        .collect();
+    anyhow::ensure!(
+        shared.is_empty(),
+        "{CONFIG_ASSET} reads {shared:?} from more than one field; a candidate could not change one document alone"
+    );
+    Ok(())
 }
 
 /// The declared asset the target field points at, when it points at one. The
