@@ -5,6 +5,7 @@ use anyhow::Result;
 use gents_codex_protocol as codex;
 use gents_codex_protocol::MessagePhase;
 
+use super::agent_projection::agent_tool_item;
 use super::command_projection::{
     codex_command_status, codex_mcp_status, codex_patch_status, command_execution_item,
     command_output_payload, file_change_item, ToolProjectionStatus,
@@ -16,7 +17,7 @@ use super::compaction_projection::{
 use super::progress::{
     gents_tool_item, tool_completed_at_ms, tool_started_at_ms, GentsToolCallProgress,
 };
-use super::projection_state::ProjectionStatus;
+use super::projection_state::{AgentProjection, ProjectionStatus};
 use super::protocol::{
     agent_message_item, agent_message_item_with_phase, now_millis, send_notification,
     turn_value_with_timing,
@@ -466,6 +467,35 @@ impl<'a> TurnProjection<'a> {
         Ok(())
     }
 
+    async fn send_agent_item(
+        &mut self,
+        outbound: &Outbound,
+        tool: &GentsToolCallProgress,
+        projection: &AgentProjection,
+        started: bool,
+    ) -> Result<()> {
+        self.finish_agent_message_with_phase(outbound, Some(MessagePhase::Commentary))
+            .await?;
+        let notification = if started {
+            let mut in_progress = projection.clone();
+            in_progress.status = ProjectionStatus::InProgress;
+            codex::ServerNotification::ItemStarted(codex::ItemStartedNotification {
+                item: agent_tool_item(self.thread_id, tool, &in_progress),
+                thread_id: self.thread_id.to_string(),
+                turn_id: self.turn_id.to_string(),
+                started_at_ms: tool_started_at_ms(tool).unwrap_or_else(now_millis),
+            })
+        } else {
+            codex::ServerNotification::ItemCompleted(codex::ItemCompletedNotification {
+                item: agent_tool_item(self.thread_id, tool, projection),
+                thread_id: self.thread_id.to_string(),
+                turn_id: self.turn_id.to_string(),
+                completed_at_ms: tool_completed_at_ms(tool).unwrap_or_else(now_millis),
+            })
+        };
+        send_notification(outbound, self.state, notification).await
+    }
+
     pub(super) async fn send_tool_projection_update(
         &mut self,
         outbound: &Outbound,
@@ -531,6 +561,18 @@ impl<'a> TurnProjection<'a> {
             (_, ToolProjectionStatus::Command(status)) => {
                 self.send_command_execution_completed(outbound, tool, codex_command_status(*status))
                     .await
+            }
+            (previous, ToolProjectionStatus::Agent(projection)) => {
+                if !matches!(previous, Some(ToolProjectionStatus::Agent(_))) {
+                    self.send_agent_item(outbound, tool, projection, true)
+                        .await?;
+                }
+                if projection.status == ProjectionStatus::InProgress {
+                    Ok(())
+                } else {
+                    self.send_agent_item(outbound, tool, projection, false)
+                        .await
+                }
             }
             (_, ToolProjectionStatus::DeferredFileChange) => Ok(()),
             (None, ToolProjectionStatus::FileChange(status))

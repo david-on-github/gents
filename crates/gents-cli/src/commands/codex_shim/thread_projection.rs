@@ -121,10 +121,16 @@ pub(super) async fn load_codex_thread(
     Ok(Some(assemble_subagent_record(state, link).await?))
 }
 
-/// Whether `thread_id` is a Codex root thread of this shim.
-pub(super) async fn is_root_thread(state: &ShimState, thread_id: &str) -> Result<bool> {
-    Ok(state.is_thread_created(thread_id).await
-        || load_thread_state(state, thread_id).await?.is_some())
+/// The Codex root thread IDs of this shim: its scoped sessions and the
+/// threads created on this connection before their first request.
+pub(super) async fn root_thread_ids(state: &ShimState) -> Result<HashSet<String>> {
+    let mut ids = list_scoped_sessions(state)
+        .await?
+        .into_iter()
+        .map(|session| session.session_id)
+        .collect::<HashSet<_>>();
+    ids.extend(state.created_thread_ids().await);
+    Ok(ids)
 }
 
 pub(super) async fn loaded_codex_thread_ids(state: &ShimState) -> Result<Vec<String>> {

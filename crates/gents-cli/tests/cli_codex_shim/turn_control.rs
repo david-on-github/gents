@@ -628,6 +628,25 @@ async fn codex_shim_turn_interrupt_on_caused_thread_interrupts_its_own_request()
 
     let (caused_request_id, caused_thread_id) =
         seed_caused_running_request(&graphql, &parent_request_id, &behavior_id).await?;
+    let (grandchild_request_id, grandchild_thread_id) =
+        seed_caused_running_request(&graphql, &caused_request_id, &behavior_id).await?;
+
+    send_client_request(
+        &mut ws,
+        codex::ClientRequest::TurnInterrupt {
+            request_id: request_id(232),
+            params: codex::TurnInterruptParams {
+                thread_id: grandchild_thread_id,
+                turn_id: grandchild_request_id,
+            },
+        },
+    )
+    .await?;
+    let refused = read_error_response(&mut ws, request_id(232)).await?;
+    assert_eq!(
+        refused.message,
+        "only the session that started this session may interrupt it"
+    );
 
     send_client_request(
         &mut ws,

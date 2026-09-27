@@ -28,6 +28,7 @@ use crate::caused_sessions::{
 /// Ext request methods routed to this leaf by the ACP service.
 pub(crate) const SUBAGENT_GET_METHOD: &str = "x.ai/subagent/get";
 pub(crate) const SUBAGENT_LIST_RUNNING_METHOD: &str = "x.ai/subagent/list_running";
+pub(crate) const SUBAGENT_CANCEL_METHOD: &str = "x.ai/subagent/cancel";
 
 /// Shape of a `subagent_spawned` update payload (Grok pager
 /// `extensions::notification::SubagentSpawned`).
@@ -362,10 +363,58 @@ pub(crate) async fn handle(
         .as_str()
         .context("subagentId required")?;
     let Some(session) = load_caused_session(&node, id, |scope| roots.contains(scope)).await? else {
-        return Ok(json!({"snapshot": null}));
+        return Ok(if method == SUBAGENT_CANCEL_METHOD {
+            json!({"subagentId": id, "cancelled": false, "outcome": {"kind": "not_found"}})
+        } else {
+            json!({"snapshot": null})
+        });
     };
+    if method == SUBAGENT_CANCEL_METHOD {
+        return cancel(&node, id, &session, context_window).await;
+    }
     let activity = load_activity(&node, std::slice::from_ref(&session), None).await?;
     Ok(json!({"snapshot": snapshot(&node, &session, &activity, context_window).await?}))
+}
+
+/// Interrupt the current turn of a caused session. The connection speaks for
+/// its root sessions, so only sessions a root started directly qualify.
+async fn cancel(
+    node: &Arc<EmbeddedNode>,
+    id: &str,
+    session: &CausedSession,
+    context_window: u64,
+) -> Result<Value> {
+    anyhow::ensure!(
+        gents::session_message::agent_interrupt_allowed(
+            &session.root_session_id,
+            id,
+            Some(session.caused_by_scope.session_id.as_str()),
+        ),
+        "only the session that started this session may interrupt it"
+    );
+    if session.latest.is_terminal() {
+        let activity = load_activity(node, std::slice::from_ref(session), None).await?;
+        let snapshot = snapshot(node, session, &activity, context_window).await?;
+        let status = snapshot["status"]
+            .as_str()
+            .unwrap_or("completed")
+            .to_owned();
+        return Ok(json!({"subagentId": id, "cancelled": false,
+            "outcome": {"kind": "already_finished", "status": status}}));
+    }
+    let request_doc_id = session
+        .latest
+        .doc_id
+        .as_deref()
+        .context("caused session head omitted physical identity")?;
+    gents::interrupt_request_by_doc_id(
+        node,
+        request_doc_id,
+        &session.scope.agent_did,
+        session.scope.requester_did.as_deref(),
+    )
+    .await?;
+    Ok(json!({"subagentId": id, "cancelled": true, "outcome": {"kind": "cancelled"}}))
 }
 
 async fn snapshot(

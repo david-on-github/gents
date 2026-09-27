@@ -3675,7 +3675,7 @@ mod tests {
         assert_ne!(receipts[0].doc_id, receipts[1].doc_id);
         let selected = &receipts[0];
         seed_assistant_message(&node, selected, 1, "selected output").await;
-        let tool = seed_tool_call(&node, selected, "call-1", "create_session", "running", "").await;
+        let tool = seed_tool_call(&node, selected, "call-1", "agent_new", "running", "").await;
         let child = seed_child_request(&node, selected, &tool, "child", "processing").await;
         assert_eq!(child.agent_did.as_deref(), Some(principal.as_str()));
         assert_eq!(child.requester_did, None);
@@ -4292,7 +4292,7 @@ mod tests {
         )
         .unwrap();
         let parent: gents_protocol::row::AgentRequestRow = serde_json::from_value(json!({"_docID":doc,"request_id":"pane-root","agent_did":agent_did,"requester_did":agent_did,"behavior_id":behavior,"session_id":"session-1"})).unwrap();
-        let tool = seed_tool_call(&node, &parent, "call-1", "create_session", "running", "").await;
+        let tool = seed_tool_call(&node, &parent, "call-1", "agent_new", "running", "").await;
         let child = seed_child_request(&node, &parent, &tool, "pane-child", "processing").await;
         let mut followup = None;
         for (id, requester, text) in [

@@ -2285,7 +2285,7 @@ fn projection_mock_agent_messages(query: &str) -> Value {
             tool_call_doc_id: "doc-tool-delegate".into(),
             id: "call-delegate".into(),
             call_id: Some("call-delegate".into()),
-            name: "create_session".into(),
+            name: "agent_new".into(),
             arguments: PayloadRef {
                 close_doc_id: "doc-segment-root-args".into(),
                 stream: 0,
@@ -2523,7 +2523,7 @@ fn projection_mock_output_segments(query: &str) -> Value {
                 StreamPayload::ToolArguments {
                     id: "call-delegate".into(),
                     call_id: Some("call-delegate".into()),
-                    name: "create_session".into(),
+                    name: "agent_new".into(),
                 },
             ),
             segment(
@@ -2585,7 +2585,7 @@ fn projection_mock_tool_calls(query: &str) -> Value {
                 "request_doc_id": "doc-request-root",
                 "session_id": "session-acp",
                 "message_sequence": 1,
-                "tool_name": "create_session",
+                "tool_name": "agent_new",
                 "tool_call_id": "call-delegate",
                 "status": "completed",
                 "lifecycle_state": "completed",
@@ -2593,7 +2593,7 @@ fn projection_mock_tool_calls(query: &str) -> Value {
                 "deadline_at": null,
                 "completed_at": "2026-06-05T18:00:02Z",
                 "selected_service_id": "gents",
-                "selected_tool_name": "create_session",
+                "selected_tool_name": "agent_new",
                 "tool_failure_class": null,
                 "denial_reason": null,
                 "denied_argv": [],

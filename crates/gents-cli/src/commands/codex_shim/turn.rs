@@ -42,7 +42,7 @@ pub(super) async fn start_gents_turn(
             &connection.outbound,
             request_id,
             JSONRPC_INVALID_PARAMS,
-            "GENTS sub-agent threads accept no user input; the session that started them messages them with send_message"
+            "GENTS sub-agent threads accept no user input; the session that started them messages them with agent_message"
                 .to_string(),
         )
         .await;
@@ -200,7 +200,7 @@ pub(super) async fn steer_gents_turn(
             &connection.outbound,
             request_id,
             JSONRPC_INVALID_PARAMS,
-            "GENTS sub-agent threads accept no user input; the session that started them messages them with send_message"
+            "GENTS sub-agent threads accept no user input; the session that started them messages them with agent_message"
                 .to_string(),
         )
         .await;

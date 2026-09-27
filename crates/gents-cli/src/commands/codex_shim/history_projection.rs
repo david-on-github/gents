@@ -10,6 +10,7 @@ use gents_protocol::transcript::{present_message, PresentedMessageRole};
 use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 
+use super::agent_projection::agent_tool_item;
 use super::command_projection::{
     codex_command_status, codex_mcp_status, codex_patch_status, command_execution_item,
     file_change_item, tool_projection_status, ToolProjectionStatus,
@@ -654,6 +655,9 @@ fn project_tool(
 ) -> Option<codex::ThreadItem> {
     match tool_projection_status(tool) {
         ToolProjectionStatus::Mcp(status) => Some(gents_tool_item(tool, codex_mcp_status(status))),
+        ToolProjectionStatus::Agent(projection) => {
+            Some(agent_tool_item(&record.session_id, tool, &projection))
+        }
         ToolProjectionStatus::Command(status) => Some(command_execution_item(
             &record.cwd,
             tool,

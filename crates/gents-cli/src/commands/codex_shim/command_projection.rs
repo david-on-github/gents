@@ -4,6 +4,7 @@ use std::path::Path;
 use gents_codex_protocol as codex;
 use serde_json::Value;
 
+use super::agent_projection::agent_projection;
 use super::progress::{
     gents_exec_metadata, observed_tool_status, tool_duration_ms, GentsToolCallProgress,
 };
@@ -12,7 +13,9 @@ pub(super) use super::projection_state::ToolProjectionStatus;
 
 pub(super) fn tool_projection_status(tool: &GentsToolCallProgress) -> ToolProjectionStatus {
     let status = observed_tool_status(tool);
-    if is_gents_file_change_tool(tool) {
+    if let Some(projection) = agent_projection(tool) {
+        ToolProjectionStatus::Agent(projection)
+    } else if is_gents_file_change_tool(tool) {
         if file_update_change(tool).is_none() {
             ToolProjectionStatus::DeferredFileChange
         } else {
@@ -113,6 +116,7 @@ pub(super) fn update_running_background_tools(
             running.insert(tool.tool_call_key.clone());
         }
         ToolProjectionStatus::Mcp(_)
+        | ToolProjectionStatus::Agent(_)
         | ToolProjectionStatus::Command(_)
         | ToolProjectionStatus::DeferredFileChange
         | ToolProjectionStatus::FileChange(_) => {

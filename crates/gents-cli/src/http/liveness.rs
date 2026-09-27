@@ -334,7 +334,7 @@ mod tests {
         let tools = vec![tool_call(
             "req-parent",
             "tc-session",
-            "create_session",
+            "agent_new",
             -5,
             None,
             Some("background"),

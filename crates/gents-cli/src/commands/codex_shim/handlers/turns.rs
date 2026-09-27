@@ -2,12 +2,12 @@ use anyhow::Result;
 use gents_codex_protocol as codex;
 use serde_json::json;
 
-use super::super::protocol::send_result;
+use super::super::protocol::{send_error, send_result};
 use super::super::thread_projection::load_codex_thread;
 use super::super::turn::{
     interrupt_active_turn, interrupt_caused_thread_turn, start_gents_turn, steer_gents_turn,
 };
-use super::super::{trace, ConnectionState, Outbound, ShimState};
+use super::super::{trace, ConnectionState, Outbound, ShimState, JSONRPC_INVALID_PARAMS};
 
 pub(super) async fn handle_turn_request(
     connection: &ConnectionState,
@@ -54,6 +54,23 @@ pub(super) async fn handle_turn_request(
                     "requested_turn_id": params.turn_id,
                 }),
             );
+            if let Some(thread) = caused.as_ref() {
+                // The Codex user speaks for the root thread, so only threads
+                // that root started directly may be interrupted from here.
+                if !gents::session_message::agent_interrupt_allowed(
+                    &thread.root_session_id,
+                    &thread.session_id,
+                    Some(thread.parent_session_id.as_str()),
+                ) {
+                    return send_error(
+                        outbound,
+                        request_id,
+                        JSONRPC_INVALID_PARAMS,
+                        "only the session that started this session may interrupt it".to_string(),
+                    )
+                    .await;
+                }
+            }
             match caused {
                 Some(thread) => {
                     interrupt_caused_thread_turn(connection, state, &thread, &params.turn_id)

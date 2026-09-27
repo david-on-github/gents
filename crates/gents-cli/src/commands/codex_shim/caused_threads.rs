@@ -90,17 +90,16 @@ pub(super) async fn load_caused_thread(
     state: &ShimState,
     thread_id: &str,
 ) -> Result<Option<CausedThread>> {
+    let roots = super::thread_projection::root_thread_ids(state).await?;
     let Some(session) = load_caused_session(&state.node, thread_id, |scope| {
         scope.agent_did == state.agent_did.as_ref()
             && scope.requester_did.as_deref() == Some(state.local_requester_did())
+            && roots.contains(&scope.session_id)
     })
     .await?
     else {
         return Ok(None);
     };
-    if !super::thread_projection::is_root_thread(state, &session.root_session_id).await? {
-        return Ok(None);
-    }
     let model = bound_model(state, &session.scope.agent_did, &session.behavior_id).await;
     Ok(Some(caused_thread(session, model)))
 }

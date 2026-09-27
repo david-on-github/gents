@@ -397,11 +397,14 @@ pub(super) fn suppressed_tool_family(tool_name: &str) -> Option<&'static str> {
 }
 
 /// True when the durable tool name belongs to the `task` family the pager
-/// recognizes for subagent spawns: `task`/`Task`.
+/// recognizes for subagent spawns: `task`/`Task` and `agent_new`.
 /// Every such row projects an object `meta` carrying an explicit
 /// `subagentBackground` boolean sibling.
 pub(super) fn is_task_family(tool_name: &str) -> bool {
-    matches!(tool_name, "task" | "Task")
+    matches!(
+        tool_name,
+        "task" | "Task" | gents::toolset::AGENT_NEW_TOOL_NAME
+    )
 }
 
 /// True when canonical tool meta recognizes the call as an active agent
@@ -595,7 +598,11 @@ pub(super) fn project_tool_rows(
         let kind = ToolCallKind::from_tool_name(tool_name);
         let title = tool_title(row, &kind, presentations);
         let content = tool_content(result_text);
-        let mut raw_input = raw_input_value(args, meta.as_ref());
+        let mut raw_input = if tool_name == gents::toolset::AGENT_MESSAGE_TOOL_NAME {
+            agent_message_raw_input(args)
+        } else {
+            raw_input_value(args, meta.as_ref())
+        };
         let background = background::project(row, &tool_call_id, result_text, args);
         if background.is_some() {
             if let Some(input) = raw_input.as_mut().and_then(Value::as_object_mut) {
@@ -798,6 +805,7 @@ fn tool_title(
         )
         .as_ref(),
     ) || tool_name == SEND_SUBAGENT_MESSAGE_TITLE
+        || tool_name == gents::toolset::AGENT_MESSAGE_TOOL_NAME
     {
         return SEND_SUBAGENT_MESSAGE_TITLE.to_string();
     }
@@ -842,6 +850,20 @@ fn tool_content(result_text: &str) -> Vec<Value> {
         "type": "content",
         "content": {"type": "text", "text": trimmed},
     })]
+}
+
+/// `agent_message` keeps the pager's active-agent-message input shape:
+/// the target session as `subagent_id` and the message as `text`.
+fn agent_message_raw_input(args: &str) -> Option<Value> {
+    let object = serde_json::from_str::<Value>(args.trim()).ok()?;
+    let mut shaped = Map::new();
+    if let Some(session_id) = object.get("session_id") {
+        shaped.insert("subagent_id".to_string(), session_id.clone());
+    }
+    if let Some(message) = object.get("message") {
+        shaped.insert("text".to_string(), message.clone());
+    }
+    Some(Value::Object(shaped))
 }
 
 /// The structured `rawInput` for a tool call. JSON args are passed through
@@ -1327,7 +1349,7 @@ mod tests {
         // `tool_call` plus a same-id terminal `tool_call_update` (title =
         // the durable tool name, kind `other`); the pager handles title
         // recognition, waiting, and suppression on its side.
-        for name in ["task", "Task"] {
+        for name in ["task", "Task", "agent_new"] {
             let row = tool_row(name, Some("completed"));
             let presentations =
                 args_result("doc-task", r#"{"description":"scout the repo"}"#, None);
@@ -1354,7 +1376,7 @@ mod tests {
         // explicit `subagentBackground` boolean: absent, `foreground`, and
         // unknown persisted await modes are all explicit false; only the
         // exact value `background` is true. False is never omitted.
-        for name in ["task", "Task"] {
+        for name in ["task", "Task", "agent_new"] {
             for (await_mode, expected) in [
                 (None, false),
                 (Some("foreground"), false),
@@ -1502,6 +1524,25 @@ mod tests {
                 .and_then(|input| input.get("subagent_id"))
                 .and_then(Value::as_str),
             Some("sub-1")
+        );
+    }
+
+    #[test]
+    fn agent_message_projects_as_an_active_agent_message() {
+        let presentations = args_result(
+            "doc-agent_message",
+            r#"{"session_id":"child","message":"continue","interrupt":false}"#,
+            None,
+        );
+        let row = tool_row("agent_message", Some("running"));
+        let projection = project_tool_rows(&[row], &presentations);
+        let ToolUpdate::ToolCall(call) = &projection.updates[0] else {
+            panic!("first update should be a tool_call");
+        };
+        assert!(call.is_active_agent_message());
+        assert_eq!(
+            call.raw_input,
+            Some(json!({"subagent_id": "child", "text": "continue"}))
         );
     }
 

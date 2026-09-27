@@ -2757,7 +2757,7 @@ mod tests {
         let created_at = "2026-08-31T22:46:44Z";
         let mut blocks = Vec::new();
         for (block_index, (tool_doc_id, native_id, name)) in calls.iter().enumerate() {
-            let arguments = if *name == "create_session" {
+            let arguments = if *name == "agent_new" {
                 r#"{"target":"child-chron"}"#
             } else {
                 r#"{"command":"true"}"#
@@ -2925,7 +2925,7 @@ mod tests {
     /// - two `AgentToolCall` rows at the *same* `message_sequence` 4, seeded
     ///   in reverse stable-identity order;
     /// - the first `AgentRequest` of a session caused by the `call-a`
-    ///   `create_session` call, whose position is that call's sequence.
+    ///   `agent_new` call, whose position is that call's sequence.
     ///
     /// The wire order must be exactly: thought, text, tool a, tool z,
     /// spawned, with the positionless `available_commands_update` last —
@@ -3037,7 +3037,7 @@ mod tests {
 
         // Two same-sequence tool calls seeded in REVERSE stable order: the
         // projection must emit `call-a` before `call-z` by identity. The
-        // first is the `create_session` call that caused the child session.
+        // first is the `agent_new` call that caused the child session.
         let bash_tool_doc_id = seed_tool_call_row(
             &engine,
             session_id,
@@ -3054,7 +3054,7 @@ mod tests {
             request_id,
             Some(&parent_doc_id),
             "call-a",
-            "create_session",
+            "agent_new",
             4,
         )
         .await;
@@ -3063,7 +3063,7 @@ mod tests {
             &request,
             4,
             &[
-                (&spawn_tool_doc_id, "call-a", "create_session"),
+                (&spawn_tool_doc_id, "call-a", "agent_new"),
                 (&bash_tool_doc_id, "call-z", "bash"),
             ],
         )

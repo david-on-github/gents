@@ -22,6 +22,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 
+mod agent_projection;
 mod background;
 mod bound_behavior;
 mod caused_threads;

@@ -10,6 +10,7 @@ use gents_protocol::client_protocol::project_persisted_attempt;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
+use super::super::agent_projection::observed_agent_projection;
 use super::super::background::spawn_background_tool_watcher;
 use super::super::bound_behavior::load_bound_context_window;
 use super::super::command_projection::{
@@ -820,6 +821,11 @@ fn prime_projection_from_turn(
                     id.clone(),
                     ToolProjectionStatus::FileChange(observed_patch_status(status)),
                 );
+            }
+            codex::ThreadItem::CollabAgentToolCall { id, .. } => {
+                if let Some(projection) = observed_agent_projection(item) {
+                    known_tool_calls.insert(id.clone(), ToolProjectionStatus::Agent(projection));
+                }
             }
             codex::ThreadItem::ContextCompaction { id } => {
                 known_compaction_states.insert(id.clone(), "completed".to_string());

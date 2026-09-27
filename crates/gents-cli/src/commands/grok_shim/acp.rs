@@ -27,12 +27,12 @@
 //! - `session/prompt` / `session/cancel` — dispatched to the sibling
 //!   [`super::turn::TurnManager`], which owns the connection-scoped pending
 //!   prompt, deferred response, and interrupt lifecycle.
-//! - `x.ai/subagent/get` / `x.ai/subagent/list_running` — inspect only the
-//!   sessions caused by sessions registered on this connection, using the
-//!   stock shell's extension DTOs. Any other `x.ai/subagent/*` method,
-//!   including `x.ai/subagent/cancel`, is unrouted and answers the typed
-//!   method-not-found (`-32601`): a caused session is stopped through its
-//!   own request interrupt or the task kill of the call that caused it.
+//! - `x.ai/subagent/get` / `x.ai/subagent/list_running` /
+//!   `x.ai/subagent/cancel` — act only on the sessions caused by sessions
+//!   registered on this connection, using the stock shell's extension DTOs.
+//!   Cancel interrupts the caused session's current turn and is allowed only
+//!   for sessions a connection session started. Any other `x.ai/subagent/*`
+//!   method answers the typed method-not-found (`-32601`).
 //!
 //! Shaped stubs return JSON-RPC method-not-found (`-32601`) with an explicit
 //! owned-transition explanation, never a fabricated success:
@@ -65,7 +65,9 @@ use gents::defra_node::EmbeddedNode;
 use gents::graphql::{escape_graphql_string, graphql_with_transaction_retry};
 use serde_json::{json, Value};
 
-use super::projection::caused_sessions::{SUBAGENT_GET_METHOD, SUBAGENT_LIST_RUNNING_METHOD};
+use super::projection::caused_sessions::{
+    SUBAGENT_CANCEL_METHOD, SUBAGENT_GET_METHOD, SUBAGENT_LIST_RUNNING_METHOD,
+};
 use super::projection::{
     effective_context_window_tokens, stamp_update_meta, AsyncCommit, ProjectionEngine,
     UpdateTimestamps, SESSION_UPDATE_METHOD,
@@ -725,7 +727,7 @@ impl AcpService {
             }
             // Any other `x.ai/subagent/*` method falls through to the typed
             // `ShapedMethodNotFound` arm so it answers the exact `-32601`.
-            SUBAGENT_GET_METHOD | SUBAGENT_LIST_RUNNING_METHOD => {
+            SUBAGENT_GET_METHOD | SUBAGENT_LIST_RUNNING_METHOD | SUBAGENT_CANCEL_METHOD => {
                 self.handle_subagent_ext_request(request.method.as_str(), request)
                     .await
             }
@@ -1340,7 +1342,7 @@ impl AcpService {
         } else {
             None
         };
-        if method == SUBAGENT_GET_METHOD {
+        if method == SUBAGENT_GET_METHOD || method == SUBAGENT_CANCEL_METHOD {
             let id = request.params.get("subagentId");
             match id {
                 None | Some(Value::Null) => {
@@ -2323,7 +2325,7 @@ mod tests {
                             parent_prompt,
                             vec![StreamChunk::tool_call(
                                 "spawn-child-meta",
-                                "create_session",
+                                "agent_new",
                                 child_args.to_string().replace("__BEHAVIOR__", behavior_id),
                             )],
                         ),
@@ -2700,7 +2702,7 @@ mod tests {
             Ok(child) => child,
             Err(_) => {
                 let diagnostic = node
-                    .execute(r#"{ AgentToolCall(filter: {tool_name: {_eq: "create_session"}}) {_docID request_id request_doc_id tool_call_id lifecycle_state tool_failure_class await_mode} }"#)
+                    .execute(r#"{ AgentToolCall(filter: {tool_name: {_eq: "agent_new"}}) {_docID request_id request_doc_id tool_call_id lifecycle_state tool_failure_class await_mode} }"#)
                     .await;
                 let presentation = diagnostic
                     .data
@@ -2737,10 +2739,10 @@ mod tests {
                         "parent request scope unavailable".into()
                     }
                 } else {
-                    "create_session call unavailable".into()
+                    "agent_new call unavailable".into()
                 };
                 panic!(
-                    "child request timeout; durable create_session observations: data={:?} errors={:?}; canonical presentation={presentation}",
+                    "child request timeout; durable agent_new observations: data={:?} errors={:?}; canonical presentation={presentation}",
                     diagnostic.data, diagnostic.errors,
                 );
             }
@@ -4649,13 +4651,7 @@ mod tests {
             ("terminal/wait_for_exit", json!({})),
             ("terminal/create", json!({})),
             ("some/unknown/method", json!({})),
-            // Other subagent ext methods are unrouted: a caused session is
-            // stopped through its own request, never a subagent cancel.
             ("x.ai/subagent/invent", json!({ "sessionId": "s-table" })),
-            (
-                "x.ai/subagent/cancel",
-                json!({ "sessionId": "s-table", "subagentId": "child-1" }),
-            ),
         ] {
             let dispatch = service
                 .handle_acp_payload(&request_payload(method, params))
@@ -4686,6 +4682,19 @@ mod tests {
             .await;
         let list = parse_response(list.response.as_deref().expect("response line"));
         assert_eq!(list["result"], json!({ "result": {"subagents": []} }));
+
+        let cancel = service
+            .handle_acp_payload(&request_payload(
+                "x.ai/subagent/cancel",
+                json!({ "sessionId": "s-table", "subagentId": "child-1" }),
+            ))
+            .await;
+        let cancel = parse_response(cancel.response.as_deref().expect("response line"));
+        assert_eq!(
+            cancel["result"],
+            json!({ "result": {"subagentId": "child-1", "cancelled": false,
+                "outcome": {"kind": "not_found"}} })
+        );
 
         // Stock get DTOs omit sessionId; their reach is limited to sessions
         // registered on this connection, never an arbitrary ID.
