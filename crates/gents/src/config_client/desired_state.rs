@@ -2,6 +2,7 @@
 //! File loading belongs to the common pack loader. This owner validates the
 //! complete retained reference set; callers own commit/discard.
 use super::{mint_recreate_identity, ConfigApplyTxn};
+use crate::defra_query::SchemaField;
 use crate::graphql::escape_graphql_string;
 use crate::{Collection, DESIRED_STATE_APPLY_ORDER};
 use anyhow::{Context, Result};
@@ -243,7 +244,7 @@ pub(crate) async fn validate_desired_state_plan(
         owners.insert(document_identity(document.collection, &document.add)?.0);
     }
     owners.extend(plan.removals().iter().map(|(_, owner, _)| owner.as_str()));
-    let mut count_fields = CountFieldSchemas::new();
+    let mut introspected = IntrospectedFields::new();
     for owner in owners {
         let retained = crate::ConfigReferences::load_in_txn(txn, owner).await?;
         let mut candidate: BTreeMap<_, _> = retained
@@ -261,9 +262,15 @@ pub(crate) async fn validate_desired_state_plan(
             } else {
                 &document.add
             };
-            if document.collection == Collection::DatastoreToolSurface {
-                validate_output_obligation_count_fields(txn, replacement, &mut count_fields)
-                    .await?;
+            match document.collection {
+                Collection::DatastoreToolSurface => {
+                    validate_output_obligation_count_fields(txn, replacement, &mut introspected)
+                        .await?;
+                }
+                Collection::EventSource => {
+                    validate_event_source_live_fields(txn, replacement, &mut introspected).await?;
+                }
+                _ => {}
             }
             candidate.insert(key, replacement.clone());
         }
@@ -326,9 +333,35 @@ async fn validate_advertised_profiles(
     Ok(())
 }
 
-/// Introspected field types per target collection; `None` for a collection the
+/// Introspected fields per target collection; `None` for a collection the
 /// schema does not have yet.
-type CountFieldSchemas = BTreeMap<String, Option<BTreeMap<String, String>>>;
+type IntrospectedFields = BTreeMap<String, Option<BTreeMap<String, SchemaField>>>;
+
+/// The declared fields of one collection, or `None` when introspection cannot
+/// see the collection. A malformed collection name is the structural owner's
+/// diagnostic, not an introspection failure, so it reports no collection
+/// rather than an error.
+async fn declared_fields<'a>(
+    txn: &ConfigApplyTxn<'_>,
+    collection: &str,
+    introspected: &'a mut IntrospectedFields,
+) -> Result<Option<&'a BTreeMap<String, SchemaField>>> {
+    if !introspected.contains_key(collection) {
+        if let Ok(query) = crate::defra_query::schema::introspection_query(collection) {
+            let response = txn.execute(&query).await?;
+            let fields = crate::defra_query::schema::parse_collection_schema(response.get("data"))
+                .map(|schema| {
+                    schema
+                        .fields
+                        .into_iter()
+                        .map(|field| (field.name.clone(), field))
+                        .collect::<BTreeMap<_, _>>()
+                });
+            introspected.insert(collection.to_owned(), fields);
+        }
+    }
+    Ok(introspected.get(collection).and_then(Option::as_ref))
+}
 
 /// The runtime reads an obligation's expected count from the durable arguments
 /// of each completed write, not from the stored document, so whether a count it
@@ -352,7 +385,7 @@ type CountFieldSchemas = BTreeMap<String, Option<BTreeMap<String, String>>>;
 async fn validate_output_obligation_count_fields(
     txn: &ConfigApplyTxn<'_>,
     candidate: &Value,
-    introspected: &mut CountFieldSchemas,
+    introspected: &mut IntrospectedFields,
 ) -> Result<()> {
     let surface_id = candidate
         .get("surface_id")
@@ -372,23 +405,6 @@ async fn validate_output_obligation_count_fields(
         else {
             continue;
         };
-        // A malformed collection name is the structural owner's diagnostic,
-        // not an introspection failure.
-        let Ok(query) = crate::defra_query::schema::introspection_query(&decl.collection) else {
-            continue;
-        };
-        if !introspected.contains_key(&decl.collection) {
-            let response = txn.execute(&query).await?;
-            let fields = crate::defra_query::schema::parse_collection_schema(response.get("data"))
-                .map(|schema| {
-                    schema
-                        .fields
-                        .into_iter()
-                        .map(|field| (field.name, field.type_name))
-                        .collect::<BTreeMap<_, _>>()
-                });
-            introspected.insert(decl.collection.clone(), fields);
-        }
         // Introspection cannot see a collection that does not exist yet,
         // and publishing a surface ahead of its schema is legitimate.
         // Nothing revalidates the obligation when that schema arrives, so a
@@ -396,20 +412,107 @@ async fn validate_output_obligation_count_fields(
         // that installs the target collection's own schema takes this path
         // in its preflight, because `ensure_package_schemas` runs after it;
         // only the publishing transaction sees the installed schema.
-        let Some(fields) = introspected[&decl.collection].as_ref() else {
+        let Some(fields) = declared_fields(txn, &decl.collection, introspected).await? else {
             continue;
         };
-        match fields.get(field).map(String::as_str) {
-            Some(reported) if crate::defra_write::can_hold_canonical_count(reported) => {}
-            Some(reported) => anyhow::bail!(
-                "DatastoreToolSurface {surface_id} tool {:?} output_obligation.expected_count_field {field:?} names a {reported} field of {}, which cannot carry the count; the runtime parses an integer or its canonical decimal spelling out of the call argument",
+        match fields.get(field) {
+            Some(declared)
+                if crate::defra_write::can_hold_canonical_count(declared.named_type()) => {}
+            Some(declared) => anyhow::bail!(
+                "DatastoreToolSurface {surface_id} tool {:?} output_obligation.expected_count_field {field:?} names a {} field of {}, which cannot carry the count; the runtime parses an integer or its canonical decimal spelling out of the call argument",
                 decl.tool_name,
+                declared.type_name,
                 decl.collection,
             ),
             None => anyhow::bail!(
                 "DatastoreToolSurface {surface_id} tool {:?} output_obligation.expected_count_field {field:?} does not exist on {}",
                 decl.tool_name,
                 decl.collection,
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// The runtime reads a group's expected count out of the stored source
+/// documents and the correlation out of each delivered document with
+/// `Value::as_str`, so a correlation field whose named type is not `String`
+/// can never correlate and a count field that cannot carry a canonical count
+/// can never complete a group. The correlation rule stays at `String` even
+/// where the reader would also read another string scalar: widening it is a
+/// policy change, not a report of what the runtime does. The structural owner
+/// (`EventSource::validate`) has no schema access; the target collection's
+/// schema is observable here, inside the publishing transaction. A collection
+/// the schema does not have yet cannot refute the document, and publishing
+/// ahead of a later schema install is legitimate.
+///
+/// `candidate` is the source exactly as it will be stored: a plan carries a
+/// create and a replacement payload that need only agree on identity, and the
+/// row's presence in this transaction decides which one is written.
+async fn validate_event_source_live_fields(
+    txn: &ConfigApplyTxn<'_>,
+    candidate: &Value,
+    introspected: &mut IntrospectedFields,
+) -> Result<()> {
+    let source: crate::document_config::EventSource = serde_json::from_value(candidate.clone())?;
+    let correlation = source
+        .correlation_field
+        .as_deref()
+        .map(str::trim)
+        .filter(|field| !field.is_empty());
+    let count_field = source
+        .group
+        .as_ref()
+        .and_then(|group| group.expected_count.as_ref())
+        .and_then(|count| match count {
+            crate::document_config::EventGroupCount::SourceField { source_field } => {
+                Some(source_field.as_str())
+            }
+            crate::document_config::EventGroupCount::Fixed(_) => None,
+        })
+        .map(str::trim)
+        .filter(|field| !field.is_empty());
+    if correlation.is_none() && count_field.is_none() {
+        return Ok(());
+    }
+    let Some(fields) = declared_fields(txn, &source.source_collection, introspected).await? else {
+        return Ok(());
+    };
+    if let Some(field) = correlation {
+        match fields.get(field) {
+            Some(declared) if declared.named_type() == "String" => {}
+            Some(declared) => anyhow::bail!(
+                "EventSource {} correlation_field {:?} must be String, found {}",
+                source.event_source_id,
+                field,
+                declared.type_name
+            ),
+            None => anyhow::bail!(
+                "EventSource {} correlation_field {:?} does not exist on {}",
+                source.event_source_id,
+                field,
+                source.source_collection
+            ),
+        }
+    }
+    if let Some(field) = count_field {
+        match fields.get(field) {
+            Some(declared)
+                if crate::defra_write::can_hold_canonical_count(declared.named_type()) => {}
+            Some(declared) => anyhow::bail!(
+                "EventSource {} expected_count_field {:?} names a {} field of {}, which cannot \
+                 carry the count; the runtime parses an integer or its canonical decimal spelling \
+                 out of the source document",
+                source.event_source_id,
+                field,
+                declared.type_name,
+                source.source_collection
+            ),
+            None => anyhow::bail!(
+                "EventSource {} expected_count_field {:?} does not exist on {}",
+                source.event_source_id,
+                field,
+                source.source_collection
             ),
         }
     }
@@ -702,7 +805,7 @@ pub async fn apply_desired_state_plan(
     plan: &DesiredStateApplyPlan,
 ) -> Result<DesiredStateApplyCounts> {
     ensure_expectations_hold(txn, plan).await?;
-    let mut count_fields = CountFieldSchemas::new();
+    let mut introspected = IntrospectedFields::new();
     let mut counts = DesiredStateApplyCounts::default();
     for document in plan.documents() {
         let (owner, id) = document_identity(document.collection, &document.add)?;
@@ -735,8 +838,14 @@ pub async fn apply_desired_state_plan(
                 mint_recreate_identity(&document.add),
             )
         };
-        if document.collection == Collection::DatastoreToolSurface {
-            validate_output_obligation_count_fields(txn, &input, &mut count_fields).await?;
+        match document.collection {
+            Collection::DatastoreToolSurface => {
+                validate_output_obligation_count_fields(txn, &input, &mut introspected).await?;
+            }
+            Collection::EventSource => {
+                validate_event_source_live_fields(txn, &input, &mut introspected).await?;
+            }
+            _ => {}
         }
         let response = txn
             .execute_with_variables(&mutation, &serde_json::json!({"input": input}))

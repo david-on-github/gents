@@ -876,6 +876,75 @@ async fn automation_rejects_invalid_template_before_publication_and_can_recover(
 }
 
 #[tokio::test]
+async fn automation_rejects_a_count_field_the_runtime_cannot_read_and_can_recover() {
+    let node = build_persona_node().await;
+    let identity = persona_identity("event-source-config");
+    let owner = identity.did().to_string();
+    crate::test_support::install_test_behavior(&node, &owner, "beh-test").await;
+    node.add_schema("type SelfConfigProbe { batch: String flag: Boolean total: Int }")
+        .await
+        .unwrap();
+    let mut grants = config(&["automation"]);
+    grants.dry_run = true;
+    let tools = build_self_config_tools(node.clone(), owner, Some(identity), &grants);
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == CONFIG_TOOL_NAME)
+        .expect("config registered");
+    let set = |count_field: &str| {
+        json!({
+            "argv": ["automation", "edit", "event-source"],
+            "target_id": "probe",
+            "set": {
+                "source_collection": "SelfConfigProbe",
+                "correlation_field": "batch",
+                "group": {"expected_count": {"source_field": count_field}}
+            }
+        })
+        .to_string()
+    };
+    for verb in ["preview", "edit"] {
+        let argv = json!({
+            "argv": ["automation", verb, "event-source"],
+            "target_id": "probe",
+            "set": {
+                "source_collection": "SelfConfigProbe",
+                "correlation_field": "batch",
+                "group": {"expected_count": {"source_field": "flag"}}
+            }
+        })
+        .to_string();
+        let error = tool.call(argv).await.unwrap_err();
+        let diagnostic = format!("{error:#}");
+        assert!(
+            diagnostic.contains("cannot carry the count"),
+            "{diagnostic}"
+        );
+        assert!(diagnostic.contains("Boolean"), "{diagnostic}");
+        let rows = node.execute("{ EventSource { event_source_id } }").await;
+        assert!(!rows.has_errors());
+        assert!(
+            rows.data.unwrap()["EventSource"]
+                .as_array()
+                .unwrap()
+                .is_empty(),
+            "a refused event source publishes no row"
+        );
+    }
+    tool.call(set("total")).await.unwrap();
+    let rows = node
+        .execute("{ EventSource { event_source_id group } }")
+        .await;
+    assert!(!rows.has_errors());
+    let rows = rows.data.unwrap()["EventSource"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["group"]["expected_count"]["source_field"], "total");
+}
+
+#[tokio::test]
 async fn schema_publication_matches_lean_grant_artifact_and_contract_guards() {
     use sha2::{Digest, Sha256};
     // Exhaust the Bool inputs of SelfConfig.schemaPublicationAllowed in
