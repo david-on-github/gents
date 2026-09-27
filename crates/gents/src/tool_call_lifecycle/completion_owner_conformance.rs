@@ -154,7 +154,7 @@ async fn drive_notification(case: &LeanR6BackgroundingCase) {
     let before = load_canonical_goal(node, did, &session).await.unwrap();
     assert!(admission
         .tool
-        .bridge_complete("durable native output".into())
+        .complete_owned("durable native output", None)
         .await
         .unwrap());
     let pending = rows(node, &format!(r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}) {{ _docID status lifecycle_state request_doc_id }} }}"#,
@@ -446,14 +446,12 @@ pub(crate) struct SelectedBackgroundWake {
     notifications: Vec<(Value, String)>,
 }
 
-/// Compose the existing signed subagent-completion owners through watcher
-/// selection, leaving the actual wake claim to the caller.
+/// Compose the signed session-message owners through watcher selection,
+/// leaving the actual wake claim to the caller: a `create_session` row settles
+/// from its caused request's terminal after a later assistant call.
 pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     use super::admission_fixture::{
-        complete_child, publish_accepted_on_claimed_request, published_admission_with_owner,
-    };
-    use crate::background_completion::{
-        project_background_subagent_completion, BackgroundCompletionOutcome,
+        complete_child, publish_accepted_on_claimed_request, published_session_message_with_owner,
     };
     use crate::lifecycle::{RequestTerminalOutcome, TerminalizeResult};
     use crate::watcher::{DefraWatcher, Watcher};
@@ -474,71 +472,48 @@ pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     assert_eq!(case.queue_source.as_deref(), Some("background_completion"));
     assert_eq!(case.queue_key.as_deref(), Some("background_completion:900"));
 
-    let child = "completion-order-child";
-    let (mut admission, mut owner) = published_admission_with_owner(PublishedAdmissionOptions {
+    let (message, mut owner) = published_session_message_with_owner(PublishedAdmissionOptions {
         name: "completion-order".into(),
         real_identity: true,
         await_mode: AwaitMode::Background,
-        spawn_plan: Some(crate::streaming::SpawnAdmissionPlan {
-            tool_call_id: "completion-order-spawn".into(),
-            child_request_id: child.into(),
-            spawn_target_did: "fixture-overrides-with-owner".into(),
-            spawn_behavior_id: "general".into(),
-            delegated_workspace: None,
-            await_mode: AwaitMode::Background,
-        }),
         ..Default::default()
     })
     .await
     .unwrap();
+    let admission = message.admission;
     let node = &admission.node;
     let did = &admission.agent_did;
     let session = admission.tool.session_id.clone();
     crate::test_support::install_test_behavior(node, did, "general").await;
-    admission
-        .tool
-        .publish_background_receipt("child started")
-        .await
-        .unwrap();
-    super::create_subagent_request_with_request_id(
-        node,
-        child.into(),
-        owner.request().request_id.clone(),
-        owner.request().doc_id.clone(),
-        admission.tool.tool_call_id().into(),
-        admission.tool.doc_id().unwrap().into(),
-        0,
-        did.clone(),
-        "general".into(),
-        "child work".into(),
-        Some(chrono::Utc::now() + chrono::Duration::minutes(4)),
-    )
-    .await
-    .unwrap();
 
     let mut wait = publish_accepted_on_claimed_request(
         node.clone(),
         &mut owner,
         did,
         1,
-        "wait_subagent",
-        "completion-order-wait",
-        json!({"child_request_id": child}),
-        None,
+        crate::toolset::LIST_PROCESSES_TOOL_NAME,
+        "completion-order-list",
+        json!({}),
         AwaitMode::Foreground,
-        super::CancelPolicy::Cascade,
         true,
     )
     .await
     .unwrap();
     let wait_header = wait.accepted_header_doc_id().unwrap().to_owned();
-    complete_child(node, child, did, "durable native output").await;
-    let projected = project_background_subagent_completion(node.clone(), child, did)
+    complete_child(
+        node,
+        &message.caused_request_id,
+        did,
+        "durable native output",
+    )
+    .await;
+    let settled = crate::background_completion::settle_running_session_message_rows(node, did)
         .await
         .unwrap();
-    assert!(
-        matches!(projected, BackgroundCompletionOutcome::Projected { .. }),
-        "{projected:?}"
+    assert_eq!(
+        settled.total(),
+        1,
+        "the caused request's terminal settles its row"
     );
 
     let notifications = notification_texts(&admission).await;
@@ -553,9 +528,9 @@ pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
             .await
             .unwrap();
     assert!(matches!(wait_native, Message::Assistant { ref content, .. }
-        if content.iter().any(|part| matches!(part, AssistantContent::ToolCall(call) if call.function.name == "wait_subagent"))));
+        if content.iter().any(|part| matches!(part, AssistantContent::ToolCall(call) if call.function.name == crate::toolset::LIST_PROCESSES_TOOL_NAME))));
     assert!(wait_record.sequence < notification_record.sequence);
-    assert!(notifications[0].1.contains("<subagent-notification"));
+    assert!(notifications[0].1.contains("<tool-completion"));
     assert!(notifications[0].1.contains("durable native output"));
 
     let requests = rows(
@@ -593,7 +568,7 @@ pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     );
     assert_eq!(queue.background_completion_wake_version, Some(1));
 
-    wait.complete("child completed").await.unwrap();
+    wait.complete("listed").await.unwrap();
     assert_eq!(
         owner
             .terminalize_owned(

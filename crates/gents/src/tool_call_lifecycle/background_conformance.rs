@@ -62,13 +62,9 @@ async fn generated_background_lifecycle_cases_use_canonical_admission_owner() {
                 "{}",
                 case.name
             ),
-            // Lean's abstract `.complete` action is implemented for an
-            // accepted background native row by the bridge completion owner;
-            // `complete` is intentionally reserved for foreground native
-            // calls and rejects this durable Background shape.
             "complete" => assert!(admission
                 .tool
-                .bridge_complete(case.result.clone().unwrap_or_default())
+                .complete_owned(case.result.as_deref().unwrap_or_default(), None)
                 .await
                 .unwrap()),
             "cancel_during_run" => assert!(admission

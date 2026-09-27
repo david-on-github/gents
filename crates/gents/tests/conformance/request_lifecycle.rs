@@ -1191,8 +1191,6 @@ async fn scheduled_materialization_snapshot_matches_claimed_waiting() {
         "scheduled-materialize-tools",
         Vec::new(),
         false,
-        false,
-        None,
     )
     .await;
     let lifecycle = RequestLifecycle::materialize_claimed_with_execution_binding(
@@ -1245,8 +1243,6 @@ async fn scheduled_materialization_persists_trigger_lineage() {
         "scheduled-materialize-lineage-tools",
         Vec::new(),
         false,
-        false,
-        None,
     )
     .await;
     let lineage = TriggerLineage {

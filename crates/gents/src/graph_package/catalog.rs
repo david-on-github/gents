@@ -535,9 +535,7 @@ mod tests {
             assert!(!builtins.enable_session_history_tool.unwrap_or(false));
             assert!(!builtins.enable_context_budget.unwrap_or(false));
             let subagents = selection.subagents.clone().unwrap_or_default();
-            assert!(!subagents.spawn_enabled.unwrap_or(false));
-            assert!(!subagents.steering_enabled.unwrap_or(false));
-            assert!(!subagents.background_enabled.unwrap_or(false));
+            assert!(!subagents.enabled.unwrap_or(false));
             assert!(!selection
                 .self_config
                 .clone()

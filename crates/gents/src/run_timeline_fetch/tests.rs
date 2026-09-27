@@ -295,37 +295,25 @@ async fn accepted_tool_arguments_read_only_the_accepted_message() {
         MessageBlock, MessagePublication, MessageRole, OutputOutcome, PayloadRef, TranscriptMessage,
     };
 
-    let plan = |tool_call_id: &str, child_request_id: &str| crate::streaming::SpawnAdmissionPlan {
-        tool_call_id: tool_call_id.into(),
-        child_request_id: child_request_id.into(),
-        spawn_target_did: "overridden-by-fixture".into(),
-        spawn_behavior_id: "general".into(),
-        delegated_workspace: None,
-        await_mode: AwaitMode::Background,
-    };
     let (admitted, mut owner) = published_admission_with_owner(PublishedAdmissionOptions {
         name: "accepted-arguments-exact".into(),
         real_identity: true,
         await_mode: AwaitMode::Background,
-        spawn_plan: Some(plan("bridge-first", "child-first")),
+        tool_name: Some(crate::toolset::CREATE_SESSION_TOOL_NAME.into()),
         ..Default::default()
     })
     .await
     .expect("publish first accepted spawn");
     let node = admitted.node.clone();
-    let mut second_plan = plan("bridge-second", "child-second");
-    second_plan.spawn_target_did = admitted.agent_did.clone();
-    let second_arguments =
-        serde_json::json!({"name": "child", "prompt": "second", "await_mode": "background"});
+    let second_arguments = serde_json::json!({"agent": "child", "prompt": "second"});
     let second = publish_accepted_on_claimed_request(
         node.clone(),
         &mut owner,
         &admitted.agent_did,
         1,
-        crate::toolset::SPAWN_SUBAGENT_TOOL_NAME,
+        crate::toolset::CREATE_SESSION_TOOL_NAME,
         "bridge-second",
         second_arguments.clone(),
-        Some(second_plan),
         AwaitMode::Background,
         true,
     )
@@ -407,7 +395,7 @@ async fn accepted_tool_arguments_read_only_the_accepted_message() {
     assert_eq!(first.len(), 1);
     assert_eq!(
         serde_json::from_str::<Value>(&first[0]).unwrap(),
-        serde_json::json!({"name": "child", "prompt": "work", "await_mode": "background"})
+        serde_json::json!({"agent": "general", "prompt": "work"})
     );
     let second = load_accepted_tool_arguments(
         &access,

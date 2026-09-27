@@ -20,7 +20,6 @@ use crate::lean_vocab_test::{
     lean_command_env_cases, lean_command_policy_case, lean_command_policy_cases,
     lean_command_sandbox_cases, LeanCommandPolicyCase,
 };
-use crate::tool_call_lifecycle::AwaitMode;
 
 #[test]
 fn toolset_presets_have_expected_counts() {
@@ -156,84 +155,28 @@ async fn bash_schema_advertises_decoupled_default_and_max() {
 }
 
 #[test]
-fn subagent_tool_names_are_gated_by_spawn_and_targets() {
+fn session_message_tool_names_are_gated_by_enabled_and_targets() {
     let disabled = SubagentToolConfig {
         targets: subagent_targets("worker"),
-        spawn_enabled: false,
-        steering_enabled: false,
-        background_enabled: true,
-        default_await_mode: AwaitMode::Foreground,
-        allow_cross_deployment: false,
+        enabled: false,
     };
     assert!(subagent_tool_names(&disabled).is_empty());
 
     let no_targets = SubagentToolConfig {
         targets: Vec::new(),
-        spawn_enabled: true,
-        steering_enabled: true,
-        background_enabled: true,
-        default_await_mode: AwaitMode::Foreground,
-        allow_cross_deployment: false,
+        enabled: true,
     };
     assert!(subagent_tool_names(&no_targets).is_empty());
 
     let enabled = SubagentToolConfig {
         targets: subagent_targets("worker"),
-        spawn_enabled: true,
-        steering_enabled: true,
-        background_enabled: false,
-        default_await_mode: AwaitMode::Foreground,
-        allow_cross_deployment: false,
-    };
-    let names = subagent_tool_names(&enabled);
-    assert_eq!(
-        names,
-        vec![
-            SPAWN_SUBAGENT_TOOL_NAME.to_string(),
-            WAIT_SUBAGENT_TOOL_NAME.to_string(),
-            LIST_SUBAGENTS_TOOL_NAME.to_string(),
-            CANCEL_SUBAGENT_TOOL_NAME.to_string()
-        ]
-    );
-    assert!(!names.contains(&"read_subagent".to_string()));
-    assert!(!names.contains(&"steer_subagent".to_string()));
-
-    let background_without_steering = SubagentToolConfig {
-        targets: subagent_targets("worker"),
-        spawn_enabled: true,
-        steering_enabled: false,
-        background_enabled: true,
-        default_await_mode: AwaitMode::Foreground,
-        allow_cross_deployment: false,
+        enabled: true,
     };
     assert_eq!(
-        subagent_tool_names(&background_without_steering),
+        subagent_tool_names(&enabled),
         vec![
-            SPAWN_SUBAGENT_TOOL_NAME.to_string(),
-            WAIT_SUBAGENT_TOOL_NAME.to_string(),
-            LIST_SUBAGENTS_TOOL_NAME.to_string(),
-            READ_SUBAGENT_TOOL_NAME.to_string(),
-            CANCEL_SUBAGENT_TOOL_NAME.to_string()
-        ]
-    );
-
-    let steering_and_background = SubagentToolConfig {
-        targets: subagent_targets("worker"),
-        spawn_enabled: true,
-        steering_enabled: true,
-        background_enabled: true,
-        default_await_mode: AwaitMode::Foreground,
-        allow_cross_deployment: false,
-    };
-    assert_eq!(
-        subagent_tool_names(&steering_and_background),
-        vec![
-            SPAWN_SUBAGENT_TOOL_NAME.to_string(),
-            WAIT_SUBAGENT_TOOL_NAME.to_string(),
-            LIST_SUBAGENTS_TOOL_NAME.to_string(),
-            READ_SUBAGENT_TOOL_NAME.to_string(),
-            STEER_SUBAGENT_TOOL_NAME.to_string(),
-            CANCEL_SUBAGENT_TOOL_NAME.to_string()
+            CREATE_SESSION_TOOL_NAME.to_string(),
+            SEND_MESSAGE_TOOL_NAME.to_string()
         ]
     );
 }
@@ -318,81 +261,46 @@ async fn spawn_process_decodes_only_its_advertised_schema() {
 }
 
 #[tokio::test]
-async fn subagent_tool_definitions_register_expected_surface() {
+async fn session_message_tool_definitions_register_expected_surface() {
     let config = SubagentToolConfig {
         targets: subagent_targets("research"),
-        spawn_enabled: true,
-        steering_enabled: true,
-        background_enabled: false,
-        default_await_mode: AwaitMode::Foreground,
-        allow_cross_deployment: false,
+        enabled: true,
     };
     let tools = build_subagent_tools(config);
     let names = tools.iter().map(|tool| tool.name()).collect::<Vec<_>>();
     assert_eq!(
         names,
         vec![
-            SPAWN_SUBAGENT_TOOL_NAME.to_string(),
-            WAIT_SUBAGENT_TOOL_NAME.to_string(),
-            LIST_SUBAGENTS_TOOL_NAME.to_string(),
-            CANCEL_SUBAGENT_TOOL_NAME.to_string()
+            CREATE_SESSION_TOOL_NAME.to_string(),
+            SEND_MESSAGE_TOOL_NAME.to_string()
         ]
     );
 
-    let spawn_def = tools[0].definition(String::new()).await;
+    let create = tools[0].definition(String::new()).await;
     assert_eq!(
-        spawn_def.parameters["properties"]["name"]["enum"],
+        create.parameters["properties"]["agent"]["enum"],
         serde_json::json!(["research"])
     );
+    for field in ["prompt", "task", "title"] {
+        assert!(
+            create.parameters["properties"].get(field).is_some(),
+            "create_session advertises {field}"
+        );
+    }
+    for absent in ["await_mode", "workspace", "deadline"] {
+        assert!(
+            create.parameters["properties"].get(absent).is_none(),
+            "create_session has no {absent}: a started session is always background work"
+        );
+    }
+    let send = tools[1].definition(String::new()).await;
     assert_eq!(
-        spawn_def.parameters["properties"]["await_mode"]["enum"],
-        serde_json::json!(["foreground"])
-    );
-    assert!(
-        spawn_def.parameters["properties"].get("deadline").is_none(),
-        "spawn_subagent should not advertise model-supplied absolute deadlines"
+        send.parameters["required"],
+        serde_json::json!(["session_id"])
     );
 }
 
-#[tokio::test]
-async fn spawn_subagent_definition_exposes_background_mode_when_enabled() {
-    let config = SubagentToolConfig {
-        targets: subagent_targets("research"),
-        spawn_enabled: true,
-        steering_enabled: true,
-        background_enabled: true,
-        default_await_mode: AwaitMode::Foreground,
-        allow_cross_deployment: false,
-    };
-    let tools = build_subagent_tools(config);
-    let spawn_def = tools[0].definition(String::new()).await;
-
-    assert_eq!(
-        spawn_def.parameters["properties"]["await_mode"]["enum"],
-        serde_json::json!(["foreground", "background"])
-    );
-}
-
-#[tokio::test]
-async fn spawn_subagent_definition_uses_configured_default_await_mode() {
-    let config = SubagentToolConfig {
-        targets: subagent_targets("research"),
-        spawn_enabled: true,
-        steering_enabled: true,
-        background_enabled: true,
-        default_await_mode: AwaitMode::Background,
-        allow_cross_deployment: false,
-    };
-    let tools = build_subagent_tools(config);
-    let spawn_def = tools[0].definition(String::new()).await;
-
-    assert_eq!(
-        spawn_def.parameters["properties"]["await_mode"]["default"],
-        serde_json::json!("background")
-    );
-}
-
-/// Build a single-target list for subagent tool tests. `name` doubles as the
+/// Build a single-target list for session-message tool tests. `name` doubles as the
 /// behavior id and the destination principal is the same fixed local owner.
 fn subagent_targets(name: &str) -> Vec<crate::document_config::SubagentTargetDocument> {
     vec![crate::document_config::SubagentTargetDocument {

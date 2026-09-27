@@ -1706,6 +1706,7 @@ fn empty_runtime_view(agent_did: &str) -> DocumentRuntimeView {
                 enabled: true,
                 created_at: None,
                 created_by: None,
+                max_request_hop: None,
                 tags: Vec::new(),
             },
         },

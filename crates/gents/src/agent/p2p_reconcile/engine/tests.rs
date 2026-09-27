@@ -438,7 +438,7 @@ fn protocol_collection_in_app_data_plane_is_rejected_without_stalling_control_pa
 }
 
 #[test]
-fn data_plane_subagent_coordinator_uses_signed_peer_for_targeted_bridge() {
+fn data_plane_subagent_coordinator_uses_signed_peer_for_addressed_requests() {
     let signed_endpoint = EnrollmentEndpointEntry {
         peer_id: "peer-b".to_string(),
         agent_did: "did:key:host".to_string(),
@@ -463,17 +463,17 @@ fn data_plane_subagent_coordinator_uses_signed_peer_for_targeted_bridge() {
     .expect("some data-plane layer");
 
     // The full template → (collections, filters) shape is owned by
-    // `subagent_coordinator_template_filters_only_targeted_bridge` in
+    // `subagent_coordinator_template_filters_only_addressed_requests` in
     // `engine/tests/desired_state.rs`; here only the unique data-plane
     // claim is re-proven: the coordinator survives the signed-endpoint
-    // merge with its targeted bridge intact.
-    assert_eq!(desired.replicator_collections, set(&["AgentToolCall"]));
+    // merge with its addressed-request filter intact.
+    assert_eq!(desired.replicator_collections, set(&["AgentRequest"]));
     assert_eq!(
         desired
             .replicator_filter
-            .get("AgentToolCall")
+            .get("AgentRequest")
             .and_then(single_string_eq),
-        Some(("spawn_target_did", "did:key:host"))
+        Some(("agent_did", "did:key:host"))
     );
 }
 

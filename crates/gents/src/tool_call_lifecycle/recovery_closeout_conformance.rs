@@ -439,7 +439,6 @@ async fn generated_registered_background_task_deletion_cases_use_live_worker() {
         crate::toolset::SPAWN_PROCESS_TOOL_NAME,
         "task-native-tool",
         serde_json::json!({"tool_name": "bash", "args": {}}),
-        None,
         AwaitMode::Background,
         true,
     )
@@ -620,10 +619,11 @@ async fn generated_background_completion_recovery_uses_accepted_native_call() {
     .expect("publish accepted background call");
     admission
         .tool
-        .bridge_failure(crate::tool_call_lifecycle::ChildTerminal::Failed {
-            reason: "seed terminal background failure".into(),
-            failure_class: crate::tool_call_lifecycle::FailureClass::External,
-        })
+        .fail_owned(
+            "seed terminal background failure",
+            crate::tool_call_lifecycle::FailureClass::External,
+            None,
+        )
         .await
         .unwrap();
     let report = ToolCallLifecycle::reconcile_background_completion_side_effects(

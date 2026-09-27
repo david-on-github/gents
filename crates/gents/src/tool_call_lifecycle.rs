@@ -271,9 +271,11 @@ impl ToolCallLifecycle {
         deadline_at: chrono::DateTime<chrono::Utc>,
         await_mode: AwaitMode,
     ) -> anyhow::Result<Self> {
+        // A call accepted in background stays background: its result
+        // arrives only as a message.
         anyhow::ensure!(
-            accepted.await_mode == await_mode,
-            "dispatch await mode conflicts with the accepted publication"
+            accepted.await_mode == AwaitMode::Foreground || await_mode == AwaitMode::Background,
+            "dispatch await mode conflicts with the accepted background publication"
         );
         Ok(Self {
             node,

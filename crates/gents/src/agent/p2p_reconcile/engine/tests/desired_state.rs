@@ -79,7 +79,7 @@ fn missing_and_unknown_templates_are_rejected() {
 }
 
 #[test]
-fn subagent_coordinator_template_filters_only_targeted_bridge() {
+fn subagent_coordinator_template_filters_only_addressed_requests() {
     let desired = desired_from_pairing_row(
         desired_row(Some("subagent-coordinator"), Some("did:key:host")),
         "did:key:coord",
@@ -88,14 +88,14 @@ fn subagent_coordinator_template_filters_only_targeted_bridge() {
     .expect("some desired layer");
 
     assert!(desired.collections.is_empty());
-    assert_eq!(desired.replicator_collections, set(&["AgentToolCall"]));
-    assert!(!desired.replicator_filter.contains_key("AgentRequest"));
+    assert_eq!(desired.replicator_collections, set(&["AgentRequest"]));
+    assert!(!desired.replicator_filter.contains_key("AgentToolCall"));
     assert_eq!(
         desired
             .replicator_filter
-            .get("AgentToolCall")
+            .get("AgentRequest")
             .and_then(single_string_eq),
-        Some(("spawn_target_did", "did:key:host"))
+        Some(("agent_did", "did:key:host"))
     );
 }
 
@@ -113,9 +113,9 @@ fn subagent_host_template_filters_return_projection_to_requester() {
         desired.replicator_collections,
         set(&[
             "AgentRequest",
+            "AgentSession",
             "AgentOutputSegment",
-            "AgentMessage",
-            "AgentToolCall"
+            "AgentMessage"
         ])
     );
     assert_eq!(desired.replicator_filter.len(), 4);

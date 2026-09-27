@@ -60,59 +60,6 @@ fn hook_execution_fixture_key(hook: &DefraSessionHook, request_id: &str) -> Stri
 }
 
 #[tokio::test]
-async fn spawn_preplan_surfaces_missing_parent_but_keeps_malformed_intent_for_dispatch() {
-    let node = Arc::new(EmbeddedNode::builder().build().await.unwrap());
-    crate::ensure_runtime_schemas(&node).await.unwrap();
-    let hook = DefraSessionHook::with_identity(
-        node.clone(),
-        "general",
-        "did:test:owner",
-        FailurePolicy::default(),
-    );
-    hook.state.lock().await.current_request_id = Some("missing-parent".to_owned());
-    let message = |arguments| Message::Assistant {
-        id: Some("provider-message".to_owned()),
-        content: vec![AssistantContent::ToolCall(ToolCall {
-            id: "tool-call".to_owned(),
-            call_id: None,
-            function: ToolFunction {
-                name: crate::toolset::SPAWN_SUBAGENT_TOOL_NAME.to_owned(),
-                arguments,
-            },
-            signature: None,
-            additional_params: None,
-        })],
-    };
-    let internal_ids = vec!["internal-tool-call".to_owned()];
-
-    let malformed = message(json!({ "name": "child" }));
-    assert!(hook
-        .preplan_spawn_admissions(&malformed, &internal_ids)
-        .await
-        .unwrap()
-        .is_empty());
-    let empty_name = message(json!({ "name": "", "prompt": "work" }));
-    assert!(hook
-        .preplan_spawn_admissions(&empty_name, &internal_ids)
-        .await
-        .unwrap()
-        .is_empty());
-
-    let valid = message(json!({ "name": "child", "prompt": "work" }));
-    let error = hook
-        .preplan_spawn_admissions(&valid, &internal_ids)
-        .await
-        .expect_err("a failed parent read must stop preplanning before publication");
-    assert!(
-        error
-            .to_string()
-            .contains("preplan spawn admission for parent request missing-parent"),
-        "unexpected preplanning error: {error:#}"
-    );
-    node.shutdown().await;
-}
-
-#[tokio::test]
 async fn client_output_snapshot_reads_full_retained_window_without_widening_model_budget() {
     let dir = tempfile::tempdir().unwrap();
     let node = Arc::new(
@@ -1382,94 +1329,21 @@ async fn accepted_hook_tool_lifecycle(
     .expect("adopt published test tool")
 }
 
-async fn accepted_subagent_lifecycle(
+async fn accepted_session_message_lifecycle(
     hook: &DefraSessionHook,
     internal_call_id: &str,
     deadline_at: chrono::DateTime<chrono::Utc>,
-    await_mode: crate::tool_call_lifecycle::AwaitMode,
-    cancel_policy: crate::tool_call_lifecycle::CancelPolicy,
-    child_request_id: &str,
 ) -> crate::tool_call_lifecycle::ToolCallLifecycle {
-    let arguments = serde_json::json!({
-        "name": "child",
-        "prompt": "work",
-        "await_mode": await_mode.as_str(),
-    });
-    let message = Message::Assistant {
-        id: Some(format!("message-{internal_call_id}")),
-        content: vec![AssistantContent::ToolCall(ToolCall {
-            id: internal_call_id.to_string(),
-            call_id: None,
-            function: ToolFunction {
-                name: crate::toolset::SPAWN_SUBAGENT_TOOL_NAME.to_string(),
-                arguments: arguments.clone(),
-            },
-            signature: None,
-            additional_params: None,
-        })],
-    };
-    let request_id = hook
-        .state
-        .lock()
-        .await
-        .current_request_id
-        .clone()
-        .expect("accepted test subagent requires active request");
-    let mut fixtures = hook_execution_fixtures().lock().await;
-    let fixture = fixtures
-        .get_mut(&hook_execution_fixture_key(hook, &request_id))
-        .expect("claimed request requires owned execution fixture");
-    let turn = fixture.turn;
-    fixture.turn += 1;
-    fixture
-        .writer
-        .start_provider_attempt(
-            &fixture.lifecycle.request().doc_id,
-            turn,
-            0,
-            format!("inference.{}", turn + 1).parse().unwrap(),
-        )
-        .await;
-    let plan = crate::streaming::SpawnAdmissionPlan {
-        tool_call_id: internal_call_id.to_string(),
-        child_request_id: child_request_id.to_string(),
-        // The children these tests create run as `did:test:general`; a
-        // child corroborates its bridge only under the bridge's target.
-        spawn_target_did: "did:test:general".to_string(),
-        spawn_behavior_id: "general".to_string(),
-        delegated_workspace: None,
-        await_mode,
-    };
-    let published = fixture
-        .writer
-        .publish_native_turn_with_spawn_admissions(&fixture.lifecycle, turn, 0, &message, &[plan])
-        .await
-        .expect("publish claimed subagent provider turn");
-    let accepted = published
-        .accepted_tools
-        .into_iter()
-        .next()
-        .expect("published test subagent acceptance");
-    drop(fixtures);
-    hook.register_stream_tool_call_identity(internal_call_id, &accepted.id, None)
-        .await;
-    hook.adopt_accepted_tool_calls(vec![(internal_call_id.to_string(), accepted)])
-        .await
-        .unwrap();
-    let session_id = hook.session_id().await.expect("active session");
-    hook.adopt_accepted_tool_dispatch(
+    let arguments = serde_json::json!({ "agent": "general", "prompt": "work" }).to_string();
+    accepted_hook_tool_lifecycle(
+        hook,
         internal_call_id,
-        None,
-        &request_id,
-        &session_id,
-        crate::toolset::SPAWN_SUBAGENT_TOOL_NAME,
-        &arguments.to_string(),
+        crate::toolset::CREATE_SESSION_TOOL_NAME,
+        &arguments,
         deadline_at,
-        await_mode,
-        cancel_policy,
+        crate::tool_call_lifecycle::AwaitMode::Background,
     )
     .await
-    .expect("adopt published test subagent")
 }
 
 async fn publish_and_adopt_tool_turn(
@@ -1592,7 +1466,6 @@ async fn fetch_tool_call_row(
                     selected_tool_name
                     cancel_cause
                     await_mode
-                    cancel_policy
                 }}
             }}"#
         ))
@@ -2961,14 +2834,7 @@ async fn interrupt_cancels_native_tools_and_keeps_children_running() {
         .insert("native-tool".to_string(), outer);
 
     // One child bridge under the same parent cancel map.
-    let mut bridge = accepted_subagent_lifecycle(
-        &hook,
-        "child-bridge",
-        deadline,
-        crate::tool_call_lifecycle::AwaitMode::Background,
-        child_request_id,
-    )
-    .await;
+    let mut bridge = accepted_session_message_lifecycle(&hook, "child-bridge", deadline).await;
     bridge.start_running().await.unwrap();
     assert!(bridge
         .publish_background_receipt("child started")
@@ -3009,12 +2875,6 @@ async fn interrupt_cancels_native_tools_and_keeps_children_running() {
     assert_eq!(
         outer_row.get("await_mode").and_then(|value| value.as_str()),
         Some("foreground")
-    );
-    assert_eq!(
-        outer_row
-            .get("cancel_policy")
-            .and_then(|value| value.as_str()),
-        Some("cascade")
     );
 
     let bridge_row = fetch_tool_call_row(&node, &session_id, "child-bridge").await;
@@ -3962,134 +3822,6 @@ async fn background_execution_completion_wait_observes_task_abort_guard_drop() {
     .expect("task-owned reservation should release on abort");
 }
 
-/// Issue #1002 defect 2: the parent-deadline sweep must not fabricate child
-/// terminal evidence. `bridge_failure(ChildTerminal::Dead)` is licensed by the
-/// Lean model only with an observed child failure terminal
-/// (`Background/Transition.lean` `h_second_term : pre.terminalOf.isFailure`;
-/// a live child maps to `.running`). The transition the model *does* license
-/// on parent-deadline expiry is the tool-leg `timeout`
-/// (`ToolExecution.Transition.timeout` — no child restriction, and
-/// `coherent_tool_deadlineExceeded_iff_request_deadlineExceeded` equates the
-/// bridge deadline with the parent's). So an expired foreground subagent
-/// bridge over a live child must land in `timedOut`, leaving the child's own
-/// terminalization to the subagent-liveness sweep.
-#[tokio::test]
-async fn parent_deadline_sweep_times_out_foreground_bridge_without_child_evidence() {
-    let data_path = std::env::temp_dir().join(format!(
-        "agent-hook-bridge-deadline-{}",
-        uuid::Uuid::new_v4()
-    ));
-    let node = Arc::new(
-        defra_node::EmbeddedNode::builder()
-            .data_path(&data_path)
-            .build()
-            .await
-            .unwrap(),
-    );
-    ensure_runtime_schemas(&node).await.unwrap();
-
-    let hook = DefraSessionHook::with_identity(
-        node.clone(),
-        "general",
-        "did:test:general",
-        FailurePolicy::default(),
-    );
-
-    let session_id = hook.session_id().await.unwrap();
-    bind_interruptible_request(
-        &node,
-        &hook,
-        "bridge-deadline-parent",
-        &session_id,
-        chrono::Utc::now() + chrono::Duration::minutes(5),
-    )
-    .await;
-    // The child request is alive (processing) — no terminal evidence exists.
-    create_interruptible_request(&node, "bridge-deadline-child", &session_id).await;
-
-    // Foreground subagent bridge over the live child, running past its
-    // (parent-derived) deadline.
-    let mut expired_bridge = accepted_subagent_lifecycle(
-        &hook,
-        "bridge-deadline-call",
-        chrono::Utc::now() - chrono::Duration::seconds(5),
-        crate::tool_call_lifecycle::AwaitMode::Foreground,
-        "bridge-deadline-child",
-    )
-    .await;
-    expired_bridge.start_running().await.unwrap();
-
-    // Negative control: an identical bridge whose deadline is still open must
-    // be left running by the sweep.
-    let mut open_bridge = accepted_subagent_lifecycle(
-        &hook,
-        "bridge-open-call",
-        chrono::Utc::now() + chrono::Duration::minutes(5),
-        crate::tool_call_lifecycle::AwaitMode::Foreground,
-        "bridge-deadline-child",
-    )
-    .await;
-    open_bridge.start_running().await.unwrap();
-
-    {
-        let mut in_flight = hook.in_flight_lifecycles.lock().await;
-        in_flight.insert("bridge-deadline-call".to_string(), expired_bridge);
-        in_flight.insert("bridge-open-call".to_string(), open_bridge);
-    }
-
-    let expired = hook.timeout_expired_tool_calls().await.unwrap();
-    assert_eq!(expired, 1, "only the expired bridge is swept");
-
-    let row = fetch_tool_call_row(&node, &session_id, "bridge-deadline-call").await;
-    assert_eq!(
-        row.get("lifecycle_state").and_then(|v| v.as_str()),
-        Some("timedOut"),
-        "parent-deadline expiry must take the licensed deadline transition, \
-         not fabricate ChildTerminal::Dead into `failed`"
-    );
-    assert_eq!(
-        row.get("cancel_cause").and_then(|v| v.as_str()),
-        Some("deadline"),
-        "the deadline cause must be recorded"
-    );
-
-    let open_row = fetch_tool_call_row(&node, &session_id, "bridge-open-call").await;
-    assert_eq!(
-        open_row.get("lifecycle_state").and_then(|v| v.as_str()),
-        Some("running"),
-        "a bridge with an open deadline must be left running"
-    );
-
-    // The child's terminalization belongs to the subagent-liveness sweep; the
-    // parent-deadline sweep must not have touched the live child.
-    let resp = node
-        .execute(
-            r#"{
-                AgentRequest(
-                    filter: { request_id: { _eq: "bridge-deadline-child" } },
-                    limit: 1
-                ) { lifecycle_state }
-            }"#,
-        )
-        .await;
-    let child_state = resp
-        .data
-        .as_ref()
-        .and_then(|data| data.get("AgentRequest"))
-        .and_then(|value| value.as_array())
-        .and_then(|rows| rows.first())
-        .and_then(|row| row.get("lifecycle_state"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-        .expect("child request row");
-    assert_eq!(
-        child_state, "processing",
-        "the live child must be untouched by the parent-deadline sweep"
-    );
-
-    node.shutdown().await;
-}
-
 /// Issue #997 end-to-end: a SUCCESSFUL tool whose output is a deliberate
 /// forgery of the retired `__gents_tool_lifecycle__:` sentinel (carrying a
 /// command-policy-denial payload) must terminalize `completed` with the text
@@ -4621,68 +4353,4 @@ async fn real_bash_policy_denial_persists_typed_class_and_payload() {
     );
     node.shutdown().await;
     let _ = std::fs::remove_dir_all(&data_path);
-}
-
-/// #1895: the reconciler links a foreground bridge (clearing its unclaimed
-/// bound) between the waiter's edge read and its own settle call. The waiter
-/// must adopt the running row and keep waiting, not fail the spawn and drop
-/// its in-flight lifecycle while the child runs.
-#[tokio::test]
-async fn foreground_waiter_keeps_waiting_when_bridge_was_linked_under_it() {
-    let data_path = std::env::temp_dir().join(format!(
-        "agent-hook-foreground-linked-{}",
-        uuid::Uuid::new_v4()
-    ));
-    let node = Arc::new(
-        defra_node::EmbeddedNode::builder()
-            .data_path(&data_path)
-            .build()
-            .await
-            .unwrap(),
-    );
-    ensure_runtime_schemas(&node).await.unwrap();
-    let hook = DefraSessionHook::with_identity(
-        node.clone(),
-        "general",
-        "did:test:general",
-        FailurePolicy::default(),
-    );
-    let session_id = hook.session_id().await.unwrap();
-    let deadline = chrono::Utc::now() + chrono::Duration::minutes(5);
-    bind_interruptible_request(&node, &hook, "parent-linked", &session_id, deadline).await;
-    let mut bridge = accepted_subagent_lifecycle(
-        &hook,
-        "linked-bridge",
-        deadline,
-        crate::tool_call_lifecycle::AwaitMode::Foreground,
-        "child-linked",
-    )
-    .await;
-    bridge.start_running().await.unwrap();
-    // The waiter's view: an expired bound. The durable row: already linked,
-    // so it carries no bound.
-    bridge.set_unclaimed_deadline_at(Some(chrono::Utc::now() - chrono::Duration::minutes(1)));
-    let bridge_doc_id = bridge.doc_id().unwrap().to_owned();
-    hook.in_flight_lifecycles
-        .lock()
-        .await
-        .insert("linked-bridge".to_string(), bridge);
-
-    let settled = hook
-        .settle_unconfirmed_foreground_spawn("linked-bridge", chrono::Utc::now())
-        .await
-        .expect("a linked bridge is not a failed spawn");
-    assert!(settled.is_none(), "the waiter keeps waiting: {settled:?}");
-    let map = hook.in_flight_lifecycles.lock().await;
-    let kept = map
-        .get("linked-bridge")
-        .expect("the in-flight lifecycle stays tracked");
-    assert!(kept.unclaimed_deadline_at.is_none());
-    drop(map);
-    let row = fetch_tool_call_row(&node, &session_id, "linked-bridge").await;
-    assert_eq!(
-        row.get("lifecycle_state").and_then(|value| value.as_str()),
-        Some("running"),
-        "{bridge_doc_id}"
-    );
 }

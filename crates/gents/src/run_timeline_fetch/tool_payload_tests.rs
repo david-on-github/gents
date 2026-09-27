@@ -56,7 +56,6 @@ fn admitted() -> (ToolLifecycleObservation, TimelineMessageRow) {
         ToolLifecycleObservation {
             row,
             spawned_by_tool_call_doc_id: None,
-            delegated_input: None,
         },
         TimelineMessageRow::from_canonical("header-physical".into(), header, native),
     )
@@ -87,20 +86,4 @@ fn timeline_rejects_multiple_acceptance_headers_instead_of_choosing_one() {
     let mut twin = message.clone();
     twin.doc_id = Some("other-header-physical".into());
     assert!(resolve_tool_payloads(row, &[message, twin]).is_err());
-}
-
-#[test]
-fn delegated_arguments_do_not_follow_private_coordinator_source() {
-    let (mut row, _) = admitted();
-    row.delegated_input = Some(gents_protocol::output::DelegatedToolInput {
-        source: PayloadRef {
-            close_doc_id: "not-authorized-here".into(),
-            stream: 7,
-        },
-        arguments: "{ \"command\": \"echo delegated\" }".into(),
-        parent_subagent_depth: 0,
-    });
-    let projected = resolve_tool_payloads(row, &[]).unwrap();
-    assert_eq!(projected.args, "{ \"command\": \"echo delegated\" }");
-    assert_eq!(projected.result, None);
 }

@@ -752,7 +752,7 @@ async fn plain_graph_root_factory_fences_publication_and_cancellation() {
         .unwrap();
     let receipt = crate::lifecycle::materialize::write_pending_agent_request_with_lineage_workspace_and_conversation_title(
         &node, ::identity::Did::new(identity.did().to_owned()).unwrap(), identity.did(), "test-behavior", "Plain graph root", crate::lifecycle::ExecutionOrigin::Scheduled,
-        lineage.clone(), None, None, Some("plain-factory-root"), None, Some(&trigger_doc),
+        lineage.clone(), None, None, Some("plain-factory-root"), None, Some(&trigger_doc), None,
     ).await.unwrap();
     let rows = persisted_requests(&node).await;
     assert_eq!(rows.len(), 2);
@@ -798,7 +798,7 @@ async fn plain_graph_root_factory_fences_publication_and_cancellation() {
     let closed = publication_state(&node).await;
     let error = crate::lifecycle::materialize::write_pending_agent_request_with_lineage_workspace_and_conversation_title(
         &node, ::identity::Did::new(identity.did().to_owned()).unwrap(), identity.did(), "test-behavior", "Too late", crate::lifecycle::ExecutionOrigin::Scheduled,
-        lineage, None, None, Some("denied-plain-factory-root"), None, Some(&trigger_doc),
+        lineage, None, None, Some("denied-plain-factory-root"), None, Some(&trigger_doc), None,
     ).await.expect_err("cancelled graph rejects the actual root factory");
     assert!(
         error.to_string().contains("graph run"),

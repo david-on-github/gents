@@ -653,7 +653,6 @@ mod tests {
             "fs_read",
             "call-1",
             serde_json::json!({"path": "x"}),
-            None,
             AwaitMode::Foreground,
             true,
         )

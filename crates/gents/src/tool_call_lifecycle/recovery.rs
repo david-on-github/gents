@@ -669,7 +669,6 @@ mod tests {
             status: "completionPending:tool_failed".to_string(),
             lifecycle_state: Some("failed".to_string()),
             cancel_cause: None,
-            child_request_id: None,
         };
         assert_eq!(
             background_completion_projection(&row),
@@ -691,7 +690,6 @@ mod tests {
             status: "completionPending:operator requested drain".to_string(),
             lifecycle_state: Some("cancelled".to_string()),
             cancel_cause: Some("userCancelled".to_string()),
-            child_request_id: None,
         };
         assert_eq!(
             background_completion_projection(&row),

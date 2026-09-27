@@ -2798,7 +2798,14 @@ mod spawned_background_tests {
         .await
         .unwrap()
         .expect("rehydrated background bridge");
-        assert!(bridge.bridge_complete(final_bytes.into()).await.unwrap());
+        assert!(bridge
+            .settle_session_message(
+                &crate::tool_call_lifecycle::CausedRequestTerminal::Completed {
+                    output: final_bytes.into()
+                }
+            )
+            .await
+            .unwrap());
         assert_eq!(bridge.state, ToolCallState::Completed);
 
         // The terminal bridge source is the durable final-output authority.
@@ -2926,18 +2933,32 @@ mod spawned_background_tests {
         };
         let mut first = load().await.unwrap().expect("first admitted bridge");
         let mut second = load().await.unwrap().expect("second admitted bridge");
+        let one_result = crate::tool_call_lifecycle::CausedRequestTerminal::Completed {
+            output: "one result".into(),
+        };
         let (left, right) = tokio::join!(
-            first.bridge_complete("one result".into()),
-            second.bridge_complete("one result".into())
+            first.settle_session_message(&one_result),
+            second.settle_session_message(&one_result)
         );
         let left = left.unwrap();
         let right = right.unwrap();
         assert_ne!(left, right, "exactly one projector must commit");
 
         let mut replay = load().await.unwrap().expect("terminal admitted bridge");
-        assert!(!replay.bridge_complete("one result".into()).await.unwrap());
+        assert!(!replay
+            .settle_session_message(
+                &crate::tool_call_lifecycle::CausedRequestTerminal::Completed {
+                    output: "one result".into()
+                }
+            )
+            .await
+            .unwrap());
         assert!(replay
-            .bridge_complete("different result".into())
+            .settle_session_message(
+                &crate::tool_call_lifecycle::CausedRequestTerminal::Completed {
+                    output: "different result".into()
+                }
+            )
             .await
             .is_err());
 

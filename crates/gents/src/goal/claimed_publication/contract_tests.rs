@@ -68,7 +68,6 @@ async fn run_generated_running_wait() {
         "spawn_process",
         "goal-spawn",
         json!({"tool_name":"bash","args":{"command":"sleep 1"}}),
-        None,
         AwaitMode::Foreground,
         true,
     )
@@ -95,7 +94,6 @@ async fn run_generated_running_wait() {
         "wait_process",
         "goal-wait",
         json!({"tool_call_id":handle,"timeout_secs":1}),
-        None,
         AwaitMode::Foreground,
         true,
     )
@@ -230,7 +228,6 @@ async fn run_generated_wait_observations() {
                 "wait_process",
                 "older-goal-wait",
                 json!({"tool_call_id":unrelated_handle,"timeout_secs":1}),
-                None,
                 AwaitMode::Foreground,
                 true,
             )
@@ -294,7 +291,6 @@ async fn run_generated_wait_observations() {
                 "spawn_process",
                 "goal-spawn",
                 json!({"tool_name":"bash","args":{"command":"sleep 1"}}),
-                None,
                 AwaitMode::Foreground,
                 true,
             )
@@ -346,7 +342,6 @@ async fn run_generated_wait_observations() {
                 "bash",
                 &handle,
                 json!({"command":"sleep 1"}),
-                None,
                 AwaitMode::Foreground,
                 false,
             )
@@ -384,7 +379,6 @@ async fn run_generated_wait_observations() {
                 } else {
                     json!({"tool_call_id":handle,"timeout_secs":1})
                 },
-                None,
                 AwaitMode::Foreground,
                 observed_wait["replied"] != false,
             )

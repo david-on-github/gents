@@ -147,7 +147,6 @@ fn production_pending_request_writers_use_the_signed_canonical_builder() {
         include_str!("../../src/lifecycle/materialize.rs"),
         include_str!("../../src/lifecycle/queue/mutation.rs"),
         include_str!("../../src/lifecycle/queue/goal_continuation.rs"),
-        include_str!("../../src/tool_call_lifecycle/subagent_request.rs"),
         include_str!("../../../gents-cli/src/request_helpers.rs"),
         include_str!("../../../gents-cli/src/commands/config/task_run.rs"),
         include_str!("../../../gents-desktop-core/src/client/mutations/chat/request.rs"),
@@ -241,10 +240,6 @@ fn production_pending_request_writers_use_the_signed_canonical_builder() {
             "lifecycle/queue/goal_continuation.rs",
             include_str!("../../src/lifecycle/queue/goal_continuation.rs"),
         ),
-        (
-            "tool_call_lifecycle/subagent_request.rs",
-            include_str!("../../src/tool_call_lifecycle/subagent_request.rs"),
-        ),
     ] {
         assert!(
             !source.contains("AgentRequestCreate::base("),
@@ -272,12 +267,9 @@ fn clean_break_has_no_legacy_pairing_or_remote_snapshot_authority() {
 
 #[test]
 fn request_and_persona_admission_have_no_logical_only_recovery_or_terminal_mutation() {
-    let subagent_source = include_str!("../../src/trigger_engine/subagent_source.rs");
     let request_admission = include_str!("../../src/request_admission.rs");
     let persona = include_str!("../../src/agent/p2p_reconcile/persona_requests.rs");
 
-    assert!(!subagent_source.contains("resolve_request_doc_id("));
-    assert!(!subagent_source.contains("recovered legacy logical-only request binding"));
     assert!(!request_admission.contains("parent_authorizes_subagent_target"));
     assert!(request_admission.contains("load_exact_parent_request"));
     assert!(request_admission.contains("request_doc_id.as_deref() == Some(parent_doc_id)"));
@@ -286,33 +278,28 @@ fn request_and_persona_admission_have_no_logical_only_recovery_or_terminal_mutat
 }
 
 #[test]
-fn runtime_internal_request_branches_cannot_collapse_back_to_ambiguous_parent_authority() {
+fn session_message_admission_has_no_child_or_bridge_authority() {
     let protocol = include_str!("../../../gents-protocol/src/request_admission.rs");
-    let authoring = include_str!("../../src/tool_call_lifecycle/subagent_request.rs");
     let verifier = include_str!("../../src/request_admission.rs");
     let request_schema = include_str!("../../../gents-schemas/schemas/agent/agent_request.graphql");
     let tool_schema = include_str!("../../../gents-schemas/schemas/agent/agent_tool_call.graphql");
 
-    assert!(!protocol.contains("pub fn runtime_internal("));
-    assert!(protocol.contains("pub fn runtime_local_child("));
-    assert!(protocol.contains("pub fn runtime_cross_principal_child("));
-    assert!(!authoring.contains("require_parent_agent_match"));
-    assert!(authoring.contains("SubagentAdmissionSource::LocalChild"));
-    assert!(authoring.contains("SubagentAdmissionSource::CrossDeploymentChild"));
-
-    let cross_verifier = verifier
-        .split("async fn verify_cross_principal_child_source")
+    assert!(!protocol.contains("pub fn runtime_local_child("));
+    assert!(!protocol.contains("pub fn runtime_cross_principal_child("));
+    assert!(protocol.contains("pub fn peer("));
+    let peer_verifier = verifier
+        .split("AgentRequestAdmissionKind::Peer =>")
         .nth(1)
         .and_then(|tail| {
-            tail.split("async fn verify_target_cross_principal_policy")
+            tail.split("AgentRequestAdmissionKind::Enrollment =>")
                 .next()
         })
-        .expect("cross-deployment verifier boundary");
-    assert!(!cross_verifier.contains("load_exact_parent_request"));
-    assert!(cross_verifier.contains("fresh_member_authorized_for_agent"));
+        .expect("peer admission branch");
+    assert!(peer_verifier.contains("fresh_member_authorized_for_agent"));
+    assert!(verifier.contains("request_hop_admitted"));
     assert!(request_schema.contains("runtime_source_kind: String @index @immutable"));
-    assert!(request_schema.contains("runtime_bridge_author_did: String @index @immutable"));
+    assert!(!request_schema.contains("runtime_bridge_author_did"));
     assert!(tool_schema.contains("request_id: String @index @immutable"));
     assert!(tool_schema.contains("tool_call_id: String @index @immutable"));
-    assert!(tool_schema.contains("child_request_id: String @index @immutable"));
+    assert!(!tool_schema.contains("child_request_id"));
 }

@@ -985,13 +985,10 @@ pub(super) fn verify_no_auxiliary_authority(tools: &gents::document_config::Tool
         "monitor must not select remote tools"
     );
     ensure!(
-        tools
-            .subagents
-            .as_ref()
-            .is_none_or(|subagents| subagents.target_ids.is_empty()
-                && subagents.spawn_enabled != Some(true)
-                && subagents.steering_enabled != Some(true)),
-        "monitor must not gain delegated execution authority"
+        tools.subagents.as_ref().is_none_or(
+            |subagents| subagents.target_ids.is_empty() && subagents.enabled != Some(true)
+        ),
+        "monitor must not gain create_session/send_message authority"
     );
     ensure!(
         tools

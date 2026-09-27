@@ -327,10 +327,7 @@ async fn from_default_behavior_documents_resolves_tool_selection_with_ceiling() 
     );
     tools.subagents = Some(crate::document_config::SubagentTools {
         target_ids: vec![format!("{default_behavior_id}:researcher")],
-        spawn_enabled: Some(true),
-        steering_enabled: Some(true),
-        background_enabled: Some(true),
-        ..Default::default()
+        enabled: Some(true),
     });
     upsert_tools(node.as_ref(), &tools).await;
 
@@ -361,9 +358,7 @@ async fn from_default_behavior_documents_resolves_tool_selection_with_ceiling() 
             .collect::<Vec<_>>(),
         ["researcher".to_string()]
     );
-    assert!(behavior.tools.subagent_tools().spawn_enabled);
-    assert!(behavior.tools.subagent_tools().steering_enabled);
-    assert!(behavior.tools.subagent_tools().background_enabled);
+    assert!(behavior.tools.subagent_tools().enabled);
     let snapshot = resolve_document_runtime_snapshot(
         agent.node.as_ref(),
         agent.document_runtime_context().unwrap(),
@@ -375,12 +370,8 @@ async fn from_default_behavior_documents_resolves_tool_selection_with_ceiling() 
         .get(&default_behavior_id)
         .expect("tool surface for default behavior");
     let tool_names = tool_surface.tool_names();
-    assert!(tool_names.contains(&"spawn_subagent".to_string()));
-    assert!(tool_names.contains(&"wait_subagent".to_string()));
-    assert!(tool_names.contains(&"list_subagents".to_string()));
-    assert!(tool_names.contains(&"read_subagent".to_string()));
-    assert!(tool_names.contains(&"steer_subagent".to_string()));
-    assert!(tool_names.contains(&"cancel_subagent".to_string()));
+    assert!(tool_names.contains(&"create_session".to_string()));
+    assert!(tool_names.contains(&"send_message".to_string()));
 }
 
 async fn load_installed_tools(node: &EmbeddedNode, did: &str, behavior_id: &str) -> Tools {
@@ -442,8 +433,7 @@ async fn from_default_behavior_documents_filters_inactive_subagent_targets() {
     let mut tools = load_installed_tools(node.as_ref(), &did, &default_behavior_id).await;
     tools.subagents = Some(crate::document_config::SubagentTools {
         target_ids: vec![format!("{default_behavior_id}:disabled-researcher")],
-        spawn_enabled: Some(true),
-        ..Default::default()
+        enabled: Some(true),
     });
     upsert_tools(node.as_ref(), &tools).await;
 
@@ -504,8 +494,7 @@ async fn from_default_behavior_documents_rejects_unresolved_subagent_target() {
     let mut tools = load_installed_tools(node.as_ref(), &did, &default_behavior_id).await;
     tools.subagents = Some(crate::document_config::SubagentTools {
         target_ids: vec![format!("{default_behavior_id}:missing-behavior")],
-        spawn_enabled: Some(true),
-        ..Default::default()
+        enabled: Some(true),
     });
     upsert_tools(node.as_ref(), &tools).await;
 

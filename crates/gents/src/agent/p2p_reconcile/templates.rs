@@ -471,25 +471,26 @@ const AGENT_CONFIG_COLLECTIONS: &[&str] = &[
     "InferenceBackend",
 ];
 
-/// Coordinator → host leg for subagent delegation: carry only bridges
-/// addressed to this host. Coordinator-owned parent requests are not
-/// pair-specific and must not fan out across every host pairing (#683).
-const SUBAGENT_COORDINATOR_COLLECTIONS: &[&str] = &["AgentToolCall"];
+/// Caller → target leg of cross-principal `create_session`/`send_message`:
+/// carry only the requests addressed to this peer. The caller's own requests,
+/// sessions and tool calls stay home.
+const SUBAGENT_COORDINATOR_COLLECTIONS: &[&str] = &["AgentRequest"];
 
 const SUBAGENT_COORDINATOR_RULES: &[CollectionRule] = &[CollectionRule {
-    collection: "AgentToolCall",
-    field: "spawn_target_did",
+    collection: "AgentRequest",
+    field: "agent_did",
     source: DidSource::PeerDid,
 }];
 
-/// Host → coordinator leg for subagent completion: carry only artifacts whose
-/// immutable requester route names this coordinator. This preserves child
-/// returns without replaying unrelated host-owned conversation history.
+/// Target → caller leg: carry back only the request, session, messages and
+/// output segments whose immutable requester route names the caller, so its
+/// completion observer can settle the row that caused them. Unrelated
+/// target-owned history does not replicate.
 const SUBAGENT_HOST_COLLECTIONS: &[&str] = &[
     "AgentRequest",
+    "AgentSession",
     "AgentOutputSegment",
     "AgentMessage",
-    "AgentToolCall",
 ];
 
 const SUBAGENT_HOST_RULES: &[CollectionRule] = &[
@@ -504,12 +505,12 @@ const SUBAGENT_HOST_RULES: &[CollectionRule] = &[
         source: DidSource::PeerDid,
     },
     CollectionRule {
-        collection: "AgentMessage",
+        collection: "AgentSession",
         field: "requester_did",
         source: DidSource::PeerDid,
     },
     CollectionRule {
-        collection: "AgentToolCall",
+        collection: "AgentMessage",
         field: "requester_did",
         source: DidSource::PeerDid,
     },
