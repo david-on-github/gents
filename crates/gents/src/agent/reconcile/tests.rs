@@ -1539,7 +1539,7 @@ async fn registration_failure_rolls_back_standing_before_any_staged_slot_spawns(
     );
 
     shutdown_tx.send_replace(true);
-    supervisor.shutdown_slots().await;
+    supervisor.shutdown_slots().await.unwrap();
     assert!(
         policy
             .retired
@@ -1549,6 +1549,99 @@ async fn registration_failure_rolls_back_standing_before_any_staged_slot_spawns(
         "supervisor shutdown must retire the active generation standing"
     );
     runtime_status_owner.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn retired_slot_drain_failure_reaches_supervisor_shutdown() {
+    let node = test_node().await;
+    ensure_runtime_schemas(node.as_ref()).await.unwrap();
+    let principal = stub_principal();
+    let initial = PendingAgentBehavior::new("general")
+        .build_with_identity_for_test(test_identity("retired-drain-failure"));
+    let mut replacement = initial.clone();
+    replacement.system_prompt = "replacement generation".to_string();
+    let initial_snapshot = snapshot_for_behaviors_with_principal(
+        node.as_ref(),
+        "general",
+        vec![Arc::new(initial)],
+        principal.clone(),
+    )
+    .await;
+    let replacement_snapshot = snapshot_for_behaviors_with_principal(
+        node.as_ref(),
+        "general",
+        vec![Arc::new(replacement)],
+        principal,
+    )
+    .await;
+    let (runtime_status_owner, runtime_status) =
+        RuntimeStatusHandle::start(node.clone(), "did:test:retired-drain-failure");
+    let (started_tx, mut started_rx) = mpsc::unbounded_channel();
+    let runner = move |_behavior: Arc<ResolvedBehavior>,
+                       _tool_surface: Arc<ToolSurface>,
+                       _request_rx: Arc<Mutex<mpsc::Receiver<AgentRequest>>>,
+                       generation: u64,
+                       mut shutdown: watch::Receiver<bool>| {
+        let started_tx = started_tx.clone();
+        async move {
+            let _ = started_tx.send(generation);
+            shutdown.changed().await?;
+            if generation == 1 {
+                anyhow::bail!("injected retired slot drain failure");
+            }
+            Ok(())
+        }
+    };
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let mut supervisor = GenerationSupervisor::bootstrap(
+        initial_snapshot,
+        crate::admission::AdmissionRegistry::new(node.clone()),
+        crate::retry::RetryPolicy {
+            max_retries: 1,
+            base_delay_ms: 1,
+            max_delay_ms: 2,
+        },
+        runner,
+        runtime_status,
+        shutdown_rx.clone(),
+        None,
+    )
+    .await
+    .unwrap();
+    let worker_count = supervisor.active_slots["general"].worker_task_count;
+    for _ in 0..worker_count {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(30), started_rx.recv())
+                .await
+                .expect("initial slot must start"),
+            Some(1)
+        );
+    }
+    let (active_tx, _active_rx) = watch::channel(supervisor.current_snapshot());
+    supervisor
+        .apply_snapshot(replacement_snapshot, 2, &active_tx, shutdown_rx)
+        .await
+        .unwrap();
+    assert_eq!(supervisor.current_snapshot.generation, 2);
+    for _ in 0..worker_count {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(30), started_rx.recv())
+                .await
+                .expect("replacement slot must start"),
+            Some(2)
+        );
+    }
+    shutdown_tx.send_replace(true);
+    let error = tokio::time::timeout(Duration::from_secs(30), supervisor.shutdown_slots())
+        .await
+        .expect("supervisor shutdown must join retired slot")
+        .expect_err("retired slot drain failure cannot become clean shutdown");
+    assert!(
+        format!("{error:#}").contains("injected retired slot drain failure"),
+        "supervisor lost retired slot drain failure: {error:#}"
+    );
+    runtime_status_owner.close().await.unwrap();
+    node.shutdown().await;
 }
 
 #[tokio::test]
@@ -1699,7 +1792,7 @@ async fn source_publish_failure_rolls_back_and_joins_staged_slots() {
         "old active generation was detached during staged rollback"
     );
     generation_one_exit.add_permits(workers_per_slot);
-    shutdown.await.unwrap();
+    shutdown.await.unwrap().unwrap();
     runtime_status_owner.close().await.unwrap();
 }
 
@@ -1828,7 +1921,7 @@ async fn closed_snapshot_receiver_does_not_detach_retired_or_active_slots() {
         "shutdown completed before joining the retired generation-one slot"
     );
     generation_one_exit.add_permits(workers_per_slot);
-    shutdown_task.await.unwrap();
+    shutdown_task.await.unwrap().unwrap();
     runtime_status_owner.close().await.unwrap();
     assert_eq!(
         exited.load(Ordering::SeqCst),

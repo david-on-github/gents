@@ -1568,7 +1568,8 @@ mod tests {
         let fresh = load_admission_request_by_id(&host, "remote-child-1").await;
         fresh_daemon
             .process_request(fresh, shutdown_rx.clone())
-            .await;
+            .await
+            .unwrap();
         let fresh_state = host.execute(
             r#"{ AgentRequest(filter: { request_id: { _eq: "remote-child-1" } }) { lifecycle_state failure_reason error_message terminal_output } }"#,
         ).await;
@@ -1585,7 +1586,10 @@ mod tests {
         let mut revoked_daemon =
             behavior_daemon(host.clone(), behavior, authority, revoked_calls.clone());
         let revoked = load_admission_request_by_id(&host, "remote-child-2").await;
-        revoked_daemon.process_request(revoked, shutdown_rx).await;
+        revoked_daemon
+            .process_request(revoked, shutdown_rx)
+            .await
+            .unwrap();
         assert_eq!(
             revoked_calls.load(Ordering::SeqCst),
             0,

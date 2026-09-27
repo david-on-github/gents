@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tokio::sync::{mpsc, watch, Mutex};
-use tokio::task::JoinSet;
+use tokio::task::{JoinError, JoinSet};
 use tracing::Instrument;
 
 use crate::admission::AdmissionRegistry;
@@ -46,7 +46,18 @@ pub(super) struct GenerationSupervisor<F> {
     runner: F,
     runtime_status: RuntimeStatusHandle,
     slot_failure_policy: Option<Arc<dyn SlotFailurePolicy>>,
-    retiring_slots: JoinSet<()>,
+    retiring_slots: JoinSet<Result<()>>,
+    retired_slot_error: Option<anyhow::Error>,
+}
+
+fn slot_join_result(
+    joined: std::result::Result<Result<()>, JoinError>,
+    context: &str,
+) -> Result<()> {
+    match joined {
+        Ok(result) => result.with_context(|| context.to_owned()),
+        Err(error) => Err(error).with_context(|| context.to_owned()),
+    }
 }
 
 struct StagedSlots {
@@ -86,10 +97,11 @@ impl StagedSlots {
             let generation = slot.generation;
             let _ = slot.state_tx.send(BehaviorSlotState::Retiring);
             drop(slot.dispatcher);
-            if let Err(error) = slot.handle.await {
-                if !error.is_cancelled() {
-                    tracing::error!(behavior_id, generation, error = %error, "staged behavior slot join failed during rollback");
-                }
+            if let Err(error) = slot_join_result(
+                slot.handle.await,
+                "staged behavior slot failed during rollback",
+            ) {
+                tracing::error!(behavior_id, generation, error = %error, "staged behavior slot failed during rollback");
             }
             if let Some(policy) = &self.failure_policy {
                 policy.on_slot_retired(&behavior_id, generation, true).await;
@@ -180,6 +192,7 @@ where
             runtime_status,
             slot_failure_policy,
             retiring_slots: JoinSet::new(),
+            retired_slot_error: None,
         })
     }
 
@@ -225,10 +238,13 @@ where
             }
         }
 
-        self.shutdown_slots().await;
-        match fatal_error {
-            Some(error) => Err(error),
-            None => Ok(()),
+        let shutdown_result = self.shutdown_slots().await;
+        match (fatal_error, shutdown_result) {
+            (Some(error), Err(shutdown_error)) => Err(error.context(format!(
+                "behavior slot shutdown also failed: {shutdown_error:#}"
+            ))),
+            (Some(error), Ok(())) => Err(error),
+            (None, result) => result,
         }
     }
 
@@ -484,17 +500,15 @@ where
             let _ = slot.state_tx.send(BehaviorSlotState::Retiring);
             drop(slot.dispatcher);
             self.retiring_slots.spawn(async move {
-                if let Err(error) = slot.handle.await {
-                    if !error.is_cancelled() {
-                        tracing::error!(error = %error, "retired behavior slot join failed");
-                    }
-                }
+                slot_join_result(slot.handle.await, "retired behavior slot failed")
             });
         }
         while let Some(joined) = self.retiring_slots.try_join_next() {
-            if let Err(error) = joined {
-                if !error.is_cancelled() {
-                    tracing::error!(error = %error, "retired behavior slot owner join failed");
+            if let Err(error) = slot_join_result(joined, "retired behavior slot owner join failed")
+            {
+                tracing::error!(error = %error, "retired behavior slot owner failed");
+                if self.retired_slot_error.is_none() {
+                    self.retired_slot_error = Some(error);
                 }
             }
         }
@@ -509,15 +523,19 @@ where
         Ok(())
     }
 
-    pub(super) async fn shutdown_slots(mut self) {
+    pub(super) async fn shutdown_slots(mut self) -> Result<()> {
         let failure_policy = self.slot_failure_policy.clone();
+        let mut first_error = self.retired_slot_error.take();
         for (behavior_id, slot) in self.active_slots {
             let generation = slot.generation;
             let _ = slot.state_tx.send(BehaviorSlotState::Retiring);
             drop(slot.dispatcher);
-            if let Err(error) = slot.handle.await {
-                if !error.is_cancelled() {
-                    tracing::error!(error = %error, "behavior slot join failed during shutdown");
+            if let Err(error) =
+                slot_join_result(slot.handle.await, "behavior slot failed during shutdown")
+            {
+                tracing::error!(behavior_id, generation, error = %error, "behavior slot failed during shutdown");
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
             }
             if let Some(policy) = &failure_policy {
@@ -527,12 +545,16 @@ where
             }
         }
         while let Some(joined) = self.retiring_slots.join_next().await {
-            if let Err(error) = joined {
-                if !error.is_cancelled() {
-                    tracing::error!(error = %error, "retired behavior slot owner join failed during shutdown");
+            if let Err(error) =
+                slot_join_result(joined, "retired behavior slot owner failed during shutdown")
+            {
+                tracing::error!(error = %error, "retired behavior slot owner failed during shutdown");
+                if first_error.is_none() {
+                    first_error = Some(error);
                 }
             }
         }
+        first_error.map_or(Ok(()), Err)
     }
 }
 

@@ -49,7 +49,7 @@ pub(super) enum BehaviorSlotState {
 pub(super) struct BehaviorSlot {
     pub(super) dispatcher: mpsc::Sender<AgentRequest>,
     pub(super) state_tx: watch::Sender<BehaviorSlotState>,
-    pub(super) handle: AbortOnDropHandle<()>,
+    pub(super) handle: AbortOnDropHandle<Result<()>>,
     pub(super) behavior_fingerprint: String,
     pub(super) tool_surface_fingerprint: String,
     pub(super) executor_capacity: usize,
@@ -351,10 +351,13 @@ pub(super) fn retire_slot(slot: BehaviorSlot) {
     let _ = slot.state_tx.send(BehaviorSlotState::Retiring);
     drop(slot.dispatcher);
     tokio::spawn(async move {
-        if let Err(error) = slot.handle.await {
-            if !error.is_cancelled() {
+        match slot.handle.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::error!(error = %error, "retired behavior slot failed"),
+            Err(error) if !error.is_cancelled() => {
                 tracing::error!(error = %error, "retired behavior slot join failed");
             }
+            Err(_) => {}
         }
     });
 }
@@ -370,7 +373,8 @@ async fn run_slot_loop<F, Fut>(
     mut state_rx: watch::Receiver<BehaviorSlotState>,
     failure_policy: Option<Arc<dyn SlotFailurePolicy>>,
     standing: Arc<std::sync::Mutex<BuildStanding>>,
-) where
+) -> Result<()>
+where
     F: Fn(
             Arc<ResolvedBehavior>,
             Arc<ToolSurface>,
@@ -387,7 +391,7 @@ async fn run_slot_loop<F, Fut>(
     let mut failure_count = 0u32;
     loop {
         if *shutdown.borrow() || *state_rx.borrow() == BehaviorSlotState::Retiring {
-            return;
+            return Ok(());
         }
         // A sibling worker may have spent the budget already; a demoted slot
         // must not keep rebuilding against a verdict that is already final.
@@ -397,7 +401,7 @@ async fn run_slot_loop<F, Fut>(
             .unwrap_or(false)
         {
             park_until_retired(&mut shutdown, &mut state_rx).await;
-            return;
+            return Ok(());
         }
 
         let outcome = AssertUnwindSafe(runner(
@@ -411,11 +415,15 @@ async fn run_slot_loop<F, Fut>(
         .await;
 
         if *shutdown.borrow() {
-            return;
+            return match outcome {
+                Ok(Err(error)) => Err(error),
+                Err(_) => anyhow::bail!("behavior runner panicked during shutdown"),
+                Ok(Ok(())) => Ok(()),
+            };
         }
 
         match outcome {
-            Ok(Ok(())) if *state_rx.borrow() == BehaviorSlotState::Retiring => return,
+            Ok(Ok(())) if *state_rx.borrow() == BehaviorSlotState::Retiring => return Ok(()),
             Ok(Ok(())) => {
                 if let Ok(mut standing) = standing.lock() {
                     *standing = standing.step(u32::MAX, BuildOutcome::Started);
@@ -428,7 +436,7 @@ async fn run_slot_loop<F, Fut>(
                     "behavior slot exited unexpectedly, scheduling restart"
                 );
                 if !wait_for_restart(delay, &mut shutdown).await {
-                    return;
+                    return Ok(());
                 }
             }
             Ok(Err(error)) => {
@@ -443,7 +451,7 @@ async fn run_slot_loop<F, Fut>(
                 )
                 .await
                 {
-                    return;
+                    return Ok(());
                 }
                 let delay = retry_policy.delay_for_attempt(failure_count);
                 failure_count += 1;
@@ -454,7 +462,7 @@ async fn run_slot_loop<F, Fut>(
                     "behavior slot failed, scheduling restart"
                 );
                 if !wait_for_restart(delay, &mut shutdown).await {
-                    return;
+                    return Ok(());
                 }
             }
             Err(_) => {
@@ -469,7 +477,7 @@ async fn run_slot_loop<F, Fut>(
                 )
                 .await
                 {
-                    return;
+                    return Ok(());
                 }
                 let delay = retry_policy.delay_for_attempt(failure_count);
                 failure_count += 1;
@@ -479,7 +487,7 @@ async fn run_slot_loop<F, Fut>(
                     "behavior slot panicked, scheduling restart"
                 );
                 if !wait_for_restart(delay, &mut shutdown).await {
-                    return;
+                    return Ok(());
                 }
             }
         }
@@ -499,7 +507,8 @@ async fn run_slot_workers<F, Fut>(
     state_rx: watch::Receiver<BehaviorSlotState>,
     failure_policy: Option<Arc<dyn SlotFailurePolicy>>,
     standing: Arc<std::sync::Mutex<BuildStanding>>,
-) where
+) -> Result<()>
+where
     F: Fn(
             Arc<ResolvedBehavior>,
             Arc<ToolSurface>,
@@ -551,17 +560,19 @@ async fn run_slot_workers<F, Fut>(
         );
     }
 
+    let mut first_error = None;
     while let Some(joined) = workers.join_next().await {
-        if let Err(error) = joined {
-            if !error.is_cancelled() {
-                tracing::error!(
-                    behavior_id = %behavior.behavior_id,
-                    error = %error,
-                    "behavior executor worker task join failed"
-                );
-            }
+        let error = match joined {
+            Ok(Ok(())) => continue,
+            Ok(Err(error)) => error,
+            Err(error) => anyhow::anyhow!("behavior executor worker task join failed: {error}"),
+        };
+        tracing::error!(behavior_id = %behavior.behavior_id, error = %error, "behavior executor worker failed");
+        if first_error.is_none() {
+            first_error = Some(error);
         }
     }
+    first_error.map_or(Ok(()), Err)
 }
 
 async fn wait_for_restart(

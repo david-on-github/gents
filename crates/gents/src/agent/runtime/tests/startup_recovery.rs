@@ -8,6 +8,20 @@ const STARTUP_DEADLOCK_GUARD: Duration = Duration::from_secs(30);
 
 struct RejectRouterGenerationRunWriter;
 
+struct AcceptReadinessWriter;
+
+#[async_trait::async_trait]
+impl crate::behavior_readiness_publisher::BehaviorReadinessWriter for AcceptReadinessWriter {
+    async fn upsert(
+        &self,
+        _agent_did: &str,
+        _snapshot: &BehaviorReadinessSnapshot,
+        _updated_at: &str,
+    ) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Default)]
 struct ExhaustStartupSourceWriter {
     source_attempts: std::sync::atomic::AtomicUsize,
@@ -412,6 +426,65 @@ async fn router_generation_persistence_failure_terminates_run_agent_before_dispa
         "runtime returned the wrong failure: {error:#}"
     );
     wait_for_request_state(node.as_ref(), &request_doc_id, "pending").await;
+}
+
+#[tokio::test]
+async fn slot_drain_failure_reaches_run_agent_after_external_shutdown() {
+    let node = test_node().await;
+    ensure_runtime_schemas(node.as_ref()).await.unwrap();
+    let identity = Arc::new(test_identity("slot-drain-failure"));
+    let mock_endpoint = MockModelEndpoint::start("default").unwrap();
+    bind_default_behavior_backend(
+        node.as_ref(),
+        identity.did(),
+        "backend-slot-drain-failure",
+        mock_endpoint.endpoint(),
+    )
+    .await;
+    let agent = crate::Gents::from_default_behavior_documents(
+        node.clone(),
+        identity,
+        crate::agent::DocumentRuntimeOptions {
+            tool_ceiling: ToolCeiling::meta_only(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let (slot_started_tx, mut slot_started_rx) = mpsc::unbounded_channel();
+    let slot_runner: super::startup::TestSlotRunner = Arc::new(move |_generation, mut shutdown| {
+        let slot_started_tx = slot_started_tx.clone();
+        Box::pin(async move {
+            let _ = slot_started_tx.send(());
+            shutdown.changed().await?;
+            anyhow::bail!("injected slot drain failure")
+        })
+    });
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let run = tokio::spawn(
+        super::startup::run_agent_with_readiness_writer_and_slot_runner(
+            agent,
+            shutdown_rx,
+            Arc::new(AcceptReadinessWriter),
+            Duration::from_millis(1),
+            Some(slot_runner),
+        ),
+    );
+    tokio::time::timeout(STARTUP_DEADLOCK_GUARD, slot_started_rx.recv())
+        .await
+        .expect("slot worker must start")
+        .expect("slot worker start channel closed");
+    shutdown_tx.send_replace(true);
+    let error = tokio::time::timeout(STARTUP_DEADLOCK_GUARD, run)
+        .await
+        .expect("slot drain failure must terminate run_agent")
+        .expect("run_agent task must join")
+        .expect_err("slot drain failure cannot become clean shutdown");
+    assert!(
+        format!("{error:#}").contains("injected slot drain failure"),
+        "run_agent lost the slot drain failure: {error:#}"
+    );
+    node.shutdown().await;
 }
 
 #[tokio::test]

@@ -555,6 +555,17 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                 ))
                 .await;
 
+            // A failed or timed-out graceful drain has an uncertain durable
+            // extent. Do not query interruption state or let its ordinary
+            // terminal path claim that the received bytes were saved.
+            if result
+                .as_ref()
+                .err()
+                .is_some_and(|error| error.is::<super::ShutdownDrainFailure>())
+            {
+                return result;
+            }
+
             let token_was_cancelled = request_token.is_cancelled();
             let watched_interrupt = { interrupt_rx.borrow().clone() };
             let interrupt_at = if token_was_cancelled {

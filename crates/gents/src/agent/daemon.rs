@@ -11,6 +11,12 @@ mod inference;
 mod request;
 mod title;
 
+#[derive(Debug, thiserror::Error)]
+#[error("graceful shutdown could not confirm received provider output was retained: {reason}")]
+pub(super) struct ShutdownDrainFailure {
+    pub(super) reason: String,
+}
+
 use super::runtime::StartupBarrier;
 use crate::agent::worker_capacity::{
     bind_current_claim, current_slot_capacity, scope_request_capacity, WorkerTicket,
@@ -402,9 +408,9 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         failure_class = tracing::field::Empty,
                     ));
             if let Some(guard) = active_guard {
-                scope_request_capacity(guard, process).await;
+                scope_request_capacity(guard, process).await?;
             } else {
-                process.await;
+                process.await?;
             }
         }
     }
@@ -413,7 +419,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
         &mut self,
         request: AgentRequest,
         shutdown: tokio::sync::watch::Receiver<bool>,
-    ) {
+    ) -> Result<()> {
         // Publication and terminal selection belong to this one execution.
         // Dropping the request future also drops its in-memory projection;
         // durable transcript and recovery state remain in DefraDB.
@@ -430,7 +436,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
         )
         .await
         else {
-            return;
+            return Ok(());
         };
         let execution_origin =
             crate::lifecycle::ExecutionOrigin::from_persisted(request.execution_origin.as_deref())
@@ -473,7 +479,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                             &request.request_id,
                         )
                         .await;
-                        return;
+                        return Ok(());
                     }
                 };
                 let ticket = WorkerTicket::new(lifecycle.request().doc_id.clone(), generation);
@@ -488,7 +494,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         &request.request_id,
                     )
                     .await;
-                    return;
+                    return Ok(());
                 }
             }
             Ok(ClaimOutcome::Queued) => {
@@ -500,7 +506,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     session_id = %request.session_id,
                     "request queued behind an earlier same-session request"
                 );
-                return;
+                return Ok(());
             }
             Ok(ClaimOutcome::Interrupted) => {
                 record_current_claim_outcome("interrupted");
@@ -512,7 +518,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     cancellation_source = "pre_claim",
                     "request interrupted before claim"
                 );
-                return;
+                return Ok(());
             }
             Ok(ClaimOutcome::Expired) => {
                 record_current_claim_outcome("expired");
@@ -524,7 +530,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     cancellation_source = "stale_ttl",
                     "request expired (valid_until passed) before claim; marked dead"
                 );
-                return;
+                return Ok(());
             }
             Err(error) => {
                 record_current_claim_outcome("error");
@@ -552,7 +558,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                             "failed to persist request admission rejection"
                         );
                     }
-                    return;
+                    return Ok(());
                 }
                 tracing::warn!(
                     behavior_id = %self.behavior.behavior_id,
@@ -560,7 +566,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     error = %error,
                     "failed to claim request; leaving it pending for retry"
                 );
-                return;
+                return Ok(());
             }
         }
 
@@ -587,7 +593,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 &request.request_id,
             )
             .await;
-            return;
+            return Ok(());
         }
 
         match crate::workspace::writer_request_already_sealed(self.node.as_ref(), &request).await {
@@ -600,12 +606,12 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         &request.request_id,
                     )
                     .await;
-                    return;
+                    return Ok(());
                 }
                 record_current_request_outcome("completed");
                 if let Err(error) = lifecycle.validate_owned_execution().await {
                     tracing::warn!(request_id = %request.request_id, %error, "stopping workspace completion after execution ownership loss");
-                    return;
+                    return Ok(());
                 }
                 if let Err(error) = crate::workspace::seal_on_writer_success(
                     self.node.as_ref(),
@@ -627,7 +633,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         &request.request_id,
                     )
                     .await;
-                    return;
+                    return Ok(());
                 }
                 if let Err(error) = terminalize_request(
                     &mut lifecycle,
@@ -642,7 +648,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     tracing::error!(request_id = %request.request_id, error = %error,
                         "failed to atomically terminalize completed request and response");
                 }
-                return;
+                return Ok(());
             }
             Ok(false) => {}
             Err(error) => {
@@ -659,7 +665,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     &request.request_id,
                 )
                 .await;
-                return;
+                return Ok(());
             }
         }
 
@@ -682,7 +688,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 record_current_request_outcome("completed");
                 if let Err(error) = lifecycle.validate_owned_execution().await {
                     tracing::warn!(request_id = %request.request_id, %error, "stopping workspace completion after execution ownership loss");
-                    return;
+                    return Ok(());
                 }
                 if let Err(error) = crate::workspace::seal_on_writer_success(
                     self.node.as_ref(),
@@ -716,11 +722,11 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                             );
                         }
                     }
-                    return;
+                    return Ok(());
                 }
                 if let Err(error) = lifecycle.validate_owned_execution().await {
                     tracing::warn!(request_id = %request.request_id, %error, "stopping workspace integration after execution ownership loss");
-                    return;
+                    return Ok(());
                 }
                 if let Err(error) = crate::workspace::integrate_on_integrator_success(
                     self.node.as_ref(),
@@ -744,7 +750,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         &request.request_id,
                     )
                     .await;
-                    return;
+                    return Ok(());
                 }
                 if let Err(error) = terminalize_request(
                     &mut lifecycle,
@@ -771,13 +777,13 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 .await
                 {
                     Ok(true) => {}
-                    Ok(false) => return,
+                    Ok(false) => return Ok(()),
                     Err(error) => {
                         record_current_request_outcome("terminalization_failed");
                         record_current_failure_class(&error);
                         tracing::error!(request_id = %request.request_id, error = %error,
                             "failed to atomically terminalize interrupted request and response");
-                        return;
+                        return Ok(());
                     }
                 }
                 if let Err(error) =
@@ -826,6 +832,17 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 }
             }
             Err(error) => {
+                if error.is::<ShutdownDrainFailure>() {
+                    record_current_request_outcome("shutdown_drain_failed");
+                    record_current_failure_class(&error);
+                    tracing::error!(
+                        behavior_id = %self.behavior.behavior_id,
+                        request_id = %request.request_id,
+                        error = %error,
+                        "graceful shutdown could not confirm provider output retention; leaving durable execution for recovery"
+                    );
+                    return Err(error);
+                }
                 record_current_request_outcome("failed");
                 record_current_failure_class(&error);
                 tracing::error!(
@@ -854,5 +871,6 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 }
             }
         }
+        Ok(())
     }
 }

@@ -269,7 +269,7 @@ fn ensure_not_reentrant_embedded_write(operation: WriteOperation) -> Result<()> 
 // Embedded DefraDB operations are local and normally complete in milliseconds.
 // Bound every phase that can retain the process-wide mutation gate so one
 // wedged transaction cannot stop response progress, recovery, and hydration.
-const EMBEDDED_TRANSACTION_STORAGE_STEP_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const EMBEDDED_TRANSACTION_STORAGE_STEP_TIMEOUT: Duration = Duration::from_secs(60);
 const EMBEDDED_TRANSACTION_CALLBACK_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const EMBEDDED_TRANSACTION_ROLLBACK_TIMEOUT: Duration = Duration::from_secs(15);
 
