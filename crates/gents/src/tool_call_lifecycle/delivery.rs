@@ -742,6 +742,26 @@ impl ToolCallLifecycle {
     /// authored source, owned by the physical row; the caused request's
     /// terminal later closes the ToolCall source and appends the notification.
     pub(crate) async fn publish_background_receipt(&mut self, text: &str) -> Result<bool> {
+        let binding = self.background_receipt_binding()?;
+        let receipt = text.to_owned();
+        ConfigAccess::transact_local_idempotent(
+            &self.node,
+            None,
+            IdempotentTransactionRetry::Standard,
+            "tool_call.publish_background_receipt",
+            move |txn| {
+                let binding = binding.clone();
+                let receipt = receipt.clone();
+                Box::pin(
+                    async move { publish_background_receipt_in_txn(txn, &binding, &receipt).await },
+                )
+            },
+        )
+        .await
+    }
+
+    /// The exact accepted invocation a background receipt answers.
+    pub(crate) fn background_receipt_binding(&self) -> Result<BackgroundReceiptBinding> {
         anyhow::ensure!(
             (self.state == ToolCallState::Running || self.state.is_terminal())
                 && self.await_mode == super::AwaitMode::Background
@@ -749,7 +769,7 @@ impl ToolCallLifecycle {
                 && !self.is_spawned_background(),
             "background receipt requires an accepted background session-message row"
         );
-        let binding = BackgroundReceiptBinding {
+        Ok(BackgroundReceiptBinding {
             tool_doc_id: self
                 .doc_id
                 .clone()
@@ -777,22 +797,7 @@ impl ToolCallLifecycle {
             call_id: self.call_id.clone(),
             tool_name: self.tool_name.clone(),
             message_sequence: self.message_sequence,
-        };
-        let receipt = text.to_owned();
-        ConfigAccess::transact_local_idempotent(
-            &self.node,
-            None,
-            IdempotentTransactionRetry::Standard,
-            "tool_call.publish_background_receipt",
-            move |txn| {
-                let binding = binding.clone();
-                let receipt = receipt.clone();
-                Box::pin(
-                    async move { publish_background_receipt_in_txn(txn, &binding, &receipt).await },
-                )
-            },
-        )
-        .await
+        })
     }
 
     /// Atomically close a direct tool's sole native-output stream, terminalize

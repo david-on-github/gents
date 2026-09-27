@@ -63,7 +63,7 @@ pub(crate) async fn settle_running_session_message_rows(
     let rows = crate::graphql::rows::<SessionMessageRow>(&response, "AgentToolCall")?;
     let mut report = SessionMessageSettlementReport::default();
     for row in rows {
-        match settle_row(node, local_did, &row).await {
+        match settle_row(node, &row).await {
             Ok(Some(Settled::Terminal)) => report.settled += 1,
             Ok(Some(Settled::TimedOut)) => report.timed_out += 1,
             Ok(None) => {}
@@ -77,54 +77,35 @@ pub(crate) async fn settle_running_session_message_rows(
     Ok(report)
 }
 
-/// Observer arm: a terminal AgentRequest caused by a local running
-/// session-message row settles that row with the request's terminal output.
-pub(super) async fn settle_row_caused_by(
+/// Observer arm: a request that reached a durable terminal may be the one a
+/// local running session-message row caused. Each running row names its
+/// caused request in its receipt, so the arm settles through those rows.
+pub(super) async fn settle_rows_after_request_update(
     node: &Arc<EmbeddedNode>,
     local_did: &str,
-    caused_request_doc_id: &str,
-) -> Result<bool> {
+    request_doc_id: &str,
+) -> Result<usize> {
     let query = format!(
         r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{
             _docID request_id lifecycle_state
         }} }}"#,
-        escape_graphql_string(caused_request_doc_id)
+        escape_graphql_string(request_doc_id)
     );
     let response = crate::graphql::graphql_with_transaction_retry(
         node.as_ref(),
         &query,
-        "load caused request for session-message settlement",
+        "load updated request for session-message settlement",
     )
     .await?;
-    let Some(request) = crate::graphql::first_row::<AgentRequestRow>(&response, "AgentRequest")?
-    else {
-        return Ok(false);
-    };
-    if !request
-        .lifecycle_state
-        .is_some_and(RequestLifecycleState::is_terminal)
-    {
-        return Ok(false);
+    let terminal = crate::graphql::first_row::<AgentRequestRow>(&response, "AgentRequest")?
+        .and_then(|request| request.lifecycle_state)
+        .is_some_and(RequestLifecycleState::is_terminal);
+    if !terminal {
+        return Ok(0);
     }
-    let Some(tool_doc_id) = request.request_id.strip_prefix("session-message:") else {
-        return Ok(false);
-    };
-    let query = format!(
-        r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }}, {} }}, limit: 1) {{ {SESSION_MESSAGE_ROW_FIELDS} }} }}"#,
-        escape_graphql_string(tool_doc_id),
-        running_session_message_filter(local_did)
-    );
-    let response = crate::graphql::graphql_with_transaction_retry(
-        node.as_ref(),
-        &query,
-        "load session-message row named by a caused request",
-    )
-    .await?;
-    let Some(row) = crate::graphql::first_row::<SessionMessageRow>(&response, "AgentToolCall")?
-    else {
-        return Ok(false);
-    };
-    Ok(settle_row(node, local_did, &row).await?.is_some())
+    Ok(settle_running_session_message_rows(node, local_did)
+        .await?
+        .total())
 }
 
 enum Settled {
@@ -132,11 +113,7 @@ enum Settled {
     TimedOut,
 }
 
-async fn settle_row(
-    node: &Arc<EmbeddedNode>,
-    local_did: &str,
-    row: &SessionMessageRow,
-) -> Result<Option<Settled>> {
+async fn settle_row(node: &Arc<EmbeddedNode>, row: &SessionMessageRow) -> Result<Option<Settled>> {
     let Some(mut lifecycle) = ToolCallLifecycle::load_by_doc_id(
         node.clone(),
         &row.doc_id,
@@ -168,7 +145,10 @@ async fn settle_row(
         .await?;
         return Ok(Some(Settled::TimedOut));
     }
-    let Some(caused_doc_id) = caused_request_doc_id(node, local_did, row).await? else {
+    let Some(caused_doc_id) = crate::session_message::load_caused_request(node, &lifecycle)
+        .await?
+        .and_then(|caused| caused.doc_id)
+    else {
         return Ok(None);
     };
     let Some(terminal) =
@@ -192,20 +172,4 @@ async fn settle_row(
     )
     .await?;
     Ok(Some(Settled::Terminal))
-}
-
-async fn caused_request_doc_id(
-    node: &Arc<EmbeddedNode>,
-    local_did: &str,
-    row: &SessionMessageRow,
-) -> Result<Option<String>> {
-    Ok(crate::session_message::load_caused_request(
-        node.as_ref(),
-        &row.doc_id,
-        &row.tool_call_id,
-        row.request_doc_id.as_deref(),
-        local_did,
-    )
-    .await?
-    .and_then(|caused| caused.doc_id))
 }

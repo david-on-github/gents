@@ -227,19 +227,6 @@ impl DefraSessionHook {
                 invalid_tool_arguments_payload(tool_name, "/task", message)
             ),
         };
-        let mut receipt = json!({
-            "ok": true,
-            "session_id": plan.session_id(),
-            "request_id": plan.request_id(),
-            "tool_call_id": lifecycle.tool_call_id(),
-            "await_mode": "background",
-            "status": "running"
-        });
-        if !create {
-            receipt["delivery"] = json!(plan.delivery().as_str());
-        }
-        let receipt = json_string(receipt);
-
         // The row outlives the calling request; its own deadline is only the
         // background backstop. The caused request settles it first.
         lifecycle.set_deadline_at(
@@ -247,25 +234,25 @@ impl DefraSessionHook {
                 + chrono::Duration::seconds(crate::toolset::BACKGROUND_COMMAND_TIMEOUT_SECS as i64),
         );
         lifecycle.start_running().await?;
-        lifecycle.publish_background_receipt(&receipt).await?;
-        if let Err(error) = crate::session_message::commit(&self.node, &cause, plan).await {
-            let terminal = crate::tool_call_lifecycle::CausedRequestTerminal::Failed {
-                reason: format!("the message could not be delivered: {error:#}"),
+        let receipt =
+            match crate::session_message::commit(&self.node, &cause, &mut lifecycle, plan, !create)
+                .await
+            {
+                Ok(receipt) => serde_json::to_string(&receipt)?,
+                Err(error) => {
+                    // Nothing was delivered, so the invocation reply is the failure.
+                    let payload = service_unavailable_payload(
+                        tool_name,
+                        "/",
+                        format!("the message could not be delivered: {error:#}"),
+                        true,
+                    );
+                    lifecycle
+                        .fail_owned(&payload, FailureClass::ServiceUnavailable, None)
+                        .await?;
+                    return Ok(self.skip_tool_result(tool_name, payload));
+                }
             };
-            if lifecycle.settle_session_message(&terminal).await? {
-                crate::background_completion::append_background_tool_completion(
-                    &self.node,
-                    &session_id,
-                    &request_id,
-                    lifecycle.doc_id().unwrap_or_default(),
-                    tool_name,
-                    terminal.notification_status(),
-                    terminal.output(),
-                    terminal.completion_reason(),
-                )
-                .await?;
-            }
-        }
         Ok(self.skip_tool_result(tool_name, receipt))
     }
 }

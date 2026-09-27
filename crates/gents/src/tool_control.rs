@@ -83,7 +83,7 @@ pub async fn cancel_background_tool_call(
         // A session-message row has no process: stopping it interrupts only
         // the one request it caused, and the row settles from that terminal.
         let interrupted =
-            crate::session_message::interrupt_caused_request(node.as_ref(), &lifecycle).await?;
+            crate::session_message::interrupt_caused_request(&node, &lifecycle).await?;
         return Ok(match interrupted {
             Some(_) => CancelBackgroundToolCallOutcome::Cancelled {
                 live_execution_cancelled: false,

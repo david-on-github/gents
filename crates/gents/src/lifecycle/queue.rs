@@ -39,7 +39,8 @@ pub(crate) use draining::drain_automated_wakeups_returning_ids;
 pub(crate) use draining::drain_subagent_owned_queue;
 pub use enqueue::enqueue_local_steering_request;
 pub(crate) use enqueue::{
-    enqueue_admitted_steering_request, enqueue_steering_request, SteeringAdmission,
+    append_prepared_steering_in_txn, enqueue_admitted_steering_request, enqueue_steering_request,
+    prepare_steering_append, PreparedSteering, SteeringAdmission,
 };
 pub use gents_protocol::request_input::{
     GoalContinuationInput, QueuePolicy, QueueSource, RequestInput, RequestQueue,

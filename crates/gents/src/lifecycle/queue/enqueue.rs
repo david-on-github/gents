@@ -37,7 +37,7 @@ pub(crate) async fn enqueue_steering_request(
     content: &str,
     input: RequestInput,
 ) -> Result<EnqueuedAgentRequest> {
-    enqueue_admitted_steering_request(node, parent, content, input, None, None).await
+    enqueue_admitted_steering_request(node, parent, content, input, None).await
 }
 
 pub(crate) async fn enqueue_admitted_steering_request(
@@ -46,8 +46,39 @@ pub(crate) async fn enqueue_admitted_steering_request(
     content: &str,
     input: RequestInput,
     admission: Option<&dyn SteeringAdmission>,
-    request_id: Option<&str>,
 ) -> Result<EnqueuedAgentRequest> {
+    let prepared = prepare_steering_append(parent, content, input).await?;
+    let prepared = &prepared;
+    crate::config_client::ConfigAccess::transact_local(
+        node,
+        None,
+        "lifecycle.enqueue_steering",
+        move |txn| {
+            Box::pin(async move {
+                if let Some(admission) = admission {
+                    admission.admit(txn).await?;
+                }
+                append_prepared_steering_in_txn(txn, parent, prepared).await
+            })
+        },
+    )
+    .await
+}
+
+/// A signed steering append beneath one exact committed parent, ready to be
+/// written inside a caller's transaction.
+pub(crate) struct PreparedSteering {
+    request_id: String,
+    mutation: String,
+}
+
+/// Build and sign one unkeyed user- or steering-sourced append. A user
+/// append is external input; a steering append is agent-authored.
+pub(crate) async fn prepare_steering_append(
+    parent: &AgentRequest,
+    content: &str,
+    input: RequestInput,
+) -> Result<PreparedSteering> {
     let queue = input
         .queue
         .as_ref()
@@ -64,11 +95,9 @@ pub(crate) async fn enqueue_admitted_steering_request(
     );
 
     let behavior_id = parent_behavior_id(parent)?;
-    let request_id = request_id
-        .map(str::to_owned)
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let request_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let request_mutation = session_request_create_mutation(
+    let mutation = session_request_create_mutation(
         parent,
         &behavior_id,
         content,
@@ -79,23 +108,16 @@ pub(crate) async fn enqueue_admitted_steering_request(
         None,
     )
     .await?;
-    let request_id = &request_id;
-    let request_mutation = &request_mutation;
+    Ok(PreparedSteering {
+        request_id,
+        mutation,
+    })
+}
 
-    let enqueued = crate::config_client::ConfigAccess::transact_local(
-        node,
-        None,
-        "lifecycle.enqueue_steering",
-        move |txn| {
-            Box::pin(async move {
-                if let Some(admission) = admission {
-                    admission.admit(txn).await?;
-                }
-                steering_transaction_attempt(txn, parent, request_id, request_mutation).await
-            })
-        },
-    )
-    .await?;
-
-    Ok(enqueued)
+pub(crate) async fn append_prepared_steering_in_txn(
+    txn: &ConfigApplyTxn<'_>,
+    parent: &AgentRequest,
+    prepared: &PreparedSteering,
+) -> Result<EnqueuedAgentRequest> {
+    steering_transaction_attempt(txn, parent, &prepared.request_id, &prepared.mutation).await
 }

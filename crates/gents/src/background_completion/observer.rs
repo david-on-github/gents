@@ -80,7 +80,7 @@ impl BackgroundCompletionObserver {
                 continue;
             }
 
-            if let Err(error) = super::session_message::settle_row_caused_by(
+            if let Err(error) = super::session_message::settle_rows_after_request_update(
                 &self.node,
                 &self.local_did,
                 &update.doc_id,
