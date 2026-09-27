@@ -618,37 +618,46 @@ pub fn next_request_hop(cause: RequestHopCause, own: u32) -> u32 {
     }
 }
 
-/// Lean `CausalHop` session current hop: the hop of the session's latest
-/// normal request (by `created_at`, then `request_id`), `0` for an empty
-/// session. Every same-session continuation copies it and every cross-session
-/// cause climbs past it. `before`, when given, bounds the latest request to
-/// those ordered before it, so a replay recomputes the hop its first
-/// publication observed.
+/// Lean `CausalHop.sessionCurrentHop`: the hop of the session's latest normal
+/// request, `0` for an empty session. `created_at` has whole-second precision,
+/// so several requests can share the latest second with no order between
+/// them; the current hop is the highest hop among them, which errs toward
+/// refusing a continuation, never toward running one below a refusal. Every
+/// same-session continuation copies it and every cross-session cause climbs
+/// past it. `before`, when given, keeps only requests ordered before it (time,
+/// then request id), so a replay recomputes the hop its first publication
+/// observed.
 pub(crate) fn session_current_hop(
     rows: &[gents_protocol::row::AgentRequestRow],
     before: Option<&gents_protocol::row::AgentRequestRow>,
 ) -> u32 {
-    // The canonical request order of `session::load_latest_request_in_txn`:
-    // parsed creation time, then logical request id.
-    let key = |row: &gents_protocol::row::AgentRequestRow| {
-        (
-            row.created_at
-                .as_deref()
-                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()),
-            row.request_id.clone(),
-        )
+    let at = |row: &gents_protocol::row::AgentRequestRow| {
+        row.created_at
+            .as_deref()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
     };
-    let bound = before.map(key);
-    rows.iter()
+    let bound = before.map(|row| (at(row), row.request_id.clone()));
+    let rows = rows
+        .iter()
         .filter(|row| {
             row.purpose.is_none_or(|purpose| {
                 purpose == gents_protocol::request_admission::RequestPurpose::Normal
             })
         })
-        .filter(|row| bound.as_ref().is_none_or(|bound| key(row) < *bound))
-        .max_by_key(|row| key(row))
-        .and_then(|row| row.subagent_depth)
-        .and_then(|hop| u32::try_from(hop).ok())
+        .filter(|row| {
+            bound
+                .as_ref()
+                .is_none_or(|bound| (at(row), row.request_id.clone()) < *bound)
+        })
+        .collect::<Vec<_>>();
+    let Some(latest) = rows.iter().map(|row| at(row)).max() else {
+        return 0;
+    };
+    rows.iter()
+        .filter(|row| at(row) == latest)
+        .filter_map(|row| row.subagent_depth)
+        .filter_map(|hop| u32::try_from(hop).ok())
+        .max()
         .unwrap_or(0)
 }
 
@@ -1139,6 +1148,47 @@ pub(super) async fn apply_request_session_projection(
     session::advance_session_request_observation_in_txn(txn, incoming, &request.content, now)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod session_hop_tests {
+    use super::session_current_hop;
+
+    fn row(request_id: &str, created_at: &str, hop: i64) -> gents_protocol::row::AgentRequestRow {
+        serde_json::from_value(serde_json::json!({
+            "request_id": request_id,
+            "purpose": "normal",
+            "created_at": created_at,
+            "subagent_depth": hop,
+        }))
+        .unwrap()
+    }
+
+    /// Lean `CausalHop.same_second_tie_takes_the_highest_hop`: a refused
+    /// over-bound wake and a native wake written in the same second read as
+    /// the refused hop, whatever their request ids.
+    #[test]
+    fn a_same_second_tie_takes_the_highest_hop() {
+        let rows = [
+            row("parent", "2026-09-27T05:12:04Z", 0),
+            row("a-refused-wake", "2026-09-27T05:12:05Z", 9),
+            row("z-native-wake", "2026-09-27T05:12:05Z", 3),
+        ];
+        assert_eq!(session_current_hop(&rows, None), 9);
+        let reversed = [
+            row("parent", "2026-09-27T05:12:04Z", 0),
+            row("z-refused-wake", "2026-09-27T05:12:05Z", 9),
+            row("a-native-wake", "2026-09-27T05:12:05Z", 3),
+        ];
+        assert_eq!(session_current_hop(&reversed, None), 9);
+        // An earlier second never counts, however high its hop.
+        let later_root = [
+            row("refused-wake", "2026-09-27T05:12:04Z", 9),
+            row("user-root", "2026-09-27T05:12:05Z", 0),
+        ];
+        assert_eq!(session_current_hop(&later_root, None), 0);
+        assert_eq!(session_current_hop(&[], None), 0);
+    }
 }
 
 #[cfg(test)]
