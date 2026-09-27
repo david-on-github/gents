@@ -1555,6 +1555,11 @@ mod tests {
         .await;
         assert_eq!(provider_calls, 0, "{row}");
         assert_eq!(row["lifecycle_state"], "failed", "{row}");
+        let reason = row["failure_reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("prepare"),
+            "an unrelated setup failure must not satisfy this regression: {reason:?}"
+        );
         assert!(
             bindings.iter().all(|binding| !binding.is_active()),
             "a terminal request must not keep the binding it was given: {row} {bindings:?}"

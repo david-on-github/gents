@@ -76,8 +76,6 @@ async fn a_hook_past_its_timeout_is_a_hook_error() {
     assert!(!attempt.result.succeeded());
 }
 
-/// Both arms observe the host through the command itself: a launched command
-/// leaves the marker file, so its absence is the evidence nothing ran.
 async fn unrepresentable_deadline_case(timeout_secs: i64) {
     let directory = tempfile::tempdir().expect("hook marker directory");
     let marker = directory.path().join("launched");
