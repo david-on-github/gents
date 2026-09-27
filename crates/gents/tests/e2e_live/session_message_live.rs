@@ -175,7 +175,7 @@ async fn live_local_create_session() -> Result<()> {
     )
     .await;
 
-    let row = wait_for_background_tool_call(
+    wait_for_background_tool_call(
         &db.node,
         request_id,
         session_id,
@@ -194,11 +194,19 @@ async fn live_local_create_session() -> Result<()> {
         caused.caused_by_parent_request_id.as_deref(),
         Some(request_id)
     );
-    assert_eq!(
-        caused.caused_by_parent_tool_call_id.as_deref(),
-        Some(row.tool_call_id.as_str()),
-        "the caused request must name the exact agent_new call"
-    );
+    // The model may start more than one session; follow the call this
+    // caused request names.
+    let row = fetch_tool_call(
+        &db.node,
+        request_id,
+        session_id,
+        caused
+            .caused_by_parent_tool_call_id
+            .as_deref()
+            .expect("a caused request names its agent_new call"),
+    )
+    .await
+    .expect("the caused request must name an agent_new call of the orchestrator request");
     assert_eq!(caused.behavior_id, RESEARCHER_BEHAVIOR_ID);
     assert_eq!(caused.agent_did, agent_did);
     assert_eq!(caused.requester_did.as_deref(), Some(agent_did.as_str()));
@@ -715,6 +723,13 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         "completed"
     );
 
+    let managed_state = fetch_request_lifecycle(db.node.as_ref(), &managed_caused.request_id)
+        .await
+        .expect("managed caused lifecycle");
+    assert!(
+        !is_terminal(&managed_state),
+        "the started session finished ({managed_state}) before it could be steered: the live model did not run the blocking command"
+    );
     let managed_message_request_id = "req-live-managed-background-agent-message";
     let managed_message_prompt = format!(
         "MANAGE_BACKGROUND_AGENT_MESSAGE: Call agent_message exactly once now with session_id {:?} and message \"STEERING_NOTE\". Do not call any other tool.",
