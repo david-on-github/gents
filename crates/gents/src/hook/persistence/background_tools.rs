@@ -979,14 +979,8 @@ impl DefraSessionHook {
         }
 
         if lifecycle.is_session_message() {
-            let interrupted = crate::session_message::interrupt_caused_request(
-                &self.node,
-                lifecycle
-                    .doc_id()
-                    .context("session-message row lacks physical identity")?,
-                &self.agent_did,
-            )
-            .await?;
+            let interrupted =
+                crate::session_message::interrupt_caused_request(&self.node, &lifecycle).await?;
             let result = json_string(json!({
                 "ok": interrupted.is_some(),
                 "tool_call_id": background_tool_call_id,

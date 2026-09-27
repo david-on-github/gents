@@ -37,7 +37,7 @@ pub(crate) async fn enqueue_steering_request(
     content: &str,
     input: RequestInput,
 ) -> Result<EnqueuedAgentRequest> {
-    enqueue_admitted_steering_request(node, parent, content, input, None).await
+    enqueue_admitted_steering_request(node, parent, content, input, None, None).await
 }
 
 pub(crate) async fn enqueue_admitted_steering_request(
@@ -46,6 +46,7 @@ pub(crate) async fn enqueue_admitted_steering_request(
     content: &str,
     input: RequestInput,
     admission: Option<&dyn SteeringAdmission>,
+    request_id: Option<&str>,
 ) -> Result<EnqueuedAgentRequest> {
     let queue = input
         .queue
@@ -63,7 +64,9 @@ pub(crate) async fn enqueue_admitted_steering_request(
     );
 
     let behavior_id = parent_behavior_id(parent)?;
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = request_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let request_mutation = session_request_create_mutation(
         parent,
@@ -95,42 +98,4 @@ pub(crate) async fn enqueue_admitted_steering_request(
     .await?;
 
     Ok(enqueued)
-}
-
-/// Append a `send_message` request to a busy session. The caller signed it
-/// through the session-message writer as a user-origin append queued after
-/// the session's active request; the append shares the steering transaction.
-pub(crate) async fn enqueue_session_message_steering(
-    node: &EmbeddedNode,
-    active: &AgentRequest,
-    create: &gents_protocol::request_admission::AgentRequestCreate,
-) -> Result<EnqueuedAgentRequest> {
-    let queue = create
-        .input
-        .queue
-        .as_ref()
-        .context("session-message steering requires queue input")?;
-    anyhow::ensure!(
-        queue.source == QueueSource::User
-            && queue.policy == QueuePolicy::Append
-            && queue.key.is_none()
-            && queue.queued_after_request_id.as_deref() == Some(active.request_id.as_str())
-            && create.session_id == active.session_id
-            && create.agent_did == active.agent_did,
-        "session-message steering must append after the session's active request"
-    );
-    let request_mutation = create.graphql_mutation().map_err(anyhow::Error::msg)?;
-    let request_mutation = &request_mutation;
-    let request_id = create.request_id.as_str();
-    crate::config_client::ConfigAccess::transact_local(
-        node,
-        None,
-        "lifecycle.enqueue_session_message_steering",
-        move |txn| {
-            Box::pin(async move {
-                steering_transaction_attempt(txn, active, request_id, request_mutation).await
-            })
-        },
-    )
-    .await
 }

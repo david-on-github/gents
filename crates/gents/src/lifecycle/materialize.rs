@@ -652,7 +652,7 @@ pub(crate) async fn build_session_message_request(
     target: &SessionMessageTarget,
     content: &str,
     title: Option<&str>,
-    queue: Option<gents_protocol::request_input::RequestQueue>,
+    request_id: &str,
     retry_key: Option<String>,
 ) -> Result<gents_protocol::request_admission::AgentRequestCreate> {
     use gents_protocol::request_admission::{AgentRequestAdmissionRecord, RequestPurpose};
@@ -671,7 +671,7 @@ pub(crate) async fn build_session_message_request(
     };
     let identity = RequestIdentity {
         requester_did: Some(cause.caller_agent_did.clone()),
-        request_id: uuid::Uuid::new_v4().to_string(),
+        request_id: request_id.to_owned(),
         agent_did: target.agent_did.clone(),
         behavior_id: target.behavior_id.clone(),
         session_id: target.session_id.clone(),
@@ -688,7 +688,6 @@ pub(crate) async fn build_session_message_request(
                 text: text.to_owned(),
                 source: gents_protocol::session::SessionTitleSource::Task,
             }),
-        queue,
         ..Default::default()
     };
     let spec = RequestSpec {

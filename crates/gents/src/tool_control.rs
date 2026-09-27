@@ -82,13 +82,8 @@ pub async fn cancel_background_tool_call(
     if lifecycle.is_session_message() {
         // A session-message row has no process: stopping it interrupts only
         // the one request it caused, and the row settles from that terminal.
-        let doc_id = lifecycle
-            .doc_id()
-            .ok_or_else(|| anyhow::anyhow!("session-message row lacks physical identity"))?
-            .to_owned();
         let interrupted =
-            crate::session_message::interrupt_caused_request(node.as_ref(), &doc_id, agent_did)
-                .await?;
+            crate::session_message::interrupt_caused_request(node.as_ref(), &lifecycle).await?;
         return Ok(match interrupted {
             Some(_) => CancelBackgroundToolCallOutcome::Cancelled {
                 live_execution_cancelled: false,

@@ -77,9 +77,8 @@ pub(crate) async fn settle_running_session_message_rows(
     Ok(report)
 }
 
-/// Observer arm: a terminal AgentRequest whose
-/// `caused_by_parent_tool_call_doc_id` names a local running session-message
-/// row settles that row with the request's terminal output.
+/// Observer arm: a terminal AgentRequest caused by a local running
+/// session-message row settles that row with the request's terminal output.
 pub(super) async fn settle_row_caused_by(
     node: &Arc<EmbeddedNode>,
     local_did: &str,
@@ -87,7 +86,7 @@ pub(super) async fn settle_row_caused_by(
 ) -> Result<bool> {
     let query = format!(
         r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{
-            _docID request_id lifecycle_state caused_by_parent_tool_call_doc_id
+            _docID request_id lifecycle_state
         }} }}"#,
         escape_graphql_string(caused_request_doc_id)
     );
@@ -107,11 +106,7 @@ pub(super) async fn settle_row_caused_by(
     {
         return Ok(false);
     }
-    let Some(tool_doc_id) = request
-        .caused_by_parent_tool_call_doc_id
-        .as_deref()
-        .filter(|id| !id.trim().is_empty())
-    else {
+    let Some(tool_doc_id) = request.request_id.strip_prefix("session-message:") else {
         return Ok(false);
     };
     let query = format!(
@@ -199,46 +194,18 @@ async fn settle_row(
     Ok(Some(Settled::Terminal))
 }
 
-/// The one request this row caused. Its lineage is signed by this principal
-/// as requester, so a request naming this row under another requester or
-/// another caller request is not this row's result.
 async fn caused_request_doc_id(
     node: &Arc<EmbeddedNode>,
     local_did: &str,
     row: &SessionMessageRow,
 ) -> Result<Option<String>> {
-    let query = format!(
-        r#"{{ AgentRequest(filter: {{ caused_by_parent_tool_call_doc_id: {{ _eq: "{}" }} }}, limit: 2) {{
-            _docID request_id requester_did caused_by_parent_request_doc_id caused_by_parent_tool_call_id
-        }} }}"#,
-        escape_graphql_string(&row.doc_id)
-    );
-    let response = crate::graphql::graphql_with_transaction_retry(
+    Ok(crate::session_message::load_caused_request(
         node.as_ref(),
-        &query,
-        "load the request a session-message row caused",
+        &row.doc_id,
+        &row.tool_call_id,
+        row.request_doc_id.as_deref(),
+        local_did,
     )
-    .await?;
-    let rows = crate::graphql::rows::<AgentRequestRow>(&response, "AgentRequest")?;
-    let [caused] = rows.as_slice() else {
-        if rows.len() > 1 {
-            tracing::warn!(
-                tool_call_doc_id = %row.doc_id,
-                "session-message row names more than one caused request; left running"
-            );
-        }
-        return Ok(None);
-    };
-    let linked = caused.requester_did.as_deref() == Some(local_did)
-        && caused.caused_by_parent_request_doc_id.as_deref() == row.request_doc_id.as_deref()
-        && caused.caused_by_parent_tool_call_id.as_deref() == Some(row.tool_call_id.as_str());
-    if !linked {
-        tracing::warn!(
-            tool_call_doc_id = %row.doc_id,
-            caused_request_id = %caused.request_id,
-            "caused request lineage does not match its session-message row; left running"
-        );
-        return Ok(None);
-    }
-    Ok(caused.doc_id.clone())
+    .await?
+    .and_then(|caused| caused.doc_id))
 }
