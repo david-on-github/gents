@@ -118,6 +118,20 @@ def transitionCases : List TransitionCase :=
           [doc "trigger-ready:doc-a"]
           [doc "trigger-ready:doc-a"]
     }
+  ,
+    -- The Watcher performs `release` when it delivers a request that overtook
+    -- this delivered one at its session head (`Watcher.releasedBy`).
+    { name   := "release_returns_overtaken_doc"
+    , pre    := mkWorld [doc "goal-cont-3"] [] [doc "goal-cont-3"] [doc "goal-cont-3"]
+    , action := .release (doc "goal-cont-3")
+    , post   := mkWorld [doc "goal-cont-3"] [] [] [doc "goal-cont-3"]
+    }
+  ,
+    { name   := "release_keeps_other_marks"
+    , pre    := mkWorld [doc "a", doc "b"] [] [doc "a", doc "b"] [doc "b", doc "a"]
+    , action := .release (doc "a")
+    , post   := mkWorld [doc "a", doc "b"] [] [doc "b"] [doc "b", doc "a"]
+    }
   ]
 
 def transitionCaseCount : Nat := transitionCases.length
@@ -223,6 +237,7 @@ def actionJson : Action → String
       "{\"kind\":\"deliver_from_queue\",\"doc\":" ++ docIdJson d ++ "}"
   | .rescanTick => "{\"kind\":\"rescan_tick\"}"
   | .handle d => "{\"kind\":\"handle\",\"doc\":" ++ docIdJson d ++ "}"
+  | .release d => "{\"kind\":\"release\",\"doc\":" ++ docIdJson d ++ "}"
 
 def transitionCaseJson (c : TransitionCase) : String :=
   "{"

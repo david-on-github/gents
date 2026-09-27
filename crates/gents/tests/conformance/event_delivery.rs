@@ -63,6 +63,18 @@ pub(super) async fn event_delivery_transition_cases_match_contract() {
                 let emitted = runtime.drive_handle(doc).await.unwrap();
                 assert_eq!(case.post.handled, vec![emitted], "{}", case.name);
             }
+            LeanEventDeliveryAction::Release { doc } => {
+                let released = case
+                    .pre
+                    .processed_set
+                    .iter()
+                    .filter(|marked| !case.post.processed_set.contains(*marked))
+                    .cloned()
+                    .collect::<Vec<_>>();
+                assert_eq!(released, vec![doc.clone()], "{}", case.name);
+                let emitted = runtime.drive_release(doc).await.unwrap();
+                assert_eq!(emitted, released, "{}", case.name);
+            }
             other => panic!("{} needs an owner adapter for {other:?}", case.name),
         }
         observed += 1;
@@ -71,7 +83,7 @@ pub(super) async fn event_delivery_transition_cases_match_contract() {
     let mut expected = UNOBSERVED.to_vec();
     expected.sort_unstable();
     assert_eq!(skipped, expected);
-    assert_eq!(observed, 5);
+    assert_eq!(observed, 7);
     assert_eq!(siblings, 1);
 }
 
@@ -589,6 +601,74 @@ impl ProductionEventDeliveryDriver {
                 Ok(doc.to_string())
             }
         }
+    }
+
+    /// Drive the Watcher's release through its owner: a same-second request
+    /// that sorts ahead of `doc` in `doc`'s session is delivered as the new
+    /// head, then terminalizes. Only released marks may deliver again before
+    /// the cooldown expires.
+    async fn drive_release(&mut self, doc: &str) -> Result<Vec<String>, String> {
+        let ProductionRuntime::Watcher { watcher } = &mut self.runtime else {
+            return Err(format!("{} never releases a delivery", self.source.name));
+        };
+        let request_id = escape_graphql_string(doc);
+        let response = self
+            .db
+            .node
+            .execute(&format!(
+                r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{request_id}" }} }}, limit: 1) {{
+                    session_id created_at }} }}"#
+            ))
+            .await;
+        let row = response
+            .data
+            .as_ref()
+            .and_then(|data| data["AgentRequest"].as_array())
+            .and_then(|rows| rows.first())
+            .cloned()
+            .ok_or_else(|| format!("release target {doc:?} has no row: {:?}", response.errors))?;
+        let session = row["session_id"].as_str().unwrap_or_default().to_owned();
+        let created_at = row["created_at"].as_str().unwrap_or_default().to_owned();
+        let overtaker = format!("0-overtakes-{doc}");
+        let overtaker_doc_id = create_request(
+            self.db.node.as_ref(),
+            &overtaker,
+            &session,
+            "pending",
+            &created_at,
+        )
+        .await;
+        let head = poll_watcher(watcher).await?;
+        if head.request_id != overtaker {
+            return Err(format!(
+                "watcher delivered {:?}, expected the overtaking head {overtaker:?}",
+                head.request_id
+            ));
+        }
+        let overtaker_doc_id = escape_graphql_string(&overtaker_doc_id);
+        let terminal = self
+            .db
+            .node
+            .execute(&format!(
+                r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{overtaker_doc_id}" }} }},
+                    input: {{ lifecycle_state: "completed" }}) {{ _docID }} }}"#
+            ))
+            .await;
+        if terminal.has_errors() {
+            return Err(format!("terminalize overtaker: {:?}", terminal.errors));
+        }
+        let mut emitted = Vec::new();
+        // Every delivery scans immediately; a request still cooling down never
+        // appears, so a quiet short window is its non-delivery observation.
+        while let Ok(next) =
+            tokio::time::timeout(Duration::from_millis(500), watcher.next_request()).await
+        {
+            let next = next
+                .ok_or_else(|| "watcher exhausted".to_string())?
+                .map_err(|err| format!("watcher returned error: {err}"))?;
+            emitted.push(next.request_id);
+        }
+        Ok(emitted)
     }
 
     fn production_doc_id(&self, doc: &str) -> Result<String, String> {

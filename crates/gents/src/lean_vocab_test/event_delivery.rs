@@ -18,6 +18,7 @@ pub(crate) enum LeanEventDeliveryAction {
     DeliverFromQueue { doc: String },
     RescanTick,
     Handle { doc: String },
+    Release { doc: String },
 }
 
 #[derive(Debug, Deserialize, Clone)]
