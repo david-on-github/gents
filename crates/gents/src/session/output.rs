@@ -98,6 +98,22 @@ struct ReconstructedScopedMessage {
     segments: Vec<super::canonical_rows::OutputSegmentRow>,
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    static REQUEST_OUTPUT_SCANS: std::sync::Arc<std::sync::atomic::AtomicUsize>;
+}
+
+/// Run `future`, counting the request-wide output segment scans canonical
+/// reconstruction issues on this task.
+#[cfg(test)]
+pub(crate) async fn count_request_output_scans<F: std::future::Future>(
+    future: F,
+) -> (F::Output, usize) {
+    let scans = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let output = REQUEST_OUTPUT_SCANS.scope(scans.clone(), future).await;
+    (output, scans.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 #[derive(Clone, Copy)]
 enum ReadAccess<'a, 'txn> {
     Node(&'a EmbeddedNode),
@@ -156,15 +172,57 @@ pub(crate) async fn load_canonical_message_in_txn(
     gents_protocol::output::TranscriptMessage,
     gents_protocol::message::Message,
 )> {
-    let mut cache = ReadCache::default();
-    reconstruct_scoped_message(
-        ReadAccess::Txn(txn),
-        header_doc_id,
-        agent_did,
-        requester_did,
-        &mut cache,
-    )
-    .await
+    TxnCanonicalReader::new(txn, agent_did, requester_did)
+        .load_message(header_doc_id)
+        .await
+}
+
+/// Exact reconstruction of many headers of one scope in one authoritative
+/// transaction. Each request-wide segment scan and resolved header is read
+/// once per reader: terminalization holds the process-wide write gate while
+/// it validates every accepted tool reply, and a fresh read per header scans
+/// the request's whole output once per tool, starving lease renewal.
+///
+/// Its cache is a snapshot: once the transaction creates an `AgentMessage` or
+/// `AgentOutputSegment`, the reader must not be used again. A caller that
+/// publishes canonical output constructs a new reader after publishing.
+pub(crate) struct TxnCanonicalReader<'a, 'txn> {
+    txn: &'a ConfigApplyTxn<'txn>,
+    agent_did: &'a str,
+    requester_did: Option<&'a str>,
+    cache: ReadCache,
+}
+
+impl<'a, 'txn> TxnCanonicalReader<'a, 'txn> {
+    pub(crate) fn new(
+        txn: &'a ConfigApplyTxn<'txn>,
+        agent_did: &'a str,
+        requester_did: Option<&'a str>,
+    ) -> Self {
+        Self {
+            txn,
+            agent_did,
+            requester_did,
+            cache: ReadCache::default(),
+        }
+    }
+
+    pub(crate) async fn load_message(
+        &mut self,
+        header_doc_id: &str,
+    ) -> Result<(
+        gents_protocol::output::TranscriptMessage,
+        gents_protocol::message::Message,
+    )> {
+        reconstruct_scoped_message(
+            ReadAccess::Txn(self.txn),
+            header_doc_id,
+            self.agent_did,
+            self.requester_did,
+            &mut self.cache,
+        )
+        .await
+    }
 }
 
 /// Resolve an exact authorized canonical header through either the local or
@@ -546,6 +604,9 @@ async fn load_referenced_segments(
             crate::graphql::escape_graphql_string(&request_doc_id),
             crate::graphql::escape_graphql_string(agent_did)
         );
+        #[cfg(test)]
+        let _ = REQUEST_OUTPUT_SCANS
+            .try_with(|scans| scans.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let response = access.query(&query, "load_output_source").await?;
         let rows = rows_value(&response, "AgentOutputSegment")?
             .iter()

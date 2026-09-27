@@ -67,7 +67,7 @@ pub(in crate::lifecycle) async fn request_segments(
 }
 
 async fn validate_selection(
-    txn: &ConfigApplyTxn<'_>,
+    reader: &mut session::TxnCanonicalReader<'_, '_>,
     headers: &[TranscriptMessageRow],
     row: &AgentRequestRow,
     selection: &TerminalOutput,
@@ -87,18 +87,10 @@ async fn validate_selection(
                     | MessagePublication::RequestRecovery { .. }
             )
     };
-    let agent = row.agent_did.as_deref().context("missing request agent")?;
     match selection {
         TerminalOutput::NoMessage => {
             for header in headers.iter().filter(eligible) {
-                match session::load_canonical_message_in_txn(
-                    txn,
-                    &header.doc_id,
-                    agent,
-                    row.requester_did.as_deref(),
-                )
-                .await
-                {
+                match reader.load_message(&header.doc_id).await {
                     Ok(_) => return Err(RecoverySelectionRejected.into()),
                     Err(error)
                         if error
@@ -117,13 +109,7 @@ async fn validate_selection(
             let [header] = matching.as_slice() else {
                 return Err(RecoverySelectionRejected.into());
             };
-            session::load_canonical_message_in_txn(
-                txn,
-                &header.doc_id,
-                agent,
-                row.requester_did.as_deref(),
-            )
-            .await?;
+            reader.load_message(&header.doc_id).await?;
         }
     }
     Ok(())
@@ -277,7 +263,9 @@ pub(crate) async fn recover_expired_generation_with_facts(
                             if execution_generation == &fresh_generation
                     ))
                     .count();
-                validate_selection(txn, &headers, &row, row.terminal_output.as_ref().expect("checked"))
+                let agent = row.agent_did.as_deref().context("missing request agent")?;
+                let mut reader = session::TxnCanonicalReader::new(txn, agent, row.requester_did.as_deref());
+                validate_selection(&mut reader, &headers, &row, row.terminal_output.as_ref().expect("checked"))
                     .await?;
                 if let Some(choice) = &selection_choice {
                     let expected = selection_from_choice(&headers, choice)?;
@@ -409,14 +397,15 @@ pub(crate) async fn recover_expired_generation_with_facts(
             }
             let mut headers = existing_headers;
             headers.extend(published.iter().cloned());
+            // Every recovery write to canonical output precedes this reader.
+            let mut reader = session::TxnCanonicalReader::new(txn, agent, row.requester_did.as_deref());
             for header in &published {
-                session::load_canonical_message_in_txn(
-                    txn, &header.doc_id, agent, row.requester_did.as_deref(),
-                ).await?;
+                reader.load_message(&header.doc_id).await?;
             }
             if !is_title {
                 super::terminal_tools::account_tools_in_txn(
                     txn,
+                    &mut reader,
                     &row,
                     &headers,
                     expected_generation,
@@ -425,6 +414,8 @@ pub(crate) async fn recover_expired_generation_with_facts(
                 )
                 .await?;
             }
+            // Tool accounting may publish retained bridge receipts.
+            let mut reader = session::TxnCanonicalReader::new(txn, agent, row.requester_did.as_deref());
             let mut eligible = headers.iter().filter(|header| {
                 header.message.role == MessageRole::Assistant
                     && matches!(header.message.publication,
@@ -444,9 +435,7 @@ pub(crate) async fn recover_expired_generation_with_facts(
                     ).count() != 1 {
                         return Err(RecoverySelectionRejected.into());
                     }
-                    match session::load_canonical_message_in_txn(
-                        txn, &header.doc_id, agent, row.requester_did.as_deref(),
-                    ).await {
+                    match reader.load_message(&header.doc_id).await {
                         Ok(_) => { selected = Some(header.doc_id.clone()); break; }
                         Err(error) if error.downcast_ref::<gents_protocol::output::ReconstructionError>().is_some() => {}
                         Err(error) => return Err(error),
@@ -471,7 +460,7 @@ pub(crate) async fn recover_expired_generation_with_facts(
                     Some(choice) => selection_from_choice(&headers, choice)?,
                 }
             };
-            validate_selection(txn, &headers, &row, &selection).await?;
+            validate_selection(&mut reader, &headers, &row, &selection).await?;
             let target = if row.interrupt_requested_at.as_deref().is_some_and(|v| !v.trim().is_empty()) {
                 RequestLifecycleState::Interrupted
             } else { RequestLifecycleState::Failed };

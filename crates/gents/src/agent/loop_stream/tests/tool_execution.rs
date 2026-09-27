@@ -793,3 +793,59 @@ async fn missing_tool_args_notify_model_and_terminalize_failed() {
         "the started tool call must terminalize failed/argumentInvalid, got rows: {rows:?}"
     );
 }
+
+/// Terminalization holds the process-wide write gate while it validates every
+/// accepted tool reply; the request's output is scanned once, not per tool.
+#[tokio::test]
+async fn completed_terminalization_scans_request_output_once_for_many_tools() {
+    const TOOL_TURNS: usize = 6;
+    let (node, hook, writer, mut lifecycle) = owned_test_hook().await;
+    let mut script = (0..TOOL_TURNS)
+        .map(|turn| {
+            vec![
+                RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
+                    format!("call-{turn}"),
+                    "echo".into(),
+                    serde_json::json!({}),
+                )),
+                RawStreamingChoice::FinalResponse(()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    script.push(vec![
+        RawStreamingChoice::Message("done".into()),
+        RawStreamingChoice::FinalResponse(()),
+    ]);
+    let tools: Vec<Box<dyn ToolDyn>> = vec![Box::new(FixedTool {
+        name: "echo".into(),
+        output: "observed".into(),
+    })];
+    let stream = run_loop_stream(
+        ScriptedModel::new_turns(script),
+        Some(hook.clone()),
+        TaggedMessage::unassociated(Message::user("run echo")),
+        Vec::new(),
+        Arc::new(tools),
+        owned_config(TOOL_TURNS + 2),
+    );
+    let collected = collect_owned_scripted_stream(
+        stream,
+        &hook,
+        &writer,
+        &mut lifecycle,
+        gents_loop::provider_input::ProviderInputProfile::OpenAiChatCompletions,
+    )
+    .await;
+    assert!(collected.error.is_none(), "{:?}", collected.error);
+    assert_eq!(collected.tool_results.len(), TOOL_TURNS);
+    let selection = writer.terminal_output(&lifecycle.request().doc_id).await;
+    let (result, scans) = crate::session::count_request_output_scans(lifecycle.terminalize_owned(
+        crate::lifecycle::RequestTerminalOutcome::Completed,
+        selection,
+        None,
+    ))
+    .await;
+    assert_eq!(result.unwrap(), crate::lifecycle::TerminalizeResult::Won);
+    assert_eq!(scans, 1, "request output scanned once per accepted tool");
+    node.shutdown().await;
+}

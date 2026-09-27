@@ -48,12 +48,14 @@ pub(crate) use observations::{
     update_session_title_with_source,
 };
 pub use observations::{load_latest_request_in_txn, SessionRequestFact};
+#[cfg(test)]
+pub(crate) use output::count_request_output_scans;
 pub use output::{
     load_canonical_message, load_canonical_message_from_node, CanonicalOutputReadError,
 };
 pub(crate) use output::{
     load_canonical_message_in_txn, load_request_headers_in_txn, resolve_canonical_replay_tags,
-    validate_canonical_replay_boundary, CanonicalReplayScope,
+    validate_canonical_replay_boundary, CanonicalReplayScope, TxnCanonicalReader,
 };
 pub(crate) use output::{load_canonical_payload_from_node, load_canonical_payload_in_txn};
 pub use query::{
