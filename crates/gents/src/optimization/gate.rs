@@ -18,10 +18,12 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
+use crate::config_client::DesiredStateApplyPlan;
 use crate::optimization::subject::{baseline_text, MaterializedPack};
 use crate::optimization::target::TargetField;
 use crate::pack::interpolate;
 use crate::template::parse_template_for_validation;
+use crate::{Collection, ConfigReferences};
 
 const CONFIG_ASSET: &str = "pack_config.json";
 
@@ -132,8 +134,47 @@ pub fn text_gate(
                 format!("the candidate template no longer references {dropped:?}"),
             ));
         }
+        owner_validation(baseline, text)?;
     }
     Ok(())
+}
+
+/// The checks the owner runs on a task at desired-state apply, on the
+/// baseline's task with `text` as its template: the catalog for `node.*` and
+/// `ctx.*`, and the roots its triggers' sources forbid. Only the task and its
+/// triggers are validated, because the pack's other documents name
+/// inference-slot markers that bind at execution.
+fn owner_validation(baseline: &MaterializedPack, text: &str) -> Result<(), StructuralRejection> {
+    let invalid = |error: anyhow::Error| reject("template_invalid", format!("{error:#}"));
+    let mut config = baseline.config.clone();
+    let task = config
+        .tasks
+        .iter_mut()
+        .find(|task| task.task_id == baseline.target_id)
+        .ok_or_else(|| {
+            reject(
+                "unexpected_change",
+                format!("pack declares no task {:?}", baseline.target_id),
+            )
+        })?;
+    task.prompt_template = text.to_owned();
+    task.validate().map_err(invalid)?;
+    let plan = DesiredStateApplyPlan::from_pack_config(&config).map_err(invalid)?;
+    let references = ConfigReferences::from_documents(
+        &config.agent_principal.agent_did,
+        plan.documents()
+            .iter()
+            .map(|document| (document.collection, document.add.clone())),
+    )
+    .map_err(invalid)?;
+    plan.documents()
+        .iter()
+        .filter(|document| document.collection == Collection::Trigger)
+        .try_for_each(|document| {
+            references
+                .validate_document(Collection::Trigger, &document.add)
+                .map_err(invalid)
+        })
 }
 
 /// The variable paths a task template renders, as the template owner reads
