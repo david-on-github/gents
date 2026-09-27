@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Result;
 use gents::parse_template_for_validation;
@@ -99,10 +99,16 @@ pub(crate) async fn validate_manifest_against_live(
             continue;
         }
 
-        let introspect = format!(
-            r#"query {{ __type(name: "{name}") {{ fields {{ name type {{ name kind }} }} }} }}"#,
-            name = gents::graphql::escape_graphql_string(source_collection),
-        );
+        let introspect = match gents::defra_query::introspection_query(source_collection) {
+            Ok(introspect) => introspect,
+            Err(err) => {
+                errors.push(format!(
+                    "event source {} has invalid source_collection {:?}: {}",
+                    source_id, source.source_collection, err
+                ));
+                continue;
+            }
+        };
         let response = match access.execute(&introspect).await {
             Ok(response) => response,
             Err(err) => {
@@ -113,30 +119,17 @@ pub(crate) async fn validate_manifest_against_live(
                 continue;
             }
         };
-        let type_node = response.get("data").and_then(|d| d.get("__type"));
-        let fields = type_node
-            .filter(|v| !v.is_null())
-            .and_then(|t| t.get("fields"))
-            .and_then(serde_json::Value::as_array);
-        let Some(fields) = fields else {
+        let Some(schema) = gents::defra_query::parse_collection_schema(response.get("data")) else {
             errors.push(format!(
                 "event source {} references unknown source_collection {}",
                 source_id, source_collection
             ));
             continue;
         };
-        let top_level: HashSet<&str> = fields
+        let declared: HashMap<&str, &gents::defra_query::SchemaField> = schema
+            .fields
             .iter()
-            .filter_map(|f| f.get("name").and_then(|n| n.as_str()))
-            .collect();
-        let field_types: HashMap<&str, &str> = fields
-            .iter()
-            .filter_map(|field| {
-                Some((
-                    field.get("name")?.as_str()?,
-                    field.get("type")?.get("name")?.as_str()?,
-                ))
-            })
+            .map(|field| (field.name.as_str(), field))
             .collect();
         if let Some(field) = source
             .correlation_field
@@ -144,11 +137,11 @@ pub(crate) async fn validate_manifest_against_live(
             .map(str::trim)
             .filter(|field| !field.is_empty())
         {
-            match field_types.get(field).copied() {
-                Some("String") => {}
-                Some(actual) => errors.push(format!(
+            match declared.get(field) {
+                Some(declared) if declared.named_type() == "String" => {}
+                Some(declared) => errors.push(format!(
                     "event source {} correlation_field {} must be String, found {}",
-                    source_id, field, actual
+                    source_id, field, declared.type_name
                 )),
                 None => errors.push(format!(
                     "event source {} correlation_field {} does not exist on {}",
@@ -160,11 +153,14 @@ pub(crate) async fn validate_manifest_against_live(
             .map(str::trim)
             .filter(|field| !field.is_empty())
         {
-            match field_types.get(field).copied() {
-                Some("String" | "Int") => {}
-                Some(actual) => errors.push(format!(
-                    "event source {} expected_count_field {} must be String or Int, found {}",
-                    source_id, field, actual
+            match declared.get(field) {
+                Some(declared)
+                    if gents::defra_write::can_hold_canonical_count(declared.named_type()) => {}
+                Some(declared) => errors.push(format!(
+                    "event source {} expected_count_field {} names a {} field of {}, which cannot \
+                     carry the count; the runtime parses an integer or its canonical decimal \
+                     spelling out of the source document",
+                    source_id, field, declared.type_name, source_collection
                 )),
                 None => errors.push(format!(
                     "event source {} expected_count_field {} does not exist on {}",
@@ -177,7 +173,7 @@ pub(crate) async fn validate_manifest_against_live(
             let Some(first) = path.get(1).map(String::as_str) else {
                 continue;
             };
-            if top_level.contains(first) {
+            if declared.contains_key(first) {
                 continue;
             }
             if !reported.insert(first.to_string()) {
@@ -191,4 +187,128 @@ pub(crate) async fn validate_manifest_against_live(
     }
 
     Ok(errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use anyhow::Result;
+    use defra_node::EmbeddedNode;
+    use serde_json::json;
+
+    use super::*;
+
+    const OWNER: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
+
+    /// Declares each shape the count and correlation rules have to decide:
+    /// non-nillable scalars, a float, a JSON column, and a boolean that no
+    /// canonical count can come back through.
+    const PROBE_SDL: &str = r#"
+        type CountProbeNonNull {
+            batch: String!
+            expected_total: Int!
+        }
+        type CountProbeNumeric {
+            batch: String
+            expected_total: Float
+        }
+        type CountProbeJson {
+            batch: String
+            expected_total: JSON
+        }
+        type CountProbeUncountable {
+            batch: String
+            expected_total: Boolean
+        }
+    "#;
+
+    async fn probe_access(tempdir: &tempfile::TempDir) -> Result<ConfigAccess> {
+        let node = Arc::new(
+            EmbeddedNode::builder()
+                .data_path(tempdir.path().join("data"))
+                .build()
+                .await?,
+        );
+        let access = ConfigAccess::Local(node);
+        access.add_schema(PROBE_SDL).await?;
+        Ok(access)
+    }
+
+    fn manifest(sources: serde_json::Value) -> Result<DesiredStateManifest> {
+        Ok(serde_json::from_value(json!({
+            "agent_principal": { "agent_did": OWNER },
+            "event_sources": sources,
+        }))?)
+    }
+
+    fn grouped_source(id: &str, collection: &str, count_field: &str) -> serde_json::Value {
+        json!({
+            "agent_did": OWNER,
+            "event_source_id": id,
+            "source_collection": collection,
+            "correlation_field": "batch",
+            "group": { "expected_count": { "source_field": count_field } },
+        })
+    }
+
+    #[tokio::test]
+    async fn accepts_non_nillable_count_and_correlation_fields() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let access = probe_access(&tempdir).await?;
+        let manifest = manifest(json!([grouped_source(
+            "non-null",
+            "CountProbeNonNull",
+            "expected_total"
+        )]))?;
+        let errors = validate_manifest_against_live(&manifest, &access).await?;
+        assert!(errors.is_empty(), "{errors:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn accepts_every_declared_type_a_canonical_count_can_come_back_through() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let access = probe_access(&tempdir).await?;
+        let manifest = manifest(json!([
+            grouped_source("numeric", "CountProbeNumeric", "expected_total"),
+            grouped_source("json", "CountProbeJson", "expected_total"),
+        ]))?;
+        let errors = validate_manifest_against_live(&manifest, &access).await?;
+        assert!(errors.is_empty(), "{errors:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refuses_a_count_field_no_count_can_come_back_through() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let access = probe_access(&tempdir).await?;
+        let manifest = manifest(json!([grouped_source(
+            "uncountable",
+            "CountProbeUncountable",
+            "expected_total"
+        )]))?;
+        let errors = validate_manifest_against_live(&manifest, &access).await?;
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("expected_total"), "{errors:?}");
+        assert!(errors[0].contains("Boolean"), "{errors:?}");
+        assert!(!errors[0].contains("does not exist"), "{errors:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refuses_a_count_field_the_collection_does_not_declare() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let access = probe_access(&tempdir).await?;
+        let manifest = manifest(json!([grouped_source(
+            "absent",
+            "CountProbeNonNull",
+            "missing_total"
+        )]))?;
+        let errors = validate_manifest_against_live(&manifest, &access).await?;
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].contains("missing_total"), "{errors:?}");
+        assert!(errors[0].contains("does not exist"), "{errors:?}");
+        Ok(())
+    }
 }
