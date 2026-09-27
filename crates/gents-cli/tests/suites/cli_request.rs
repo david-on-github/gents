@@ -548,6 +548,8 @@ async fn request_show_expanded_view_surfaces_background_tools_and_child_lineage(
                     provenance: {{parent_request_doc_id: "{parent_doc_id}"}}
                 }}) {{ _docID }}
             }}"#,
+            child_session_id = escape_graphql_string(&child_session_id),
+            agent_did = escape_graphql_string(&agent_did),
             parent_doc_id = escape_graphql_string(&parent_doc_id),
         ),
     )

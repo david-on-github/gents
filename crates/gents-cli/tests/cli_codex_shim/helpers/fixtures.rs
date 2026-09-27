@@ -713,6 +713,7 @@ pub(super) async fn seed_caused_running_request(
                 }}) {{ _docID }}
             }}"#,
             session = escape_graphql_string(&parent_session_id),
+            tool_call_id = escape_graphql_string(&tool_call_id),
             parent_request_id = escape_graphql_string(parent_request_id),
             parent_doc_id = escape_graphql_string(&parent_doc_id),
             agent_did = escape_graphql_string(&agent_did),

@@ -4285,12 +4285,18 @@ mod tests {
         assert!(manager.autonomous_delivery.lock().await.is_empty());
     }
 
+    /// Seeded native-owner integration: stores the physical call, request
+    /// and provenance rows and drives the real opening-request selector and
+    /// `session_origin` lineage. It does not dispatch `agent_new` through the
+    /// runtime.
     #[tokio::test]
     async fn opening_request_is_the_agent_new_call_not_a_same_second_message() {
         let (_tempdir, node, agent_did) = test_node().await;
         let behavior = gents::default_behavior_id_for_agent(&agent_did);
+        let agent = escape_graphql_string(&agent_did);
+        let behavior_literal = escape_graphql_string(&behavior);
         let response = node.execute(&format!(r#"mutation {{create_AgentRequest(input: {{
-            request_id:"open-root", purpose:"normal", session_id:"session-1", agent_did:"{agent_did}", requester_did:"{agent_did}", behavior_id:"{behavior}", lifecycle_state:"processing"
+            request_id:"open-root", purpose:"normal", session_id:"session-1", agent_did:"{agent}", requester_did:"{agent}", behavior_id:"{behavior_literal}", lifecycle_state:"processing"
         }}) {{_docID}} }}"#)).await;
         ensure_no_errors(&response, "seed opening parent").unwrap();
         let parent_doc = gents_protocol::graphql::extract_mutation_doc_id(
@@ -4324,9 +4330,13 @@ mod tests {
             ("zz-opening", "call-open", &open_call),
             ("aa-message", "call-message", &message_call),
         ] {
+            let request_id = escape_graphql_string(request_id);
+            let parent = escape_graphql_string(&parent_doc);
+            let call_id = escape_graphql_string(call_id);
+            let call_doc = escape_graphql_string(call_doc);
             let response = node.execute(&format!(r#"mutation {{create_AgentRequest(input: {{
-                request_id:"{request_id}", purpose:"normal", session_id:"opened", agent_did:"{agent_did}", requester_did:"{agent_did}", behavior_id:"{behavior}", lifecycle_state:"processing", created_at:"2026-09-27T00:00:00Z",
-                caused_by_parent_request_id:"open-root", caused_by_parent_request_doc_id:"{parent_doc}", caused_by_parent_tool_call_id:"{call_id}", caused_by_parent_tool_call_doc_id:"{call_doc}"
+                request_id:"{request_id}", purpose:"normal", session_id:"opened", agent_did:"{agent}", requester_did:"{agent}", behavior_id:"{behavior_literal}", lifecycle_state:"processing", created_at:"2026-09-27T00:00:00Z",
+                caused_by_parent_request_id:"open-root", caused_by_parent_request_doc_id:"{parent}", caused_by_parent_tool_call_id:"{call_id}", caused_by_parent_tool_call_doc_id:"{call_doc}"
             }}) {{_docID}} }}"#)).await;
             ensure_no_errors(&response, "seed opened session request").unwrap();
         }
@@ -4385,7 +4395,13 @@ mod tests {
                     .map(|did| format!("\"{}\"", escape_graphql_string(did)))
                     .unwrap_or_else(|| "null".into());
                 let created_at = chrono::Utc::now().to_rfc3339();
-                let response = node.execute(&format!(r#"mutation {{create_AgentRequest(input: {{request_id:"{id}", purpose:"normal", session_id:"session-1-child", agent_did:"{agent_did}", requester_did:{requester_field}, behavior_id:"{behavior}", lifecycle_state:"processing", created_at:"{created_at}"}}) {{_docID}} }}"#)).await;
+                let response = node.execute(&format!(
+                    r#"mutation {{create_AgentRequest(input: {{request_id:"{}", purpose:"normal", session_id:"session-1-child", agent_did:"{}", requester_did:{requester_field}, behavior_id:"{}", lifecycle_state:"processing", created_at:"{}"}}) {{_docID}} }}"#,
+                    escape_graphql_string(id),
+                    escape_graphql_string(&agent_did),
+                    escape_graphql_string(&behavior),
+                    escape_graphql_string(&created_at),
+                )).await;
                 ensure_no_errors(&response, "seed child followup").unwrap();
                 let doc = gents_protocol::graphql::extract_mutation_doc_id(
                     &json!({"data":response.data}),
