@@ -2136,11 +2136,21 @@ agent_new returns, including an error, then reply exactly RELAY_DONE and call no
         .into_iter()
         .filter(SessionRequestRow::is_background_completion_wake)
         .collect::<Vec<_>>();
+    assert!(
+        !wakes.is_empty(),
+        "the notification must attempt a completion wake"
+    );
     for wake in &wakes {
-        assert_ne!(
+        assert_eq!(
             wake.lifecycle_state.as_deref(),
-            Some("completed"),
+            Some("failed"),
             "a completion wake beyond the hop bound must not run: {wake:?}"
+        );
+        assert!(
+            wake.failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("max_request_hop")),
+            "the over-bound wake must be refused by the hop bound: {wake:?}"
         );
     }
     tracing::info!(
@@ -2148,7 +2158,7 @@ agent_new returns, including an error, then reply exactly RELAY_DONE and call no
         relay_session = %first.session_id,
         relay_request = %first.request_id,
         root_agent_new = %root_row.tool_call_id,
-        wakes = ?wakes.iter().map(|wake| (&wake.request_id, &wake.lifecycle_state, wake.subagent_depth)).collect::<Vec<_>>(),
+        wakes = ?wakes.iter().map(|wake| (&wake.request_id, &wake.lifecycle_state, wake.subagent_depth, &wake.failure_reason)).collect::<Vec<_>>(),
         "[live-hop] chain stopped at the bound; notification delivered"
     );
 
