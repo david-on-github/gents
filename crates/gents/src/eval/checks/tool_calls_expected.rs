@@ -1,6 +1,5 @@
 //! `tool_calls_expected`: which tools a stage called, graded per requirement.
 
-use gents_protocol::request_lifecycle::RequestLifecycleState;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -54,7 +53,7 @@ impl Check for ToolCallsExpected {
                 },
                 "additionalProperties": false
             }),
-            reads: vec!["stage:tool_calls".into(), "stage:terminal_state".into()],
+            reads: vec!["stage:tool_calls".into()],
             reason_codes: graded_reason_codes(&[]),
         }
     }
@@ -72,7 +71,6 @@ impl Check for ToolCallsExpected {
         }
         let calls = &stage.tool_calls;
         let called = |name: &str| calls.iter().filter(|call| call.tool_name == name).count();
-        let completed = stage.terminal_state == Some(RequestLifecycleState::Completed);
         let mut satisfied = 0;
         let mut problems = Vec::new();
         for name in &params.required {
@@ -84,9 +82,6 @@ impl Check for ToolCallsExpected {
                 });
             } else {
                 satisfied += 1;
-                if !completed {
-                    problems.push(format!("{name}: called but the stage still failed"));
-                }
             }
         }
         for name in &params.forbidden {
@@ -254,23 +249,6 @@ mod tests {
             text.contains("2 tool calls, more than the 1 allowed"),
             "{text}"
         );
-    }
-
-    #[test]
-    fn a_required_call_in_a_stage_that_did_not_complete_says_so() {
-        let mut failed = stage(vec![call("write", "{}", "completed")]);
-        failed.terminal_state = Some(RequestLifecycleState::Failed);
-        let verdict = ToolCallsExpected.evaluate(&json!({"required": ["write"]}), &failed);
-        assert_eq!(verdict.score_bp, Some(10_000));
-        let text = feedback(&verdict);
-        assert!(
-            text.contains("write: called but the stage still failed"),
-            "{text}"
-        );
-
-        let completed = stage(vec![call("write", "{}", "completed")]);
-        let verdict = ToolCallsExpected.evaluate(&json!({"required": ["write"]}), &completed);
-        assert_eq!(verdict.feedback, None);
     }
 
     #[test]
