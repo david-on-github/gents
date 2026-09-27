@@ -628,9 +628,13 @@ pub(crate) fn session_current_hop(
     rows: &[gents_protocol::row::AgentRequestRow],
     before: Option<&gents_protocol::row::AgentRequestRow>,
 ) -> u32 {
+    // The canonical request order of `session::load_latest_request_in_txn`:
+    // parsed creation time, then logical request id.
     let key = |row: &gents_protocol::row::AgentRequestRow| {
         (
-            row.created_at.clone().unwrap_or_default(),
+            row.created_at
+                .as_deref()
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok()),
             row.request_id.clone(),
         )
     };

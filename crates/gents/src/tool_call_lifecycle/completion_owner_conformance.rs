@@ -67,7 +67,9 @@ async fn admitted_parent(case: &LeanR6BackgroundingCase, branch: &str) -> Publis
         start_running: true,
         // The failed historical wake must be the actual latest request fact;
         // the redrive owner deliberately ignores a hand-edited session cache.
-        request_created_at: (branch == "redrive").then(|| "2026-07-14T00:00:00Z".to_owned()),
+        request_created_at: branch
+            .ends_with("redrive")
+            .then(|| "2026-07-14T00:00:00Z".to_owned()),
         ..Default::default()
     })
     .await
@@ -642,5 +644,82 @@ async fn generated_r6_notification_precedes_continuation_claim() {
     );
     drop(continuation);
     node.shutdown().await;
+    std::fs::remove_dir_all(admission.path).unwrap();
+}
+
+/// Lean `DurableLineage.ContinuationKind.retry` and
+/// `CausalHop.retry_after_refusal_is_refused`: a recovery retry of a wake the
+/// hop bound refused copies the session's current hop, so it is refused too.
+#[tokio::test]
+async fn a_retried_over_bound_wake_is_refused_again() {
+    let case = lean_r6_backgrounding_case("failed_background_wake_with_budget_redrives");
+    let admission = admitted_parent(case, "over-bound-redrive").await;
+    let node = &admission.node;
+    let did = admission.agent_did.as_str();
+    let session = admission.tool.session_id.as_str();
+    let parent_doc = admission.tool.request_doc_id().unwrap();
+    let parent = rows(
+        node,
+        &format!(
+            r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}) {{ request_id }} }}"#,
+            escape_graphql_string(parent_doc)
+        ),
+        "AgentRequest",
+    )
+    .await[0]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let bound = crate::document_config::DEFAULT_MAX_REQUEST_HOP;
+    let refused_wake = "refused-over-bound-wake";
+    let input = RequestInput {
+        queue: Some(RequestQueue {
+            source: QueueSource::BackgroundCompletion,
+            policy: QueuePolicy::Coalesce,
+            key: Some(format!("background_completion:{session}")),
+            queued_after_request_id: Some(parent.clone()),
+            interrupted_request_id: None,
+            background_completion_wake_version: Some(1),
+        }),
+        ..Default::default()
+    };
+    let input =
+        gents_protocol::graphql::graphql_input_literal(&serde_json::to_value(input).unwrap())
+            .unwrap();
+    let deadline = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let response = node.execute(&format!(r#"mutation {{ create_AgentRequest(input: {{
+        request_id: "{refused_wake}", purpose: "normal", agent_did: "{}", requester_did: "{}", behavior_id: "general",
+        session_id: "{}", content: "background input", input: {input},
+        execution_origin: "scheduled", lifecycle_state: "failed",
+        failure_reason: "AgentRequest causal hop exceeds the target principal's max_request_hop",
+        terminalized_at: "2026-07-15T00:00:00Z", created_at: "2026-07-15T00:00:00Z", retry_count: 0, max_retries: 3,
+        retry_root_request: "{refused_wake}", terminal_redrive_attempts: 0,
+        subagent_depth: {}, deadline: "{}",
+        caused_by_parent_request_id: "{}", caused_by_parent_request_doc_id: "{}"
+    }}) {{ _docID }} }}"#,
+        escape_graphql_string(did), escape_graphql_string(did), escape_graphql_string(session),
+        bound + 1, escape_graphql_string(&deadline), escape_graphql_string(&parent),
+        escape_graphql_string(parent_doc))).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let source = rows(node, &format!(r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{refused_wake}" }} }}) {{ _docID request_id lifecycle_state created_at }} }}"#), "AgentRequest").await;
+    seed_session_head(node, session, &source[0]).await;
+
+    let report = crate::RequestLifecycle::redrive_failed_background_wakeups(node, did)
+        .await
+        .unwrap();
+    assert_eq!(report.redriven, 1, "{report:?}");
+    let successor = rows(
+        node,
+        &format!(
+            r#"{{ AgentRequest(filter: {{ retry_parent_request: {{ _eq: "{refused_wake}" }} }}) {{ subagent_depth }} }}"#
+        ),
+        "AgentRequest",
+    )
+    .await;
+    assert_eq!(successor.len(), 1);
+    let hop = successor[0]["subagent_depth"].as_u64().unwrap() as u32;
+    assert_eq!(hop, bound + 1);
+    assert!(!crate::lifecycle::request_hop_within_bound(bound, hop));
+    admission.node.shutdown().await;
     std::fs::remove_dir_all(admission.path).unwrap();
 }

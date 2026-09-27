@@ -1588,6 +1588,20 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
         .await
         .unwrap();
 
+        // Order the two writers: the Goal owner publishes its wrapup into the
+        // idle session first, and only then does the background process end
+        // and publish its completion wake.
+        for _ in 0..200 {
+            if goal_children(&db).await.len() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert_eq!(
+            goal_children(&db).await.len(),
+            1,
+            "the Goal wrapup is published"
+        );
         std::fs::write(&release_path, b"release").unwrap();
         for _ in 0..200 {
             let delivery = db.node.execute(
@@ -1607,7 +1621,7 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
         }
         gents::tool_call_lifecycle::ToolCallLifecycle::reconcile_background_completion_side_effects(&db.node, db.node_identity.did()).await.unwrap();
         let observed = db.node.execute(
-            "{ AgentRequest { _docID request_id lifecycle_state execution_origin caused_by_trigger_kind caused_by_parent_request_id } AgentMessage { _docID agent_did requester_did request_doc_id } AgentToolCall { _docID tool_name lifecycle_state completion_notification_delivered_at } }",
+            "{ AgentRequest { _docID request_id created_at lifecycle_state execution_origin caused_by_trigger_kind caused_by_parent_request_id } AgentMessage { _docID agent_did requester_did request_doc_id } AgentToolCall { _docID tool_name lifecycle_state completion_notification_delivered_at } }",
         ).await;
         assert!(!observed.has_errors(), "{:?}", observed.errors);
         let data = observed.data.unwrap();
@@ -1639,13 +1653,13 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
             1,
             "besides the parent and the Goal wrapup, only the completion wake exists: {requests:?}"
         );
-        // The completion wake is ordinary work in the Goal's session: when it
-        // runs and ends before the Goal owner acts, it is the latest request
-        // the wrapup continues; otherwise the failed parent is.
-        let wrapup_parent = goal_requests[0]["caused_by_parent_request_id"].clone();
-        assert!(
-            wrapup_parent == parent || wrapup_parent == wakes[0]["request_id"],
-            "the wrapup continues the failed parent or its completion wake: {requests:?}"
+        // The Goal owner continues the session's latest request, which at
+        // wrapup time is the failed parent: the completion wake was written
+        // only after the wrapup.
+        let wrapup = goal_requests[0];
+        assert_eq!(
+            wrapup["caused_by_parent_request_id"], parent,
+            "the wrapup must continue the session's latest request: {requests:?}"
         );
         // Goal continuations are themselves scheduled work, like the wake.
         assert_eq!(goal_requests[0]["execution_origin"], "scheduled");
