@@ -1058,8 +1058,8 @@ fn normalize_absolute(path: &Path) -> Result<PathBuf> {
     Ok(normalized)
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path.parent().context("service definition has no parent")?;
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    let parent = path.parent().context("path has no parent")?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     use std::io::Write as _;
     temporary.write_all(contents)?;
