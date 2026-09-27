@@ -113,15 +113,17 @@ fn generated_causal_hop_cases_match_native_materializer() {
         contract.default_max_request_hop,
         gents::document_config::DEFAULT_MAX_REQUEST_HOP
     );
-    let cause = |name: &str| match name {
+    let cause = |name: &str, cause_hop: Option<u32>| match name {
         "root" => RequestHopCause::Root,
-        "tool_call" => RequestHopCause::ToolCall,
+        "cross_session" => RequestHopCause::CrossSession {
+            cause_hop: cause_hop.expect("cross-session step names its cause hop"),
+        },
         "continuation" => RequestHopCause::Continuation,
         other => panic!("unknown Lean causal-hop cause {other:?}"),
     };
     assert!(!contract.step_cases.is_empty());
     for case in &contract.step_cases {
-        let hop = next_request_hop(cause(&case.cause), case.predecessor_hop);
+        let hop = next_request_hop(cause(&case.cause, case.cause_hop), case.own_predecessor_hop);
         assert_eq!(hop, case.expected_hop, "{}", case.name);
         assert_eq!(
             request_hop_within_bound(case.max_request_hop, hop),
@@ -135,8 +137,15 @@ fn generated_causal_hop_cases_match_native_materializer() {
         let mut hop = 0;
         let mut hops = Vec::new();
         let mut admitted = Vec::new();
-        for name in &chain.causes {
-            hop = next_request_hop(cause(name), hop);
+        for step in &chain.steps {
+            hop = match step.kind.as_str() {
+                "cross_session" => next_request_hop(
+                    RequestHopCause::CrossSession { cause_hop: hop },
+                    step.own_predecessor_hop
+                        .expect("cross-session step names its own predecessor hop"),
+                ),
+                other => next_request_hop(cause(other, None), hop),
+            };
             hops.push(hop);
             admitted.push(request_hop_within_bound(chain.max_request_hop, hop));
         }

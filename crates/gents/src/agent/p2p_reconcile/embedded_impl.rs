@@ -800,7 +800,6 @@ mod tests {
         .await
         .expect("plan peer session message")
         .expect("peer session message admitted by the caller");
-        row.start_running().await.expect("dispatch create_session");
         crate::session_message::commit(node, &cause, &mut row, plan, false)
             .await
             .expect("materialize the caller-signed Peer request")

@@ -130,6 +130,18 @@ impl DefraSessionHook {
                 ),
             };
             let target_session = parsed.session_id.trim().to_owned();
+            // Lean `CausalHop.sendTargetAllowed`: messaging the calling
+            // session would steer it with no hop increase.
+            if target_session == caller.session_id {
+                refuse!(
+                    FailureClass::ArgumentInvalid,
+                    invalid_tool_arguments_payload(
+                        tool_name,
+                        "/session_id",
+                        "send_message cannot address the calling session itself",
+                    )
+                );
+            }
             let Some(target) = crate::session_message::resolve_send_target(
                 &self.node,
                 &caller.agent_did,
@@ -167,23 +179,6 @@ impl DefraSessionHook {
             );
         }
         let caller_hop = caller.subagent_depth;
-        let hop = crate::lifecycle::next_request_hop(
-            crate::lifecycle::RequestHopCause::ToolCall,
-            caller_hop,
-        );
-        if target.agent_did == caller.agent_did {
-            let max_request_hop =
-                crate::document_config::load_agent_principal(&self.node, &caller.agent_did)
-                    .await?
-                    .and_then(|principal| principal.max_request_hop)
-                    .unwrap_or(crate::document_config::DEFAULT_MAX_REQUEST_HOP);
-            if !crate::lifecycle::request_hop_within_bound(max_request_hop, hop) {
-                refuse!(
-                    FailureClass::ArgumentInvalid,
-                    hop_exceeded_payload(tool_name, hop, max_request_hop)
-                );
-            }
-        }
         let rendered = match crate::session_message::render_body(
             &self.node,
             &caller.agent_did,
@@ -227,24 +222,38 @@ impl DefraSessionHook {
                 invalid_tool_arguments_payload(tool_name, "/task", message)
             ),
         };
-        lifecycle.start_running().await?;
+        // A local target's own admission would refuse this hop; refuse the
+        // call instead. A peer checks its own bound at admission.
+        if target.agent_did == caller.agent_did {
+            let max_request_hop =
+                crate::document_config::load_agent_principal(&self.node, &caller.agent_did)
+                    .await?
+                    .and_then(|principal| principal.max_request_hop)
+                    .unwrap_or(crate::document_config::DEFAULT_MAX_REQUEST_HOP);
+            if !crate::lifecycle::request_hop_within_bound(max_request_hop, plan.hop()) {
+                refuse!(
+                    FailureClass::ArgumentInvalid,
+                    hop_exceeded_payload(tool_name, plan.hop(), max_request_hop)
+                );
+            }
+        }
         let receipt =
             match crate::session_message::commit(&self.node, &cause, &mut lifecycle, plan, !create)
                 .await
             {
                 Ok(receipt) => serde_json::to_string(&receipt)?,
                 Err(error) => {
-                    // Nothing was delivered, so the invocation reply is the failure.
-                    let payload = service_unavailable_payload(
-                        tool_name,
-                        "/",
-                        format!("the message could not be delivered: {error:#}"),
-                        true,
+                    // The row never left pending and nothing was delivered, so
+                    // the invocation reply is the failure.
+                    refuse!(
+                        FailureClass::ServiceUnavailable,
+                        service_unavailable_payload(
+                            tool_name,
+                            "/",
+                            format!("the message could not be delivered: {error:#}"),
+                            true,
+                        )
                     );
-                    lifecycle
-                        .fail_owned(&payload, FailureClass::ServiceUnavailable, None)
-                        .await?;
-                    return Ok(self.skip_tool_result(tool_name, payload));
                 }
             };
         Ok(self.skip_tool_result(tool_name, receipt))

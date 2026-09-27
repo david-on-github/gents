@@ -547,6 +547,48 @@ impl ToolCallLifecycle {
         })
     }
 
+    /// The accepted identity a pending-to-running dispatch compares against.
+    pub(crate) fn dispatch_start(&self) -> Result<DispatchStart> {
+        Ok(DispatchStart {
+            header: self
+                .accepted_header_doc_id
+                .clone()
+                .context("dispatch requires an accepted tool header binding")?,
+            request: self
+                .request_doc_id
+                .clone()
+                .context("dispatch requires an accepted request binding")?,
+            generation: self
+                .execution_generation
+                .clone()
+                .context("dispatch requires the accepted execution generation")?,
+            arguments: self
+                .arguments
+                .clone()
+                .context("dispatch requires an accepted argument reference")?,
+            agent: self.agent_did.clone(),
+            requester: self.requester_did.clone(),
+            session: self.session_id.clone(),
+            doc_id: self
+                .doc_id
+                .clone()
+                .context("dispatch requires a physical tool row")?,
+            id: self.tool_call_id.clone(),
+            call_id: self.call_id.clone(),
+            message_sequence: self.message_sequence,
+            name: self.tool_name.clone(),
+            selected_tool_fields: self.selected_tool_fields_fragment(),
+            await_mode: self.await_mode.as_str(),
+        })
+    }
+
+    /// Record a pending-to-running compare that committed in a caller's
+    /// transaction through [`start_running_in_txn`].
+    pub(crate) fn mark_started(&mut self, started_at: DateTime<Utc>) {
+        self.state = ToolCallState::Running;
+        self.started_at = Some(started_at);
+    }
+
     /// One dispatch-admission fence: immutable accepted header binding,
     /// physical tool row, and the current request lease are observed with the
     /// pending-to-running compare under the same mutation gate.
@@ -554,174 +596,21 @@ impl ToolCallLifecycle {
         &mut self,
         fixture_now: Option<DateTime<Utc>>,
     ) -> Result<()> {
-        let header = self
-            .accepted_header_doc_id
-            .clone()
-            .context("dispatch requires an accepted tool header binding")?;
-        let request = self
-            .request_doc_id
-            .clone()
-            .context("dispatch requires an accepted request binding")?;
-        let generation = self
-            .execution_generation
-            .clone()
-            .context("dispatch requires the accepted execution generation")?;
-        let arguments = self
-            .arguments
-            .clone()
-            .context("dispatch requires an accepted argument reference")?;
-        let agent = self.agent_did.clone();
-        let requester = self.requester_did.clone();
-        let session = self.session_id.clone();
-        let doc_id = self
-            .doc_id
-            .clone()
-            .context("dispatch requires a physical tool row")?;
-        let id = self.tool_call_id.clone();
-        let call_id = self.call_id.clone();
-        let message_sequence = self.message_sequence;
-        let name = self.tool_name.clone();
-        let selected_tool_fields = self.selected_tool_fields_fragment();
-        let await_mode = self.await_mode.as_str();
+        let start = self.dispatch_start()?;
         let started_at = ConfigAccess::transact_local_idempotent(
             &self.node,
             None,
             IdempotentTransactionRetry::Standard,
             "tool_call.start_running_canonical",
             move |txn| {
-                let header = header.clone();
-                let request = request.clone();
-                let generation = generation.clone();
-                let arguments = arguments.clone();
-                let agent = agent.clone();
-                let requester = requester.clone();
-                let session = session.clone();
-                let doc_id = doc_id.clone();
-                let id = id.clone();
-                let call_id = call_id.clone();
-                let name = name.clone();
-                let selected_tool_fields = selected_tool_fields.clone();
-                Box::pin(async move {
-                    // This is sampled only after the transaction has acquired
-                    // the mutation gate. A queued dispatcher must not use an
-                    // earlier timestamp to run past a lease that expired while
-                    // it waited.
-                    let now = fixture_now.unwrap_or_else(Utc::now);
-                    let started_at = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
-                    let (message, _) = crate::session::load_canonical_message_in_txn(
-                        txn,
-                        &header,
-                        &agent,
-                        requester.as_deref(),
-                    )
-                    .await?;
-                    anyhow::ensure!(
-                        message.session_id == session
-                            && message.request_doc_id.as_deref() == Some(request.as_str())
-                            && message.role == MessageRole::Assistant
-                            && message.outcome == OutputOutcome::Complete
-                            && message.sequence == message_sequence
-                            && matches!(message.publication, MessagePublication::RequestExecution {
-                                execution_generation: ref accepted_generation
-                            } if accepted_generation == &generation)
-                            && message.blocks.iter().any(|block| matches!(block,
-                                MessageBlock::ToolCall { tool_call_doc_id, id: block_id,
-                                    call_id: block_call_id, name: block_name,
-                                    arguments: block_arguments, .. }
-                                if tool_call_doc_id == &doc_id && block_id == &id
-                                    && block_call_id == &call_id && block_name == &name
-                                    && block_arguments == &arguments)),
-                        "accepted header does not bind this exact dispatch"
-                    );
-                    let request_id = escape_graphql_string(&request);
-                    let request_row = txn
-                        .execute(&format!(
-                            r#"{{ AgentRequest(filter: {{
-                        _docID: {{ _eq: "{request_id}" }}, agent_did: {{ _eq: "{}" }},
-                        session_id: {{ _eq: "{}" }}
-                    }}, limit: 2) {{
-                        _docID requester_did lifecycle_state execution_generation
-                        execution_lease_expires_at interrupt_requested_at
-                    }} }}"#,
-                            escape_graphql_string(&agent),
-                            escape_graphql_string(&session)
-                        ))
-                        .await?;
-                    let rows = request_row["data"]["AgentRequest"]
-                        .as_array()
-                        .context("dispatch request lookup omitted rows")?;
-                    anyhow::ensure!(rows.len() == 1, "dispatch request is missing or ambiguous");
-                    let row = &rows[0];
-                    if row["requester_did"].as_str() != requester.as_deref()
-                        || row["lifecycle_state"].as_str() != Some("processing")
-                        || row["execution_generation"].as_str() != Some(generation.as_str())
-                        || !row["interrupt_requested_at"].is_null()
-                    {
-                        return Err(ToolDispatchRejection::LostRequestOwnership.into());
-                    }
-                    let expiry = row["execution_lease_expires_at"]
-                        .as_str()
-                        .context("dispatch request lease deadline missing")?;
-                    let expiry = DateTime::parse_from_rfc3339(expiry)?.with_timezone(&Utc);
-                    anyhow::ensure!(expiry > now, "dispatch request lease has expired");
-
-                    let requester_filter = requester
-                        .as_deref()
-                        .map(|value| {
-                            format!(
-                                r#", requester_did: {{ _eq: "{}" }}"#,
-                                escape_graphql_string(value)
-                            )
-                        })
-                        .unwrap_or_else(|| ", requester_did: { _eq: null }".to_owned());
-                    let physical = txn
-                        .execute(&format!(
-                            r#"{{ AgentToolCall(filter: {{
-                        _docID: {{ _eq: "{}" }}, request_doc_id: {{ _eq: "{request_id}" }},
-                        session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }}{requester_filter}
-                    }}, limit: 2) {{ _docID }} }}"#,
-                            escape_graphql_string(&doc_id),
-                            escape_graphql_string(&session),
-                            escape_graphql_string(&agent)
-                        ))
-                        .await?;
-                    let physical_rows = physical["data"]["AgentToolCall"]
-                        .as_array()
-                        .context("dispatch physical tool lookup omitted rows")?;
-                    anyhow::ensure!(
-                        physical_rows.len() == 1,
-                        "dispatch physical tool is missing or ambiguous"
-                    );
-                    let update = txn
-                        .execute(&format!(
-                            r#"mutation {{ update_AgentToolCall(filter: {{
-                        _docID: {{ _eq: "{}" }}, request_doc_id: {{ _eq: "{request_id}" }},
-                        session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }},
-                        tool_call_id: {{ _eq: "{}" }}, tool_name: {{ _eq: "{}" }},
-                        message_sequence: {{ _eq: {message_sequence} }},
-                        lifecycle_state: {{ _eq: "pending" }}{requester_filter}
-                    }}, input: {{ lifecycle_state: "running", started_at: "{started_at}",
-                        await_mode: "{await_mode}", {selected_tool_fields}
-                    }}) {{ _docID }} }}"#,
-                            escape_graphql_string(&doc_id),
-                            escape_graphql_string(&session),
-                            escape_graphql_string(&agent),
-                            escape_graphql_string(&id),
-                            escape_graphql_string(&name)
-                        ))
-                        .await?;
-                    Ok(update["data"]["update_AgentToolCall"]
-                        .as_array()
-                        .is_some_and(|rows| !rows.is_empty())
-                        .then_some(now))
-                })
+                let start = start.clone();
+                Box::pin(async move { start_running_in_txn(txn, &start, fixture_now).await })
             },
         )
         .await?;
         let started_at = started_at
             .context("accepted tool lifecycle binding was altered or is no longer pending")?;
-        self.state = ToolCallState::Running;
-        self.started_at = Some(started_at);
+        self.mark_started(started_at);
         Ok(())
     }
 
@@ -752,8 +641,7 @@ impl ToolCallLifecycle {
     /// The exact accepted invocation a background receipt answers.
     pub(crate) fn background_receipt_binding(&self) -> Result<BackgroundReceiptBinding> {
         anyhow::ensure!(
-            (self.state == ToolCallState::Running || self.state.is_terminal())
-                && self.await_mode == super::AwaitMode::Background
+            self.await_mode == super::AwaitMode::Background
                 && self.is_session_message()
                 && !self.is_spawned_background(),
             "background receipt requires an accepted background session-message row"
@@ -3199,4 +3087,149 @@ pub(crate) async fn publish_background_receipt_in_txn(
     )
     .await?;
     Ok(true)
+}
+
+#[derive(Clone)]
+pub(crate) struct DispatchStart {
+    header: String,
+    request: String,
+    generation: String,
+    arguments: gents_protocol::output::PayloadRef,
+    agent: String,
+    requester: Option<String>,
+    session: String,
+    doc_id: String,
+    id: String,
+    call_id: Option<String>,
+    message_sequence: u32,
+    name: String,
+    selected_tool_fields: String,
+    await_mode: &'static str,
+}
+
+/// The pending-to-running compare of [`ToolCallLifecycle::start_running`],
+/// inside a caller's transaction, so a caller can make Running imply the
+/// other writes of that transaction. `None` when the row was altered or is no
+/// longer pending.
+pub(crate) async fn start_running_in_txn(
+    txn: &ConfigApplyTxn<'_>,
+    start: &DispatchStart,
+    fixture_now: Option<DateTime<Utc>>,
+) -> Result<Option<DateTime<Utc>>> {
+    // This is sampled only after the transaction has acquired
+    // the mutation gate. A queued dispatcher must not use an
+    // earlier timestamp to run past a lease that expired while
+    // it waited.
+    let now = fixture_now.unwrap_or_else(Utc::now);
+    let started_at = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let (message, _) = crate::session::load_canonical_message_in_txn(
+        txn,
+        &start.header,
+        &start.agent,
+        start.requester.as_deref(),
+    )
+    .await?;
+    anyhow::ensure!(
+        message.session_id == start.session
+            && message.request_doc_id.as_deref() == Some(start.request.as_str())
+            && message.role == MessageRole::Assistant
+            && message.outcome == OutputOutcome::Complete
+            && message.sequence == start.message_sequence
+            && matches!(message.publication, MessagePublication::RequestExecution {
+                    execution_generation: ref accepted_generation
+                } if accepted_generation == &start.generation)
+            && message.blocks.iter().any(|block| matches!(block,
+                    MessageBlock::ToolCall { tool_call_doc_id, id: block_id,
+                        call_id: block_call_id, name: block_name,
+                        arguments: block_arguments, .. }
+                    if tool_call_doc_id == &start.doc_id && block_id == &start.id
+                        && block_call_id == &start.call_id && block_name == &start.name
+                        && block_arguments == &start.arguments)),
+        "accepted header does not bind this exact dispatch"
+    );
+    let request_id = escape_graphql_string(&start.request);
+    let request_row = txn
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{
+            _docID: {{ _eq: "{request_id}" }}, agent_did: {{ _eq: "{}" }},
+            session_id: {{ _eq: "{}" }}
+        }}, limit: 2) {{
+            _docID requester_did lifecycle_state execution_generation
+            execution_lease_expires_at interrupt_requested_at
+        }} }}"#,
+            escape_graphql_string(&start.agent),
+            escape_graphql_string(&start.session)
+        ))
+        .await?;
+    let rows = request_row["data"]["AgentRequest"]
+        .as_array()
+        .context("dispatch request lookup omitted rows")?;
+    anyhow::ensure!(rows.len() == 1, "dispatch request is missing or ambiguous");
+    let row = &rows[0];
+    if row["requester_did"].as_str() != start.requester.as_deref()
+        || row["lifecycle_state"].as_str() != Some("processing")
+        || row["execution_generation"].as_str() != Some(start.generation.as_str())
+        || !row["interrupt_requested_at"].is_null()
+    {
+        return Err(ToolDispatchRejection::LostRequestOwnership.into());
+    }
+    let expiry = row["execution_lease_expires_at"]
+        .as_str()
+        .context("dispatch request lease deadline missing")?;
+    let expiry = DateTime::parse_from_rfc3339(expiry)?.with_timezone(&Utc);
+    anyhow::ensure!(expiry > now, "dispatch request lease has expired");
+
+    let requester_filter = start
+        .requester
+        .as_deref()
+        .map(|value| {
+            format!(
+                r#", requester_did: {{ _eq: "{}" }}"#,
+                escape_graphql_string(value)
+            )
+        })
+        .unwrap_or_else(|| ", requester_did: { _eq: null }".to_owned());
+    let physical = txn
+        .execute(&format!(
+            r#"{{ AgentToolCall(filter: {{
+            _docID: {{ _eq: "{}" }}, request_doc_id: {{ _eq: "{request_id}" }},
+            session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }}{requester_filter}
+        }}, limit: 2) {{ _docID }} }}"#,
+            escape_graphql_string(&start.doc_id),
+            escape_graphql_string(&start.session),
+            escape_graphql_string(&start.agent)
+        ))
+        .await?;
+    let physical_rows = physical["data"]["AgentToolCall"]
+        .as_array()
+        .context("dispatch physical tool lookup omitted rows")?;
+    anyhow::ensure!(
+        physical_rows.len() == 1,
+        "dispatch physical tool is missing or ambiguous"
+    );
+    let update = txn
+        .execute(&format!(
+            r#"mutation {{ update_AgentToolCall(filter: {{
+            _docID: {{ _eq: "{}" }}, request_doc_id: {{ _eq: "{request_id}" }},
+            session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }},
+            tool_call_id: {{ _eq: "{}" }}, tool_name: {{ _eq: "{}" }},
+            message_sequence: {{ _eq: {} }},
+            lifecycle_state: {{ _eq: "pending" }}{requester_filter}
+        }}, input: {{ lifecycle_state: "running", started_at: "{started_at}",
+            await_mode: "{}", {}
+        }}) {{ _docID }} }}"#,
+            escape_graphql_string(&start.doc_id),
+            escape_graphql_string(&start.session),
+            escape_graphql_string(&start.agent),
+            escape_graphql_string(&start.id),
+            escape_graphql_string(&start.name),
+            start.message_sequence,
+            start.await_mode,
+            start.selected_tool_fields,
+        ))
+        .await?;
+    Ok(update["data"]["update_AgentToolCall"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty())
+        .then_some(now))
 }

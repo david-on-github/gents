@@ -313,9 +313,9 @@ impl DefraSessionHook {
                                 &execution_request_id,
                                 &execution_tool_doc_id,
                                 &execution_tool_name,
-                                "failed",
+                                BACKGROUND_TIMEOUT_NOTIFICATION.0,
                                 "",
-                                Some("deadline_exceeded"),
+                                Some(BACKGROUND_TIMEOUT_NOTIFICATION.1),
                             ),
                         )
                         .await
@@ -979,13 +979,20 @@ impl DefraSessionHook {
         }
 
         if lifecycle.is_session_message() {
-            let interrupted =
-                crate::session_message::interrupt_caused_request(&self.node, &lifecycle).await?;
+            let mut lifecycle = lifecycle;
+            let (status, request_id) =
+                match crate::session_message::kill(&self.node, &mut lifecycle).await? {
+                    crate::session_message::KillOutcome::Interrupting { request_id } => {
+                        ("interrupting", Some(request_id))
+                    }
+                    crate::session_message::KillOutcome::Cancelled => ("cancelled", None),
+                    crate::session_message::KillOutcome::Settled => ("already_terminal", None),
+                };
             let result = json_string(json!({
-                "ok": interrupted.is_some(),
+                "ok": true,
                 "tool_call_id": background_tool_call_id,
-                "status": if interrupted.is_some() { "interrupting" } else { "not_running" },
-                "request_id": interrupted,
+                "status": status,
+                "request_id": request_id,
                 "error": null
             }));
             return self
@@ -1114,9 +1121,14 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// A native background process past its own deadline: its completion
+/// notification reports a failure with the `deadline_exceeded` reason, which
+/// recovery's projection of a `timedOut` row reproduces.
+const BACKGROUND_TIMEOUT_NOTIFICATION: (&str, &str) = ("failed", "deadline_exceeded");
+
 #[cfg(test)]
 mod ownership_projection_tests {
-    use super::project_background_completion_if_owned;
+    use super::{project_background_completion_if_owned, BACKGROUND_TIMEOUT_NOTIFICATION};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -1150,5 +1162,42 @@ mod ownership_projection_tests {
 
         assert!(matches!(output, Some(Ok(()))));
         assert!(projected.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn background_timeout_preserves_failure_metadata() {
+        assert_eq!(
+            BACKGROUND_TIMEOUT_NOTIFICATION,
+            ("failed", "deadline_exceeded")
+        );
+        let admission = crate::tool_call_lifecycle::admission_fixture::published_admission(
+            crate::tool_call_lifecycle::admission_fixture::PublishedAdmissionOptions {
+                name: "background-timeout-metadata".to_owned(),
+                real_identity: true,
+                await_mode: crate::tool_call_lifecycle::AwaitMode::Background,
+                start_running: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut tool = admission.tool;
+        assert!(tool.timeout().await.unwrap());
+        let doc_id = tool.doc_id().unwrap().to_owned();
+        let response = admission
+            .node
+            .execute(&format!(
+                r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ lifecycle_state cancel_cause tool_failure_class status }} }}"#,
+                crate::graphql::escape_graphql_string(&doc_id)
+            ))
+            .await;
+        assert!(!response.has_errors(), "{:?}", response.errors);
+        let row = &response.data.unwrap()["AgentToolCall"][0];
+        assert_eq!(row["lifecycle_state"], "timedOut");
+        assert_eq!(row["cancel_cause"], "deadline");
+        assert_eq!(row["tool_failure_class"], "external");
+        assert_eq!(row["status"], "completionPending");
+        admission.node.shutdown().await;
+        std::fs::remove_dir_all(admission.path).unwrap();
     }
 }

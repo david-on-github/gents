@@ -30,7 +30,7 @@ pub(crate) async fn enqueue_steering_request(
     content: &str,
     input: RequestInput,
 ) -> Result<EnqueuedAgentRequest> {
-    let prepared = prepare_steering_append(parent, content, input).await?;
+    let prepared = prepare_steering_append(parent, content, input, parent.subagent_depth).await?;
     let prepared = &prepared;
     crate::config_client::ConfigAccess::transact_local(
         node,
@@ -50,12 +50,15 @@ pub(crate) struct PreparedSteering {
     mutation: String,
 }
 
-/// Build and sign one unkeyed user- or steering-sourced append. A user
-/// append is external input; a steering append is agent-authored.
+/// Build and sign one unkeyed user- or steering-sourced append at `hop`. A
+/// user append is external input and keeps the parent's hop; a steering append
+/// is agent-authored by another session and climbs past its caller (Lean
+/// `DurableLineage.ContinuationKind`).
 pub(crate) async fn prepare_steering_append(
     parent: &AgentRequest,
     content: &str,
     input: RequestInput,
+    hop: u32,
 ) -> Result<PreparedSteering> {
     let queue = input
         .queue
@@ -75,8 +78,9 @@ pub(crate) async fn prepare_steering_append(
     let behavior_id = parent_behavior_id(parent)?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let mutation = session_request_create_mutation(
+    let mutation = session_request_create_mutation_at_hop(
         parent,
+        hop,
         &behavior_id,
         content,
         ExecutionOrigin::Interactive,

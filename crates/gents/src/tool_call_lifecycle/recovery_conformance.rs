@@ -289,16 +289,18 @@ async fn generated_session_message_restart_dispositions_use_canonical_admission_
     for case in cases {
         let name = case.name.as_str();
         assert_eq!(case.await_mode, "background", "{name}");
-        let admission = published_admission(PublishedAdmissionOptions {
-            name: format!("restart-{name}"),
-            real_identity: true,
-            await_mode: AwaitMode::Background,
-            tool_name: Some(crate::toolset::CREATE_SESSION_TOOL_NAME.to_owned()),
-            start_running: true,
-            ..Default::default()
-        })
+        // A running session-message row always has its caused request.
+        let admission = crate::tool_call_lifecycle::admission_fixture::published_session_message(
+            PublishedAdmissionOptions {
+                name: format!("restart-{name}"),
+                real_identity: true,
+                await_mode: AwaitMode::Background,
+                ..Default::default()
+            },
+        )
         .await
-        .unwrap();
+        .unwrap()
+        .admission;
         let tool_doc = admission.tool.doc_id().unwrap().to_owned();
         let request_doc = admission.tool.request_doc_id().unwrap().to_owned();
         if case.deadline_expired {

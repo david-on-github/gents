@@ -765,10 +765,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                 model_name = %model_name,
                 deadline_at = %deadline_at,
                 has_deadline,
-                subagent_depth = request.subagent_depth,
-                is_subagent = request.subagent_depth > 0
-                    || request.caused_by_parent_request_id.is_some()
-                    || request.caused_by_parent_tool_call_id.is_some(),
+                request_hop = request.subagent_depth,
                 workspace_cwd_set,
                 attempt = attempt_index,
                 retry_attempt = false,

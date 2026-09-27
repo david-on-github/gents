@@ -29,7 +29,7 @@ pub(crate) use atomic_inputs::persist_background_completion_with_message_canonic
 use atomic_inputs::steering_transaction_attempt;
 #[cfg(test)]
 use atomic_inputs::transaction_created_doc_id;
-pub(crate) use atomic_inputs::ToolNotificationPublication;
+pub(crate) use atomic_inputs::{CompletionWake, ToolNotificationPublication};
 pub use coalescing::reconcile_coalesced_pending_request;
 use coalescing::{
     parent_behavior_id, queue_row_to_enqueued_request, row_matches_coalesced_source_and_key,
@@ -52,7 +52,9 @@ pub(crate) use input::{
 };
 #[cfg(test)]
 use input::{queue_is_automated_wakeup, BACKGROUND_COMPLETION_WAKE_VERSION};
+#[cfg(test)]
 use mutation::session_request_create_mutation;
+use mutation::session_request_create_mutation_at_hop;
 
 #[derive(Debug)]
 pub(crate) struct EnqueuedBackgroundCompletionInput {

@@ -986,16 +986,28 @@ pub(crate) struct LeanCausalHopContract {
     pub(crate) chain_cases: Vec<LeanCausalHopChainCase>,
 }
 
-/// One materialization step: `cause` is `root`, `tool_call` or `continuation`.
+/// One materialization step: `cause` is `root`, `cross_session` (with its
+/// `cause_hop`) or `continuation`, from the hop of the request it continues in
+/// its own session.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LeanCausalHopStepCase {
     pub(crate) name: String,
     pub(crate) cause: String,
-    pub(crate) predecessor_hop: u32,
+    pub(crate) cause_hop: Option<u32>,
+    pub(crate) own_predecessor_hop: u32,
     pub(crate) max_request_hop: u32,
     pub(crate) expected_hop: u32,
     pub(crate) expected_admitted: bool,
+}
+
+/// One link of a causal chain: `cross_session` from another session (with
+/// its own session's predecessor hop) or a same-session `continuation`.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LeanCausalHopChainStep {
+    pub(crate) kind: String,
+    pub(crate) own_predecessor_hop: Option<u32>,
 }
 
 /// A chain materialized from hop zero; expectations are per request.
@@ -1004,7 +1016,7 @@ pub(crate) struct LeanCausalHopStepCase {
 pub(crate) struct LeanCausalHopChainCase {
     pub(crate) name: String,
     pub(crate) max_request_hop: u32,
-    pub(crate) causes: Vec<String>,
+    pub(crate) steps: Vec<LeanCausalHopChainStep>,
     pub(crate) expected_hops: Vec<u32>,
     pub(crate) expected_admitted: Vec<bool>,
 }

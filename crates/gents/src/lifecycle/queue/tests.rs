@@ -394,6 +394,7 @@ impl CanonicalBackgroundFixture {
                     end_byte: notification_content.len() as u64,
                 }],
             },
+            super::CompletionWake::AtHop(self.parent.subagent_depth),
         )
         .await
     }

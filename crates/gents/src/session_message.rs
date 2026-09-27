@@ -78,8 +78,8 @@ impl SendMessageArgs {
 pub(crate) enum Delivery {
     /// An idle session received a new request.
     Request,
-    /// A busy session received a user-origin append queued after its active
-    /// request.
+    /// A busy session received an agent-authored steering continuation
+    /// queued after its active request.
     Steering,
 }
 
@@ -328,10 +328,16 @@ enum PlannedWrite {
 /// the tool row starts running.
 pub(crate) struct Plan {
     session_id: String,
+    hop: u32,
     write: PlannedWrite,
 }
 
 impl Plan {
+    /// The causal hop the planned request or continuation is written with.
+    pub(crate) fn hop(&self) -> u32 {
+        self.hop
+    }
+
     pub(crate) fn delivery(&self) -> Delivery {
         match self.write {
             PlannedWrite::Steering { .. } => Delivery::Steering,
@@ -354,16 +360,42 @@ pub(crate) async fn plan(
     let request_id = uuid::Uuid::new_v4().to_string();
     let local = target.agent_did == cause.caller_agent_did;
     let active = if local {
-        crate::interrupt::active_session_request(
+        match crate::interrupt::active_session_request(
             node,
             &target.session_id,
             &target.agent_did,
             Some(&cause.caller_agent_did),
         )
         .await?
+        {
+            Some(active) => {
+                let active_doc_id = active
+                    .doc_id
+                    .as_deref()
+                    .context("active session request lacks physical identity")?;
+                Some(
+                    crate::request_binding::load_agent_request_by_doc_id(node, active_doc_id)
+                        .await?
+                        .context("active session request disappeared")?,
+                )
+            }
+            None => None,
+        }
     } else {
         None
     };
+    // Lean `CausalHop.nextHop` of a cross-session cause: past the caller, and
+    // never below the addressed session's own hop.
+    let own_hop = match &active {
+        Some(active) => active.subagent_depth,
+        None => session_latest_hop(node, target).await?,
+    };
+    let hop = crate::lifecycle::next_request_hop(
+        crate::lifecycle::RequestHopCause::CrossSession {
+            cause_hop: cause.caller_hop,
+        },
+        own_hop,
+    );
     let write = if let Some((objective, token_budget)) = rendered.goal {
         if !local {
             return Ok(Err(
@@ -383,6 +415,7 @@ pub(crate) async fn plan(
             title,
             &request_id,
             Some(format!("session-message:{}", cause.tool_call_doc_id)),
+            hop,
         )
         .await?;
         PlannedWrite::Goal {
@@ -391,13 +424,6 @@ pub(crate) async fn plan(
             token_budget,
         }
     } else if let Some(active) = active {
-        let active_doc_id = active
-            .doc_id
-            .as_deref()
-            .context("active session request lacks physical identity")?;
-        let active = crate::request_binding::load_agent_request_by_doc_id(node, active_doc_id)
-            .await?
-            .context("active session request disappeared")?;
         let input = gents_protocol::request_input::RequestInput {
             queue: Some(gents_protocol::request_input::RequestQueue {
                 source: gents_protocol::request_input::QueueSource::Steering,
@@ -409,9 +435,13 @@ pub(crate) async fn plan(
             }),
             ..Default::default()
         };
-        let prepared =
-            crate::lifecycle::queue::prepare_steering_append(&active, &rendered.content, input)
-                .await?;
+        let prepared = crate::lifecycle::queue::prepare_steering_append(
+            &active,
+            &rendered.content,
+            input,
+            hop,
+        )
+        .await?;
         PlannedWrite::Steering { active, prepared }
     } else {
         PlannedWrite::Request(
@@ -422,14 +452,42 @@ pub(crate) async fn plan(
                 title,
                 &request_id,
                 None,
+                hop,
             )
             .await?,
         )
     };
     Ok(Ok(Plan {
         session_id: target.session_id.clone(),
+        hop,
         write,
     }))
+}
+
+/// The hop of the addressed session's latest request, `0` for a new session.
+async fn session_latest_hop(node: &EmbeddedNode, target: &SessionMessageTarget) -> Result<u32> {
+    #[derive(Deserialize)]
+    struct HopRow {
+        #[serde(default)]
+        subagent_depth: Option<i64>,
+    }
+    let query = format!(
+        r#"{{ AgentRequest(filter: {{ session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }}, purpose: {{ _eq: "normal" }} }}, order: [{{ created_at: DESC }}, {{ request_id: DESC }}], limit: 1) {{ subagent_depth }} }}"#,
+        escape_graphql_string(&target.session_id),
+        escape_graphql_string(&target.agent_did),
+    );
+    let response = crate::graphql::graphql_with_transaction_retry(
+        node,
+        &query,
+        "load the addressed session's latest hop",
+    )
+    .await?;
+    Ok(
+        crate::graphql::first_row::<HopRow>(&response, "AgentRequest")?
+            .and_then(|row| row.subagent_depth)
+            .and_then(|hop| u32::try_from(hop).ok())
+            .unwrap_or(0),
+    )
 }
 
 /// The receipt a session-message row answers its invocation with. It names
@@ -448,8 +506,9 @@ pub(crate) struct SessionMessageReceipt {
     pub status: String,
 }
 
-/// Persist a planned session-message request and, in the same transaction,
-/// the running row's receipt naming it.
+/// Start the pending row, persist its planned request and publish the
+/// receipt naming that request, all in one transaction: a running
+/// session-message row always has a receipt and a caused request.
 pub(crate) async fn commit(
     node: &EmbeddedNode,
     cause: &SessionMessageCause,
@@ -471,8 +530,10 @@ pub(crate) async fn commit(
             status: "running".to_owned(),
         };
     let binding = lifecycle.background_receipt_binding()?;
+    let start = lifecycle.dispatch_start()?;
+    let start = &start;
     let session_id = plan.session_id;
-    match plan.write {
+    let (receipt, started_at) = match plan.write {
         PlannedWrite::Request(create) => {
             let mutation = create.graphql_mutation().map_err(anyhow::Error::msg)?;
             let (mutation, binding, create, receipt_for) =
@@ -483,6 +544,7 @@ pub(crate) async fn commit(
                 "session_message.commit_request",
                 move |txn| {
                     Box::pin(async move {
+                        let started_at = start_dispatch(txn, start).await?;
                         let response = txn.execute(mutation).await?;
                         let doc_id = crate::graphql::created_doc_id(&response, "AgentRequest")?;
                         let receipt = receipt_for(&crate::lifecycle::EnqueuedAgentRequest {
@@ -496,7 +558,7 @@ pub(crate) async fn commit(
                             &serde_json::to_string(&receipt)?,
                         )
                         .await?;
-                        Ok(receipt)
+                        Ok((receipt, started_at))
                     })
                 },
             )
@@ -511,6 +573,7 @@ pub(crate) async fn commit(
                 "session_message.commit_steering",
                 move |txn| {
                     Box::pin(async move {
+                        let started_at = start_dispatch(txn, start).await?;
                         let enqueued = crate::lifecycle::queue::append_prepared_steering_in_txn(
                             txn, active, prepared,
                         )
@@ -522,7 +585,7 @@ pub(crate) async fn commit(
                             &serde_json::to_string(&receipt)?,
                         )
                         .await?;
-                        Ok(receipt)
+                        Ok((receipt, started_at))
                     })
                 },
             )
@@ -543,6 +606,7 @@ pub(crate) async fn commit(
                 "session_message.commit_goal",
                 move |txn| {
                     Box::pin(async move {
+                        let started_at = start_dispatch(txn, start).await?;
                         let enqueued = crate::goal::stage_goal_backed_request_in_txn(
                             txn,
                             &create.agent_did,
@@ -559,16 +623,28 @@ pub(crate) async fn commit(
                             &serde_json::to_string(&receipt)?,
                         )
                         .await?;
-                        Ok(receipt)
+                        Ok((receipt, started_at))
                     })
                 },
             )
             .await
         }
-    }
+    }?;
+    lifecycle.mark_started(started_at);
+    Ok(receipt)
 }
 
-/// The receipt a session-message row published, if any.
+async fn start_dispatch(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    start: &crate::tool_call_lifecycle::delivery::DispatchStart,
+) -> Result<chrono::DateTime<chrono::Utc>> {
+    crate::tool_call_lifecycle::delivery::start_running_in_txn(txn, start, None)
+        .await?
+        .context("session-message row was altered or is no longer pending")
+}
+
+/// The receipt a session-message row published: `Ok(None)` when the row has
+/// no invocation reply, or its reply is not a session-message receipt.
 pub(crate) async fn load_receipt(
     node: &std::sync::Arc<EmbeddedNode>,
     tool_call_doc_id: &str,
@@ -576,7 +652,7 @@ pub(crate) async fn load_receipt(
     session_id: &str,
     requester_did: Option<&str>,
 ) -> Result<Option<SessionMessageReceipt>> {
-    let message = crate::tool_call_lifecycle::query::load_tool_call_result(
+    let read = crate::tool_call_lifecycle::query::load_tool_call_read(
         &crate::config_client::ConfigAccess::Local(node.clone()),
         tool_call_doc_id,
         agent_did,
@@ -584,20 +660,35 @@ pub(crate) async fn load_receipt(
         requester_did,
     )
     .await?;
+    let Some(message) = read.result else {
+        return Ok(None);
+    };
     let text = crate::tool_call_lifecycle::query::render_tool_result(&message)?;
     Ok(serde_json::from_str::<SessionMessageReceipt>(&text)
         .ok()
         .filter(|receipt| receipt.ok))
 }
 
+/// What a session-message row can observe of the one request it caused.
+pub(crate) enum CausedObservation {
+    /// The receipt names a request carrying the row's lineage.
+    Bound(gents_protocol::row::AgentRequestRow),
+    /// The named request is not visible here yet: a peer has not replicated
+    /// it back (Lean premise on `SessionMessageRecoveryCause`).
+    NotVisible,
+    /// Lean `SessionMessageRecoveryCause.causedRequestUnbound`: the receipt
+    /// is missing, or names a request that fails the row's lineage.
+    Unbound(&'static str),
+}
+
 /// The one request a session-message row caused, read through the row's
 /// receipt and checked against its lineage: either a session-message request
 /// carrying the row's full calling edge under this requester, or a steering
 /// continuation in the addressed session under this principal.
-pub(crate) async fn load_caused_request(
+pub(crate) async fn observe_caused_request(
     node: &std::sync::Arc<EmbeddedNode>,
     lifecycle: &crate::tool_call_lifecycle::ToolCallLifecycle,
-) -> Result<Option<gents_protocol::row::AgentRequestRow>> {
+) -> Result<CausedObservation> {
     let tool_call_doc_id = lifecycle
         .doc_id()
         .context("session-message row lacks physical identity")?;
@@ -610,12 +701,14 @@ pub(crate) async fn load_caused_request(
     )
     .await?
     else {
-        return Ok(None);
+        return Ok(CausedObservation::Unbound(
+            "the row has no receipt naming the request it caused",
+        ));
     };
     let query = format!(
         r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{
             _docID request_id agent_did requester_did session_id lifecycle_state input
-            caused_by_parent_request_doc_id caused_by_parent_tool_call_id
+            subagent_depth caused_by_parent_request_doc_id caused_by_parent_tool_call_id
             caused_by_parent_tool_call_doc_id
         }} }}"#,
         escape_graphql_string(&receipt.request_doc_id),
@@ -631,7 +724,7 @@ pub(crate) async fn load_caused_request(
         "AgentRequest",
     )?
     else {
-        return Ok(None);
+        return Ok(CausedObservation::NotVisible);
     };
     let caller = lifecycle.agent_did();
     let session_message = caused.requester_did.as_deref() == Some(caller)
@@ -656,39 +749,217 @@ pub(crate) async fn load_caused_request(
             caused_request_id = %caused.request_id,
             "caused request does not match its session-message receipt"
         );
-        return Ok(None);
+        return Ok(CausedObservation::Unbound(
+            "the receipt names a request that does not carry this call's lineage",
+        ));
     }
-    Ok(Some(caused))
+    Ok(CausedObservation::Bound(caused))
 }
 
-/// `cancel_process` on a session-message row interrupts only the one request
-/// that row caused; the row settles when that request reaches its terminal.
-/// Returns the interrupted request id, or `None` when it has no live request.
-pub(crate) async fn interrupt_caused_request(
+/// The hop of a bound caused request, which its completion wake climbs past.
+pub(crate) fn caused_hop(caused: &gents_protocol::row::AgentRequestRow) -> u32 {
+    caused
+        .subagent_depth
+        .and_then(|hop| u32::try_from(hop).ok())
+        .unwrap_or(0)
+}
+
+/// What a kill did (Lean `Recovery.KillAction`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum KillOutcome {
+    /// The caused request had already ended; the row settled from it.
+    Settled,
+    /// The local caused request was interrupted; its terminal settles the row.
+    Interrupting { request_id: String },
+    /// The row was cancelled now, with a cancelled completion notification.
+    Cancelled,
+}
+
+/// `cancel_process` and the operator kill on a running session-message row
+/// (Lean `Recovery.killAction`). A kill never waits on a peer or on a request
+/// it cannot name: those rows are cancelled directly.
+pub(crate) async fn kill(
     node: &std::sync::Arc<EmbeddedNode>,
-    lifecycle: &crate::tool_call_lifecycle::ToolCallLifecycle,
-) -> Result<Option<String>> {
-    let Some(caused) = load_caused_request(node, lifecycle).await? else {
-        return Ok(None);
+    lifecycle: &mut crate::tool_call_lifecycle::ToolCallLifecycle,
+) -> Result<KillOutcome> {
+    let caused = match observe_caused_request(node, lifecycle).await? {
+        CausedObservation::Bound(caused) => Some(caused),
+        CausedObservation::NotVisible | CausedObservation::Unbound(_) => None,
     };
-    if caused
-        .lifecycle_state
-        .is_some_and(gents_protocol::request_lifecycle::RequestLifecycleState::is_terminal)
-    {
-        return Ok(None);
-    }
-    crate::interrupt::interrupt_request_by_doc_id(
-        node,
-        caused
+    if let Some(caused) = &caused {
+        let terminal = caused
+            .lifecycle_state
+            .is_some_and(gents_protocol::request_lifecycle::RequestLifecycleState::is_terminal);
+        if terminal
+            && crate::background_completion::settle_session_message_row(node, lifecycle).await?
+        {
+            return Ok(KillOutcome::Settled);
+        }
+        let doc_id = caused
             .doc_id
             .as_deref()
-            .context("caused request lacks physical identity")?,
-        caused
+            .context("caused request lacks physical identity")?;
+        let agent_did = caused
             .agent_did
             .as_deref()
-            .context("caused request lacks agent_did")?,
-        caused.requester_did.as_deref(),
+            .context("caused request lacks agent_did")?;
+        let local = agent_did == lifecycle.agent_did();
+        if !terminal {
+            let interrupted = crate::interrupt::interrupt_request_by_doc_id(
+                node,
+                doc_id,
+                agent_did,
+                caused.requester_did.as_deref(),
+            )
+            .await;
+            match interrupted {
+                Ok(_) if local => {
+                    return Ok(KillOutcome::Interrupting {
+                        request_id: caused.request_id.clone(),
+                    })
+                }
+                Ok(_) => {}
+                Err(error) if local => return Err(error),
+                Err(error) => tracing::warn!(
+                    caused_request_doc_id = doc_id,
+                    error = %format!("{error:#}"),
+                    "peer interrupt of a killed session message was not written"
+                ),
+            }
+        }
+    }
+    if lifecycle
+        .cancel_during_run_owned(
+            crate::tool_call_lifecycle::CancelCause::UserCancelled,
+            "explicit_cancel",
+        )
+        .await?
+    {
+        let calling_request_id = calling_request_id(node, lifecycle).await?;
+        crate::background_completion::append_background_tool_completion(
+            node.as_ref(),
+            lifecycle.session_id(),
+            &calling_request_id,
+            lifecycle
+                .doc_id()
+                .context("session-message row lacks physical identity")?,
+            lifecycle.tool_name(),
+            "cancelled",
+            "",
+            Some("explicit_cancel"),
+        )
+        .await?;
+    }
+    Ok(KillOutcome::Cancelled)
+}
+
+/// The logical id of the request that made a session-message call, read from
+/// its physical binding when the row was not loaded with it.
+pub(crate) async fn calling_request_id(
+    node: &EmbeddedNode,
+    lifecycle: &crate::tool_call_lifecycle::ToolCallLifecycle,
+) -> Result<String> {
+    if !lifecycle.request_id().trim().is_empty() {
+        return Ok(lifecycle.request_id().to_owned());
+    }
+    let doc_id = lifecycle
+        .request_doc_id()
+        .context("session-message row lacks its calling request document")?;
+    Ok(
+        crate::request_binding::load_agent_request_by_doc_id(node, doc_id)
+            .await?
+            .context("session-message calling request disappeared")?
+            .request_id,
     )
-    .await?;
-    Ok(Some(caused.request_id))
+}
+
+#[cfg(test)]
+mod hop_tests {
+    use super::*;
+    use crate::tool_call_lifecycle::admission_fixture::{
+        published_session_message, PublishedAdmissionOptions,
+    };
+    use crate::tool_call_lifecycle::AwaitMode;
+
+    fn cause(
+        message: &crate::tool_call_lifecycle::admission_fixture::PublishedSessionMessage,
+        caller_hop: u32,
+    ) -> SessionMessageCause {
+        SessionMessageCause {
+            caller_agent_did: message.admission.agent_did.clone(),
+            caller_request_id: "caller-request".to_owned(),
+            caller_request_doc_id: message.admission.tool.request_doc_id().unwrap().to_owned(),
+            caller_hop,
+            tool_call_id: "hop-tool".to_owned(),
+            tool_call_doc_id: "hop-tool-doc".to_owned(),
+            correlation: None,
+        }
+    }
+
+    /// Lean `DurableLineage.ContinuationKind.agentSteering` and
+    /// `CausalHop.nextHop`: a message into a busy session steers it past its
+    /// caller, and one into an idle session never lowers that session's hop.
+    #[tokio::test]
+    async fn session_messages_climb_past_their_caller_and_keep_the_target_hop() {
+        let message = published_session_message(PublishedAdmissionOptions {
+            name: "session-message-hops".to_owned(),
+            real_identity: true,
+            await_mode: AwaitMode::Background,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+        let node = message.admission.node.clone();
+        let did = message.admission.agent_did.clone();
+        let caused = crate::request_binding::load_agent_request_by_doc_id(
+            &node,
+            &message.caused_request_doc_id,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(caused.subagent_depth, 1);
+        let target = SessionMessageTarget {
+            agent_did: did.clone(),
+            behavior_id: caused.behavior_id.clone(),
+            session_id: caused.session_id.clone(),
+        };
+        let body = || RenderedBody {
+            content: "again".to_owned(),
+            goal: None,
+        };
+
+        let idle = plan(&node, &cause(&message, 0), &target, body(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(idle.delivery(), Delivery::Request);
+        assert_eq!(idle.hop(), 1, "never below the addressed session's own hop");
+        let idle = plan(&node, &cause(&message, 5), &target, body(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(idle.hop(), 6);
+
+        let response = node
+            .execute(&format!(
+                r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, input: {{ lifecycle_state: "processing" }}) {{ _docID }} }}"#,
+                escape_graphql_string(&message.caused_request_doc_id)
+            ))
+            .await;
+        assert!(!response.has_errors(), "{:?}", response.errors);
+        let busy = plan(&node, &cause(&message, 3), &target, body(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(busy.delivery(), Delivery::Steering);
+        assert_eq!(busy.hop(), 4, "steering climbs past its caller");
+        let busy = plan(&node, &cause(&message, 0), &target, body(), None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(busy.hop(), 1, "steering never lowers the active hop");
+        node.shutdown().await;
+        std::fs::remove_dir_all(&message.admission.path).unwrap();
+    }
 }

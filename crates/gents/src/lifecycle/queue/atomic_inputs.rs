@@ -12,6 +12,29 @@ pub(crate) struct ToolNotificationPublication {
     pub(crate) presentation: Vec<gents_protocol::output::PresentationPart>,
 }
 
+/// How a completion's wake is written (Lean `CausalHop.completionWake`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CompletionWake {
+    /// Coalesce into, or create, the pending wake at this hop.
+    AtHop(u32),
+    /// The wake would exceed the woken principal's bound: the notification is
+    /// still appended, bound to the calling request, and no wake is written.
+    RefusedByHopBound { hop: u32, max_request_hop: u32 },
+}
+
+impl CompletionWake {
+    /// Wakes coalesce only with wakes at the same hop, so a completion caused
+    /// by another session never rides a lower-hop wake.
+    pub(crate) fn queue_key(&self, session_id: &str, own_hop: u32) -> String {
+        match self {
+            Self::AtHop(hop) if *hop != own_hop => {
+                format!("background_completion:{session_id}:hop:{hop}")
+            }
+            _ => format!("background_completion:{session_id}"),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct BackgroundCompletionGateKey {
     node: usize,
@@ -72,6 +95,7 @@ pub(crate) async fn persist_background_completion_with_message_canonical(
     queue: RequestQueue,
     existing_notification_doc_id: Option<&str>,
     native: &ToolNotificationPublication,
+    wake: CompletionWake,
 ) -> Result<EnqueuedBackgroundCompletionInput> {
     anyhow::ensure!(
         queue.source == QueueSource::BackgroundCompletion && queue.policy == QueuePolicy::Coalesce,
@@ -111,6 +135,7 @@ pub(crate) async fn persist_background_completion_with_message_canonical(
                     queue,
                     existing_notification_doc_id,
                     native,
+                    wake,
                 )
                 .await
             })
@@ -279,6 +304,7 @@ pub(crate) async fn persist_background_completion_with_message(
                 end_byte: notification_content.len() as u64,
             }],
         },
+        CompletionWake::AtHop(parent.subagent_depth),
     )
     .await
 }
@@ -294,6 +320,7 @@ async fn background_completion_transaction_attempt(
     queue: &RequestQueue,
     existing_notification_doc_id: Option<&str>,
     native: &ToolNotificationPublication,
+    wake: CompletionWake,
 ) -> Result<EnqueuedBackgroundCompletionInput> {
     use sha2::{Digest, Sha256};
 
@@ -398,6 +425,17 @@ async fn background_completion_transaction_attempt(
             "canonical notification replay request binding is invalid"
         );
         let bound = &rows[0];
+        if let CompletionWake::RefusedByHopBound { .. } = wake {
+            anyhow::ensure!(
+                bound.doc_id.as_deref() == Some(parent.doc_id.as_str()),
+                "canonical notification replay without a wake must bind its calling request"
+            );
+            return Ok(EnqueuedBackgroundCompletionInput {
+                request: None,
+                message_sequence: row.message.sequence,
+                created_request: false,
+            });
+        }
         anyhow::ensure!(
             row_matches_coalesced_source_and_key(
                 bound,
@@ -416,6 +454,29 @@ async fn background_completion_transaction_attempt(
         });
     }
 
+    let wake_hop = match wake {
+        CompletionWake::AtHop(hop) => hop,
+        CompletionWake::RefusedByHopBound { .. } => {
+            let message_sequence =
+                next_append_sequence_in_transaction(txn, &parent.agent_did, &parent.session_id)
+                    .await?;
+            publish_native_tool_notification(
+                txn,
+                parent,
+                &parent.doc_id,
+                message_sequence,
+                message_key,
+                content,
+                native,
+            )
+            .await?;
+            return Ok(EnqueuedBackgroundCompletionInput {
+                request: None,
+                message_sequence,
+                created_request: false,
+            });
+        }
+    };
     let pending_rows: Vec<AgentRequestRow> =
         serde_json::from_value(response["data"]["pending"].clone())
             .context("decode pending AgentRequest rows")?;
@@ -465,8 +526,9 @@ async fn background_completion_transaction_attempt(
                 )),
                 ..Default::default()
             };
-            let request_mutation = session_request_create_mutation(
+            let request_mutation = session_request_create_mutation_at_hop(
                 parent,
+                wake_hop,
                 behavior_id,
                 wake_content,
                 ExecutionOrigin::Scheduled,

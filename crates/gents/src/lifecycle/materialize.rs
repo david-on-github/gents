@@ -600,18 +600,21 @@ pub(crate) async fn write_pending_title_request(
 pub enum RequestHopCause {
     /// A user, trigger or schedule root.
     Root,
-    /// `create_session`/`send_message` materialized it from a tool call.
-    ToolCall,
-    /// A retry, goal continuation, steering or completion wake of the same work.
+    /// Caused by another session's action at `cause_hop`: a
+    /// `create_session`/`send_message` request or steering continuation, or a
+    /// session-message completion wake.
+    CrossSession { cause_hop: u32 },
+    /// A retry, goal continuation, user steering or native completion wake.
     Continuation,
 }
 
-/// Lean `CausalHop.nextHop`.
-pub fn next_request_hop(cause: RequestHopCause, predecessor_hop: u32) -> u32 {
+/// Lean `CausalHop.nextHop`: `own` is the hop of the request this one
+/// continues in its own session, `0` for a new session.
+pub fn next_request_hop(cause: RequestHopCause, own: u32) -> u32 {
     match cause {
         RequestHopCause::Root => 0,
-        RequestHopCause::ToolCall => predecessor_hop.saturating_add(1),
-        RequestHopCause::Continuation => predecessor_hop,
+        RequestHopCause::CrossSession { cause_hop } => own.max(cause_hop.saturating_add(1)),
+        RequestHopCause::Continuation => own,
     }
 }
 
@@ -643,8 +646,8 @@ pub(crate) struct SessionMessageTarget {
 }
 
 /// Build and sign the request a `create_session`/`send_message` call
-/// materializes. This is the single writer of the calling edge
-/// (`caused_by_parent_*`) and of its hop, one further than the caller's. The
+/// materializes at `hop` (Lean `CausalHop.nextHop` of a cross-session cause).
+/// This is the single writer of the calling edge (`caused_by_parent_*`). The
 /// caller is the requester and signer: its own principal admits it as
 /// LocalSelf, any other target as Peer under that target's ACP.
 pub(crate) async fn build_session_message_request(
@@ -654,6 +657,7 @@ pub(crate) async fn build_session_message_request(
     title: Option<&str>,
     request_id: &str,
     retry_key: Option<String>,
+    hop: u32,
 ) -> Result<gents_protocol::request_admission::AgentRequestCreate> {
     use gents_protocol::request_admission::{AgentRequestAdmissionRecord, RequestPurpose};
     anyhow::ensure!(
@@ -696,7 +700,7 @@ pub(crate) async fn build_session_message_request(
             ..Default::default()
         },
         subagent: Some(ParentLink {
-            depth: next_request_hop(RequestHopCause::ToolCall, cause.caller_hop),
+            depth: hop,
             parent_request_id: cause.caller_request_id.clone(),
             parent_request_doc_id: cause.caller_request_doc_id.clone(),
             parent_tool_call_id: Some(cause.tool_call_id.clone()),

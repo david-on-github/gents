@@ -80,18 +80,24 @@ pub async fn cancel_background_tool_call(
     }
 
     if lifecycle.is_session_message() {
-        // A session-message row has no process: stopping it interrupts only
-        // the one request it caused, and the row settles from that terminal.
-        let interrupted =
-            crate::session_message::interrupt_caused_request(&node, &lifecycle).await?;
-        return Ok(match interrupted {
-            Some(_) => CancelBackgroundToolCallOutcome::Cancelled {
-                live_execution_cancelled: false,
+        // A session-message row has no process: the kill interrupts the one
+        // request it caused, or ends the row itself when it cannot wait on
+        // this runtime's own terminal for that request.
+        return Ok(
+            match crate::session_message::kill(&node, &mut lifecycle).await? {
+                crate::session_message::KillOutcome::Settled => {
+                    CancelBackgroundToolCallOutcome::AlreadyTerminal {
+                        state: lifecycle.state().as_str().to_string(),
+                    }
+                }
+                crate::session_message::KillOutcome::Interrupting { .. }
+                | crate::session_message::KillOutcome::Cancelled => {
+                    CancelBackgroundToolCallOutcome::Cancelled {
+                        live_execution_cancelled: false,
+                    }
+                }
             },
-            None => CancelBackgroundToolCallOutcome::AlreadyTerminal {
-                state: lifecycle.state().as_str().to_string(),
-            },
-        });
+        );
     }
 
     if !background_executions.contains(tool_call_id).await {

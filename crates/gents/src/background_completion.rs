@@ -19,7 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::graphql::escape_graphql_string;
 use crate::lifecycle::queue::{QueuePolicy, QueueSource, RequestQueue};
-use crate::tool_call_lifecycle::ToolCallLifecycle;
+use crate::tool_call_lifecycle::{FailureClass, ToolCallLifecycle};
 
 const AGENT_REQUEST_COLLECTION: &str = "AgentRequest";
 pub const BACKGROUND_COMPLETION_WAKE_PROMPT: &str =
@@ -42,9 +42,11 @@ mod rendering;
 mod session_message;
 mod side_effects;
 
-pub(crate) use notification_delivery::append_background_tool_completion;
+pub(crate) use notification_delivery::{
+    append_background_tool_completion, append_session_message_completion,
+};
 pub(crate) use observer::run_background_completion_observer;
-pub(crate) use session_message::settle_running_session_message_rows;
+pub(crate) use session_message::{settle_running_session_message_rows, settle_session_message_row};
 
 use datetime_fields::agent_tool_call_datetime_update_fragment;
 use rendering::tool_completion_presentation;

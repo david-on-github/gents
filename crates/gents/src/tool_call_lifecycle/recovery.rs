@@ -1,7 +1,8 @@
 //! Recovery for persisted running tool calls: the startup sweep over rows
 //! orphaned by a daemon restart, the session-message sweep that settles a
-//! `create_session`/`send_message` row from its own deadline or its caused
-//! request's terminal, and the live terminal-parent owned-tool cleanup that
+//! `create_session`/`send_message` row from its caused request's terminal (or
+//! fails it closed when it cannot name that request), and the live
+//! terminal-parent owned-tool cleanup that
 //! cancels running foreground tools whose parent is already terminal without
 //! waiting for deadline or daemon restart.
 
@@ -560,18 +561,52 @@ impl super::ToolCallLifecycle {
                     continue;
                 }
             };
-            match crate::background_completion::append_background_tool_completion(
-                node,
-                session_id,
-                request_id,
-                &row.doc_id,
-                &row.tool_name,
-                status,
-                &output,
-                reason,
-            )
-            .await
+            // A session-message completion's wake climbs past its caused
+            // request; a kill or an unbound verdict continues this session.
+            let caused_hop = if crate::toolset::is_session_message_tool(&row.tool_name)
+                && !matches!(reason, Some("explicit_cancel" | "caused_request_unbound"))
             {
+                match session_message_caused_hop(node, &row, agent_did, session_id).await {
+                    Ok(Some(hop)) => Some(hop),
+                    Ok(None) => continue,
+                    Err(error) => {
+                        tracing::warn!(doc_id = %row.doc_id, error = %format!("{error:#}"), "session-message completion cause is unresolved");
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let appended = match caused_hop {
+                Some(caused_hop) => {
+                    crate::background_completion::append_session_message_completion(
+                        node,
+                        session_id,
+                        request_id,
+                        &row.doc_id,
+                        &row.tool_name,
+                        status,
+                        &output,
+                        reason,
+                        caused_hop,
+                    )
+                    .await
+                }
+                None => {
+                    crate::background_completion::append_background_tool_completion(
+                        node,
+                        session_id,
+                        request_id,
+                        &row.doc_id,
+                        &row.tool_name,
+                        status,
+                        &output,
+                        reason,
+                    )
+                    .await
+                }
+            };
+            match appended {
                 Ok(()) => report.side_effects_converged += 1,
                 Err(error) => tracing::warn!(
                     doc_id = %row.doc_id,
@@ -1063,6 +1098,34 @@ async fn load_pending_background_completion_rows(
         }
     }
     Ok(rows)
+}
+
+/// The hop of the request a terminal session-message row caused.
+async fn session_message_caused_hop(
+    node: &std::sync::Arc<EmbeddedNode>,
+    row: &TerminalBackgroundToolRow,
+    agent_did: &str,
+    session_id: &str,
+) -> Result<Option<u32>> {
+    let Some(lifecycle) = super::ToolCallLifecycle::load_by_doc_id(
+        node.clone(),
+        &row.doc_id,
+        agent_did,
+        session_id,
+        row.requester_did.as_deref(),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(
+        match crate::session_message::observe_caused_request(node, &lifecycle).await? {
+            crate::session_message::CausedObservation::Bound(caused) => {
+                Some(crate::session_message::caused_hop(&caused))
+            }
+            _ => None,
+        },
+    )
 }
 
 fn background_completion_projection(

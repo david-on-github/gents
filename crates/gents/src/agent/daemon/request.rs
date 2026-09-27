@@ -158,8 +158,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                     session_id = %request.session_id,
                     agent_did = %request.agent_did,
                     behavior_id = %response_behavior_id,
-                    subagent_depth = trace_attrs.subagent_depth,
-                    is_subagent = trace_attrs.is_subagent,
+                    request_hop = trace_attrs.request_hop,
                 ))
                 .await?;
             self.spawn_conversation_title_generation(&request);
@@ -503,8 +502,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                 behavior_id = %behavior_name,
                 deadline_at = %trace_attrs.deadline_at,
                 has_deadline = trace_attrs.has_deadline,
-                subagent_depth = trace_attrs.subagent_depth,
-                is_subagent = trace_attrs.is_subagent,
+                request_hop = trace_attrs.request_hop,
                 selected_skill_count = trace_attrs.selected_skill_count,
                 workspace_cwd_set = trace_attrs.workspace_cwd_set,
             ))
@@ -548,8 +546,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                     backend_id = %inference_backend_id,
                     deadline_at = %trace_attrs.deadline_at,
                     has_deadline = trace_attrs.has_deadline,
-                    subagent_depth = trace_attrs.subagent_depth,
-                    is_subagent = trace_attrs.is_subagent,
+                    request_hop = trace_attrs.request_hop,
                     selected_skill_count = trace_attrs.selected_skill_count,
                     workspace_cwd_set = trace_attrs.workspace_cwd_set,
                 ))

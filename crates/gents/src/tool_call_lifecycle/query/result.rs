@@ -111,7 +111,7 @@ pub async fn load_tool_call_result(
     })
 }
 
-async fn load_tool_call_read(
+pub(crate) async fn load_tool_call_read(
     access: &ConfigAccess,
     tool_call_doc_id: &str,
     agent_did: &str,

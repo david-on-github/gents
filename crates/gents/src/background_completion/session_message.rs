@@ -60,8 +60,9 @@ pub(crate) async fn settle_running_session_message_rows(
 }
 
 /// Observer arm: a request that reached a durable terminal may be the one a
-/// local running session-message row caused. Each running row names its
-/// caused request in its receipt, so the arm settles through those rows.
+/// local running session-message row caused. A session-message request names
+/// its row through `caused_by_parent_tool_call_doc_id`, so only that row is
+/// settled; a steering continuation names none, so its terminal rescans.
 pub(super) async fn settle_rows_after_request_update(
     node: &Arc<EmbeddedNode>,
     local_did: &str,
@@ -69,7 +70,7 @@ pub(super) async fn settle_rows_after_request_update(
 ) -> Result<usize> {
     let query = format!(
         r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{
-            _docID request_id lifecycle_state
+            _docID request_id lifecycle_state caused_by_parent_tool_call_doc_id
         }} }}"#,
         escape_graphql_string(request_doc_id)
     );
@@ -79,13 +80,35 @@ pub(super) async fn settle_rows_after_request_update(
         "load updated request for session-message settlement",
     )
     .await?;
-    let terminal = crate::graphql::first_row::<AgentRequestRow>(&response, "AgentRequest")?
-        .and_then(|request| request.lifecycle_state)
-        .is_some_and(RequestLifecycleState::is_terminal);
-    if !terminal {
+    let Some(request) = crate::graphql::first_row::<AgentRequestRow>(&response, "AgentRequest")?
+    else {
+        return Ok(0);
+    };
+    if !request
+        .lifecycle_state
+        .is_some_and(RequestLifecycleState::is_terminal)
+    {
         return Ok(0);
     }
-    settle_running_session_message_rows(node, local_did).await
+    let Some(tool_doc_id) = request.caused_by_parent_tool_call_doc_id else {
+        return settle_running_session_message_rows(node, local_did).await;
+    };
+    let query = format!(
+        r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }}, {} }}, limit: 1) {{ {SESSION_MESSAGE_ROW_FIELDS} }} }}"#,
+        escape_graphql_string(&tool_doc_id),
+        running_session_message_filter(local_did)
+    );
+    let response = crate::graphql::graphql_with_transaction_retry(
+        node.as_ref(),
+        &query,
+        "load the session-message row a terminal request names",
+    )
+    .await?;
+    let mut settled = 0;
+    for row in crate::graphql::rows::<SessionMessageRow>(&response, "AgentToolCall")? {
+        settled += usize::from(settle_row(node, &row).await?);
+    }
+    Ok(settled)
 }
 
 async fn settle_row(node: &Arc<EmbeddedNode>, row: &SessionMessageRow) -> Result<bool> {
@@ -100,33 +123,75 @@ async fn settle_row(node: &Arc<EmbeddedNode>, row: &SessionMessageRow) -> Result
     else {
         return Ok(false);
     };
+    settle_session_message_row(node, &mut lifecycle).await
+}
+
+/// Settle one running session-message row from what it observes of its
+/// caused request (Lean `Recovery.sessionMessageRecoverySweep`): the caused
+/// terminal ends it with that result; a row that cannot name its caused
+/// request fails closed once (`causedRequestUnbound`); a request not yet
+/// visible here leaves it running. The winner of the row's terminal compare
+/// appends its completion notification.
+pub(crate) async fn settle_session_message_row(
+    node: &Arc<EmbeddedNode>,
+    lifecycle: &mut ToolCallLifecycle,
+) -> Result<bool> {
     if !lifecycle.is_running() || !lifecycle.is_session_message() {
         return Ok(false);
     }
-    let Some(caused_doc_id) = crate::session_message::load_caused_request(node, &lifecycle)
-        .await?
-        .and_then(|caused| caused.doc_id)
-    else {
-        return Ok(false);
+    let doc_id = lifecycle
+        .doc_id()
+        .context("session-message row lacks physical identity")?
+        .to_owned();
+    let calling_request_id =
+        crate::session_message::calling_request_id(node.as_ref(), lifecycle).await?;
+    let caused = match crate::session_message::observe_caused_request(node, lifecycle).await? {
+        crate::session_message::CausedObservation::Bound(caused) => caused,
+        crate::session_message::CausedObservation::NotVisible => return Ok(false),
+        crate::session_message::CausedObservation::Unbound(reason) => {
+            const REASON: &str = "caused_request_unbound";
+            if !lifecycle
+                .fail_owned_with_completion_reason(reason, FailureClass::External, REASON)
+                .await?
+            {
+                return Ok(false);
+            }
+            append_background_tool_completion(
+                node.as_ref(),
+                lifecycle.session_id(),
+                &calling_request_id,
+                &doc_id,
+                lifecycle.tool_name(),
+                "failed",
+                reason,
+                Some(REASON),
+            )
+            .await?;
+            return Ok(true);
+        }
     };
+    let caused_doc_id = caused
+        .doc_id
+        .as_deref()
+        .context("caused request lacks physical identity")?;
     let Some(terminal) =
-        crate::background_tools::load_caused_request_terminal(node.as_ref(), &caused_doc_id)
-            .await?
+        crate::background_tools::load_caused_request_terminal(node.as_ref(), caused_doc_id).await?
     else {
         return Ok(false);
     };
     if !lifecycle.settle_session_message(&terminal).await? {
         return Ok(false);
     }
-    append_background_tool_completion(
+    append_session_message_completion(
         node.as_ref(),
-        &row.session_id,
-        &row.request_id,
-        &row.doc_id,
-        &row.tool_name,
+        lifecycle.session_id(),
+        &calling_request_id,
+        &doc_id,
+        lifecycle.tool_name(),
         terminal.notification_status(),
         terminal.output(),
         terminal.completion_reason(),
+        crate::session_message::caused_hop(&caused),
     )
     .await?;
     Ok(true)

@@ -580,7 +580,6 @@ pub(crate) async fn materialize_session_message(
     )
     .await?
     .map_err(anyhow::Error::msg)?;
-    tool.start_running().await?;
     crate::session_message::commit(node, &cause, tool, plan, false).await
 }
 
