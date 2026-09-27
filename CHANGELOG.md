@@ -123,6 +123,9 @@ source consistency checks, not a separate runtime compatibility version.
 
 - Title audits dispatch only through the runtime watcher, preventing duplicate
   claim attempts while retaining received reasoning (#1916).
+- A command that hits its own timeout no longer reports a duration shorter
+  than that timeout: one arming instant now both sets the deadline and starts
+  the measurement (#1929).
 
 - Stateless (`store:false`) Responses requests to xAI/Grok and ChatGPT Codex
   now always request `include: ["reasoning.encrypted_content"]`, even with no
