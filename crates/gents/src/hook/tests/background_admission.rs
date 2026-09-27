@@ -94,11 +94,17 @@ impl DeniedTarget {
     }
 }
 
-async fn spawned_target_rejection_case(
-    case: &crate::lean_vocab_test::LeanSpawnedTargetRejectionCase,
-    target: &DeniedTarget,
-) {
-    let expected = &case.expected;
+struct AdmissionHarness {
+    _dir: tempfile::TempDir,
+    root: tempfile::TempDir,
+    node: Arc<EmbeddedNode>,
+    hook: DefraSessionHook,
+    request_id: String,
+}
+
+async fn admission_harness(
+    registry: impl FnOnce(&Arc<EmbeddedNode>, &std::path::Path) -> BackgroundToolRegistry,
+) -> AdmissionHarness {
     let dir = tempfile::tempdir().unwrap();
     let identity =
         crate::identity::KeyIdentity::load_or_create(dir.path().join("agent.key"), None).unwrap();
@@ -119,8 +125,8 @@ async fn spawned_target_rejection_case(
         identity.did(),
         FailurePolicy::default(),
     )
-    .with_background_tool_registry(target.registry(&node, root.path()));
-    hook.on_completion_call(&user_text_message("remove in the background"), &[])
+    .with_background_tool_registry(registry(&node, root.path()));
+    hook.on_completion_call(&user_text_message("run in the background"), &[])
         .await;
     let session = hook.session_id().await.unwrap();
     crate::session::create_session_with_behavior_id(
@@ -141,6 +147,27 @@ async fn spawned_target_rejection_case(
         Utc::now() + chrono::Duration::minutes(5),
     )
     .await;
+    AdmissionHarness {
+        _dir: dir,
+        root,
+        node,
+        hook,
+        request_id,
+    }
+}
+
+async fn spawned_target_rejection_case(
+    case: &crate::lean_vocab_test::LeanSpawnedTargetRejectionCase,
+    target: &DeniedTarget,
+) {
+    let expected = &case.expected;
+    let AdmissionHarness {
+        _dir,
+        root,
+        node,
+        hook,
+        request_id,
+    } = admission_harness(|node, root| target.registry(node, root)).await;
     let args = target.spawn_arguments();
     accept_hook_tool_call(&hook, "spawn-denied", &case.parent_tool, args, None).await;
     let action = hook
@@ -216,4 +243,84 @@ async fn spawned_target_rejection_case(
         target.target()
     );
     node.shutdown().await;
+}
+
+/// Input outside the advertised `spawn_process` schema fails the call that
+/// carries it, so the model sees the rejection in the same turn instead of a
+/// running receipt for a process whose target arguments cannot decode. The
+/// first input is the live shape GLM emitted for the desktop operations smoke.
+#[tokio::test]
+async fn spawn_process_rejects_unadvertised_arguments_before_spawned_admission() {
+    for args in [
+        r#"{"args":[],"command":"ls","timeout_secs":"25","tool_name":"bash"}"#,
+        r#"{"tool_name":"bash","args":{},"command":"ls"}"#,
+        r#"{"tool_name":"bash"}"#,
+        r#"{"tool_name":"bash","args":"{\"command\":\"ls\"}"}"#,
+    ] {
+        let AdmissionHarness {
+            _dir,
+            root: _root,
+            node,
+            hook,
+            request_id,
+        } = admission_harness(|_, root| {
+            BackgroundToolRegistry::from_tools(
+                vec![crate::toolset::read_only_bash_for_test(
+                    root,
+                    vec!["ls".into()],
+                )],
+                &["bash".into()],
+            )
+        })
+        .await;
+        accept_hook_tool_call(
+            &hook,
+            "spawn-malformed",
+            crate::toolset::SPAWN_PROCESS_TOOL_NAME,
+            args,
+            None,
+        )
+        .await;
+        let action = hook
+            .on_tool_call(
+                crate::toolset::SPAWN_PROCESS_TOOL_NAME,
+                None,
+                "spawn-malformed",
+                args,
+            )
+            .await;
+        let ToolCallHookAction::Skip { reason } = &action else {
+            panic!("{args}: {action:?}");
+        };
+        assert!(
+            reason.contains("invalid spawn_process arguments"),
+            "{args}: {reason}"
+        );
+
+        let response = node
+            .execute(&format!(
+                r#"{{ AgentToolCall(filter: {{ request_id: {{_eq: "{}"}} }}) {{ tool_name lifecycle_state tool_failure_class spawned_by_tool_call_doc_id }} }}"#,
+                crate::graphql::escape_graphql_string(&request_id),
+            ))
+            .await;
+        assert!(!response.has_errors(), "{:?}", response.errors);
+        let data = response.data.unwrap();
+        let rows = data["AgentToolCall"].as_array().unwrap();
+        assert_eq!(rows.len(), 1, "{args}: {rows:?}");
+        assert_eq!(
+            rows[0]["tool_name"],
+            crate::toolset::SPAWN_PROCESS_TOOL_NAME
+        );
+        assert!(rows[0]["spawned_by_tool_call_doc_id"].is_null(), "{rows:?}");
+        assert_eq!(rows[0]["lifecycle_state"], "failed", "{args}: {rows:?}");
+        assert_eq!(
+            rows[0]["tool_failure_class"], "argumentInvalid",
+            "{args}: {rows:?}"
+        );
+        hook_execution_fixtures()
+            .lock()
+            .await
+            .remove(&hook_execution_fixture_key(&hook, &request_id));
+        node.shutdown().await;
+    }
 }

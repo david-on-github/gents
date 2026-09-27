@@ -277,6 +277,46 @@ fn background_tool_names_are_gated_by_allowlist() {
     );
 }
 
+/// The first input is the live shape GLM emitted for the desktop operations
+/// smoke: the target's fields flattened beside `tool_name`, with the target's
+/// own `args` array standing in for the `args` object.
+#[tokio::test]
+async fn spawn_process_decodes_only_its_advertised_schema() {
+    use crate::background_tools::BackgroundToolArgs;
+    use crate::llm::tool::parse_tool_args;
+
+    let tools = build_background_tools(BackgroundToolConfig {
+        allowlist: vec!["bash_unrestricted".to_string()],
+        timeouts: Default::default(),
+    });
+    let spawn = tools[0].definition(String::new()).await;
+    assert_eq!(spawn.name, SPAWN_PROCESS_TOOL_NAME);
+    assert_eq!(
+        spawn.parameters["required"],
+        serde_json::json!(["tool_name", "args"])
+    );
+    assert_eq!(spawn.parameters["properties"]["args"]["type"], "object");
+    assert_eq!(spawn.parameters["additionalProperties"], false);
+
+    for rejected in [
+        r#"{"args":[],"command":"sleep 20; printf live-native-background-smoke","timeout_secs":"25","tool_name":"bash_unrestricted"}"#,
+        r#"{"tool_name":"bash_unrestricted","args":{},"command":"true"}"#,
+        r#"{"tool_name":"bash_unrestricted"}"#,
+        r#"{"tool_name":"bash_unrestricted","args":"{\"command\":\"true\"}"}"#,
+    ] {
+        assert!(
+            parse_tool_args::<BackgroundToolArgs>(rejected).is_err(),
+            "spawn_process decoded input its schema does not advertise: {rejected}"
+        );
+    }
+    let accepted = parse_tool_args::<BackgroundToolArgs>(
+        r#"{"tool_name":"bash_unrestricted","args":{"command":"true","args":[],"timeout_secs":25}}"#,
+    )
+    .unwrap();
+    assert_eq!(accepted.tool_name, "bash_unrestricted");
+    assert_eq!(accepted.args["command"], "true");
+}
+
 #[tokio::test]
 async fn subagent_tool_definitions_register_expected_surface() {
     let config = SubagentToolConfig {

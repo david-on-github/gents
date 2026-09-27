@@ -501,7 +501,8 @@ impl Tool for SpawnProcessTool {
                         "description": "Arguments passed to the target tool."
                     }
                 },
-                "required": ["tool_name", "args"]
+                "required": ["tool_name", "args"],
+                "additionalProperties": false
             }),
         }
     }
