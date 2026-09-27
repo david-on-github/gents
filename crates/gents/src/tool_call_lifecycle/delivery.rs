@@ -619,6 +619,7 @@ impl ToolCallLifecycle {
     /// closing its ToolCall source. The receipt has its own immutable
     /// authored source, owned by the physical row; the caused request's
     /// terminal later closes the ToolCall source and appends the notification.
+    #[cfg(test)]
     pub(crate) async fn publish_background_receipt(&mut self, text: &str) -> Result<bool> {
         let binding = self.background_receipt_binding()?;
         let receipt = text.to_owned();

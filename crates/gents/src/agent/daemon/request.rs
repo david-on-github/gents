@@ -270,7 +270,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                     // One canonical reduction, shared with the compaction writer:
                     // `messages_compacted` is measured against this list, so the
                     // prefix drop below must index the same one (#993).
-                    let mut replay = crate::provider_input::replay::owned_replay_input(
+                    let replay = crate::provider_input::replay::owned_replay_input(
                         self.node.clone(), request.clone(), request_commit_cid.clone(),
                         gents_protocol::rendered_request::CaptureScopeKind::Inference,
                         self.replay_issuer.clone(), provider_profile,

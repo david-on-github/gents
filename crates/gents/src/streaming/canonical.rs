@@ -57,6 +57,8 @@ pub(crate) fn session_message_call_ids(message: &gents_protocol::message::Messag
 #[derive(Clone, Debug)]
 pub(crate) struct PublishedProviderTurn {
     pub(crate) message_doc_id: String,
+    /// Read only by tests that pin the published transcript position.
+    #[cfg(test)]
     pub(crate) sequence: u32,
     pub(crate) accepted_tools: Vec<super::AcceptedToolCall>,
 }
@@ -621,6 +623,7 @@ pub(crate) async fn publish_provider_turn(
     publish_provider_turn_with_time(node, generation, plan, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn publish_provider_turn_at(
     node: &EmbeddedNode,
     generation: &str,
@@ -815,7 +818,12 @@ async fn publish_provider_turn_with_time(
                     },
                 }
             }).collect();
-            Ok(PublishedProviderTurn { message_doc_id, sequence, accepted_tools })
+            Ok(PublishedProviderTurn {
+                message_doc_id,
+                #[cfg(test)]
+                sequence,
+                accepted_tools,
+            })
         })},
     ).await
 }
@@ -950,6 +958,7 @@ async fn replay_publication_in_txn(
     }
     Ok(PublishedProviderTurn {
         message_doc_id: row.doc_id,
+        #[cfg(test)]
         sequence: row.message.sequence,
         accepted_tools,
     })
@@ -972,6 +981,7 @@ pub(crate) async fn append_provider_segment(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn append_provider_segment_at(
     node: &EmbeddedNode,
     generation: &str,
@@ -996,6 +1006,7 @@ pub(crate) async fn append_in_txn(
     append_in_txn_with_time(txn, generation, prepared, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn append_in_txn_at(
     txn: &ConfigApplyTxn<'_>,
     generation: &str,

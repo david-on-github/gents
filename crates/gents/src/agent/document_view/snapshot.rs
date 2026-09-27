@@ -495,7 +495,6 @@ fn resolve_inference(
     view: &DocumentRuntimeView,
     id: &str,
 ) -> Result<crate::config::ResolvedInference> {
-    let scope = view.principal.value.agent_did.as_str();
     let selected = select_inference_documents(view, id)?;
     let profile = selected.profile.clone();
     let backend = selected.backend.clone();
@@ -539,7 +538,6 @@ fn resolve_inference(
 
 #[cfg(test)]
 mod advertised_context_override_tests {
-    use super::*;
     use crate::config::validate_advertised_context_override;
 
     #[test]

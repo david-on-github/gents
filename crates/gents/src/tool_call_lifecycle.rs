@@ -257,9 +257,6 @@ pub(crate) struct SpawnedBackgroundToolAdmission {
 }
 
 impl ToolCallLifecycle {
-    pub(crate) fn execution_generation(&self) -> Option<&str> {
-        self.execution_generation.as_deref()
-    }
     /// Adopt a pending row that was atomically published with an accepted
     /// provider header.  This is the only constructor for direct canonical
     /// dispatch: it deliberately has no create transition.
@@ -461,10 +458,6 @@ impl ToolCallLifecycle {
         self.spawned_by_tool_call_doc_id.is_some()
     }
 
-    pub(crate) fn is_bridge(&self) -> bool {
-        self.is_background_tool_bridge()
-    }
-
     /// A background row owes its completion notification only once it ran; a
     /// call refused before dispatch was answered by its invocation reply.
     pub(crate) fn terminal_persistence_status(&self, completion_reason: Option<&str>) -> String {
@@ -558,6 +551,12 @@ impl ToolCallLifecycle {
         &self.tool_call_id
     }
 
+    #[cfg(test)]
+    pub(crate) fn execution_generation(&self) -> Option<&str> {
+        self.execution_generation.as_deref()
+    }
+
+    #[cfg(test)]
     pub(crate) fn accepted_header_doc_id(&self) -> Option<&str> {
         self.accepted_header_doc_id.as_deref()
     }
@@ -614,7 +613,6 @@ mod tests {
         let deadline = chrono::Utc::now() + chrono::Duration::minutes(1);
         let check = |tool: &ToolCallLifecycle, background, plain: &str, reason: &str| {
             assert_eq!(tool.is_background_tool_bridge(), background);
-            assert_eq!(tool.is_bridge(), background);
             assert_eq!(tool.terminal_persistence_status(None), plain);
             assert_eq!(
                 tool.terminal_persistence_status(Some("tool_failed")),

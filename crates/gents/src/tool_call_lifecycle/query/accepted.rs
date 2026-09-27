@@ -15,6 +15,7 @@ impl ToolCallLifecycle {
     /// Reconstruct the immutable admission binding of a local direct tool.
     /// This is not dispatch authorization: the start transition rechecks the
     /// live request and pending row atomically under the mutation gate.
+    #[cfg(test)]
     pub(crate) async fn load_accepted_for_dispatch(
         node: &EmbeddedNode,
         tool_doc_id: &str,

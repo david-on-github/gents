@@ -9,13 +9,8 @@ use crate::support::{first_row, test_db_in};
 
 #[derive(Debug, Deserialize)]
 struct ToolCallRow {
-    tool_name: Option<String>,
-    await_mode: Option<String>,
-    request_id: Option<String>,
-    deadline_at: Option<String>,
     lifecycle_state: Option<String>,
     cancel_cause: Option<String>,
-    tool_failure_class: Option<String>,
 }
 
 async fn wait_for_running_tool(node: &gents::defra_node::EmbeddedNode, session_id: &str) -> String {
@@ -168,12 +163,7 @@ async fn load_tool_call(node: &gents::defra_node::EmbeddedNode, tool_call_id: &s
         r#"{{
             AgentToolCall(filter: {{ tool_call_id: {{ _eq: "{tool_call_id}" }} }}, limit: 1) {{
                 lifecycle_state
-                tool_name
-                await_mode
-                request_id
-                deadline_at
                 cancel_cause
-                tool_failure_class
             }}
         }}"#
     );

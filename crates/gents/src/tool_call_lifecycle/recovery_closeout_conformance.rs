@@ -537,6 +537,153 @@ async fn kill_cancels_a_row_whose_caused_request_runs_on_a_peer() {
     std::fs::remove_dir_all(admission.path).unwrap();
 }
 
+/// Lean `CausalHop.WakeSession` through real admission: a session-message
+/// completion whose wake is over the woken principal's bound still delivers
+/// its notification; admission refuses the wake as a visible failure; and a
+/// later native completion wake copies the refused hop and is refused too.
+#[tokio::test]
+async fn an_over_bound_completion_notifies_and_admission_refuses_its_wakes() {
+    use crate::identity::AgentIdentity;
+    let message = published_session_message(PublishedAdmissionOptions {
+        name: "session-message-wake-at-bound".to_owned(),
+        real_identity: true,
+        await_mode: AwaitMode::Background,
+        ..Default::default()
+    })
+    .await
+    .expect("publish accepted session message and materialize its request");
+    let node = message.admission.node.clone();
+    let did = message.admission.agent_did.clone();
+    let session_id = message.admission.tool.session_id().to_owned();
+    let caller_doc_id = message.admission.tool.request_doc_id().unwrap().to_owned();
+    // The caused request runs at hop 1, the bound; its wake would be hop 2.
+    crate::document_config::ensure_agent_principal(&node, &did)
+        .await
+        .unwrap();
+    let response = node
+        .execute(&format!(
+            r#"mutation {{ update_AgentPrincipal(filter: {{ agent_did: {{ _eq: "{}" }} }}, input: {{ max_request_hop: 1 }}) {{ _docID }} }}"#,
+            crate::graphql::escape_graphql_string(&did)
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let identity: Arc<dyn AgentIdentity> = Arc::new(
+        crate::KeyIdentity::load_or_create(message.admission.path.join("test-agent.key"), None)
+            .unwrap(),
+    );
+    let verifier = crate::request_admission::AgentRequestAdmissionVerifier::new(
+        node.clone(),
+        identity,
+        crate::agent::p2p_reconcile::enrollment_authority_channel().1,
+    );
+    let pending_wakes = |node: Arc<crate::defra_node::EmbeddedNode>, session: String| async move {
+        let response = node
+            .execute(&format!(
+                r#"{{ AgentRequest(filter: {{ session_id: {{ _eq: "{}" }}, execution_origin: {{ _eq: "scheduled" }}, lifecycle_state: {{ _eq: "pending" }} }}) {{ _docID }} }}"#,
+                crate::graphql::escape_graphql_string(&session)
+            ))
+            .await;
+        assert!(!response.has_errors(), "{:?}", response.errors);
+        response.data.unwrap()["AgentRequest"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["_docID"].as_str().unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let admit = |doc_id: String| {
+        let node = node.clone();
+        let verifier = &verifier;
+        async move {
+            let request = crate::request_binding::load_agent_request_by_doc_id(&node, &doc_id)
+                .await
+                .unwrap()
+                .unwrap();
+            let behavior = request.behavior_id.clone();
+            let admitted = crate::agent::daemon::verify_request_at_claim_boundary(
+                verifier,
+                node.clone(),
+                &behavior,
+                request,
+            )
+            .await;
+            let row = node
+                .execute(&format!(
+                    r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}) {{ subagent_depth lifecycle_state failure_reason }} }}"#,
+                    crate::graphql::escape_graphql_string(&doc_id)
+                ))
+                .await
+                .data
+                .unwrap()["AgentRequest"][0]
+                .clone();
+            (admitted.is_some(), row)
+        }
+    };
+
+    complete_child(
+        &node,
+        &message.caused_request_id,
+        &did,
+        "result at the bound",
+    )
+    .await;
+    assert_eq!(
+        crate::background_completion::settle_running_session_message_rows(&node, &did)
+            .await
+            .unwrap(),
+        1
+    );
+    let (notifications, _) = completion_obligations(&node, &session_id, &did).await;
+    assert_eq!(notifications.len(), 1, "{notifications:?}");
+    assert!(notifications[0].contains("result at the bound"));
+    let wakes = pending_wakes(node.clone(), session_id.clone()).await;
+    assert_eq!(wakes.len(), 1);
+    let (admitted, row) = admit(wakes[0].clone()).await;
+    assert!(!admitted);
+    assert_eq!(row["subagent_depth"], 2);
+    assert_eq!(row["lifecycle_state"], "failed");
+    assert!(
+        row["failure_reason"]
+            .as_str()
+            .unwrap()
+            .contains("max_request_hop"),
+        "{row}"
+    );
+
+    // A native process of the same turn completes afterwards.
+    let caller = crate::request_binding::load_agent_request_by_doc_id(&node, &caller_doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    crate::lifecycle::queue::persist_background_completion_with_message_waking(
+        &node,
+        &caller,
+        "process done",
+        "background-completion-notification:process:tool",
+        crate::background_completion::BACKGROUND_COMPLETION_WAKE_PROMPT,
+        crate::lifecycle::queue::RequestQueue {
+            source: crate::lifecycle::queue::QueueSource::BackgroundCompletion,
+            policy: crate::lifecycle::queue::QueuePolicy::Coalesce,
+            key: Some(format!("background_completion:{session_id}")),
+            queued_after_request_id: Some(caller.request_id.clone()),
+            interrupted_request_id: None,
+            background_completion_wake_version: None,
+        },
+        None,
+        crate::lifecycle::queue::CompletionWake::Continuation,
+    )
+    .await
+    .unwrap();
+    let wakes = pending_wakes(node.clone(), session_id.clone()).await;
+    assert_eq!(wakes.len(), 1);
+    let (admitted, row) = admit(wakes[0].clone()).await;
+    assert!(!admitted, "a later native wake copies the refused hop");
+    assert_eq!(row["subagent_depth"], 2);
+    assert_eq!(row["lifecycle_state"], "failed");
+    node.shutdown().await;
+    std::fs::remove_dir_all(&message.admission.path).unwrap();
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn generated_orphan_background_recovery_cases_use_accepted_native_call() {

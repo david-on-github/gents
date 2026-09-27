@@ -856,3 +856,66 @@ async fn queued_claimed_publication_observes_pause_before_creating_child() {
     assert_eq!(fixture.observe().await, expected);
     fixture.node.shutdown().await;
 }
+
+/// A replay of a claimed publication checks the published continuation
+/// against its own signed hop. A request written later in the same second
+/// (with a request id that sorts first and a higher hop) cannot turn the
+/// replay into a conflict.
+#[tokio::test]
+async fn claimed_publication_replay_keeps_its_hop_across_a_same_second_write() {
+    let before = json!({"status":"active","blocked_audits":2,"wrapup_requested":false,
+        "wrapup_completed":false,"sequence":1,"last_continued_from":10,"latest_request":10,
+        "children":[],"tokens_used":37,"token_budget":1000});
+    let fixture = Fixture::new(&before).await;
+    let observed = load_canonical_goal(&fixture.node, fixture.identity.did(), SESSION)
+        .await
+        .unwrap()
+        .unwrap();
+    let first = publish_claimed_continuation(
+        &fixture.node,
+        &observed,
+        PARENT,
+        "Original signed continuation",
+        false,
+    )
+    .await
+    .unwrap()
+    .expect("first publication creates the continuation");
+    assert!(first.created);
+    let child = request_rows(&fixture.node)
+        .await
+        .into_iter()
+        .find(|row| row.request_id == first.request_id)
+        .unwrap();
+    execute(
+        &fixture.node,
+        &format!(
+            r#"mutation {{ create_AgentRequest(input: {{
+            request_id: "background-completion-same-second", purpose: "normal",
+            agent_did: "{}", requester_did: "{}", behavior_id: "contract-behavior",
+            session_id: "{SESSION}", content: "later work", execution_origin: "scheduled",
+            lifecycle_state: "completed", failure_reason: "", created_at: "{}",
+            retry_count: 0, max_retries: 3, retry_root_request: "background-completion-same-second",
+            subagent_depth: {}
+        }}) {{ _docID }} }}"#,
+            escape_graphql_string(fixture.identity.did()),
+            escape_graphql_string(fixture.identity.did()),
+            escape_graphql_string(child.created_at.as_deref().unwrap()),
+            child.subagent_depth.unwrap_or(0) + 5,
+        ),
+    )
+    .await;
+    let replay = publish_claimed_continuation(
+        &fixture.node,
+        &observed,
+        PARENT,
+        "Original signed continuation",
+        false,
+    )
+    .await
+    .unwrap()
+    .expect("replay recovers the published continuation");
+    assert!(!replay.created);
+    assert_eq!(replay.request_id, first.request_id);
+    fixture.node.shutdown().await;
+}

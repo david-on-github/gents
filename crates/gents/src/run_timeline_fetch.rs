@@ -47,6 +47,7 @@ pub(crate) async fn load_session_tool_calls(
     .await
 }
 
+#[cfg(test)]
 /// Canonical accepted arguments of one exact physical tool document in an
 /// authorized session scope, one entry per matching physical row. Reads only
 /// the tool row and the messages at its accepted sequence, binding them with

@@ -465,10 +465,6 @@ impl DefraStreamWriter {
         Ok(())
     }
 
-    pub(crate) async fn discard_buffer(&self, doc_id: &str) {
-        self.buffers.lock().await.remove(doc_id);
-    }
-
     async fn flush_snapshot(&self, doc_id: &str, _snapshot: &StreamBufferSnapshot) -> Result<bool> {
         let Some(snapshot) = self.pending_snapshot(doc_id, true).await? else {
             return Ok(false);

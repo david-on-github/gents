@@ -66,8 +66,6 @@ struct RunningToolCallRow {
     #[serde(default)]
     request_id: Option<String>,
     #[serde(default)]
-    request_doc_id: Option<String>,
-    #[serde(default)]
     requester_did: Option<String>,
     /// Immutable owner principal stamped at create. Recovery scopes by this
     /// field — `request_id` alone is not unique across agents.
@@ -77,8 +75,6 @@ struct RunningToolCallRow {
     tool_call_id: String,
     #[serde(default)]
     tool_name: String,
-    #[serde(default)]
-    started_at: Option<String>,
     #[serde(default)]
     deadline_at: Option<String>,
     #[serde(default)]
@@ -368,7 +364,7 @@ impl super::ToolCallLifecycle {
                 .stop_execution(&row.tool_call_id, &row.doc_id)
                 .await;
             let Some(outcome) =
-                classify_orphaned_background_tool(&row, &parent, process, task_deleted, Utc::now())
+                classify_orphaned_background_tool(&row, process, task_deleted, Utc::now())
             else {
                 tracing::warn!(
                     doc_id = %row.doc_id,
@@ -742,11 +738,6 @@ mod tests {
             }))
             .unwrap()
         };
-        let parent = |state: RequestLifecycleState| AgentRequestRow {
-            request_id: "parent".to_string(),
-            lifecycle_state: Some(state),
-            ..Default::default()
-        };
         let lean_cause = |outcome: RecoveryOutcome| match outcome {
             RecoveryOutcome::TimedOut => "deadlineExceeded",
             RecoveryOutcome::Cancelled => "parentInterrupted",
@@ -757,19 +748,19 @@ mod tests {
         };
         let mut checked = 0;
         for case in crate::lean_vocab_test::lean_restart_disposition_cases() {
-            let parent_state = match case.parent_observation.as_str() {
-                "live" => RequestLifecycleState::Processing,
-                "interrupted" => RequestLifecycleState::Interrupted,
-                "cleanlyCompleted" => RequestLifecycleState::Completed,
-                "otherTerminal" => RequestLifecycleState::Failed,
-                _ => continue,
-            };
+            // A missing parent defers classification; every resolvable
+            // parent observation reaches the orphan classifier alike.
+            if !matches!(
+                case.parent_observation.as_str(),
+                "live" | "interrupted" | "cleanlyCompleted" | "otherTerminal"
+            ) {
+                continue;
+            }
             if case.await_mode != "background" || case.session_message {
                 continue;
             }
             let outcome = classify_orphaned_background_tool(
                 &row(case.deadline_expired),
-                &parent(parent_state),
                 verdict(&case.process_outcome),
                 false,
                 Utc::now(),
@@ -798,18 +789,14 @@ mod tests {
             ) else {
                 continue;
             };
-            let parent_state = if case.parent_live == Some(true) {
-                RequestLifecycleState::Processing
-            } else if case.parent_interrupted == Some(true) {
-                RequestLifecycleState::Interrupted
-            } else if case.parent_terminal == Some(true) {
-                RequestLifecycleState::Completed
-            } else {
+            if case.parent_live != Some(true)
+                && case.parent_interrupted != Some(true)
+                && case.parent_terminal != Some(true)
+            {
                 continue;
-            };
+            }
             let outcome = classify_orphaned_background_tool(
                 &row(case.deadline_expired == Some(true)),
-                &parent(parent_state),
                 verdict(process),
                 task_deleted,
                 Utc::now(),
@@ -1326,7 +1313,6 @@ fn unresolved_parent_warning_due(doc_id: &str) -> bool {
 /// parent resolved: the host stop verdict precedes every other cause.
 fn classify_orphaned_background_tool(
     row: &RunningToolCallRow,
-    parent: &AgentRequestRow,
     process: crate::managed_exec::ProcessStopOutcome,
     task_deleted: bool,
     now: DateTime<Utc>,

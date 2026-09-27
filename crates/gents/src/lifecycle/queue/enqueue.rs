@@ -30,7 +30,12 @@ pub(crate) async fn enqueue_steering_request(
     content: &str,
     input: RequestInput,
 ) -> Result<EnqueuedAgentRequest> {
-    let prepared = prepare_steering_append(parent, content, input, parent.subagent_depth).await?;
+    // Lean `DurableLineage.own_session_continuations_copy`: user steering is
+    // written at the session's current hop.
+    let hop =
+        crate::lifecycle::load_session_current_hop(node, &parent.agent_did, &parent.session_id)
+            .await?;
+    let prepared = prepare_steering_append(parent, content, input, hop).await?;
     let prepared = &prepared;
     crate::config_client::ConfigAccess::transact_local(
         node,

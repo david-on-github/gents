@@ -647,9 +647,10 @@ async fn generated_r6_notification_precedes_continuation_claim() {
     std::fs::remove_dir_all(admission.path).unwrap();
 }
 
-/// Lean `DurableLineage.ContinuationKind.retry` and
-/// `CausalHop.retry_after_refusal_is_refused`: a recovery retry of a wake the
-/// hop bound refused copies the session's current hop, so it is refused too.
+/// Lean `DurableLineage.retry_copies_session_current_hop` with
+/// `CausalHop.later_native_wake_after_refusal_is_refused`: a recovery retry of
+/// a wake the hop bound refused copies the session's current hop, so it is
+/// refused too.
 #[tokio::test]
 async fn a_retried_over_bound_wake_is_refused_again() {
     let case = lean_r6_backgrounding_case("failed_background_wake_with_budget_redrives");
@@ -670,7 +671,20 @@ async fn a_retried_over_bound_wake_is_refused_again() {
         .as_str()
         .unwrap()
         .to_owned();
-    let bound = crate::document_config::DEFAULT_MAX_REQUEST_HOP;
+    // The principal's effective bound, and the hop a completion caused at it
+    // is written with (Lean `CausalHop.nextHop`).
+    let bound = crate::document_config::load_agent_principal(node, did)
+        .await
+        .unwrap()
+        .and_then(|principal| principal.max_request_hop)
+        .unwrap_or(crate::document_config::DEFAULT_MAX_REQUEST_HOP);
+    let over_bound = crate::lifecycle::next_request_hop(
+        crate::lifecycle::RequestHopCause::CrossSession { cause_hop: bound },
+        0,
+    );
+    assert!(!crate::lifecycle::request_hop_within_bound(
+        bound, over_bound
+    ));
     let refused_wake = "refused-over-bound-wake";
     let input = RequestInput {
         queue: Some(RequestQueue {
@@ -698,7 +712,7 @@ async fn a_retried_over_bound_wake_is_refused_again() {
         caused_by_parent_request_id: "{}", caused_by_parent_request_doc_id: "{}"
     }}) {{ _docID }} }}"#,
         escape_graphql_string(did), escape_graphql_string(did), escape_graphql_string(session),
-        bound + 1, escape_graphql_string(&deadline), escape_graphql_string(&parent),
+        over_bound, escape_graphql_string(&deadline), escape_graphql_string(&parent),
         escape_graphql_string(parent_doc))).await;
     assert!(!response.has_errors(), "{:?}", response.errors);
     let source = rows(node, &format!(r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{refused_wake}" }} }}) {{ _docID request_id lifecycle_state created_at }} }}"#), "AgentRequest").await;
@@ -718,7 +732,7 @@ async fn a_retried_over_bound_wake_is_refused_again() {
     .await;
     assert_eq!(successor.len(), 1);
     let hop = successor[0]["subagent_depth"].as_u64().unwrap() as u32;
-    assert_eq!(hop, bound + 1);
+    assert_eq!(hop, over_bound);
     assert!(!crate::lifecycle::request_hop_within_bound(bound, hop));
     admission.node.shutdown().await;
     std::fs::remove_dir_all(admission.path).unwrap();

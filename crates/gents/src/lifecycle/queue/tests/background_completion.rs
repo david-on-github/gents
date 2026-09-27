@@ -1096,7 +1096,7 @@ async fn a_lower_hop_wake_never_consumes_a_higher_hop_notification() {
     assert_eq!(lower["superseded_by_request_doc_id"], raised_wake.as_str());
 }
 
-/// The reviewer's loop, Lean `CausalHop.ping_pong_halts_at_max`: session A
+/// An agent loop, Lean `CausalHop.ping_pong_halts_at_max`: session A
 /// messages B and starts a background process in the same turn. B's result
 /// needs a wake over the bound; A's process wake must not run that result at
 /// A's old hop, now or later.

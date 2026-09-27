@@ -54,13 +54,12 @@ pub async fn cancel_session_background_process(
     {
         return Ok(CancelBackgroundToolCallOutcome::NotFound);
     }
-    cancel_background_tool_call(node, executions, agent_did, session_id, tool_call_id).await
+    cancel_background_tool_call(node, executions, session_id, tool_call_id).await
 }
 
 pub async fn cancel_background_tool_call(
     node: Arc<EmbeddedNode>,
     background_executions: &BackgroundExecutionRegistry,
-    agent_did: &str,
     session_id: &str,
     tool_call_id: &str,
 ) -> Result<CancelBackgroundToolCallOutcome> {
@@ -387,7 +386,6 @@ mod tests {
             let outcome = cancel_background_tool_call(
                 admission.node.clone(),
                 &registry,
-                &admission.agent_did,
                 admission.tool.session_id(),
                 admission.tool.tool_call_id(),
             )

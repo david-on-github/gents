@@ -2,11 +2,10 @@ mod final_output;
 pub(crate) mod r4c_args;
 
 use crate::llm::message::{AssistantContent, Message, Text};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use defra_node::EmbeddedNode;
 use serde::Deserialize;
-use serde_json::Value;
 
 use crate::graphql::escape_graphql_string;
 
@@ -19,8 +18,7 @@ use self::r4c_args::{
     ListStatusFilter, ReadToolOutputArgs, ReadToolOutputResponse,
 };
 pub(crate) use gents_loop::live_output::{
-    LiveOutputStream, LiveToolOutputRegistry, LiveToolOutputSnapshot, LiveToolOutputWriter,
-    STDERR_BOUNDARY,
+    LiveOutputStream, LiveToolOutputRegistry, LiveToolOutputWriter,
 };
 
 /// Immutable identity boundary used by `list_processes`, `read_process`,
@@ -89,7 +87,6 @@ struct ListBackgroundToolRow {
     doc_id: String,
     tool_call_id: String,
     tool_name: String,
-    request_id: String,
     request_doc_id: String,
     session_id: String,
     agent_did: String,
@@ -106,7 +103,6 @@ struct ReadToolOutputRow {
     doc_id: String,
     tool_call_id: String,
     tool_name: String,
-    request_id: Option<String>,
     session_id: Option<String>,
     agent_did: Option<String>,
     requester_did: Option<String>,
@@ -142,7 +138,6 @@ pub(crate) async fn handle_list_background_tools(
                 _docID
                 tool_call_id
                 tool_name
-                request_id
                 request_doc_id
                 session_id
                 agent_did
@@ -273,7 +268,6 @@ pub(crate) async fn read_tool_output_slice(
                 _docID
                 tool_call_id
                 tool_name
-                request_id
                 request_doc_id
                 session_id
                 agent_did
@@ -486,18 +480,6 @@ fn canonical_tool_output_from_rows(
     Ok(CanonicalToolOutputObservation::Closed(stream.text))
 }
 
-/// Concatenate captured stdout and stderr into one logical buffer behind a
-/// single byte cursor. stdout first; if both streams are non-empty a labeled
-/// boundary separates them; if only one is non-empty it is served verbatim.
-fn combine_output_streams(stdout: &str, stderr: &str) -> String {
-    match (stdout.is_empty(), stderr.is_empty()) {
-        (true, true) => String::new(),
-        (false, true) => stdout.to_string(),
-        (true, false) => stderr.to_string(),
-        (false, false) => format!("{stdout}{STDERR_BOUNDARY}{stderr}"),
-    }
-}
-
 struct CombinedOutputSlice {
     output: String,
     next_offset: u64,
@@ -521,21 +503,6 @@ fn read_combined_output_slice(
     max_bytes: usize,
 ) -> CombinedOutputSlice {
     read_retained_output_slice(combined, 0, combined.len() as u64, offset, max_bytes)
-}
-
-fn read_live_output_slice(
-    snapshot: LiveToolOutputSnapshot,
-    offset: u64,
-    max_bytes: usize,
-) -> CombinedOutputSlice {
-    let retained = String::from_utf8_lossy(&snapshot.combined.bytes).into_owned();
-    read_retained_output_slice(
-        &retained,
-        snapshot.combined.first_offset,
-        snapshot.combined.total_bytes_seen,
-        offset,
-        max_bytes,
-    )
 }
 
 fn read_retained_output_slice(
@@ -578,58 +545,6 @@ fn read_retained_output_slice(
         first_available_offset: first_offset,
         total_bytes,
         has_more: next_offset < total_bytes,
-    }
-}
-
-#[derive(Debug, Default)]
-struct PersistedToolOutputStreams {
-    stdout: String,
-    stderr: String,
-    exit_code: Option<i32>,
-}
-
-fn persisted_tool_output_streams(tool_name: &str, result: &str) -> PersistedToolOutputStreams {
-    parse_native_command_output_streams(tool_name, result).unwrap_or_else(|| {
-        PersistedToolOutputStreams {
-            stdout: result.to_string(),
-            ..Default::default()
-        }
-    })
-}
-
-fn parse_native_command_output_streams(
-    tool_name: &str,
-    result: &str,
-) -> Option<PersistedToolOutputStreams> {
-    if !matches!(tool_name, "bash" | "bash_unrestricted") {
-        return None;
-    }
-
-    let trimmed = result.trim_start();
-    let (metadata_line, body) = trimmed.split_once('\n')?;
-    let metadata = metadata_line.trim().strip_prefix("gents_exec: ")?;
-    let metadata = serde_json::from_str::<Value>(metadata).ok()?;
-    let body = body.strip_prefix("stdout:\n")?;
-    let (stdout, stderr) = body.rsplit_once("\nstderr:\n")?;
-    let stdout = persisted_stream_body(stdout);
-    let stderr = persisted_stream_body(stderr);
-    let exit_code = metadata
-        .get("exit_code")
-        .and_then(Value::as_i64)
-        .and_then(|code| i32::try_from(code).ok());
-
-    Some(PersistedToolOutputStreams {
-        stdout,
-        stderr,
-        exit_code,
-    })
-}
-
-fn persisted_stream_body(value: &str) -> String {
-    if value == "(empty)" {
-        String::new()
-    } else {
-        value.to_string()
     }
 }
 
@@ -693,16 +608,6 @@ where
     data.and_then(|data| data.get(collection))
         .and_then(|value| serde_json::from_value::<Vec<T>>(value.clone()).ok())
         .and_then(|mut rows| rows.pop())
-}
-
-fn rows<T>(data: Option<&serde_json::Value>, collection: &str) -> Result<Vec<T>>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    let Some(value) = data.and_then(|data| data.get(collection)) else {
-        anyhow::bail!("{collection} field missing from query response");
-    };
-    serde_json::from_value(value.clone()).map_err(|error| anyhow!("parse {collection}: {error}"))
 }
 
 fn rows_skipping_malformed<T>(data: Option<&serde_json::Value>, collection: &str) -> Result<Vec<T>>
@@ -916,38 +821,6 @@ mod tests {
         assert_eq!(slice.output, "tail");
         assert_eq!(slice.next_offset, 1000);
         assert_eq!(slice.total_bytes, 1000);
-        assert!(!slice.has_more);
-    }
-
-    #[test]
-    fn persisted_empty_stream_sentinel_decodes_to_empty_combined_output() {
-        let persisted = concat!(
-            "gents_exec: {\"ok\":true,\"status\":\"success\",",
-            "\"command\":\"true\",\"argv\":[\"true\"],",
-            "\"cwd\":\".\",\"exit_code\":0,\"timed_out\":false,\"duration_ms\":1,",
-            "\"timeout_ms\":10000,\"execution_mode\":\"read_only\",",
-            "\"network_mode\":\"inherit\",\"sandbox\":\"policy_read_only\",",
-            "\"stdout_truncation\":{\"returned_bytes\":0,\"total_bytes\":0,",
-            "\"max_bytes\":16000,\"truncated\":false},",
-            "\"stderr_truncation\":{\"returned_bytes\":0,\"total_bytes\":0,",
-            "\"max_bytes\":16000,\"truncated\":false}}\n",
-            "stdout:\n",
-            "(empty)\n",
-            "stderr:\n",
-            "(empty)"
-        );
-        let streams = persisted_tool_output_streams("bash", persisted);
-        assert_eq!(streams.stdout, "");
-        assert_eq!(streams.stderr, "");
-        assert_eq!(streams.exit_code, Some(0));
-
-        let combined = combine_output_streams(&streams.stdout, &streams.stderr);
-        assert_eq!(combined, "");
-        let slice = read_combined_output_slice(&combined, 0, 1024);
-        assert_eq!(slice.output, "");
-        assert_eq!(slice.first_available_offset, 0);
-        assert_eq!(slice.next_offset, 0);
-        assert_eq!(slice.total_bytes, 0);
         assert!(!slice.has_more);
     }
 

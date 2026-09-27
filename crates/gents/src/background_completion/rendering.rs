@@ -3,28 +3,6 @@
 /// the summary stays small even when a tool's own output budget is larger.
 pub(crate) const NOTIFICATION_SUMMARY_BYTES: usize = 4000;
 
-pub(super) fn render_tool_completion(
-    tool_call_id: &str,
-    tool_name: &str,
-    status: &str,
-    result: &str,
-    reason: Option<&str>,
-) -> String {
-    let reason_element = reason
-        .map(|reason| format!("\n  <reason>{}</reason>", xml_escape_text(reason)))
-        .unwrap_or_default();
-    format!(
-        r#"<tool-completion tool_call_id="{tool_call_id}" tool_name="{tool_name}" status="{status}">
-  <result>{result}</result>{reason_element}
-</tool-completion>"#,
-        tool_call_id = xml_escape_attr(tool_call_id),
-        tool_name = xml_escape_attr(tool_name),
-        status = xml_escape_attr(status),
-        result = xml_escape_text(&compact_summary(result)),
-        reason_element = reason_element,
-    )
-}
-
 /// Build the identical rendered notification while retaining unchanged result
 /// bytes as references to the canonical tool-output stream. Only wrappers,
 /// collapsed whitespace, XML entities and the truncation marker are literals.
@@ -114,57 +92,10 @@ pub(super) fn tool_completion_presentation(
     (format!("{prefix}{rendered_result}{suffix}"), parts)
 }
 
-pub(super) fn compact_summary(value: &str) -> String {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
-    const LIMIT: usize = NOTIFICATION_SUMMARY_BYTES;
-    if normalized.len() <= LIMIT {
-        return normalized;
-    }
-
-    let boundary = normalized
-        .char_indices()
-        .map(|(idx, _)| idx)
-        .take_while(|idx| *idx <= LIMIT)
-        .last()
-        .unwrap_or(0);
-    let mut truncated = normalized[..boundary].to_string();
-    truncated.push_str("...");
-    truncated
-}
-
 pub(super) fn xml_escape_attr(value: &str) -> String {
     xml_escape_text(value)
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
-}
-
-#[cfg(test)]
-mod canonical_presentation_tests {
-    use super::*;
-
-    #[test]
-    fn composed_tool_completion_matches_existing_renderer() {
-        let long = "é".repeat(2_100);
-        for result in [
-            "plain output",
-            "  spaced\n\toutput  ",
-            "<&> \"quoted\" 'single' ✓",
-            &long,
-        ] {
-            let (rendered, _) = tool_completion_presentation(
-                "call<&>",
-                "bash",
-                "failed",
-                result,
-                Some("reason<&>"),
-                NOTIFICATION_SUMMARY_BYTES,
-            );
-            assert_eq!(
-                rendered,
-                render_tool_completion("call<&>", "bash", "failed", result, Some("reason<&>"))
-            );
-        }
-    }
 }
 
 pub(super) fn xml_escape_text(value: &str) -> String {

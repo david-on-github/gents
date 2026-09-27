@@ -135,19 +135,6 @@ async fn boot_two_running_recovery_bashes(
     )
 }
 
-async fn fetch_interrupt_requested_at_by_doc(
-    node: &gents::defra_node::EmbeddedNode,
-    request_doc_id: &str,
-) -> Option<String> {
-    let response = node
-        .execute(&format!(
-            r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ request_id interrupt_requested_at }} }}"#,
-            gents::graphql::escape_graphql_string(request_doc_id),
-        ))
-        .await;
-    first_row::<AgentRequestRow>(&response, "AgentRequest").interrupt_requested_at
-}
-
 /// Resolve a provider call id through the accepted canonical header. The
 /// lifecycle row's `tool_call_id` is an internal invocation id and is not the
 /// provider id carried by the transcript block.

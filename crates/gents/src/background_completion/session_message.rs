@@ -4,16 +4,13 @@ use super::*;
 struct SessionMessageRow {
     #[serde(rename = "_docID")]
     doc_id: String,
-    request_id: String,
     session_id: String,
     agent_did: String,
     #[serde(default)]
     requester_did: Option<String>,
-    tool_name: String,
 }
 
-const SESSION_MESSAGE_ROW_FIELDS: &str =
-    "_docID request_id session_id agent_did requester_did tool_name";
+const SESSION_MESSAGE_ROW_FIELDS: &str = "_docID session_id agent_did requester_did";
 
 fn running_session_message_filter(local_did: &str) -> String {
     format!(

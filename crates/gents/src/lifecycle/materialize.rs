@@ -624,30 +624,19 @@ pub fn next_request_hop(cause: RequestHopCause, own: u32) -> u32 {
 /// them; the current hop is the highest hop among them, which errs toward
 /// refusing a continuation, never toward running one below a refusal. Every
 /// same-session continuation copies it and every cross-session cause climbs
-/// past it. `before`, when given, keeps only requests ordered before it (time,
-/// then request id), so a replay recomputes the hop its first publication
-/// observed.
-pub(crate) fn session_current_hop(
-    rows: &[gents_protocol::row::AgentRequestRow],
-    before: Option<&gents_protocol::row::AgentRequestRow>,
-) -> u32 {
+/// past it.
+pub(crate) fn session_current_hop(rows: &[gents_protocol::row::AgentRequestRow]) -> u32 {
     let at = |row: &gents_protocol::row::AgentRequestRow| {
         row.created_at
             .as_deref()
             .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
     };
-    let bound = before.map(|row| (at(row), row.request_id.clone()));
     let rows = rows
         .iter()
         .filter(|row| {
             row.purpose.is_none_or(|purpose| {
                 purpose == gents_protocol::request_admission::RequestPurpose::Normal
             })
-        })
-        .filter(|row| {
-            bound
-                .as_ref()
-                .is_none_or(|bound| (at(row), row.request_id.clone()) < *bound)
         })
         .collect::<Vec<_>>();
     let Some(latest) = rows.iter().map(|row| at(row)).max() else {
@@ -681,7 +670,7 @@ pub(crate) async fn load_session_current_hop_in_txn(
     let rows: Vec<gents_protocol::row::AgentRequestRow> =
         serde_json::from_value(response["data"]["AgentRequest"].clone())
             .context("decode session requests for its current hop")?;
-    Ok(session_current_hop(&rows, None))
+    Ok(session_current_hop(&rows))
 }
 
 /// [`session_current_hop`] of a session.
@@ -698,7 +687,7 @@ pub(crate) async fn load_session_current_hop(
     .await?;
     let rows =
         crate::graphql::rows::<gents_protocol::row::AgentRequestRow>(&response, "AgentRequest")?;
-    Ok(session_current_hop(&rows, None))
+    Ok(session_current_hop(&rows))
 }
 
 /// Lean `CausalHop.admitHop`.
@@ -1174,20 +1163,20 @@ mod session_hop_tests {
             row("a-refused-wake", "2026-09-27T05:12:05Z", 9),
             row("z-native-wake", "2026-09-27T05:12:05Z", 3),
         ];
-        assert_eq!(session_current_hop(&rows, None), 9);
+        assert_eq!(session_current_hop(&rows), 9);
         let reversed = [
             row("parent", "2026-09-27T05:12:04Z", 0),
             row("z-refused-wake", "2026-09-27T05:12:05Z", 9),
             row("a-native-wake", "2026-09-27T05:12:05Z", 3),
         ];
-        assert_eq!(session_current_hop(&reversed, None), 9);
+        assert_eq!(session_current_hop(&reversed), 9);
         // An earlier second never counts, however high its hop.
         let later_root = [
             row("refused-wake", "2026-09-27T05:12:04Z", 9),
             row("user-root", "2026-09-27T05:12:05Z", 0),
         ];
-        assert_eq!(session_current_hop(&later_root, None), 0);
-        assert_eq!(session_current_hop(&[], None), 0);
+        assert_eq!(session_current_hop(&later_root), 0);
+        assert_eq!(session_current_hop(&[]), 0);
     }
 }
 

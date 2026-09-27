@@ -122,9 +122,16 @@ async fn stage_claimed_continuation(
         children.len() <= 1,
         "ambiguous claimed continuation receipt"
     );
-    // The session's current hop at first publication; a replay bounds it by
-    // the published continuation so it recomputes the same hop.
-    let session_hop = crate::lifecycle::session_current_hop(&requests, children.first());
+    // A first publication writes the session's current hop. A replay takes the
+    // published continuation's own signed hop: the session has moved on since,
+    // and its rows cannot reproduce the set the first publication read.
+    let session_hop = match children.first() {
+        Some(child) => child
+            .subagent_depth
+            .and_then(|hop| u32::try_from(hop).ok())
+            .context("claimed continuation receipt lacks its hop")?,
+        None => crate::lifecycle::session_current_hop(&requests),
+    };
     let mut create = prepare_goal_continuation(
         &parent,
         behavior,

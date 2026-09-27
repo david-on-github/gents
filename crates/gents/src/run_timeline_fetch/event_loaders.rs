@@ -21,6 +21,7 @@ pub(super) async fn resolve_timeline_messages_for_session(
 
 /// The canonical messages at one accepted sequence of an exact session scope.
 /// Duplicate headers at a sequence are returned, never silently picked.
+#[cfg(test)]
 pub(super) async fn resolve_timeline_messages_at_sequence(
     access: &ConfigAccess,
     agent_did: &str,
@@ -125,6 +126,7 @@ pub(super) async fn load_timeline_tool_observations_for_session(
 
 /// Lifecycle observations for one exact physical tool document in a session
 /// scope. A document outside the scope yields no rows.
+#[cfg(test)]
 pub(super) async fn load_timeline_tool_observation(
     access: &ConfigAccess,
     agent_did: &str,
