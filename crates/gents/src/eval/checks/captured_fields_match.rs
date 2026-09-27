@@ -284,6 +284,24 @@ mod tests {
         assert!(!text.contains("row 0"), "only what is missing: {text}");
     }
 
+    /// The schema admits `equals: null`, so the parser must read it as a test
+    /// for null rather than as no test at all.
+    #[test]
+    fn equals_null_tests_for_a_null_value() {
+        let params = json!({"name": "items", "expect": [{"field": "sku", "equals": null}]});
+        let verdict = CapturedFieldsMatch.evaluate(&params, &stage(vec![json!({"sku": null})]));
+        assert_eq!(
+            (verdict.kind, verdict.score_bp),
+            (OutcomeKind::Passed, Some(10_000))
+        );
+        let verdict = CapturedFieldsMatch.evaluate(&params, &stage(vec![json!({"sku": "A1"})]));
+        assert_eq!(
+            (verdict.kind, verdict.score_bp),
+            (OutcomeKind::ModelAcceptance, Some(0))
+        );
+        assert!(feedback(&verdict).contains("sku expected equals null, got \"A1\""));
+    }
+
     #[test]
     fn an_absent_field_is_reported_as_absent() {
         let verdict = CapturedFieldsMatch.evaluate(

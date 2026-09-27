@@ -288,5 +288,15 @@ mod tests {
         assert!(validator.is_valid(&json!({"required": ["a"], "forbidden": [], "max_calls": 3})));
         assert!(!validator.is_valid(&json!({"required": ["a"], "extra": 1})));
         assert!(!validator.is_valid(&json!({"max_calls": -1})));
+        // What the parser rejects as requiring nothing, the schema rejects too.
+        for nothing in [
+            json!({}),
+            json!({"required": []}),
+            json!({"max_calls": null}),
+        ] {
+            assert!(!validator.is_valid(&nothing), "{nothing}");
+        }
+        assert!(validator.is_valid(&json!({"max_calls": 0})));
+        assert!(validator.is_valid(&json!({"required": [], "forbidden": ["rm"]})));
     }
 }

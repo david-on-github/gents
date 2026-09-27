@@ -289,5 +289,10 @@ mod tests {
         assert!(validator.is_valid(&json!({"any": ["a"], "all": [{"matches": "b+"}]})));
         assert!(!validator.is_valid(&json!({"all": [{"regex": "b"}]})));
         assert!(!validator.is_valid(&json!({"all": ["a"], "extra": 1})));
+        // What the parser rejects as requiring nothing, the schema rejects too.
+        for nothing in [json!({}), json!({"any": []}), json!({"any": [], "all": []})] {
+            assert!(!validator.is_valid(&nothing), "{nothing}");
+        }
+        assert!(validator.is_valid(&json!({"any": [], "all": ["a"]})));
     }
 }
