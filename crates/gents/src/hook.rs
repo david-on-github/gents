@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use crate::llm::message::{Message, ToolResult};
+use crate::llm::message::Message;
 use crate::llm::tool::ToolDyn;
 use crate::llm::{HookAction, ToolCallHookAction};
 use chrono::{DateTime, Utc};

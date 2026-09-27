@@ -436,7 +436,7 @@ async fn seed_raw_tools(
         .join(", ");
     let mutation = format!(
         r#"mutation {{ update_Tools(filter: {{tools_id: {{_eq: "{tools_id}"}}, agent_did: {{_eq: "{agent_did}"}}}}, input: {{
-            subagents: {{ target_ids: [{target_list}], spawn_enabled: true }}
+            subagents: {{ target_ids: [{target_list}], enabled: true }}
         }}) {{ _docID }} }}"#,
         tools_id = escape_graphql_string(tools_id),
         agent_did = escape_graphql_string(agent_did),

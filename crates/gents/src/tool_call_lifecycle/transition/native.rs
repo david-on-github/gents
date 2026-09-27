@@ -327,21 +327,6 @@ impl ToolCallLifecycle {
     /// interrupt, recovery sweep, or the tool itself — terminalized first),
     /// preserving that terminal's state and recorded cause.
     pub async fn timeout(&mut self) -> Result<bool> {
-        self.timeout_inner(None).await
-    }
-
-    pub(crate) async fn timeout_with_presentation(
-        &mut self,
-        rendered: &str,
-        presentation: gents_protocol::output::PayloadPresentation,
-    ) -> Result<bool> {
-        self.timeout_inner(Some((rendered, presentation))).await
-    }
-
-    async fn timeout_inner(
-        &mut self,
-        presented: Option<(&str, gents_protocol::output::PayloadPresentation)>,
-    ) -> Result<bool> {
         self.ensure_state(&[ToolCallState::Running], "timeout")?;
         let message = format!(
             "tool call deadline exceeded at {}",
@@ -353,30 +338,16 @@ impl ToolCallLifecycle {
             cancel: Some(CancelCause::Deadline),
             completion_reason: None,
         };
-        let updated = match presented {
-            Some((rendered, presentation)) => {
-                self.terminalize_raw_with_presentation(
-                    ToolCallState::Running,
-                    fields,
-                    &message,
-                    rendered,
-                    presentation,
-                    "tool_call.timeout_delivery",
-                )
-                .await?
-            }
-            None => {
-                self.terminalize_raw_with_presentation(
-                    ToolCallState::Running,
-                    fields,
-                    &message,
-                    &message,
-                    gents_protocol::output::PayloadPresentation::Full,
-                    "tool_call.timeout_delivery",
-                )
-                .await?
-            }
-        };
+        let updated = self
+            .terminalize_raw_with_presentation(
+                ToolCallState::Running,
+                fields,
+                &message,
+                &message,
+                gents_protocol::output::PayloadPresentation::Full,
+                "tool_call.timeout_delivery",
+            )
+            .await?;
         if !updated {
             // Another actor terminalized first — adopt the durable terminal.
             self.sync_after_lost_running_compare("timeout").await?;

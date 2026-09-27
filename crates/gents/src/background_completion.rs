@@ -5,7 +5,7 @@
 //! executor; a `create_session`/`send_message` row terminalizes here, when the
 //! observer sees the request it caused reach a durable terminal.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -42,14 +42,10 @@ mod rendering;
 mod session_message;
 mod side_effects;
 
-pub(crate) use datetime_fields::AgentToolCallDateTimeRow;
 pub(crate) use notification_delivery::append_background_tool_completion;
 pub(crate) use observer::run_background_completion_observer;
-pub(crate) use session_message::{
-    settle_running_session_message_rows, SessionMessageSettlementReport,
-};
+pub(crate) use session_message::settle_running_session_message_rows;
 
 use datetime_fields::agent_tool_call_datetime_update_fragment;
-use notification_delivery::SideEffects;
 use rendering::tool_completion_presentation;
 use side_effects::existing_tool_completion_notification;

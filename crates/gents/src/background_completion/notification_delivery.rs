@@ -1,9 +1,7 @@
 use super::*;
 
 pub(super) struct SideEffects {
-    pub(super) notification_sequence: u32,
     pub(super) wake_request_id: Option<String>,
-    pub(super) created_notification: bool,
     pub(super) created_wake: bool,
 }
 
@@ -163,7 +161,7 @@ pub(super) async fn ensure_notification_delivery(
     native: Option<crate::lifecycle::queue::ToolNotificationPublication>,
 ) -> Result<SideEffects> {
     let native = native.context(
-        "subagent background notification requires its dedicated canonical provenance builder",
+        "background notification requires its canonical provenance",
     )?;
     let enqueued = crate::lifecycle::queue::persist_background_completion_with_message_canonical(
         node,
@@ -184,9 +182,7 @@ pub(super) async fn ensure_notification_delivery(
     )
     .await?;
     Ok(SideEffects {
-        notification_sequence: enqueued.message_sequence,
         wake_request_id: enqueued.request.map(|request| request.request_id),
-        created_notification: existing.is_none(),
         created_wake: enqueued.created_request,
     })
 }

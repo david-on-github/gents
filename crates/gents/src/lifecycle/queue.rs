@@ -35,12 +35,10 @@ use coalescing::{
     parent_behavior_id, queue_row_to_enqueued_request, row_matches_coalesced_source_and_key,
 };
 pub(crate) use draining::drain_automated_wakeups_in_txn;
-pub(crate) use draining::drain_automated_wakeups_returning_ids;
-pub(crate) use draining::drain_subagent_owned_queue;
 pub use enqueue::enqueue_local_steering_request;
 pub(crate) use enqueue::{
-    append_prepared_steering_in_txn, enqueue_admitted_steering_request, enqueue_steering_request,
-    prepare_steering_append, PreparedSteering, SteeringAdmission,
+    append_prepared_steering_in_txn, enqueue_steering_request, prepare_steering_append,
+    PreparedSteering,
 };
 pub use gents_protocol::request_input::{
     GoalContinuationInput, QueuePolicy, QueueSource, RequestInput, RequestQueue,
@@ -50,7 +48,7 @@ pub(crate) use goal_continuation::{
 };
 pub(crate) use input::{
     background_wake_queue, is_automated_wakeup, row_is_automated_wakeup,
-    row_is_subagent_owned_queue, row_queue,
+    row_queue,
 };
 #[cfg(test)]
 use input::{queue_is_automated_wakeup, BACKGROUND_COMPLETION_WAKE_VERSION};

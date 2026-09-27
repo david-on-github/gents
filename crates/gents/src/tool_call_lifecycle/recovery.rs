@@ -17,14 +17,6 @@ use crate::graphql::escape_graphql_string;
 
 use super::{AwaitMode, CancelCause, FailureClass, ToolCallLifecycle, ToolCallState};
 
-async fn execute_mutation_with_retry(
-    node: &std::sync::Arc<EmbeddedNode>,
-    mutation: &str,
-    operation: &'static str,
-) -> Result<defra_node::QueryResponse> {
-    crate::config_client::ConfigAccess::write_local_response(node, operation, mutation).await
-}
-
 #[derive(Debug, Default)]
 pub struct ToolCallRecoveryReport {
     pub tool_calls_recovered: usize,
@@ -604,9 +596,6 @@ impl super::ToolCallLifecycle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lifecycle::{ClaimOutcome, RequestLifecycle, RequestTerminalOutcome};
-    use crate::llm::message::{AssistantContent, Message, Text, ToolCall, ToolFunction};
-    use crate::streaming::DefraStreamWriter;
 
     #[test]
     fn timeout_recovery_persists_external_failure_class() {

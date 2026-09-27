@@ -21,13 +21,6 @@ pub async fn enqueue_local_steering_request(
     enqueue_steering_request(node, &parent, content, input).await
 }
 
-/// Re-admits a steering append inside the transaction that writes it, so the
-/// admission and the append observe one serialized state.
-#[async_trait::async_trait]
-pub(crate) trait SteeringAdmission: Send + Sync {
-    async fn admit(&self, txn: &ConfigApplyTxn<'_>) -> Result<()>;
-}
-
 /// Atomically persist the signed steering request. Its admission content is
 /// displayed while queued and is published to the transcript only when owned
 /// execution starts.
@@ -37,30 +30,13 @@ pub(crate) async fn enqueue_steering_request(
     content: &str,
     input: RequestInput,
 ) -> Result<EnqueuedAgentRequest> {
-    enqueue_admitted_steering_request(node, parent, content, input, None).await
-}
-
-pub(crate) async fn enqueue_admitted_steering_request(
-    node: &EmbeddedNode,
-    parent: &AgentRequest,
-    content: &str,
-    input: RequestInput,
-    admission: Option<&dyn SteeringAdmission>,
-) -> Result<EnqueuedAgentRequest> {
     let prepared = prepare_steering_append(parent, content, input).await?;
     let prepared = &prepared;
     crate::config_client::ConfigAccess::transact_local(
         node,
         None,
         "lifecycle.enqueue_steering",
-        move |txn| {
-            Box::pin(async move {
-                if let Some(admission) = admission {
-                    admission.admit(txn).await?;
-                }
-                append_prepared_steering_in_txn(txn, parent, prepared).await
-            })
-        },
+        move |txn| Box::pin(async move { append_prepared_steering_in_txn(txn, parent, prepared).await }),
     )
     .await
 }

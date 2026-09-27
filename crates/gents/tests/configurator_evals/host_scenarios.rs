@@ -1048,7 +1048,7 @@ fn bash_access_does_not_grant_auxiliary_monitor_tools() {
         ("integrations", serde_json::json!({"lsp":{}})),
         (
             "subagents",
-            serde_json::json!({"target_ids":["repair"],"spawn_enabled":true}),
+            serde_json::json!({"target_ids":["repair"],"enabled":true}),
         ),
         (
             "remote",

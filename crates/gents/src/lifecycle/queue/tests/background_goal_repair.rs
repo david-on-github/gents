@@ -37,7 +37,7 @@ async fn message_ids(db: &TestDb) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn canonical_publication_rechecks_goal_after_waiting_for_enqueue_gate() {
+async fn canonical_publication_wakes_even_when_a_goal_owns_the_session() {
     let (db, parent) = fixture("goal-before-canonical-publication").await;
     let queue = hints(&parent);
     let gate = super::super::atomic_inputs::background_completion_gate(
@@ -73,10 +73,12 @@ async fn canonical_publication_rechecks_goal_after_waiting_for_enqueue_gate() {
     .unwrap();
     drop(held);
     let result = publication.await.unwrap().unwrap();
-    assert!(result.request.is_none());
-    assert!(!result.created_request);
+    // A Goal never suppresses a completion: the notification and its wake are
+    // published, and the Goal is left as it was.
+    assert!(result.request.is_some());
+    assert!(result.created_request);
     assert_eq!(message_ids(&db).await.len(), 1);
-    assert_eq!(queue_rows(&db.node, &parent.session_id).await.len(), 1);
+    assert_eq!(queue_rows(&db.node, &parent.session_id).await.len(), 2);
     let after = crate::goal::load_canonical_goal(&db.node, db.agent_did(), &parent.session_id)
         .await
         .unwrap()

@@ -1611,10 +1611,12 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
         ).await;
         assert!(!observed.has_errors(), "{:?}", observed.errors);
         let data = observed.data.unwrap();
+        // A Goal never suppresses a background completion: the wrapup and the
+        // completion's coalesced wake are both published.
         assert_eq!(
             data["AgentRequest"].as_array().unwrap().len(),
-            2,
-            "the sole extra request must be the runtime-owned Goal wrapup, never a completion wake; observed={data}"
+            3,
+            "expected the parent, the Goal wrapup and one completion wake; observed={data}"
         );
         let requests = data["AgentRequest"].as_array().unwrap();
         let goal_requests = requests
@@ -1627,15 +1629,16 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
             "expected exactly one Goal wrapup: {requests:?}"
         );
         assert_eq!(goal_requests[0]["caused_by_parent_request_id"], parent);
-        assert!(
+        assert_eq!(
             requests
                 .iter()
-                .all(|row| row["request_id"] == parent
-                    || row["_docID"] == goal_requests[0]["_docID"]),
-            "only the parent and exact Goal wrapup may exist; no background wake: {requests:?}"
+                .filter(|row| row["request_id"] != parent
+                    && row["_docID"] != goal_requests[0]["_docID"])
+                .count(),
+            1,
+            "besides the parent and the Goal wrapup, only the completion wake exists: {requests:?}"
         );
-        // Goal continuations are themselves scheduled work. Origin alone
-        // cannot distinguish them from an unwanted background-completion wake.
+        // Goal continuations are themselves scheduled work, like the wake.
         assert_eq!(goal_requests[0]["execution_origin"], "scheduled");
         let messages = data["AgentMessage"].as_array().unwrap();
         let mut completions = Vec::new();
@@ -2726,7 +2729,7 @@ async fn operator_resume_rejects_corrupted_child_receipt_without_reactivation() 
     // input by replacing the fixture row while retaining its original signature.
     let original = db.node.execute(&format!(
         r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}) {{
-            request_id agent_did requester_did admission_kind admission_signer_did admission_signature enrollment_request_id enrollment_request_digest enrollment_admin_did enrollment_authorization_sequence enrollment_authorization_expires_at runtime_issuer_did runtime_source_request_id runtime_source_kind runtime_bridge_author_did behavior_id session_id retry_parent_request retry_parent_request_doc_id retry_root_request retry_key content max_total_tokens input execution_origin caused_by_trigger_id caused_by_trigger_doc_id caused_by_trigger_kind caused_by_correlation caused_by_trigger_context caused_by_source_doc_id created_at retry_count max_retries valid_until subagent_depth caused_by_parent_request_id caused_by_parent_request_doc_id caused_by_parent_tool_call_id caused_by_parent_tool_call_doc_id workspace_id workspace_authority workspace_owner_agent_did workspace_seal_hash lifecycle_state
+            request_id agent_did requester_did admission_kind admission_signer_did admission_signature enrollment_request_id enrollment_request_digest enrollment_admin_did enrollment_authorization_sequence enrollment_authorization_expires_at runtime_issuer_did runtime_source_request_id runtime_source_kind behavior_id session_id retry_parent_request retry_parent_request_doc_id retry_root_request retry_key content max_total_tokens input execution_origin caused_by_trigger_id caused_by_trigger_doc_id caused_by_trigger_kind caused_by_correlation caused_by_trigger_context caused_by_source_doc_id created_at retry_count max_retries valid_until subagent_depth caused_by_parent_request_id caused_by_parent_request_doc_id caused_by_parent_tool_call_id caused_by_parent_tool_call_doc_id workspace_id workspace_authority workspace_owner_agent_did workspace_seal_hash lifecycle_state
         }} }}"#, gents::graphql::escape_graphql_string(&first.doc_id),
     )).await;
     assert!(!original.has_errors(), "{:?}", original.errors);

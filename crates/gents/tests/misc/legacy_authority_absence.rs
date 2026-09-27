@@ -272,7 +272,7 @@ fn request_and_persona_admission_have_no_logical_only_recovery_or_terminal_mutat
 
     assert!(!request_admission.contains("parent_authorizes_subagent_target"));
     assert!(request_admission.contains("load_exact_parent_request"));
-    assert!(request_admission.contains("request_doc_id.as_deref() == Some(parent_doc_id)"));
+    assert!(request_admission.contains("row.doc_id.as_deref() == Some(source_doc_id)"));
     assert!(!persona.contains("filter: {{ request_key:"));
     assert!(persona.contains("filter: {{ _docID:"));
 }

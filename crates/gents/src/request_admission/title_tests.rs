@@ -187,6 +187,12 @@ async fn verify_generated_case(case: &LeanTitleRequestAdmissionCase) {
                 &case.admission.source_request_id,
             )
         }
+        ("runtime-internal", "automated-trigger") => {
+            AgentRequestAdmissionRecord::runtime_automated_trigger(
+                target,
+                &case.admission.source_request_id,
+            )
+        }
         ("local-self", _) => AgentRequestAdmissionRecord::local_self(target),
         other => panic!("unsupported generated admission branch: {other:?}"),
     };

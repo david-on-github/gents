@@ -1765,10 +1765,13 @@ mod tests {
             "foreign-requester artifact leaked to the receiver"
         );
 
+        // The caused session returns with its request so the caller can open
+        // it; sessions the requester did not cause stay on the host.
+        wait_for_value(&receiver, "AgentSession", "session_id", &match_session_id).await;
         assert_eq!(
             collection_values(&receiver, "AgentSession", "session_id").await,
-            BTreeSet::new(),
-            "host-local session ownership must not cross the return leg"
+            BTreeSet::from([match_session_id.clone()]),
+            "only the requester's caused session crosses the return leg"
         );
 
         sender.shutdown().await;

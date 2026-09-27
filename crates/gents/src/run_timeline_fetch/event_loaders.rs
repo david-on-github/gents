@@ -332,7 +332,7 @@ pub(super) fn resolve_tool_payloads(
         .request_doc_id
         .as_deref()
         .context("timeline tool lacks physical request binding")?;
-    let mut accepted_call_id = None;
+    let accepted_call_id;
     {
         let binding_doc = spawned_by_tool_call_doc_id.as_deref().unwrap_or(tool_doc);
         let mut bindings = Vec::new();

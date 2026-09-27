@@ -714,34 +714,6 @@ pub(crate) async fn build_session_message_request(
     build_signed_request(spec, RequestSigner::Identity(&signer)).await
 }
 
-/// Persist a session-message request built by [`build_session_message_request`].
-pub(crate) async fn write_session_message_request(
-    node: &EmbeddedNode,
-    create: &gents_protocol::request_admission::AgentRequestCreate,
-) -> Result<EnqueuedAgentRequest> {
-    let mutation = create.graphql_mutation().map_err(anyhow::Error::msg)?;
-    let response = crate::config_client::ConfigAccess::write_local_response(
-        node,
-        "lifecycle.materialize_session_message",
-        &mutation,
-    )
-    .await?;
-    let doc_id = resolve_created_agent_request_doc_id(
-        node,
-        &response,
-        "create_AgentRequest",
-        &escape_graphql_string(&create.request_id),
-        "querying created session-message AgentRequest doc id failed",
-        "session-message AgentRequest create returned no _docID",
-    )
-    .await?;
-    Ok(EnqueuedAgentRequest {
-        doc_id,
-        request_id: create.request_id.clone(),
-        session_id: create.session_id.clone(),
-    })
-}
-
 pub async fn activate_workspace_bound_request(
     node: &EmbeddedNode,
     request_doc_id: &str,

@@ -1,23 +1,16 @@
 mod final_output;
 pub(crate) mod r4c_args;
 
-use std::collections::{HashMap, HashSet};
-
 use crate::llm::message::{AssistantContent, Message, Text, UserContent};
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use defra_node::EmbeddedNode;
-use gents_protocol::transcript::present_message;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::graphql::escape_graphql_string;
-use gents_protocol::request_input::RequestInput;
-use gents_protocol::request_lifecycle::RequestLifecycleState;
-use gents_protocol::row::AgentRequestRow;
 
 use crate::session::canonical_rows::{decode_output_segment_row, AGENT_OUTPUT_SEGMENT_FIELDS};
-use crate::tool_call_lifecycle::{AwaitMode, FailureClass, ToolCallState};
 use gents_protocol::output::reconstruction::{reconstruct_stream, ObservedSegment};
 use gents_protocol::output::{OutputSource, OutputWriter, PayloadRef};
 

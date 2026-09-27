@@ -176,19 +176,3 @@ pub(super) fn xml_escape_text(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
-pub(super) fn non_empty(value: Option<&str>) -> Option<&str> {
-    value.and_then(|value| {
-        let trimmed = value.trim();
-        (!trimmed.is_empty()).then_some(trimmed)
-    })
-}
-
-#[cfg(test)]
-pub(super) fn first_row<T>(data: Option<&serde_json::Value>, collection: &str) -> Option<T>
-where
-    T: for<'de> Deserialize<'de>,
-{
-    data.and_then(|data| data.get(collection))
-        .and_then(|value| serde_json::from_value::<Vec<T>>(value.clone()).ok())
-        .and_then(|mut rows| rows.pop())
-}

@@ -655,33 +655,6 @@ mod lifecycle_tests {
     use crate::config_client::ConfigAccess;
     use crate::tool_call_lifecycle::{CancelCause, FailureClass};
 
-    async fn canonical_result(node: &Arc<EmbeddedNode>, tool: &ToolCallLifecycle) -> String {
-        let message = crate::tool_call_lifecycle::load_tool_call_result(
-            &ConfigAccess::Local(node.clone()),
-            tool.doc_id().expect("admitted physical tool document"),
-            tool.agent_did(),
-            tool.session_id(),
-            tool.requester_did(),
-        )
-        .await
-        .expect("canonical tool delivery");
-        crate::tool_call_lifecycle::render_tool_result(&message)
-            .expect("canonical tool delivery renders as text")
-    }
-
-    async fn canonical_raw_output(node: &Arc<EmbeddedNode>, tool: &ToolCallLifecycle) -> String {
-        crate::background_tools::canonical_tool_output(
-            node.as_ref(),
-            tool.doc_id().expect("admitted physical tool document"),
-            tool.request_doc_id().expect("accepted request document"),
-            tool.session_id(),
-            tool.agent_did(),
-            tool.requester_did(),
-        )
-        .await
-        .expect("canonical raw tool output")
-    }
-
     async fn row(node: &EmbeddedNode, session_id: &str) -> serde_json::Value {
         let session = crate::graphql::escape_graphql_string(session_id);
         let response = node

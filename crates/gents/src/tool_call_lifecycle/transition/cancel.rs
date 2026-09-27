@@ -9,7 +9,7 @@ impl super::ToolCallLifecycle {
     /// startup recovery for interrupted parent requests.
     ///
     pub async fn cancel_during_run(&mut self, cause: CancelCause) -> Result<bool> {
-        self.cancel_during_run_inner(cause, None, None).await
+        self.cancel_during_run_inner(cause, None).await
     }
 
     /// Returns whether this caller won the durable running-state compare.
@@ -20,24 +20,14 @@ impl super::ToolCallLifecycle {
         cause: CancelCause,
         completion_reason: &str,
     ) -> Result<bool> {
-        self.cancel_during_run_inner(cause, Some(completion_reason), None)
+        self.cancel_during_run_inner(cause, Some(completion_reason))
             .await
-    }
-
-    /// Running -> Cancelled with the caller's rendered diagnostic.
-    pub(crate) async fn cancel_during_run_with_presentation(
-        &mut self,
-        cause: CancelCause,
-        presented: Option<(&str, gents_protocol::output::PayloadPresentation)>,
-    ) -> Result<bool> {
-        self.cancel_during_run_inner(cause, None, presented).await
     }
 
     async fn cancel_during_run_inner(
         &mut self,
         cause: CancelCause,
         completion_reason_override: Option<&str>,
-        presented: Option<(&str, gents_protocol::output::PayloadPresentation)>,
     ) -> Result<bool> {
         self.ensure_state(&[ToolCallState::Running], "cancel_during_run")?;
 
@@ -53,30 +43,16 @@ impl super::ToolCallLifecycle {
             completion_reason: Some(completion_reason),
         };
         let raw = Self::CANCEL_DURING_RUN_OUTPUT;
-        let updated = match presented {
-            Some((rendered, presentation)) => {
-                self.terminalize_raw_with_presentation(
-                    ToolCallState::Running,
-                    fields,
-                    raw,
-                    rendered,
-                    presentation,
-                    "tool_call.cancel_during_run_delivery",
-                )
-                .await?
-            }
-            None => {
-                self.terminalize_raw_with_presentation(
-                    ToolCallState::Running,
-                    fields,
-                    raw,
-                    raw,
-                    gents_protocol::output::PayloadPresentation::Full,
-                    "tool_call.cancel_during_run_delivery",
-                )
-                .await?
-            }
-        };
+        let updated = self
+            .terminalize_raw_with_presentation(
+                ToolCallState::Running,
+                fields,
+                raw,
+                raw,
+                gents_protocol::output::PayloadPresentation::Full,
+                "tool_call.cancel_during_run_delivery",
+            )
+            .await?;
         if !updated {
             self.sync_after_lost_running_compare("cancel_during_run")
                 .await?;

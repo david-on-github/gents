@@ -193,33 +193,4 @@ impl DefraSessionHook {
             &self.truncation_limits,
         ))
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(super) async fn fail_background_meta_tool_call(
-        &self,
-        session_id: String,
-        request_id: String,
-        deadline_at: chrono::DateTime<chrono::Utc>,
-        _message_sequence: u32,
-        internal_call_id: &str,
-        tool_name: &str,
-        args: &str,
-        failure_class: FailureClass,
-        result: String,
-    ) -> anyhow::Result<ToolCallHookAction> {
-        let mut lifecycle = self
-            .adopt_accepted_tool_dispatch(
-                internal_call_id,
-                None,
-                &request_id,
-                &session_id,
-                tool_name,
-                args,
-                deadline_at,
-                AwaitMode::Foreground,
-            )
-            .await?;
-        lifecycle.spawn_failed(failure_class, &result).await?;
-        Ok(self.skip_tool_result(tool_name, result))
-    }
 }

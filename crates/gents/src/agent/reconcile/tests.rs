@@ -588,17 +588,8 @@ async fn behavior_slot_fans_out_background_children_to_backend_capacity() {
             .unwrap();
     }
 
-    let dequeued = tokio::time::timeout(Duration::from_secs(1), async {
-        let mut request_ids = BTreeSet::new();
-        while request_ids.len() < 4 {
-            request_ids.insert(dequeued_rx.recv().await.expect("runner dequeued request"));
-        }
-        request_ids
-    })
-    .await
-    .expect("all fixed workers should dequeue available requests");
-    assert_eq!(dequeued.len(), 4);
-
+    // One fixed worker per active permit: the fourth request stays queued
+    // until a worker frees, with no extra task holding it.
     let started = tokio::time::timeout(Duration::from_secs(1), async {
         let mut request_ids = BTreeSet::new();
         while request_ids.len() < 3 {
@@ -612,30 +603,29 @@ async fn behavior_slot_fans_out_background_children_to_backend_capacity() {
     })
     .await
     .expect("executor should start all same-behavior background children concurrently");
-
     assert_eq!(
         started.len(),
         3,
         "logical active work is bounded by backend capacity"
     );
-    assert!(started.is_subset(&dequeued));
-    let fourth = dequeued.difference(&started).next().unwrap().clone();
-
+    let mut dequeued = BTreeSet::new();
+    while let Ok(request_id) = dequeued_rx.try_recv() {
+        dequeued.insert(request_id);
+    }
+    assert_eq!(dequeued, started, "only the three workers dequeued");
     assert!(
         tokio::time::timeout(Duration::from_millis(150), started_rx.recv())
             .await
             .is_err(),
-        "fourth request must wait for an active worker permit"
+        "fourth request must wait for an active worker"
     );
 
     release.add_permits(3);
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
-            .await
-            .expect("freed active permit admits queued child")
-            .expect("fourth child is reported"),
-        fourth
-    );
+    let fourth = tokio::time::timeout(Duration::from_secs(1), started_rx.recv())
+        .await
+        .expect("freed worker admits queued child")
+        .expect("fourth child is reported");
+    assert!(!started.contains(&fourth));
     let _ = shutdown_tx.send(true);
     for slot in slots.into_values() {
         retire_slot(slot);

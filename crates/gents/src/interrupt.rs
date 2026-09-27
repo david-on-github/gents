@@ -9,7 +9,7 @@ use defra_node::EmbeddedNode;
 use tokio::sync::watch;
 
 use crate::graphql::{escape_graphql_string, graphql_with_transaction_retry};
-use crate::lifecycle::queue::{drain_automated_wakeups_in_txn, drain_subagent_owned_queue};
+use crate::lifecycle::queue::drain_automated_wakeups_in_txn;
 
 /// Request a soft interrupt by latching `interrupt_requested_at` on the
 /// AgentRequest document. Idempotent: if the field is already set, the
@@ -191,38 +191,6 @@ async fn interrupt_request_matching_in_txn(
         "automated wake-up drained because active request was interrupted",
     )
     .await
-}
-
-pub(crate) async fn interrupt_active_session_request(
-    node: &EmbeddedNode,
-    session_id: &str,
-    agent_did: &str,
-    requester_did: Option<&str>,
-) -> Result<bool> {
-    let Some(row) = active_session_request(node, session_id, agent_did, requester_did).await?
-    else {
-        return Ok(false);
-    };
-    interrupt_request_by_doc_id(
-        node,
-        row.doc_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("active request has no physical identity"))?,
-        agent_did,
-        requester_did,
-    )
-    .await?;
-    Ok(true)
-}
-
-pub(crate) async fn cancel_subagent_session_queue(
-    node: &EmbeddedNode,
-    session_id: &str,
-    agent_did: &str,
-    requester_did: Option<&str>,
-    reason: &str,
-) -> Result<usize> {
-    drain_subagent_owned_queue(node, session_id, agent_did, requester_did, reason).await
 }
 
 pub(crate) async fn active_session_request(

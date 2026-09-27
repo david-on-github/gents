@@ -1041,23 +1041,6 @@ async fn generated_storage_observation_cases_match_hook_runtime_classification()
     }
 }
 
-async fn create_interruptible_request(
-    node: &defra_node::EmbeddedNode,
-    request_id: &str,
-    session_id: &str,
-) -> String {
-    create_interruptible_request_for_agent(node, request_id, session_id, "did:test:general").await
-}
-
-async fn create_interruptible_request_for_agent(
-    node: &defra_node::EmbeddedNode,
-    request_id: &str,
-    session_id: &str,
-    agent_did: &str,
-) -> String {
-    create_interruptible_request_with_fields(node, request_id, session_id, agent_did, "").await
-}
-
 async fn create_interruptible_request_with_fields(
     node: &defra_node::EmbeddedNode,
     request_id: &str,

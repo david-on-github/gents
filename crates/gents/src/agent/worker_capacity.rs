@@ -62,7 +62,8 @@ tokio::task_local! {
 
 enum RequestGuard {
     Unbound(UnboundActiveGuard),
-    Active(ActiveGuard),
+    /// Held until the request scope ends; dropping it releases the slot.
+    Active { _guard: ActiveGuard },
 }
 
 /// Slot generation scope shared by its fixed worker tasks. Tool and request
@@ -100,7 +101,7 @@ pub(crate) fn bind_current_claim(ticket: WorkerTicket) -> Result<(), CapacityErr
             };
             match guard.bind(ticket) {
                 Ok(active) => {
-                    *slot = Some(RequestGuard::Active(active));
+                    *slot = Some(RequestGuard::Active { _guard: active });
                     Ok(())
                 }
                 Err((guard, error)) => {
@@ -222,12 +223,6 @@ pub(crate) struct ActiveGuard {
     ticket: WorkerTicket,
     marker: Arc<()>,
     permit: Option<OwnedSemaphorePermit>,
-}
-
-impl ActiveGuard {
-    pub(crate) fn ticket(&self) -> &WorkerTicket {
-        &self.ticket
-    }
 }
 
 impl Drop for ActiveGuard {

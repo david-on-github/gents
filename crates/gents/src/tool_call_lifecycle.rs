@@ -157,7 +157,7 @@ use std::sync::Arc;
 use defra_node::EmbeddedNode;
 
 pub(crate) mod delivery;
-pub(crate) use delivery::{publish_background_receipt_in_txn, BackgroundReceiptBinding};
+pub(crate) use delivery::publish_background_receipt_in_txn;
 pub(crate) mod query;
 // Consumers reconstruct invocation replies through the same physical-identity
 // owner as the runtime; admission and mutation internals remain private.
@@ -458,10 +458,6 @@ impl ToolCallLifecycle {
         self.spawned_by_tool_call_doc_id.is_some()
     }
 
-    pub(crate) fn spawned_by_tool_call_doc_id(&self) -> Option<&str> {
-        self.spawned_by_tool_call_doc_id.as_deref()
-    }
-
     pub(crate) fn is_bridge(&self) -> bool {
         self.is_background_tool_bridge()
     }
@@ -563,10 +559,6 @@ impl ToolCallLifecycle {
         self.accepted_header_doc_id.as_deref()
     }
 
-    pub(crate) fn accepted_arguments(&self) -> Option<&gents_protocol::output::PayloadRef> {
-        self.arguments.as_ref()
-    }
-
     pub(crate) fn is_running(&self) -> bool {
         self.state == ToolCallState::Running
     }
@@ -652,7 +644,7 @@ mod tests {
             native = native.with_requester_did(input.map(str::to_string));
             assert_eq!(native.requester_did.as_deref(), expected);
         }
-        let background = ToolCallLifecycle::new_background_tool(
+        let mut background = ToolCallLifecycle::new_background_tool(
             node.clone(),
             "request".into(),
             "session".into(),
@@ -663,7 +655,10 @@ mod tests {
             "{}".into(),
             deadline,
         );
+        // A call refused before dispatch is answered by its invocation reply.
+        check(&background, true, "completed", "completed");
         // Recovery selects completionPending rows to redrive native-tool effects.
+        background.state = ToolCallState::Running;
         check(
             &background,
             true,

@@ -180,6 +180,7 @@ pub(crate) async fn verify_fresh_local_self_request(
     observation.signer_matches_requester =
         row.requester_did.as_deref() == Some(admission.signer_did.as_str());
     observation.requester_matches_target = row.requester_did.as_deref() == row.agent_did.as_deref();
+    observation.hop_within_bound = request_hop_admitted(node, &row).await?;
     require_admitted_observation(observation, None)?;
     verify_request_input(node, &row, &admission).await?;
     row_into_agent_request(row, &request.doc_id).map_err(AgentRequestAdmissionError::denied)

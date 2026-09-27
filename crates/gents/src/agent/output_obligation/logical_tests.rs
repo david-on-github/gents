@@ -248,7 +248,7 @@ async fn non_deadline_request_terminalization_does_not_timeout_running_wait() {
         let response = execute(
             &node,
             &format!(
-                r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ lifecycle_state cancel_cause tool_failure_class stuck_since cancel_cascade_intent_at }} }}"#,
+                r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ lifecycle_state cancel_cause tool_failure_class stuck_since }} }}"#,
                 escape_graphql_string(&tool_call_doc_id),
             ),
         )
@@ -258,7 +258,6 @@ async fn non_deadline_request_terminalization_does_not_timeout_running_wait() {
         assert!(observed["cancel_cause"].is_null());
         assert!(observed["tool_failure_class"].is_null());
         assert!(observed["stuck_since"].is_string());
-        assert!(observed["cancel_cascade_intent_at"].is_null());
     }
 }
 

@@ -19,18 +19,15 @@ struct SessionMessageRow {
     #[serde(rename = "_docID")]
     doc_id: String,
     request_id: String,
-    #[serde(default)]
-    request_doc_id: Option<String>,
     session_id: String,
     agent_did: String,
     #[serde(default)]
     requester_did: Option<String>,
-    tool_call_id: String,
     tool_name: String,
 }
 
 const SESSION_MESSAGE_ROW_FIELDS: &str =
-    "_docID request_id request_doc_id session_id agent_did requester_did tool_call_id tool_name";
+    "_docID request_id session_id agent_did requester_did tool_name";
 
 fn running_session_message_filter(local_did: &str) -> String {
     format!(
@@ -44,7 +41,7 @@ fn running_session_message_filter(local_did: &str) -> String {
 /// Settle every running local `create_session`/`send_message` row whose own
 /// deadline passed or whose caused request reached a durable terminal (Lean
 /// `Recovery.sessionMessageRecoverySweep`). A row with neither observation
-/// keeps running: no parent fate settles it. The winner of the row's terminal
+/// keeps running: no parent fate settles it. The winner of a caused-terminal
 /// compare appends its completion notification and wake.
 pub(crate) async fn settle_running_session_message_rows(
     node: &Arc<EmbeddedNode>,
@@ -128,22 +125,10 @@ async fn settle_row(node: &Arc<EmbeddedNode>, row: &SessionMessageRow) -> Result
     if !lifecycle.is_running() || !lifecycle.is_session_message() {
         return Ok(None);
     }
+    // Lean `RestartRow.notification` owes no completion for an expired
+    // session-message row: only the caused request's terminal is reported.
     if lifecycle.is_deadline_expired(Utc::now()) {
-        if !lifecycle.timeout().await? {
-            return Ok(None);
-        }
-        append_background_tool_completion(
-            node.as_ref(),
-            &row.session_id,
-            &row.request_id,
-            &row.doc_id,
-            &row.tool_name,
-            "failed",
-            "",
-            Some("deadline_exceeded"),
-        )
-        .await?;
-        return Ok(Some(Settled::TimedOut));
+        return Ok(lifecycle.timeout().await?.then_some(Settled::TimedOut));
     }
     let Some(caused_doc_id) = crate::session_message::load_caused_request(node, &lifecycle)
         .await?

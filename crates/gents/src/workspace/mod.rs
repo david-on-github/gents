@@ -67,7 +67,7 @@ pub(crate) use runtime::{
 
 pub(crate) use overlay::{
     frozen_instruction_manifest_from_overlay, install_process_operator_tool_root,
-    process_operator_tool_root, request_workspace_cwd, require_under_ceiling,
+    request_workspace_cwd, require_under_ceiling,
     resolve_request_workspace_overlay, validate_request_workspace_input,
     workspace_authority_file_mode,
 };
