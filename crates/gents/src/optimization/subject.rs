@@ -360,6 +360,29 @@ pub(crate) mod tests {
         );
     }
 
+    /// A sidecar two fields read would change both documents in a trial,
+    /// while promotion writes only the target.
+    #[test]
+    fn a_sidecar_referenced_from_two_fields_is_an_error() {
+        let dirs = tempfile::tempdir().unwrap();
+        let baseline_dir = dirs.path().join("baseline");
+        write_task_fixture_pack(&baseline_dir, false);
+        let config_path = baseline_dir.join("pack_config.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["tasks"].as_array_mut().unwrap().push(json!({
+            "task_id": "review",
+            "behavior_id": "monitor",
+            "prompt_template": "./tasks/plan/prompt.md",
+        }));
+        std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+        let error = task_pack(&baseline_dir).unwrap_err();
+        assert!(
+            format!("{error:#}").contains("./tasks/plan/prompt.md"),
+            "{error:#}"
+        );
+    }
+
     #[test]
     fn a_task_the_pack_does_not_declare_or_name_is_an_error() {
         let dirs = tempfile::tempdir().unwrap();
