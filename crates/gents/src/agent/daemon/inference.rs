@@ -1156,6 +1156,272 @@ mod tests {
             .unwrap()
     }
 
+    /// Installs the Schedule/Task/Trigger chain a claimed request resolves its
+    /// hooks through, then returns the signed automated-trigger request the
+    /// daemon claims. Only automated trigger lineage reaches a Task, so this is
+    /// the sole shape whose hooks the executor can find.
+    async fn create_task_hook_request(
+        node: &defra_node::EmbeddedNode,
+        behavior: &ResolvedBehavior,
+        hooks: serde_json::Value,
+    ) -> AgentRequest {
+        use crate::config_client::{
+            ConfigAccess, DesiredStateApplyDocument, DesiredStateApplyPlan,
+        };
+        use crate::Collection;
+        use serde_json::json;
+
+        crate::test_support::install_test_behavior(
+            node,
+            behavior.agent_did(),
+            &behavior.behavior_id,
+        )
+        .await;
+        let owner = behavior.agent_did();
+        let documents = [
+            (
+                Collection::Schedule,
+                json!({
+                    "agent_did": owner,
+                    "schedule_id": "hook-schedule",
+                    "cadence": {"kind": "interval", "interval_secs": 3600},
+                }),
+            ),
+            (
+                Collection::Task,
+                json!({
+                    "agent_did": owner,
+                    "task_id": "hook-task",
+                    "behavior_id": behavior.behavior_id,
+                    "prompt_template": "run the gate",
+                    "hooks": hooks,
+                }),
+            ),
+            (
+                Collection::Trigger,
+                json!({
+                    "agent_did": owner,
+                    "trigger_id": "hook-trigger",
+                    "task_id": "hook-task",
+                    "source": {"kind": "schedule", "schedule_id": "hook-schedule"},
+                }),
+            ),
+        ]
+        .into_iter()
+        .map(|(collection, value)| DesiredStateApplyDocument {
+            collection,
+            add: value.clone(),
+            update: value,
+        })
+        .collect();
+        let plan = DesiredStateApplyPlan::new(documents).unwrap();
+        ConfigAccess::transact_local(node, None, "test.install_task_hooks", |txn| {
+            let plan = &plan;
+            Box::pin(async move { crate::config_client::apply_desired_state_plan(txn, plan).await })
+        })
+        .await
+        .unwrap();
+
+        let triggers = node
+            .execute(&format!(
+                r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{}" }}, trigger_id: {{ _eq: "hook-trigger" }} }}, limit: 1) {{ _docID }} }}"#,
+                crate::graphql::escape_graphql_string(owner),
+            ))
+            .await;
+        assert!(!triggers.has_errors(), "{:?}", triggers.errors);
+        let trigger_doc_id: serde_json::Value = crate::graphql::first_row(&triggers, "Trigger")
+            .unwrap()
+            .expect("installed Trigger");
+        let trigger_doc_id = trigger_doc_id["_docID"]
+            .as_str()
+            .expect("Trigger physical ID")
+            .to_owned();
+
+        let created_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let mut create = gents_protocol::request_admission::AgentRequestCreate::base(
+            gents_protocol::request_admission::RequestPurpose::Normal,
+            uuid::Uuid::new_v4().to_string(),
+            owner,
+            owner,
+            &behavior.behavior_id,
+            uuid::Uuid::new_v4().to_string(),
+            "run the gate",
+            "scheduled",
+            created_at,
+            gents_protocol::request_admission::AgentRequestAdmissionRecord::runtime_automated_trigger(
+                owner,
+                "hook-trigger",
+            ),
+        );
+        create.caused_by_trigger_id = Some("hook-trigger".into());
+        create.caused_by_trigger_kind = Some("schedule".into());
+        create.caused_by_trigger_doc_id = Some(trigger_doc_id);
+        crate::sign_agent_request_create(behavior.principal_identity().as_ref(), &mut create)
+            .await
+            .unwrap();
+        let response = node.execute(&create.graphql_mutation().unwrap()).await;
+        assert!(
+            !response.has_errors(),
+            "create task-hook AgentRequest failed: {:?}",
+            response.errors
+        );
+        let doc_id = crate::graphql::single_mutation_document(&response, "create_AgentRequest")
+            .unwrap()
+            .expect("created request receipt")["_docID"]
+            .as_str()
+            .expect("created request physical ID")
+            .to_owned();
+        crate::request_admission::load_request_for_admission_test(node, &doc_id)
+            .await
+            .unwrap()
+    }
+
+    async fn run_task_hook_request(hooks: serde_json::Value) -> (usize, serde_json::Value) {
+        let node = Arc::new(
+            defra_node::EmbeddedNode::builder()
+                .data_path(
+                    std::env::temp_dir()
+                        .join(format!("daemon-task-hooks-{}", uuid::Uuid::new_v4())),
+                )
+                .build()
+                .await
+                .expect("embedded node"),
+        );
+        crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
+        let behavior = test_behavior();
+        let request = create_task_hook_request(node.as_ref(), &behavior, hooks).await;
+        let doc_id = request.doc_id.clone();
+        let prompt_builder = LayeredPromptBuilder::for_behavior(
+            &behavior.system_prompt,
+            &behavior.behavior_id,
+            &[],
+            false,
+            &[],
+        );
+        let calls = Arc::new(AtomicUsize::new(0));
+        let runtime_status = crate::runtime_status::RuntimeStatusHandle::new(
+            node.clone(),
+            behavior.agent_did().to_string(),
+        );
+        let request_identity = behavior.principal_identity().clone();
+        let mut daemon = BehaviorDaemon::new(
+            node.clone(),
+            behavior.clone(),
+            None,
+            Arc::new(CountingReplyModel(calls.clone())),
+            prompt_builder.preamble().to_string(),
+            Arc::new(Vec::<Box<dyn ToolDyn>>::new()),
+            prompt_builder,
+            FailurePolicy::default(),
+            Some(crate::rendered_request::defra_rendered_request_capture_factory(node.clone())),
+            BackgroundToolRegistry::default(),
+            BackgroundExecutionRegistry::default(),
+            Arc::new(StartupBarrier::ready_for_test()),
+            runtime_status,
+            1,
+            crate::request_admission::AgentRequestAdmissionVerifier::new(
+                node.clone(),
+                request_identity,
+                crate::agent::p2p_reconcile::enrollment_authority_channel().1,
+            ),
+        )
+        .unwrap();
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        daemon.process_request(request, shutdown_rx).await;
+
+        let terminal = node
+            .execute(&format!(
+                r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ lifecycle_state failure_reason }} }}"#,
+                crate::graphql::escape_graphql_string(&doc_id),
+            ))
+            .await;
+        assert!(!terminal.has_errors(), "{:?}", terminal.errors);
+        let row: serde_json::Value = crate::graphql::first_row(&terminal, "AgentRequest")
+            .unwrap()
+            .expect("terminal AgentRequest row");
+        let provider_calls = calls.load(Ordering::SeqCst);
+        drop(daemon);
+        node.shutdown().await;
+        (provider_calls, row)
+    }
+
+    #[tokio::test]
+    async fn a_failing_before_hook_stops_the_request_before_the_provider() {
+        let (provider_calls, row) = run_task_hook_request(serde_json::json!([{
+            "hook_id": "prepare",
+            "phase": "before",
+            "command": ["sh", "-c", "echo blocked >&2; exit 1"],
+            "timeout_secs": 30,
+        }]))
+        .await;
+        assert_eq!(
+            provider_calls, 0,
+            "a failing before hook must gate provider execution: {row}"
+        );
+        assert_eq!(row["lifecycle_state"], "failed", "{row}");
+        let reason = row["failure_reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("prepare") && reason.contains("blocked"),
+            "the operator must see which hook refused and what it said: {reason:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_after_success_hook_blocks_successful_completion() {
+        let (provider_calls, row) = run_task_hook_request(serde_json::json!([
+            {
+                "hook_id": "verify",
+                "phase": "after_success",
+                "command": ["sh", "-c", "echo verify refused >&2; exit 2"],
+                "timeout_secs": 30,
+            },
+            {
+                "hook_id": "sweep",
+                "phase": "finally",
+                "command": ["true"],
+                "timeout_secs": 30,
+            },
+        ]))
+        .await;
+        assert!(
+            provider_calls > 0,
+            "the agent must run before its after_success gate: {row}"
+        );
+        assert_eq!(row["lifecycle_state"], "failed", "{row}");
+        let reason = row["failure_reason"].as_str().unwrap_or_default();
+        assert!(
+            reason.contains("verify") && reason.contains("verify refused"),
+            "the operator must see the gate's own output: {reason:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn passing_hooks_leave_the_request_completed() {
+        let (provider_calls, row) = run_task_hook_request(serde_json::json!([
+            {
+                "hook_id": "prepare",
+                "phase": "before",
+                "command": ["true"],
+                "timeout_secs": 30,
+            },
+            {
+                "hook_id": "verify",
+                "phase": "after_success",
+                "command": ["true"],
+                "timeout_secs": 30,
+            },
+            {
+                "hook_id": "sweep",
+                "phase": "finally",
+                "command": ["true"],
+                "timeout_secs": 30,
+            },
+        ]))
+        .await;
+        assert!(provider_calls > 0, "{row}");
+        assert_eq!(row["lifecycle_state"], "completed", "{row}");
+    }
+
     async fn create_enrollment_daemon_request(
         node: &defra_node::EmbeddedNode,
         behavior: &ResolvedBehavior,

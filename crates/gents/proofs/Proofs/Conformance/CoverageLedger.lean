@@ -736,17 +736,28 @@ def caseCoverage : List CoverageEntry :=
       "TaskHookAdmissionCases"
       "lean_vocab_test::task_hooks_policy::generated_task_hook_admission_cases_fence_production_validation")
       "task-hooks" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "task_hook_admission_cases"
+      "TaskHookAdmissionCases"
+      "lean_vocab_test::task_hook_executor::generated_task_hook_admission_cases_fence_production_timeout_resolution")
+      "task-hooks" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "task_hook_run_cases"
       "TaskHookRunCases"
       "lean_vocab_test::task_hooks_policy::generated_task_hook_cases_fence_the_modeled_phase_vocabulary"
-      "The consumer binds the emitted phase vocabulary to the production TaskHookPhase encoding and replays admission over every trace. Native timeout resolution is deferred with sequencing: the model-resolved effective timeout is emitted for the future executor and enforced by nothing here. Phase ordering, the before-hook gate on claim-to-processing, after_success gating of successful completion and interrupted-recovery selection are equally unbound, because no host executor consumes these traces yet (#1600).")
+      "The consumer binds the emitted phase vocabulary to the production TaskHookPhase encoding and replays admission over every trace. It makes no claim about execution; the executor consumer below drives the traces.")
+      "task-hooks" [Surface.runtimeInternal]
+  , tagged (consumerWithFollowUp
+      "task_hook_run_cases"
+      "TaskHookRunCases"
+      "lean_vocab_test::task_hook_executor::generated_task_hook_run_cases_drive_the_production_hook_executor"
+      "The production hook orchestration executes every generated trace: phase selection and order, stop-at-first-error for ordinary phases, all-cleanup-attempted, primary-error preservation, model-resolved effective timeouts, the final outcome and the request state its terminal owner would write. The host command observation is scripted exactly as the model scripts HookExec, so process launch, capture, timeout and cancellation are covered by managed-exec owner tests rather than here. The daemon wiring that places the before gate at claim and the after phases at the terminal owner is not itself replayed by these traces, and no durable attempt record exists yet, so production recovery has no caller.")
       "task-hooks" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "task_hook_recovery_cases"
       "TaskHookRecoveryCases"
-      "lean_vocab_test::task_hooks_policy::generated_task_hook_cases_fence_the_modeled_phase_vocabulary"
-      "Recovery selection of remaining cleanup from observed attempts has no native owner. Binding it needs the host executor's durable attempt observations, not a test-local replay of recoveryCleanup.")
+      "lean_vocab_test::task_hook_executor::generated_task_hook_recovery_cases_drive_the_production_hook_executor"
+      "The production recovery selection executes every generated trace: no cleanup before work started, remaining cleanup after it started, and no repeat of an observed or unknown-outcome occurrence. It is driven by supplied observations because no durable record of a hook attempt exists; until one does, no production caller can supply them and interrupted-request cleanup stays unrecovered.")
       "task-hooks" [Surface.runtimeInternal]
   , tagged (consumerCoverage
       "request_progress_cases"

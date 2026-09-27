@@ -85,6 +85,10 @@ pub enum RequestTerminalOutcome {
 }
 
 impl RequestTerminalOutcome {
+    pub(crate) fn request_lifecycle_state(self) -> RequestLifecycleState {
+        self.request_state()
+    }
+
     fn request_state(self) -> RequestLifecycleState {
         match self {
             Self::Completed => RequestLifecycleState::Completed,

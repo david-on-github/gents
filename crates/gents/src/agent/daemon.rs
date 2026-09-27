@@ -155,6 +155,38 @@ enum HandleRequestOutcome {
     Interrupted,
 }
 
+/// The terminal this execution's owned work decided, before the task hook
+/// phases react to it. `release_writer_binding` keeps each arm's existing
+/// choice: an integrate failure retains its Active binding so a retry can
+/// observe the pending commit-tree.
+struct OwnedWorkOutcome {
+    observation: crate::task_hooks::OwnedWorkObservation,
+    reason: Option<String>,
+    release_writer_binding: bool,
+}
+
+impl OwnedWorkOutcome {
+    fn relinquished() -> Self {
+        Self {
+            observation: crate::task_hooks::OwnedWorkObservation::Relinquished,
+            reason: None,
+            release_writer_binding: false,
+        }
+    }
+
+    fn observed(
+        result: crate::task_hooks::TaskAgentResult,
+        reason: Option<String>,
+        release_writer_binding: bool,
+    ) -> Self {
+        Self {
+            observation: crate::task_hooks::OwnedWorkObservation::Observed(result),
+            reason,
+            release_writer_binding,
+        }
+    }
+}
+
 impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
     pub(super) fn new(
         node: Arc<defra_node::EmbeddedNode>,
@@ -591,6 +623,10 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
         }
 
         match crate::workspace::writer_request_already_sealed(self.node.as_ref(), &request).await {
+            // This completes work an earlier execution already observed and
+            // sealed. Task hooks stay out of it: re-running their host commands
+            // would replay effects the hook contract refuses to replay, and no
+            // durable attempt record exists to select the unobserved ones.
             Ok(true) => {
                 if let Err(error) = lifecycle.begin_owned_execution(&stream_writer).await {
                     finalize_request_failure(
@@ -663,80 +699,19 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
             }
         }
 
-        let (interrupt_tx, interrupt_rx) =
-            tokio::sync::watch::channel::<Option<crate::interrupt::InterruptIntent>>(None);
-        let observer = crate::interrupt::spawn_request_interrupt_observer(
-            self.node.clone(),
-            request.doc_id.clone(),
-            interrupt_tx,
-            shutdown.clone(),
-        );
-
-        let result = self
-            .handle_request(&mut lifecycle, &stream_writer, shutdown, interrupt_rx)
-            .await;
-        observer.abort();
-
-        match result {
-            Ok(HandleRequestOutcome::Completed) => {
-                record_current_request_outcome("completed");
-                if let Err(error) = lifecycle.validate_owned_execution().await {
-                    tracing::warn!(request_id = %request.request_id, %error, "stopping workspace completion after execution ownership loss");
-                    return;
-                }
-                if let Err(error) = crate::workspace::seal_on_writer_success(
-                    self.node.as_ref(),
-                    &request,
-                    self.operator_tool_root.as_deref(),
-                )
-                .await
-                {
+        let hooks =
+            match crate::task_hooks::resolve_request_task_hooks(self.node.as_ref(), &request).await
+            {
+                Ok(hooks) => hooks,
+                Err(error) => {
+                    record_current_request_outcome("task_hooks_unresolved");
                     record_current_failure_class(&error);
                     tracing::error!(
+                        behavior_id = %self.behavior.behavior_id,
                         request_id = %request.request_id,
                         error = %error,
-                        "failed to seal workspace after writer success"
+                        "refusing to run a request whose configured task hooks cannot be resolved"
                     );
-                    if finalize_request_failure(
-                        &mut lifecycle,
-                        &stream_writer,
-                        &error.to_string(),
-                        &request.request_id,
-                    )
-                    .await
-                    {
-                        if let Err(release_error) =
-                            crate::workspace::release_writer_binding(self.node.as_ref(), &request)
-                                .await
-                        {
-                            tracing::warn!(
-                                request_id = %request.request_id,
-                                error = %release_error,
-                                "failed to release writer workspace binding after seal failure"
-                            );
-                        }
-                    }
-                    return;
-                }
-                if let Err(error) = lifecycle.validate_owned_execution().await {
-                    tracing::warn!(request_id = %request.request_id, %error, "stopping workspace integration after execution ownership loss");
-                    return;
-                }
-                if let Err(error) = crate::workspace::integrate_on_integrator_success(
-                    self.node.as_ref(),
-                    &request,
-                    self.operator_tool_root.as_deref(),
-                )
-                .await
-                {
-                    record_current_failure_class(&error);
-                    tracing::error!(
-                        request_id = %request.request_id,
-                        error = %error,
-                        "failed to integrate workspace after integrator success"
-                    );
-                    // Keep the Active Integrate binding so a retry can observe
-                    // a pending commit-tree and write the durable receipt.
                     finalize_request_failure(
                         &mut lifecycle,
                         &stream_writer,
@@ -746,13 +721,95 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     .await;
                     return;
                 }
-                if let Err(error) = terminalize_request(
-                    &mut lifecycle,
-                    &stream_writer,
-                    RequestTerminalOutcome::Completed,
-                    None,
-                )
-                .await
+            };
+        // No configured occurrence reaches the host executor when the task has
+        // none, so the root is resolved and revalidated only when one exists.
+        let hook_cwd = if hooks.is_empty() {
+            PathBuf::new()
+        } else {
+            match self.task_hook_cwd().await {
+                Ok(cwd) => cwd,
+                Err(error) => {
+                    record_current_request_outcome("task_hook_root_unavailable");
+                    record_current_failure_class(&error);
+                    tracing::error!(
+                        behavior_id = %self.behavior.behavior_id,
+                        request_id = %request.request_id,
+                        error = %error,
+                        "refusing to run task hooks without an admitted host-tools root"
+                    );
+                    finalize_request_failure(
+                        &mut lifecycle,
+                        &stream_writer,
+                        &error.to_string(),
+                        &request.request_id,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        };
+        let hook_cancellation = tokio_util::sync::CancellationToken::new();
+        let hook_shutdown = (!hooks.is_empty()).then(|| {
+            let cancellation = hook_cancellation.clone();
+            let mut shutdown = shutdown.clone();
+            tokio::spawn(async move {
+                while shutdown.changed().await.is_ok() {
+                    if *shutdown.borrow() {
+                        cancellation.cancel();
+                        return;
+                    }
+                }
+            })
+        });
+        let hook_exec = crate::task_hooks::ManagedTaskHookExec::new(hook_cwd, hook_cancellation);
+
+        let mut work_decision: Option<(Option<String>, bool)> = None;
+        let run = crate::task_hooks::run_task_hooks(&hooks, &hook_exec, || async {
+            let outcome = self
+                .observe_owned_work(&mut lifecycle, &stream_writer, &request, shutdown)
+                .await;
+            work_decision = Some((outcome.reason, outcome.release_writer_binding));
+            outcome.observation
+        })
+        .await;
+        if let Some(handle) = hook_shutdown {
+            handle.abort();
+        }
+        let Some(run) = run else {
+            return;
+        };
+        let (work_reason, release_writer_binding) = work_decision.unwrap_or((None, false));
+
+        let final_outcome = run.final_outcome();
+        if run.agent_result == Some(crate::task_hooks::TaskAgentResult::Success)
+            && final_outcome != crate::task_hooks::TaskHookOutcome::Success
+        {
+            record_current_request_outcome("task_hook_gate_failed");
+        }
+        let mut reason = match &final_outcome {
+            crate::task_hooks::TaskHookOutcome::Failure(
+                crate::task_hooks::HookPrimaryError::Hook(hook_id),
+            ) => Some(run.hook_failure_reason(hook_id)),
+            _ => work_reason,
+        };
+        let cleanup_errors = run.cleanup_errors();
+        if !cleanup_errors.is_empty() {
+            let note = format!("task cleanup hooks failed: {}", cleanup_errors.join(", "));
+            tracing::error!(
+                behavior_id = %self.behavior.behavior_id,
+                request_id = %request.request_id,
+                cleanup_errors = %cleanup_errors.join(","),
+                "task cleanup hooks failed"
+            );
+            reason = Some(reason.map_or(note.clone(), |reason| format!("{reason}\n{note}")));
+        }
+
+        let terminal = final_outcome.terminal_outcome();
+        match final_outcome {
+            crate::task_hooks::TaskHookOutcome::Success => {
+                if let Err(error) =
+                    terminalize_request(&mut lifecycle, &stream_writer, terminal, None).await
                 {
                     record_current_request_outcome("terminalization_failed");
                     record_current_failure_class(&error);
@@ -760,15 +817,33 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         "failed to atomically terminalize completed request and response");
                 }
             }
-            Ok(HandleRequestOutcome::Interrupted) => {
-                record_current_request_outcome("interrupted");
-                match terminalize_request(
+            crate::task_hooks::TaskHookOutcome::Failure(_) => {
+                let reason = reason.unwrap_or_else(|| "request failed".to_string());
+                if finalize_request_failure(
                     &mut lifecycle,
                     &stream_writer,
-                    RequestTerminalOutcome::Interrupted,
-                    Some("interrupted"),
+                    &reason,
+                    &request.request_id,
                 )
                 .await
+                    && release_writer_binding
+                {
+                    if let Err(release_error) =
+                        crate::workspace::release_writer_binding(self.node.as_ref(), &request).await
+                    {
+                        tracing::warn!(
+                            request_id = %request.request_id,
+                            error = %release_error,
+                            "failed to release writer workspace binding after failure"
+                        );
+                    }
+                }
+            }
+            crate::task_hooks::TaskHookOutcome::Interrupted => {
+                record_current_request_outcome("interrupted");
+                let reason = reason.unwrap_or_else(|| "interrupted".to_string());
+                match terminalize_request(&mut lifecycle, &stream_writer, terminal, Some(&reason))
+                    .await
                 {
                     Ok(true) => {}
                     Ok(false) => return,
@@ -797,6 +872,106 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     "request interrupted mid-flight"
                 );
             }
+        }
+    }
+
+    /// Host commands run from the behavior's host-tools root, revalidated
+    /// through its existing admission owner, so a task hook cannot select a
+    /// workspace overlay of its own; workspace association for general hooks
+    /// remains an open design question.
+    async fn task_hook_cwd(&self) -> Result<PathBuf> {
+        if let Some(guard) = &self.root_execution_guard {
+            guard.validate(&self.node).await?;
+            if let Some(root) = guard.selected_root.clone() {
+                return Ok(root);
+            }
+        }
+        std::env::current_dir()
+            .map_err(|error| anyhow::anyhow!("resolving the runtime cwd for a task hook: {error}"))
+    }
+
+    async fn observe_owned_work(
+        &mut self,
+        lifecycle: &mut RequestLifecycle,
+        stream_writer: &DefraStreamWriter,
+        request: &AgentRequest,
+        shutdown: tokio::sync::watch::Receiver<bool>,
+    ) -> OwnedWorkOutcome {
+        use crate::task_hooks::TaskAgentResult;
+
+        let (interrupt_tx, interrupt_rx) =
+            tokio::sync::watch::channel::<Option<crate::interrupt::InterruptIntent>>(None);
+        let observer = crate::interrupt::spawn_request_interrupt_observer(
+            self.node.clone(),
+            request.doc_id.clone(),
+            interrupt_tx,
+            shutdown.clone(),
+        );
+
+        let result = self
+            .handle_request(lifecycle, stream_writer, shutdown, interrupt_rx)
+            .await;
+        observer.abort();
+
+        match result {
+            Ok(HandleRequestOutcome::Completed) => {
+                record_current_request_outcome("completed");
+                if let Err(error) = lifecycle.validate_owned_execution().await {
+                    tracing::warn!(request_id = %request.request_id, %error, "stopping workspace completion after execution ownership loss");
+                    return OwnedWorkOutcome::relinquished();
+                }
+                if let Err(error) = crate::workspace::seal_on_writer_success(
+                    self.node.as_ref(),
+                    request,
+                    self.operator_tool_root.as_deref(),
+                )
+                .await
+                {
+                    record_current_failure_class(&error);
+                    tracing::error!(
+                        request_id = %request.request_id,
+                        error = %error,
+                        "failed to seal workspace after writer success"
+                    );
+                    return OwnedWorkOutcome::observed(
+                        TaskAgentResult::Failure,
+                        Some(error.to_string()),
+                        true,
+                    );
+                }
+                if let Err(error) = lifecycle.validate_owned_execution().await {
+                    tracing::warn!(request_id = %request.request_id, %error, "stopping workspace integration after execution ownership loss");
+                    return OwnedWorkOutcome::relinquished();
+                }
+                if let Err(error) = crate::workspace::integrate_on_integrator_success(
+                    self.node.as_ref(),
+                    request,
+                    self.operator_tool_root.as_deref(),
+                )
+                .await
+                {
+                    record_current_failure_class(&error);
+                    tracing::error!(
+                        request_id = %request.request_id,
+                        error = %error,
+                        "failed to integrate workspace after integrator success"
+                    );
+                    // Keep the Active Integrate binding so a retry can observe
+                    // a pending commit-tree and write the durable receipt.
+                    return OwnedWorkOutcome::observed(
+                        TaskAgentResult::Failure,
+                        Some(error.to_string()),
+                        false,
+                    );
+                }
+                OwnedWorkOutcome::observed(TaskAgentResult::Success, None, false)
+            }
+            // The owned loop returns this only with an interrupt latch
+            // present, so the observation is a cancellation of active work,
+            // not an unknown outcome.
+            Ok(HandleRequestOutcome::Interrupted) => {
+                OwnedWorkOutcome::observed(TaskAgentResult::Cancelled, None, false)
+            }
             Ok(HandleRequestOutcome::FailedAfterResponse(error)) => {
                 record_current_request_outcome("failed_after_response");
                 record_current_failure_class(&error);
@@ -806,24 +981,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     error = %error,
                     "request failed after response started"
                 );
-                if finalize_request_failure(
-                    &mut lifecycle,
-                    &stream_writer,
-                    &error.to_string(),
-                    &request.request_id,
-                )
-                .await
-                {
-                    if let Err(release_error) =
-                        crate::workspace::release_writer_binding(self.node.as_ref(), &request).await
-                    {
-                        tracing::warn!(
-                            request_id = %request.request_id,
-                            error = %release_error,
-                            "failed to release writer workspace binding after failure"
-                        );
-                    }
-                }
+                OwnedWorkOutcome::observed(TaskAgentResult::Failure, Some(error.to_string()), true)
             }
             Err(error) => {
                 record_current_request_outcome("failed");
@@ -834,24 +992,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     error = %error,
                     "request handling failed"
                 );
-                if finalize_request_failure(
-                    &mut lifecycle,
-                    &stream_writer,
-                    &error.to_string(),
-                    &request.request_id,
-                )
-                .await
-                {
-                    if let Err(release_error) =
-                        crate::workspace::release_writer_binding(self.node.as_ref(), &request).await
-                    {
-                        tracing::warn!(
-                            request_id = %request.request_id,
-                            error = %release_error,
-                            "failed to release writer workspace binding after failure"
-                        );
-                    }
-                }
+                OwnedWorkOutcome::observed(TaskAgentResult::Failure, Some(error.to_string()), true)
             }
         }
     }
