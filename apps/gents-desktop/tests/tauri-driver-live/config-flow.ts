@@ -258,9 +258,9 @@ export async function createTools({
   changeField(`${ids.toolsId}-root`, fileToolRoot);
   await chooseField(driver, `${ids.toolsId}-files`, /^Read \/ write$/);
   await chooseField(driver, `${ids.toolsId}-bash`, /^Read only$/);
-  for (const name of ["Spawn subagents", "Steer subagents", "Background subagents"]) {
-    await driver.user.click(screen.getByRole("switch", { name }));
-  }
+  await driver.user.click(
+    screen.getByRole("switch", { name: "Start and message subagent sessions" }),
+  );
   const serviceOption = screen.getByText("HTTP MCP Service").closest("label");
   if (!serviceOption) throw new Error("Remote service selection is missing");
   await driver.user.click(serviceOption);
@@ -276,9 +276,7 @@ export async function createTools({
     expect(tools?.host?.files?.mode).toBe("ReadWrite");
     expect(tools?.host?.bash?.mode).toBe("ReadOnly");
     expect(tools?.host?.root).toBe(fileToolRoot);
-    expect(tools?.subagents?.spawn_enabled).toBe(true);
-    expect(tools?.subagents?.steering_enabled).toBe(true);
-    expect(tools?.subagents?.background_enabled).toBe(true);
+    expect(tools?.subagents?.enabled).toBe(true);
   });
 }
 
