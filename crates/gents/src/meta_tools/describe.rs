@@ -71,13 +71,18 @@ impl Tool for DescribeToolTool {
         }
     }
 
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        if let Some(error) = self
+    fn admit(&self, args: &Self::Args) -> Result<(), Self::Error> {
+        match self
             .ctx
             .blocked_service_error(&args.service_id, &args.tool_name)
         {
-            return Err(MetaToolError::structured(error));
+            Some(error) => Err(MetaToolError::structured(error)),
+            None => Ok(()),
         }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        Tool::admit(self, &args)?;
 
         if let Err(error) = enforce_health_gate(&self.ctx.health, &args.service_id).await {
             return Err(MetaToolError::structured(

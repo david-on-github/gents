@@ -1,20 +1,102 @@
 use super::*;
 use crate::identity::AgentIdentity;
 
-/// The generated spawned-target case fixes what the parent row, the spawned
-/// rows and request completion must show once the real read-only command owner
-/// denies the target.
 #[tokio::test]
 async fn spawn_process_rejects_target_policy_before_spawned_admission() {
     let cases = crate::lean_vocab_test::lean_canonical_spawned_target_rejection_cases();
     assert!(!cases.is_empty());
     for case in cases {
-        spawned_target_rejection_case(case).await;
+        for target in DeniedTarget::ALL {
+            spawned_target_rejection_case(case, &target).await;
+        }
+    }
+}
+
+enum DeniedTarget {
+    ReadOnlyBash,
+    CliArgvPrefix,
+    McpAllowlist,
+}
+
+impl DeniedTarget {
+    const ALL: [DeniedTarget; 3] = [
+        DeniedTarget::ReadOnlyBash,
+        DeniedTarget::CliArgvPrefix,
+        DeniedTarget::McpAllowlist,
+    ];
+
+    fn target(&self) -> &'static str {
+        match self {
+            Self::ReadOnlyBash => "read_only_bash",
+            Self::CliArgvPrefix => "cli_argv_prefix",
+            Self::McpAllowlist => "mcp_allowlist",
+        }
+    }
+
+    fn spawn_arguments(&self) -> &'static str {
+        match self {
+            Self::ReadOnlyBash => {
+                r#"{"tool_name":"bash","args":{"command":"rm","args":["-rf","."]}}"#
+            }
+            Self::CliArgvPrefix => r#"{"tool_name":"git","args":{"argv":["push","--force"]}}"#,
+            Self::McpAllowlist => {
+                r#"{"tool_name":"call_tool","args":{"service_id":"selected-service","tool_name":"unselected-tool","arguments":{}}}"#
+            }
+        }
+    }
+
+    fn registry(&self, node: &Arc<EmbeddedNode>, root: &std::path::Path) -> BackgroundToolRegistry {
+        match self {
+            Self::ReadOnlyBash => BackgroundToolRegistry::from_tools(
+                vec![crate::toolset::read_only_bash_for_test(
+                    root,
+                    vec!["ls".into()],
+                )],
+                &["bash".into()],
+            ),
+            Self::CliArgvPrefix => BackgroundToolRegistry::from_tools(
+                vec![crate::toolset::cli_tool_for_test(
+                    crate::toolset::CliToolConfig {
+                        name: "git".into(),
+                        binary_path: "/bin/echo".into(),
+                        description: String::new(),
+                        allowed_argv_prefixes: vec![vec!["status".into()]],
+                        env_vars: HashMap::new(),
+                        working_dir: Some(root.to_path_buf()),
+                        timeout_secs: 5,
+                        max_output_chars: 4096,
+                    },
+                )],
+                &["git".into()],
+            ),
+            Self::McpAllowlist => BackgroundToolRegistry::from_tools(
+                vec![Box::new(crate::meta_tools::CallToolTool::new(
+                    crate::meta_tools::MetaToolContext {
+                        node: node.clone(),
+                        mcp_pool: crate::mcp_pool::McpPool::new().for_agent("did:test:test"),
+                        health: crate::health_checker::ServiceHealthMap::new(),
+                        local_hostname: "local".into(),
+                        local_subnet: None,
+                        agent_did: "did:test:test".into(),
+                        allowed_mcp_service_ids: vec!["selected-service".into()],
+                        remote_tools: crate::document_config::RemoteTools {
+                            services: vec![crate::document_config::RemoteServiceTools {
+                                mcp_service_id: "selected-service".into(),
+                                tool_names: vec!["selected-tool".into()],
+                                ..Default::default()
+                            }],
+                        },
+                    },
+                ))],
+                &["call_tool".into()],
+            ),
+        }
     }
 }
 
 async fn spawned_target_rejection_case(
     case: &crate::lean_vocab_test::LeanSpawnedTargetRejectionCase,
+    target: &DeniedTarget,
 ) {
     let expected = &case.expected;
     let dir = tempfile::tempdir().unwrap();
@@ -37,13 +119,7 @@ async fn spawned_target_rejection_case(
         identity.did(),
         FailurePolicy::default(),
     )
-    .with_background_tool_registry(BackgroundToolRegistry::from_tools(
-        vec![crate::toolset::read_only_bash_for_test(
-            root.path(),
-            vec!["ls".into()],
-        )],
-        &["bash".into()],
-    ));
+    .with_background_tool_registry(target.registry(&node, root.path()));
     hook.on_completion_call(&user_text_message("remove in the background"), &[])
         .await;
     let session = hook.session_id().await.unwrap();
@@ -65,15 +141,16 @@ async fn spawned_target_rejection_case(
         Utc::now() + chrono::Duration::minutes(5),
     )
     .await;
-    let args = r#"{"tool_name":"bash","args":{"command":"rm","args":["-rf","."]}}"#;
+    let args = target.spawn_arguments();
     accept_hook_tool_call(&hook, "spawn-denied", &case.parent_tool, args, None).await;
     let action = hook
         .on_tool_call(&case.parent_tool, None, "spawn-denied", args)
         .await;
     assert!(
         matches!(action, ToolCallHookAction::Skip { .. }),
-        "{}: {action:?}",
-        case.name
+        "{}/{}: {action:?}",
+        case.name,
+        target.target()
     );
 
     let response = node
@@ -88,15 +165,29 @@ async fn spawned_target_rejection_case(
     let (parents, spawned): (Vec<_>, Vec<_>) = rows
         .iter()
         .partition(|row| row["spawned_by_tool_call_doc_id"].is_null());
-    assert_eq!(!spawned.is_empty(), expected.spawned_admitted, "{rows:?}");
+    assert_eq!(
+        !spawned.is_empty(),
+        expected.spawned_admitted,
+        "{}: {rows:?}",
+        target.target()
+    );
     assert_eq!(parents.len(), 1, "{rows:?}");
     let parent = parents[0];
     assert_eq!(parent["tool_name"], case.parent_tool.as_str());
-    assert_eq!(parent["lifecycle_state"] == "failed", expected.failed);
-    assert_eq!(parent["started_at"].is_string(), expected.started);
     assert_eq!(
-        parent["tool_failure_class"].as_str(),
-        expected.failure_class.as_deref()
+        (
+            parent["lifecycle_state"] == "failed",
+            parent["started_at"].is_string(),
+            parent["tool_failure_class"].as_str(),
+        ),
+        (
+            expected.failed,
+            expected.started,
+            expected.failure_class.as_deref(),
+        ),
+        "{}/{}",
+        case.name,
+        target.target()
     );
     assert!(root.path().exists());
 
@@ -120,8 +211,9 @@ async fn spawned_target_rejection_case(
     assert_eq!(
         completion.is_ok(),
         expected.completion_accepted,
-        "{}: {completion:?}",
-        case.name
+        "{}/{}: {completion:?}",
+        case.name,
+        target.target()
     );
     node.shutdown().await;
 }
