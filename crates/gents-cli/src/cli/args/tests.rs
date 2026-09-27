@@ -1224,6 +1224,41 @@ fn subagent_target_entry_distinguishes_owner_from_destination() {
 }
 
 #[test]
+fn parse_target_accepts_context_and_a_named_task_and_rejects_the_rest() {
+    assert_eq!(parse_target("context").unwrap(), TargetArg::Context);
+    assert_eq!(
+        parse_target("task:plan").unwrap(),
+        TargetArg::Task("plan".into())
+    );
+    for bad in ["", "task", "task:", "task: ", "prompt", "context:x"] {
+        let error = parse_target(bad).unwrap_err();
+        assert!(error.contains("task:<task_id>"), "{bad}: {error}");
+    }
+    let cli = Cli::try_parse_from([
+        "gents",
+        "optimization",
+        "run",
+        "monitor-findings",
+        "--subject",
+        "monitor",
+        "--proposer",
+        "scripted:p.json",
+    ])
+    .unwrap();
+    let Command::Optimization {
+        command: OptimizationCommand::Run(args),
+    } = cli.command
+    else {
+        panic!("expected optimization run");
+    };
+    assert_eq!(
+        args.target,
+        TargetArg::Context,
+        "--target defaults to context"
+    );
+}
+
+#[test]
 fn parse_proposer_accepts_scripted_and_behavior_forms_and_rejects_the_rest() {
     assert_eq!(
         parse_proposer("scripted:proposals.json").unwrap(),

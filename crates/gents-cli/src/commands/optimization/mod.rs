@@ -515,6 +515,7 @@ mod tests {
         proposer_file,
     };
     use super::{execute, proposer_behavior_id, subject_preamble};
+    use crate::cli::args::TargetArg;
     use crate::cli::Cli;
     use crate::commands::eval::testing::{deps, eval, executor, Fixture, DEFINITION};
     use crate::commands::eval::UNCALIBRATED_BANNER;
@@ -584,7 +585,7 @@ mod tests {
     fn the_subject_preamble_is_the_dossier_naming_the_subject_tools() {
         let pipeline =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
-        let preamble = subject_preamble(&pipeline, "exp-stage1").unwrap();
+        let preamble = subject_preamble(&pipeline, "exp-stage1", &TargetArg::Context).unwrap();
         assert!(
             preamble.starts_with("# Subject\n\n## Identity"),
             "{preamble}"
@@ -598,6 +599,13 @@ mod tests {
             ),
             "{preamble}"
         );
+        let task =
+            subject_preamble(&pipeline, "exp-stage1", &TargetArg::Task("plan".into())).unwrap();
+        assert!(
+            task.contains("the prompt template of its task \"plan\""),
+            "{task}"
+        );
+        assert!(task.contains("{{ variables }}"), "{task}");
     }
 
     #[tokio::test]
