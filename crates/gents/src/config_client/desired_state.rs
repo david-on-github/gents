@@ -454,7 +454,8 @@ async fn validate_event_source_live_fields(
     candidate: &Value,
     introspected: &mut IntrospectedFields,
 ) -> Result<()> {
-    let source: crate::document_config::EventSource = serde_json::from_value(candidate.clone())?;
+    let source: crate::document_config::EventSource = serde_json::from_value(candidate.clone())
+        .context("decoding EventSource for live-field validation")?;
     let correlation = source
         .correlation_field
         .as_deref()
