@@ -115,6 +115,25 @@ fn automation_query_grader_resolves_referenced_surface_before_checking_scope() {
         created_at: None,
         tags: Vec::new(),
     };
+    let missing = gents::document_config::Tools {
+        tools_id: "automation-query-grader".into(),
+        agent_did: owner.into(),
+        datastore: Some(gents::document_config::DatastoreTools {
+            datastore_tool_surface_ids: Some(vec![surface.surface_id.clone()]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(exposes_unscoped_defra_query(&missing, &[], &[], &[])
+        .unwrap_err()
+        .to_string()
+        .contains("missing same-agent DatastoreToolSurface"));
+    let mut foreign = surface.clone();
+    foreign.agent_did = "did:key:another-agent".into();
+    assert!(exposes_unscoped_defra_query(&missing, &[foreign], &[], &[])
+        .unwrap_err()
+        .to_string()
+        .contains("missing same-agent DatastoreToolSurface"));
     for (collections, unscoped) in [
         (Some(vec!["EvalAutomationInput".into()]), false),
         (None, true),
@@ -451,21 +470,36 @@ async fn run_document_automation(
         decode_configuration(gents::Collection::Tools, &builder_after["tools"])?;
     let surfaces = gents::document_config::list_datastore_tool_surfaces(node, owner).await?;
     let eth_tools = gents::document_config::list_eth_tools(node, owner).await?;
-    let (target_fields, _) =
-        gents::config_client::config_projection(gents::Collection::SubagentTarget, None)?;
-    let escaped_owner = gents::graphql::escape_graphql_string(owner);
-    let targets = rows(
-        node,
-        &format!(
-            "{{ SubagentTarget(filter: {{agent_did: {{_eq: \"{escaped_owner}\"}}}}) {{ {} }} }}",
-            target_fields.join(" ")
-        ),
-        "SubagentTarget",
-    )
-    .await?
-    .iter()
-    .map(|row| decode_configuration(gents::Collection::SubagentTarget, row))
-    .collect::<Result<Vec<gents::document_config::SubagentTargetDocument>>>()?;
+    let target_ids = tools
+        .subagents
+        .as_ref()
+        .map(|subagents| subagents.target_ids.clone())
+        .unwrap_or_default();
+    let target_owner = owner.to_owned();
+    let targets = gents::ConfigAccess::Local(node.clone())
+        .transact("test.configurator_evals.grader_targets", move |txn| {
+            let ids = target_ids.clone();
+            let owner = target_owner.clone();
+            Box::pin(async move {
+                let mut targets = Vec::with_capacity(ids.len());
+                for id in ids {
+                    let (_, value) = gents::config_client::read_desired_state_record_in_txn(
+                        txn,
+                        gents::Collection::SubagentTarget,
+                        &owner,
+                        &id,
+                    )
+                    .await?
+                    .with_context(|| format!("selected SubagentTarget {id} is missing"))?;
+                    targets.push(decode_configuration(
+                        gents::Collection::SubagentTarget,
+                        &value,
+                    )?);
+                }
+                Ok(targets)
+            })
+        })
+        .await?;
     ensure!(
         !exposes_unscoped_defra_query(&tools, &surfaces, &eth_tools, &targets)?,
         "automation enabled unrestricted query tools"
