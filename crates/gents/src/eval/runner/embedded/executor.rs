@@ -816,7 +816,10 @@ async fn submit_and_observe(
     ObservedStage {
         request_id: Some(request_id),
         terminal_state: observed.as_ref().map(|observed| observed.terminal_state),
-        failure_kind: stage_failure_kind(observed.as_ref(), collected, stopped, &evidence),
+        failure_kind: match stage_failure_kind(observed.as_ref(), collected, stopped, &evidence) {
+            None => trigger_failure(&home.node, &locator.trial_agent_did).await,
+            failed => failed,
+        },
         evidence,
     }
 }
@@ -878,6 +881,10 @@ fn provider_reason(
         .iter()
         .filter_map(|call| call.failure_reason.as_deref())
         .find_map(provider_reason_from_failure)
+}
+
+async fn trigger_failure(_node: &EmbeddedNode, _agent_did: &str) -> Option<OutcomeKind> {
+    None
 }
 
 async fn runtime_exited(runtime: &RunningRuntime) {
@@ -1772,6 +1779,46 @@ mod tests {
         assert_eq!(evidence.failure_kind, Some(OutcomeKind::Runtime));
         assert_eq!(evidence.provider_reason, None);
         home.node.shutdown().await;
+    }
+
+    /// A trigger that fired and one that errored, in the same home: only the
+    /// error fails a stage that otherwise completed.
+    #[tokio::test]
+    async fn an_errored_trigger_fails_a_completed_stage_as_runtime() {
+        let home = EmbeddedHome::create_temp("trigger-error").await.unwrap();
+        assert_eq!(trigger_failure(&home.node, home.did()).await, None);
+
+        seed_trigger(&home, "healthy", "fired", None).await;
+        assert_eq!(trigger_failure(&home.node, home.did()).await, None);
+
+        seed_trigger(&home, "broken", "error", Some("template did not render")).await;
+        assert_eq!(
+            trigger_failure(&home.node, home.did()).await,
+            Some(OutcomeKind::Runtime)
+        );
+        assert_eq!(
+            trigger_failure(&home.node, "did:key:zSomeoneElse").await,
+            None,
+            "another principal's trigger is not this trial's"
+        );
+        home.node.shutdown().await;
+    }
+
+    async fn seed_trigger(
+        home: &EmbeddedHome,
+        trigger_id: &str,
+        status: &str,
+        error: Option<&str>,
+    ) {
+        let agent_did = escape_graphql_string(home.did());
+        let last_error = error.map_or("null".to_string(), |error| {
+            format!("\"{}\"", escape_graphql_string(error))
+        });
+        let mutation = format!(
+            r#"mutation {{ create_Trigger(input: {{ trigger_id: "{trigger_id}", agent_did: "{agent_did}", task_id: "task", enabled: true, last_status: "{status}", last_error: {last_error} }}) {{ _docID }} }}"#
+        );
+        let response = home.node.execute(&mutation).await;
+        assert!(response.errors.is_empty(), "{:?}", response.errors);
     }
 
     fn exited_runtime() -> RunningRuntime {
