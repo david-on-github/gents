@@ -206,9 +206,13 @@ theorem root_session_not_interruptible (callerSession targetSession : String) :
     interruptAllowed callerSession targetSession none = false := by
   simp [interruptAllowed]
 
-/-- A recovery retry copies the session's current hop (`CausalHop.WakeSession.retryWake`). -/
-theorem retry_copies_session_current_hop (own : Nat) :
-    ContinuationKind.retry.hop own = own := by
+/-- A recovery retry is written at the session's current hop
+(`CausalHop.sessionCurrentHop`, the highest hop of its latest second), so a
+retry after a refused wake carries that refused hop
+(`CausalHop.later_native_wake_after_refusal_is_refused`). -/
+theorem retry_copies_session_current_hop (rows : List CausalHop.RequestStamp) :
+    ContinuationKind.retry.hop (CausalHop.sessionCurrentHop rows) =
+      CausalHop.sessionCurrentHop rows := by
   simp [ContinuationKind.hop, ContinuationKind.cause, CausalHop.nextHop]
 
 end DurableLineage
