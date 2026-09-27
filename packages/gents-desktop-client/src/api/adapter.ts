@@ -31,6 +31,8 @@ import type { ProviderAccountView } from "../generated/ProviderAccountView.js";
 import type { InferenceSetupCatalog } from "../generated/InferenceSetupCatalog.js";
 import type { InferenceDiscoveryResult } from "../generated/InferenceDiscoveryResult.js";
 import type { InferenceModelRecommendation } from "../generated/InferenceModelRecommendation.js";
+import type { GrokLoginResult } from "../generated/GrokLoginResult.js";
+import type { ClaudeLoginResult } from "../generated/ClaudeLoginResult.js";
 
 export function createDesktopApiAdapter(
   transport: DesktopTransport,
@@ -263,17 +265,12 @@ export function createDesktopApiAdapter(
       }),
     cancelCodexLogin: () => invokeDesktop<void>("desktop_codex_login_cancel"),
     grokLogin: (agentDid, provider) =>
-      invokeDesktop<import("../generated/GrokLoginResult.js").GrokLoginResult>(
-        "desktop_grok_login",
-        {
-          request: { agentDid, provider: provider ?? null },
-        },
-      ),
+      invokeDesktop<GrokLoginResult>("desktop_grok_login", {
+        request: { agentDid, provider: provider ?? null },
+      }),
     cancelGrokLogin: () => invokeDesktop<void>("desktop_grok_login_cancel"),
     claudeLogin: (agentDid, provider) =>
-      invokeDesktop<
-        import("../generated/ClaudeLoginResult.js").ClaudeLoginResult
-      >("desktop_claude_login", {
+      invokeDesktop<ClaudeLoginResult>("desktop_claude_login", {
         request: { agentDid, provider: provider ?? null },
       }),
     cancelClaudeLogin: () => invokeDesktop<void>("desktop_claude_login_cancel"),
