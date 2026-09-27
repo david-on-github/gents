@@ -1,9 +1,11 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
-use super::cooldown::{take_next_eligible_pending_request, PROCESSED_REQUEST_COOLDOWN};
+use super::cooldown::{
+    take_next_eligible_pending_request, ProcessedMark, ProcessedRequests,
+    PROCESSED_REQUEST_COOLDOWN,
+};
 use super::*;
 
 #[test]
@@ -247,7 +249,7 @@ fn validate_accepts_subagent_request() {
 #[test]
 fn cooling_down_request_does_not_block_other_pending_sessions() {
     let now = Instant::now();
-    let mut processed_request_ids = HashMap::from([("req-1".to_string(), now)]);
+    let mut processed_request_ids = marks(&[("req-1", "sess-1")], now);
 
     let request = take_next_eligible_pending_request(
         &mut processed_request_ids,
@@ -264,7 +266,7 @@ fn cooling_down_request_does_not_block_other_pending_sessions() {
 #[test]
 fn cooled_down_request_becomes_eligible_again() {
     let now = Instant::now();
-    let mut processed_request_ids = HashMap::from([("req-1".to_string(), now)]);
+    let mut processed_request_ids = marks(&[("req-1", "sess-1")], now);
     let later = now + PROCESSED_REQUEST_COOLDOWN + Duration::from_millis(1);
 
     let request = take_next_eligible_pending_request(
@@ -275,7 +277,54 @@ fn cooled_down_request_becomes_eligible_again() {
     .expect("eligible request");
 
     assert_eq!(request.request_id, "req-1");
-    assert_eq!(processed_request_ids.get("req-1").copied(), Some(later));
+    assert_eq!(
+        processed_request_ids.get("req-1").map(|mark| mark.at),
+        Some(later)
+    );
+}
+
+fn marks(entries: &[(&str, &str)], at: Instant) -> ProcessedRequests {
+    entries
+        .iter()
+        .map(|(request_id, session_id)| {
+            (
+                request_id.to_string(),
+                ProcessedMark {
+                    at,
+                    queue_session: Some(session_id.to_string()),
+                },
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn delivering_a_session_head_releases_only_that_sessions_other_marks() {
+    let now = Instant::now();
+    let mut processed_request_ids = marks(
+        &[("goal-cont-3", "sess-1"), ("other-session", "sess-2")],
+        now,
+    );
+    processed_request_ids.insert(
+        "title-audit".to_string(),
+        ProcessedMark {
+            at: now,
+            queue_session: None,
+        },
+    );
+
+    let wake = take_next_eligible_pending_request(
+        &mut processed_request_ids,
+        vec![request("background-completion-1", "sess-1")],
+        now,
+    )
+    .expect("the overtaking head is delivered");
+
+    assert_eq!(wake.request_id, "background-completion-1");
+    assert!(!processed_request_ids.contains_key("goal-cont-3"));
+    assert!(processed_request_ids.contains_key("background-completion-1"));
+    assert!(processed_request_ids.contains_key("other-session"));
+    assert!(processed_request_ids.contains_key("title-audit"));
 }
 
 fn base_request() -> AgentRequest {
@@ -950,4 +999,138 @@ fn canonical_request_conversion_rejects_negative_lease_duration() {
         error.to_string().contains("execution_lease_secs"),
         "{error:#}"
     );
+}
+
+/// A request delivered first can lose its same-session claim to a row that
+/// sorts ahead of it in `(created_at, request_id)` order: a completion wake
+/// published in the same second as a Goal continuation. The losing claim leaves
+/// the continuation pending, so its blocker's terminal transition must deliver
+/// it again rather than the delivery cooldown or the fallback poll.
+#[tokio::test]
+async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
+    use crate::lifecycle::{ClaimOutcome, ExecutionOrigin, RequestLifecycle};
+
+    let node = test_node().await;
+    crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
+    let agent_did = "did:key:z-watcher-requeue";
+    let session = "sess-requeue";
+    let second = "2026-09-27T19:47:28Z";
+    let continuation_id = "goal-cont-00000000000000000003-requeue";
+    let wake_id = "background-completion-sess-requeue-00000000000000000000";
+    let deliver = Duration::from_secs(5);
+
+    insert_agent_request_row(
+        node.as_ref(),
+        agent_did,
+        continuation_id,
+        session,
+        "pending",
+        second,
+    )
+    .await;
+    let mut watcher = DefraWatcher::new(node.clone(), agent_did);
+    let continuation = tokio::time::timeout(deliver, watcher.next_request())
+        .await
+        .expect("first delivery")
+        .expect("watcher open")
+        .expect("pending scan");
+    assert_eq!(continuation.request_id, continuation_id);
+
+    let wake_doc_id = insert_agent_request_row(
+        node.as_ref(),
+        agent_did,
+        wake_id,
+        session,
+        "pending",
+        second,
+    )
+    .await;
+    let mut lifecycle = RequestLifecycle::new_with_execution_binding(
+        node.clone(),
+        "behavior",
+        agent_did,
+        continuation,
+        60,
+        ExecutionOrigin::Interactive,
+        "backend",
+    );
+    assert_eq!(lifecycle.claim().await.unwrap(), ClaimOutcome::Queued);
+    let queued = request_terminal_fields(node.as_ref(), continuation_id).await;
+    assert_eq!(
+        queued["lifecycle_state"], "pending",
+        "the overtaken request stays pending"
+    );
+
+    let wake = tokio::time::timeout(deliver, watcher.next_request())
+        .await
+        .expect("wake delivery")
+        .expect("watcher open")
+        .expect("pending scan");
+    assert_eq!(wake.request_id, wake_id);
+    set_request_processing(node.as_ref(), &wake_doc_id).await;
+    set_request_terminal_completed(node.as_ref(), &wake_doc_id).await;
+
+    let started = Instant::now();
+    let redelivered = tokio::time::timeout(deliver, watcher.next_request())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "queued continuation was not redelivered within {deliver:?} of its blocker's \
+                 terminal transition (cooldown {PROCESSED_REQUEST_COOLDOWN:?})"
+            )
+        })
+        .expect("watcher open")
+        .expect("pending scan");
+    assert_eq!(redelivered.request_id, continuation_id);
+    assert!(started.elapsed() < deliver);
+
+    // Releasing the mark admits a duplicate delivery: the stale, queued
+    // delivery's lifecycle and the redelivery race to claim one row. The claim
+    // is a CAS on the pending state, so exactly one wins and binds the row.
+    let mut redelivered_lifecycle = RequestLifecycle::new_with_execution_binding(
+        node.clone(),
+        "behavior",
+        agent_did,
+        redelivered,
+        60,
+        ExecutionOrigin::Interactive,
+        "backend",
+    );
+    let (stale, fresh) = tokio::join!(lifecycle.claim(), redelivered_lifecycle.claim());
+    let claimed =
+        |outcome: &anyhow::Result<ClaimOutcome>| matches!(outcome, Ok(ClaimOutcome::Claimed));
+    assert_eq!(
+        usize::from(claimed(&stale)) + usize::from(claimed(&fresh)),
+        1,
+        "exactly one delivery claims: stale={stale:?} fresh={fresh:?}"
+    );
+    for loser in [&stale, &fresh]
+        .into_iter()
+        .filter(|outcome| !claimed(outcome))
+    {
+        assert!(
+            matches!(loser, Ok(ClaimOutcome::Queued) | Err(_)),
+            "the losing delivery leaves the row to the winner: {loser:?}"
+        );
+    }
+    let winner = if claimed(&stale) {
+        &lifecycle
+    } else {
+        &redelivered_lifecycle
+    };
+    let generation = winner.execution_generation().unwrap().to_owned();
+    let response = node
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{continuation_id}" }} }}) {{
+                lifecycle_state execution_generation }} }}"#
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let rows = response.data.as_ref().unwrap()["AgentRequest"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["lifecycle_state"], "claimed");
+    assert_eq!(rows[0]["execution_generation"], generation.as_str());
 }

@@ -204,7 +204,7 @@ pub struct DefraWatcher {
     agent_did: String,
     request_collection_id: Option<String>,
     subscription: events::DocumentChangeSubscription,
-    processed_request_ids: HashMap<String, Instant>,
+    processed_request_ids: cooldown::ProcessedRequests,
 }
 
 impl DefraWatcher {

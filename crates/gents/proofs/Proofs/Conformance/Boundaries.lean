@@ -194,6 +194,8 @@ def boundaries : List Boundary :=
         "bounded-gap Fair predicate; this does not prove substrate scheduling " ++
         "fairness. Delivery traces cover one dedupe epoch. Watcher cooldown " ++
         "expiry and capacity eviction end that epoch and permit redelivery; " ++
+        "within an epoch, Watcher release returns an overtaken session " ++
+        "request to the unprocessed set; " ++
         "its ttl_cooldown metadata does not imply permanent processed-set " ++
         "membership or lifetime at-most-once delivery. The substrate model " ++
         "lives in tla/ReversePairing.tla."

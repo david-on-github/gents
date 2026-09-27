@@ -56,6 +56,7 @@ inductive Action where
   | deliverFromQueue (d : DocId)
   | rescanTick
   | handle (d : DocId)
+  | release (d : DocId)
   deriving DecidableEq, Repr
 
 def Action.isRescan : Action → Bool
@@ -94,6 +95,13 @@ inductive Transition : World → Action → World → Prop where
         { w with handled := d :: w.handled
                , processedSet := d :: w.processedSet
                , subscriptionQueue := w.subscriptionQueue.erase d }
+  /-- A ttl_cooldown adapter returns a handled document to the unprocessed set
+  within the epoch when the handling did not consume it. Monotone-once sources
+  never release. -/
+  | release (w : World) (d : DocId) :
+      d ∈ w.processedSet →
+      Transition w (.release d)
+        { w with processedSet := w.processedSet.filter (fun x => x ≠ d) }
 
 inductive Trace : World → World → Prop where
   | refl {w : World} : Trace w w
