@@ -400,6 +400,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_seed_outside_the_subject_is_refused() {
+        let seed = |collection: &str| {
+            let mut draft = good();
+            let stage = first_stage(&mut draft);
+            stage["prompt"] = json!("");
+            stage["seed"] = json!({"collection": collection, "document": {"item_id": "a"}});
+            draft
+        };
+        let message = only_message(&seed("Mailbox"), &FLOOR_ONE);
+        assert!(
+            message.contains("case train-a stage answer seed"),
+            "{message}"
+        );
+        assert!(message.contains("Mailbox"), "{message}");
+
+        assert_eq!(check(&seed("CanaryItem"), &FLOOR_ONE), Ok(()));
+    }
+
+    #[test]
     fn a_capture_filter_tests_only_fields_of_its_collection() {
         let mut draft = good();
         first_stage(&mut draft)["capture"][0]["filter"] = json!({
