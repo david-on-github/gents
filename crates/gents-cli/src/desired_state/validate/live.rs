@@ -201,9 +201,6 @@ mod tests {
 
     const OWNER: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
 
-    /// Declares each shape the count and correlation rules have to decide:
-    /// non-nillable scalars, a float, a JSON column, and a boolean that no
-    /// canonical count can come back through.
     const PROBE_SDL: &str = r#"
         type CountProbeNonNull {
             batch: String!
@@ -267,7 +264,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_every_declared_type_a_canonical_count_can_come_back_through() -> Result<()> {
+    async fn accepts_float_and_json_count_fields() -> Result<()> {
         let tempdir = tempfile::tempdir()?;
         let access = probe_access(&tempdir).await?;
         let manifest = manifest(json!([
