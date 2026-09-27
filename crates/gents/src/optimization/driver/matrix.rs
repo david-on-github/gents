@@ -55,6 +55,7 @@ use crate::optimization::job::{create_job, load_job, Budgets, JobState, JournalE
 use crate::optimization::policy::{Decision, InconclusiveReason, Mode, PolicyV2, RejectReason};
 use crate::optimization::proposer::{Proposal, ProposalInput, Proposer, ScriptedProposer};
 use crate::optimization::subject::{baseline_text, materialize_candidate, materialize_pack};
+use crate::optimization::target::TargetField;
 use crate::Collection;
 
 pub(crate) const VALIDATION_CASES: [&str; 6] =
@@ -492,6 +493,8 @@ impl Harness {
             owner: OWNER.into(),
             evaluator_did: self.launching.evaluator_did(),
             behavior_id: "monitor".into(),
+            target_field: TargetField::AgentContextSystemPrompt,
+            task_id: None,
             definition_id: definition_id.into(),
             inference_profile_id: "local".into(),
             baseline_pack: self.pack.clone(),
@@ -1619,7 +1622,14 @@ async fn a_job_created_without_frozen_resumes_to_the_journal_of_its_twin() {
     // Everything the freeze wrote before the crash: the baseline copy, then
     // the row. The origin names no job id, so the twin's is this job's.
     let resumed = harness.request("unfrozen-b", DEFINITION, budgets(1_000));
-    let source = materialize_pack(&resumed.baseline_pack, OWNER, "monitor").unwrap();
+    let source = materialize_pack(
+        &resumed.baseline_pack,
+        OWNER,
+        "monitor",
+        TargetField::AgentContextSystemPrompt,
+        None,
+    )
+    .unwrap();
     let copy = materialize_candidate(
         &source,
         OWNER,

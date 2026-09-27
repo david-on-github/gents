@@ -1,8 +1,8 @@
 //! The baseline subject pack and the candidate packs derived from it.
 //!
 //! A candidate is the baseline pack with exactly one field changed: the system
-//! prompt of the context the subject behavior names. When the pack keeps that
-//! prompt in a sidecar asset — the shape every pack in this repository uses —
+//! prompt of the context the subject behavior names, or the prompt template of
+//! a task of that behavior. When the pack keeps that text in a sidecar asset — the shape every pack in this repository uses —
 //! the change is one file's bytes and nothing else, which is what makes the
 //! structural gate's "only the target moved" check a file comparison.
 //!
@@ -20,6 +20,7 @@ use serde_json::Value;
 use crate::document_config::PackConfig;
 use crate::eval::runner::freeze::{load_pack, write_pack_files};
 use crate::eval::runner::CellSource;
+use crate::optimization::target::TargetField;
 use crate::pack::{declared_paths, interpolate, PackManifest};
 
 /// The canonical config bundle a sidecar reference or an inline prompt lives in.
@@ -35,29 +36,59 @@ pub struct MaterializedPack {
     pub manifest: PackManifest,
     /// Every declared asset, keyed by its path relative to `dir`.
     pub files: BTreeMap<String, Vec<u8>>,
-    /// The context the subject behavior names.
-    pub context_id: String,
-    /// The declared asset the context reads its system prompt from, when the
+    pub behavior_id: String,
+    pub target: TargetField,
+    /// The context the subject behavior names, or the task being optimized.
+    pub target_id: String,
+    /// The declared asset the target document reads its text from, when the
     /// pack stores it as a sidecar rather than inline.
     pub prompt_asset: Option<String>,
 }
 
-/// Read the pack at `dir` as the subject of `behavior_id`.
-pub fn materialize_pack(dir: &Path, owner: &str, behavior_id: &str) -> Result<MaterializedPack> {
+impl MaterializedPack {
+    fn task_id(&self) -> Option<&str> {
+        (self.target == TargetField::TaskPromptTemplate).then_some(self.target_id.as_str())
+    }
+}
+
+/// Read the pack at `dir` as the subject of `behavior_id`, optimizing the
+/// behavior's context or, for a task target, the task `task_id`.
+pub fn materialize_pack(
+    dir: &Path,
+    owner: &str,
+    behavior_id: &str,
+    target: TargetField,
+    task_id: Option<&str>,
+) -> Result<MaterializedPack> {
     let pack = load_pack(&CellSource::Directory(dir.to_path_buf()), owner)
         .with_context(|| format!("loading pack {}", dir.display()))?;
 
-    let context_id = pack
+    let behavior = pack
         .config
         .agent_behaviors
         .iter()
         .find(|behavior| behavior.behavior_id == behavior_id)
-        .with_context(|| format!("pack declares no behavior {behavior_id:?}"))?
-        .context_id
-        .clone()
-        .with_context(|| format!("behavior {behavior_id:?} names no context to optimize"))?;
+        .with_context(|| format!("pack declares no behavior {behavior_id:?}"))?;
+    let target_id = match target {
+        TargetField::AgentContextSystemPrompt => behavior
+            .context_id
+            .clone()
+            .with_context(|| format!("behavior {behavior_id:?} names no context to optimize"))?,
+        TargetField::TaskPromptTemplate => {
+            let task_id = task_id.context("a task prompt template target names a task")?;
+            pack.config
+                .tasks
+                .iter()
+                .find(|task| task.task_id == task_id && task.behavior_id == behavior_id)
+                .with_context(|| {
+                    format!("pack declares no task {task_id:?} of behavior {behavior_id:?}")
+                })?
+                .task_id
+                .clone()
+        }
+    };
 
-    let prompt_asset = sidecar_prompt_asset(&pack.manifest, &pack.files, &context_id)?;
+    let prompt_asset = sidecar_prompt_asset(&pack.manifest, &pack.files, target, &target_id)?;
 
     Ok(MaterializedPack {
         dir: dir.to_path_buf(),
@@ -65,30 +96,43 @@ pub fn materialize_pack(dir: &Path, owner: &str, behavior_id: &str) -> Result<Ma
         config: pack.config,
         manifest: pack.manifest,
         files: pack.files,
-        context_id,
+        behavior_id: behavior_id.to_owned(),
+        target,
+        target_id,
         prompt_asset,
     })
 }
 
-/// The declared asset `context_id`'s `system_prompt` points at, when it points
-/// at one. The raw `pack_config.json` is read rather than the loaded
-/// [`PackConfig`], because the loader resolves a sidecar reference into the
-/// text it holds and the reference itself is what has to be rewritten.
+/// The raw target field of `target_id`'s document in `pack_config.json`.
+fn raw_target<'a>(
+    raw: &'a mut Value,
+    target: TargetField,
+    target_id: &str,
+) -> Option<&'a mut Value> {
+    let (array, id_key, field) = target.pack_slot();
+    raw[array]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+        .find(|document| document[id_key].as_str() == Some(target_id))
+        .map(|document| &mut document[field])
+}
+
+/// The declared asset the target field points at, when it points at one. The
+/// raw `pack_config.json` is read rather than the loaded [`PackConfig`],
+/// because the loader resolves a sidecar reference into the text it holds and
+/// the reference itself is what has to be rewritten.
 fn sidecar_prompt_asset(
     manifest: &PackManifest,
     files: &BTreeMap<String, Vec<u8>>,
-    context_id: &str,
+    target: TargetField,
+    target_id: &str,
 ) -> Result<Option<String>> {
     let Some(bytes) = files.get(CONFIG_ASSET) else {
         return Ok(None);
     };
-    let raw: Value = serde_json::from_slice(bytes).context("parsing pack_config.json")?;
-    let Some(reference) = raw["contexts"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .find(|context| context["context_id"].as_str() == Some(context_id))
-        .and_then(|context| context["system_prompt"].as_str())
+    let mut raw: Value = serde_json::from_slice(bytes).context("parsing pack_config.json")?;
+    let Some(reference) = raw_target(&mut raw, target, target_id).and_then(|value| value.as_str())
     else {
         return Ok(None);
     };
@@ -98,7 +142,7 @@ fn sidecar_prompt_asset(
         .find(|path| path == normalized))
 }
 
-/// The subject behavior's current system prompt.
+/// The target's current text.
 pub fn baseline_text(pack: &MaterializedPack) -> Result<String> {
     if let Some(path) = &pack.prompt_asset {
         let bytes = pack
@@ -108,17 +152,25 @@ pub fn baseline_text(pack: &MaterializedPack) -> Result<String> {
         return String::from_utf8(bytes.clone())
             .with_context(|| format!("asset {path:?} is not UTF-8"));
     }
-    Ok(pack
-        .config
-        .contexts
-        .iter()
-        .find(|context| context.context_id == pack.context_id)
-        .and_then(|context| context.system_prompt.clone())
-        .unwrap_or_default())
+    Ok(match pack.target {
+        TargetField::AgentContextSystemPrompt => pack
+            .config
+            .contexts
+            .iter()
+            .find(|context| context.context_id == pack.target_id)
+            .and_then(|context| context.system_prompt.clone()),
+        TargetField::TaskPromptTemplate => pack
+            .config
+            .tasks
+            .iter()
+            .find(|task| task.task_id == pack.target_id)
+            .map(|task| task.prompt_template.clone()),
+    }
+    .unwrap_or_default())
 }
 
-/// Write the baseline's declared assets into `dir` with the subject behavior's
-/// system prompt replaced by `text`, and read the result back as a pack.
+/// Write the baseline's declared assets into `dir` with the target's text
+/// replaced by `text`, and read the result back as a pack.
 ///
 /// A sidecar asset holds `text` byte for byte, since sidecars are never
 /// interpolated. An inline prompt is written in its escaped form
@@ -148,29 +200,28 @@ pub fn materialize_candidate(
                 .with_context(|| format!("pack has no asset {CONFIG_ASSET:?}"))?;
             let mut raw: Value =
                 serde_json::from_slice(bytes).context("parsing pack_config.json")?;
-            let context = raw["contexts"]
-                .as_array_mut()
-                .into_iter()
-                .flatten()
-                .find(|context| {
-                    context["context_id"].as_str() == Some(baseline.context_id.as_str())
-                })
-                .with_context(|| format!("pack declares no context {:?}", baseline.context_id))?;
+            let field =
+                raw_target(&mut raw, baseline.target, &baseline.target_id).with_context(|| {
+                    format!(
+                        "pack declares no {} {:?}",
+                        baseline.target.collection().graphql_type(),
+                        baseline.target_id
+                    )
+                })?;
             // The loader interpolates every string in pack_config.json, so
             // the text is written escaped to be read back as exactly itself.
-            context["system_prompt"] = Value::String(interpolate::escape(text));
+            *field = Value::String(interpolate::escape(text));
             files.insert(CONFIG_ASSET.to_owned(), serde_json::to_vec_pretty(&raw)?);
         }
     }
     write_pack_files(dir, &files)?;
-    let behavior_id = baseline
-        .config
-        .agent_behaviors
-        .iter()
-        .find(|behavior| behavior.context_id.as_deref() == Some(baseline.context_id.as_str()))
-        .map(|behavior| behavior.behavior_id.clone())
-        .with_context(|| format!("no behavior names context {:?}", baseline.context_id))?;
-    materialize_pack(dir, owner, &behavior_id)
+    materialize_pack(
+        dir,
+        owner,
+        &baseline.behavior_id,
+        baseline.target,
+        baseline.task_id(),
+    )
 }
 
 #[cfg(test)]

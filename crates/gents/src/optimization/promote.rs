@@ -218,7 +218,13 @@ pub async fn promote(
     // still digests to the journal's and holds the text about to go live.
     let origin = &job.origin;
     let checked = verified_checkpoint(origin, job_id, &retained).and_then(|path| {
-        let pack = materialize_pack(&path, &origin.owner, &origin.subject.behavior_id)?;
+        let pack = materialize_pack(
+            &path,
+            &origin.owner,
+            &origin.subject.behavior_id,
+            origin.target.field,
+            origin.target.task_id(),
+        )?;
         let text = baseline_text(&pack)?;
         anyhow::ensure!(
             text == retained.text,

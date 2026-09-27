@@ -54,6 +54,13 @@ pub struct Target {
     pub id: String,
 }
 
+impl Target {
+    /// The task a task prompt template target names.
+    pub fn task_id(&self) -> Option<&str> {
+        (self.field == TargetField::TaskPromptTemplate).then_some(self.id.as_str())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FrozenDocument {
     pub collection: Collection,

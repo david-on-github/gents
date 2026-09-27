@@ -69,15 +69,25 @@ fn raw_config(pack: &MaterializedPack) -> Result<Value, StructuralRejection> {
     })
 }
 
-/// The raw `system_prompt` of `context_id`, and the config with it masked.
-fn split_prompt(mut raw: Value, context_id: &str) -> Result<(Value, Value), StructuralRejection> {
-    let context = raw["contexts"]
+/// The raw target field of `pack`'s target document, and the config with it
+/// masked.
+fn split_prompt(
+    mut raw: Value,
+    pack: &MaterializedPack,
+) -> Result<(Value, Value), StructuralRejection> {
+    let (array, id_key, field) = pack.target.pack_slot();
+    let document = raw[array]
         .as_array_mut()
         .into_iter()
         .flatten()
-        .find(|context| context["context_id"].as_str() == Some(context_id))
-        .ok_or_else(|| reject("unexpected_change", format!("no context {context_id:?}")))?;
-    let prompt = context["system_prompt"].take();
+        .find(|document| document[id_key].as_str() == Some(pack.target_id.as_str()))
+        .ok_or_else(|| {
+            reject(
+                "unexpected_change",
+                format!("no {array} entry {:?}", pack.target_id),
+            )
+        })?;
+    let prompt = document[field].take();
     Ok((prompt, raw))
 }
 
@@ -166,12 +176,12 @@ pub fn structural_gate(
             format!("expected only {allowed:?} to change, but {changed:?} did"),
         ));
     }
-    if candidate.context_id != baseline.context_id {
+    if (candidate.target, &candidate.target_id) != (baseline.target, &baseline.target_id) {
         return Err(reject(
             "unexpected_change",
             format!(
-                "the subject behavior's context moved from {:?} to {:?}",
-                baseline.context_id, candidate.context_id
+                "the target moved from {:?} to {:?}",
+                baseline.target_id, candidate.target_id
             ),
         ));
     }
@@ -189,15 +199,15 @@ pub fn structural_gate(
         // Inline: the configs agree once the target is masked, and the
         // candidate's target is exactly the proposed text's escaped form.
         None => {
-            let (_, baseline_rest) = split_prompt(raw_config(baseline)?, &baseline.context_id)?;
-            let (prompt, candidate_rest) =
-                split_prompt(raw_config(candidate)?, &candidate.context_id)?;
+            let (_, baseline_rest) = split_prompt(raw_config(baseline)?, baseline)?;
+            let (prompt, candidate_rest) = split_prompt(raw_config(candidate)?, candidate)?;
             if baseline_rest != candidate_rest {
+                let (array, _, field) = baseline.target.pack_slot();
                 return Err(reject(
                     "unexpected_change",
                     format!(
-                        "{CONFIG_ASSET} changed besides contexts[{:?}].system_prompt",
-                        baseline.context_id
+                        "{CONFIG_ASSET} changed besides {array}[{:?}].{field}",
+                        baseline.target_id
                     ),
                 ));
             }
@@ -206,7 +216,7 @@ pub fn structural_gate(
             if prompt.as_str() != Some(interpolate::escape(text).as_str()) {
                 return Err(reject(
                     "text_mismatch",
-                    "the inline system_prompt is not the proposed text",
+                    "the inline target field is not the proposed text",
                 ));
             }
         }
@@ -221,6 +231,7 @@ mod tests {
         write_fixture_pack, write_inline_fixture_pack, FIXTURE_PROMPT,
     };
     use crate::optimization::subject::{materialize_candidate, materialize_pack};
+    use crate::optimization::target::TargetField;
 
     const OWNER: &str = "did:key:gate-owner";
     const TEXT: &str = "Watch the mailbox, and say why.\n";
@@ -239,7 +250,14 @@ mod tests {
         } else {
             write_fixture_pack(&root.join("baseline"));
         }
-        let baseline = materialize_pack(&root.join("baseline"), OWNER, "monitor").unwrap();
+        let baseline = materialize_pack(
+            &root.join("baseline"),
+            OWNER,
+            "monitor",
+            TargetField::AgentContextSystemPrompt,
+            None,
+        )
+        .unwrap();
         Fixture {
             _dirs: dirs,
             root,

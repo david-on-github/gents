@@ -59,6 +59,9 @@ pub struct JobRequest {
     /// The DID of the home that launched the job, recorded on every run.
     pub evaluator_did: String,
     pub behavior_id: String,
+    pub target_field: TargetField,
+    /// The task a `TaskPromptTemplate` target names; ignored otherwise.
+    pub task_id: Option<String>,
     pub definition_id: String,
     pub inference_profile_id: String,
     /// The operator-supplied baseline subject pack (ruling R5). Copied into the
@@ -612,6 +615,11 @@ pub(crate) fn check_resume(
     if origin.subject.behavior_id != request.behavior_id {
         differs.push("behavior_id");
     }
+    if origin.target.field != request.target_field
+        || origin.target.task_id() != request.task_id.as_deref()
+    {
+        differs.push("target");
+    }
     if origin.definition.definition_id != request.definition_id {
         differs.push("definition_id");
     }
@@ -875,7 +883,13 @@ fn proposed_candidate(
             )
         })?;
     }
-    let candidate = materialize_pack(&final_dir, &origin.owner, &origin.subject.behavior_id)?;
+    let candidate = materialize_pack(
+        &final_dir,
+        &origin.owner,
+        &origin.subject.behavior_id,
+        origin.target.field,
+        origin.target.task_id(),
+    )?;
     anyhow::ensure!(
         candidate.digest == digest,
         "round {round}'s candidate digests to {}, not the journaled {digest}",
@@ -936,19 +950,27 @@ async fn freeze_job(
         .await
         .map_err(as_job_refusal)?;
 
-    let source = materialize_pack(&request.baseline_pack, owner, &request.behavior_id)?;
+    let source = materialize_pack(
+        &request.baseline_pack,
+        owner,
+        &request.behavior_id,
+        request.target_field,
+        request.task_id.as_deref(),
+    )?;
     let pack_text = baseline_text(&source)?;
     // Ruling R5, before anything is written: the pack must be the live one.
     let closure = read_closure(access, owner).await?;
     let target = Target {
-        field: TargetField::AgentContextSystemPrompt,
+        field: request.target_field,
         owner: request.owner.clone(),
-        id: source.context_id.clone(),
+        id: source.target_id.clone(),
     };
     if current_text(&closure, &target)? != pack_text {
         return Err(refused(format!(
-            "the live AgentContext {:?} and the baseline pack disagree about the subject's system prompt; supply a pack exported from this configuration",
-            target.id
+            "the live {} {:?} and the baseline pack disagree about the target's {}; supply a pack exported from this configuration",
+            target.field.collection().graphql_type(),
+            target.id,
+            target.field.field_name()
         )));
     }
     // A promotable job evaluates the live revision: everything else the trial
@@ -1138,7 +1160,13 @@ pub async fn run_job(
         return finalize(access, &mut job, state).await;
     }
     let baseline_path = baseline_dir(&origin.jobs_dir, &job_id);
-    let baseline = materialize_pack(&baseline_path, owner, &origin.subject.behavior_id)?;
+    let baseline = materialize_pack(
+        &baseline_path,
+        owner,
+        &origin.subject.behavior_id,
+        origin.target.field,
+        origin.target.task_id(),
+    )?;
     if baseline.digest != origin.subject.pack_digest {
         return Err(refused(format!(
             "the job's baseline copy at {} no longer digests to what it froze",
@@ -1463,7 +1491,13 @@ pub(crate) fn verified_checkpoint(
     held: &Checkpoint,
 ) -> Result<PathBuf> {
     let path = candidate_dir(&origin.jobs_dir, job_id, held.round);
-    let pack = materialize_pack(&path, &origin.owner, &origin.subject.behavior_id)?;
+    let pack = materialize_pack(
+        &path,
+        &origin.owner,
+        &origin.subject.behavior_id,
+        origin.target.field,
+        origin.target.task_id(),
+    )?;
     anyhow::ensure!(
         pack.digest == held.pack_digest,
         "the checkpoint at {} no longer digests to the journaled {}",
@@ -1566,6 +1600,8 @@ mod tests {
             owner: "did:key:o".into(),
             evaluator_did: "did:key:home".into(),
             behavior_id: "monitor".into(),
+            target_field: TargetField::AgentContextSystemPrompt,
+            task_id: None,
             definition_id: "monitor-findings".into(),
             inference_profile_id: "local".into(),
             baseline_pack: PathBuf::from("/tmp/baseline"),
