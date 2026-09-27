@@ -1902,6 +1902,79 @@ mod tests {
         assert!(response.errors.is_empty(), "{:?}", response.errors);
     }
 
+    /// The request settled and then the runtime exited, both inside one poll
+    /// of the stage's watch: the stage is what the request did, not a dead
+    /// runtime.
+    #[tokio::test]
+    async fn a_request_that_settled_before_its_runtime_exited_keeps_its_outcome() {
+        let dir = tempfile::tempdir().unwrap();
+        let workspace = dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let home = EmbeddedHome::create_temp("settled-then-exit")
+            .await
+            .unwrap();
+        let locator = TrialLocator {
+            trial_agent_did: home.did().to_string(),
+            session_id: "s-1".to_string(),
+            home_hint: None,
+        };
+        let stage = StageSpec {
+            stage_id: "only".to_string(),
+            prompt: "hello".to_string(),
+            deadline_secs: 600,
+            captures: Vec::new(),
+        };
+        // Completes the request once it is written, then exits.
+        let node = home.node.clone();
+        let runtime = RunningRuntime {
+            shutdown: tokio::sync::watch::channel(false).0,
+            handle: tokio::spawn(async move {
+                loop {
+                    let response = node
+                        .execute(
+                            r#"mutation { update_AgentRequest(filter: {lifecycle_state: {_ne: "completed"}}, input: {lifecycle_state: "completed"}) { _docID } }"#,
+                        )
+                        .await;
+                    let updated = response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data["update_AgentRequest"].as_array().map(Vec::len));
+                    assert!(response.errors.is_empty(), "{:?}", response.errors);
+                    if updated.unwrap_or(0) > 0 {
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }),
+            agent_did: String::new(),
+        };
+
+        let evidence = tokio::time::timeout(
+            Duration::from_secs(30),
+            run_stage(
+                &TrialSpec {
+                    behavior_id: "subject".to_string(),
+                    ..TrialSpec::empty_for_tests("t1")
+                },
+                &CancellationToken::new(),
+                &home,
+                &runtime,
+                &locator,
+                &workspace,
+                &stage,
+            ),
+        )
+        .await
+        .expect("the stage ends once its runtime has exited");
+
+        assert_eq!(
+            evidence.terminal_state,
+            Some(RequestLifecycleState::Completed)
+        );
+        assert_eq!(evidence.failure_kind, None);
+        home.node.shutdown().await;
+    }
+
     fn exited_runtime() -> RunningRuntime {
         RunningRuntime {
             shutdown: tokio::sync::watch::channel(false).0,
