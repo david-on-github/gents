@@ -109,12 +109,24 @@ fn catalog_conformance(definition: &EvalDefinition, registry: &CheckRegistry) ->
     messages
 }
 
-/// Step 5: documents captures name the subject's collections and their
-/// fields; file captures stay inside the trial workspace.
+/// Step 5: seeds and documents captures name the subject's collections
+/// (captures also their fields); file captures stay inside the trial
+/// workspace.
 fn capture_conformance(definition: &EvalDefinition, dossier: &Dossier) -> BTreeSet<String> {
     let mut messages = BTreeSet::new();
     for case in &definition.cases {
         for stage in &case.stages {
+            if let Some(seed) = &stage.seed {
+                if !dossier.collections.contains_key(&seed.collection) {
+                    messages.insert(format!(
+                        "case {} stage {} seed: collection {:?} is not one the subject shows (known: {})",
+                        case.case_id,
+                        stage.stage_id,
+                        seed.collection,
+                        known_collections(dossier)
+                    ));
+                }
+            }
             for capture in &stage.capture {
                 let at = format!(
                     "case {} stage {} capture {}",
@@ -130,11 +142,9 @@ fn capture_conformance(definition: &EvalDefinition, dossier: &Dossier) -> BTreeS
                         ..
                     } => match dossier.collections.get(collection) {
                         None => {
-                            let known: Vec<&str> =
-                                dossier.collections.keys().map(String::as_str).collect();
                             messages.insert(format!(
                                 "{at}: collection {collection:?} is not one the subject shows (known: {})",
-                                if known.is_empty() { "none".to_owned() } else { known.join(", ") }
+                                known_collections(dossier)
                             ));
                         }
                         Some(known) => {
@@ -167,6 +177,15 @@ fn capture_conformance(definition: &EvalDefinition, dossier: &Dossier) -> BTreeS
         }
     }
     messages
+}
+
+fn known_collections(dossier: &Dossier) -> String {
+    let known: Vec<&str> = dossier.collections.keys().map(String::as_str).collect();
+    if known.is_empty() {
+        "none".to_owned()
+    } else {
+        known.join(", ")
+    }
 }
 
 /// The field names a DefraDB filter object tests: its keys, through the
