@@ -1481,20 +1481,6 @@ fn openai_codex_projection_schema() -> Value {
                                 "started_at": optional_string_schema(),
                                 "completed_at": optional_string_schema()
                             }
-                        },
-                        {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["type", "id", "status"],
-                            "properties": {
-                                "type": { "const": "response" },
-                                "id": string_schema(),
-                                "status": optional_string_schema(),
-                                "output": optional_string_schema(),
-                                "reasoning": optional_string_schema(),
-                                "error": optional_string_schema(),
-                                "timestamp": optional_string_schema()
-                            }
                         }
                     ]
                 }
@@ -1700,7 +1686,7 @@ fn training_sample_kind_schema(kind: AdapterProjectionKind) -> Value {
             json!({ "enum": ["prompt", "message", "tool_call"] })
         }
         AdapterProjectionKind::OpenAiCodexRunTrace => {
-            json!({ "enum": ["prompt", "message", "tool_call", "response"] })
+            json!({ "enum": ["prompt", "message", "tool_call"] })
         }
         AdapterProjectionKind::LangGraphStateHistory => {
             json!({ "enum": ["state_snapshot", "state_node", "state_transition", "task"] })

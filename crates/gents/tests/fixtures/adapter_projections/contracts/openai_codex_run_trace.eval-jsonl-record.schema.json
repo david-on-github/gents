@@ -88,8 +88,7 @@
       "enum": [
         "prompt",
         "message",
-        "tool_call",
-        "response"
+        "tool_call"
       ]
     },
     "source_request_id": {

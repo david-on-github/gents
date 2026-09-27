@@ -480,23 +480,33 @@ async fn trace_project_exports_live_inference_turn_as_adapter_artifacts() -> Res
         items.iter().any(|item| {
             item.get("type").and_then(Value::as_str) == Some("request")
                 && item.get("id").and_then(Value::as_str) == Some(request_id.as_str())
+                && item.get("status").and_then(Value::as_str) == Some("completed")
         }),
-        "live openai-codex projection missing root request item: {openai:#}"
+        "live openai-codex projection missing completed root request item: {openai:#}"
     );
-    assert!(
-        items.iter().any(|item| {
+    let read_file_position = items
+        .iter()
+        .position(|item| {
             item.get("type").and_then(Value::as_str) == Some("tool_call")
                 && item.get("name").and_then(Value::as_str) == Some("read_file")
                 && item.get("status").and_then(Value::as_str) == Some("completed")
-        }),
-        "live openai-codex projection missing completed read_file tool item: {openai:#}"
-    );
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "live openai-codex projection missing completed read_file tool item: {openai:#}"
+            )
+        })?;
+    // The canonical terminal output is the run's last item: an assistant
+    // message of this request after its tool call, not an earlier header.
+    let final_item = items
+        .last()
+        .ok_or_else(|| anyhow!("live openai-codex projection has no items: {openai:#}"))?;
     assert!(
-        items.iter().any(|item| {
-            item.get("type").and_then(Value::as_str) == Some("response")
-                && item.get("id").and_then(Value::as_str) == Some(request_id.as_str())
-        }),
-        "live openai-codex projection missing response item: {openai:#}"
+        final_item.get("type").and_then(Value::as_str) == Some("message")
+            && final_item.get("role").and_then(Value::as_str) == Some("assistant")
+            && final_item.get("request_id").and_then(Value::as_str) == Some(request_id.as_str())
+            && items.len() - 1 > read_file_position,
+        "live openai-codex projection must end with the request's final assistant message: {openai:#}"
     );
     let serialized_openai = serde_json::to_string(&openai)?;
     assert!(
