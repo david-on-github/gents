@@ -63,10 +63,18 @@ impl Drop for LocalChain {
         let Some(child) = self.child.as_mut() else {
             return;
         };
-        if let Some(pid) = child.id() {
-            let _ = std::process::Command::new("kill")
-                .args(["-TERM", &format!("-{pid}")])
-                .status();
+        // Signal the chain's own process group directly: procps-ng 4 `kill
+        // -TERM -<pgid>` parses the group operand as kill(-1, SIGTERM) and
+        // terminates every process of the invoking user.
+        #[cfg(unix)]
+        if let Some(pgid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+            if pgid > 1 {
+                // SAFETY: killpg has no memory-safety preconditions; the group
+                // was created for this child with `process_group(0)`.
+                unsafe {
+                    libc::killpg(pgid, libc::SIGTERM);
+                }
+            }
         }
         let _ = child.start_kill();
     }
@@ -500,7 +508,7 @@ async fn create_write_eth_tool(
 }
 
 async fn wait_for_tool_result(
-    node: &EmbeddedNode,
+    node: &Arc<EmbeddedNode>,
     request_id: &str,
     tool_name: &str,
     timeout: Duration,
@@ -509,7 +517,7 @@ async fn wait_for_tool_result(
     loop {
         let rows = fetch_tool_calls(node, request_id).await;
         if let Some(row) = rows.into_iter().find(|row| {
-            row.tool_name.as_deref() == Some(tool_name)
+            row.tool_name == tool_name
                 && row
                     .result
                     .as_deref()
@@ -697,13 +705,8 @@ async fn eth_tool_live_model_writes_on_local_chain() {
         terminal, "completed",
         "native transfer request must complete; last={terminal}"
     );
-    let transfer_result = wait_for_tool_result(
-        db.node.as_ref(),
-        transfer_id,
-        "send_eth",
-        Duration::from_secs(30),
-    )
-    .await;
+    let transfer_result =
+        wait_for_tool_result(&db.node, transfer_id, "send_eth", Duration::from_secs(30)).await;
     assert!(
         transfer_result.contains("confirmed_success") && transfer_result.contains("0x"),
         "send_eth must confirm on chain, result={transfer_result}"
@@ -740,7 +743,7 @@ async fn eth_tool_live_model_writes_on_local_chain() {
         "counter increment request must complete; last={terminal}"
     );
     let increment_result = wait_for_tool_result(
-        db.node.as_ref(),
+        &db.node,
         increment_id,
         "counter_increment",
         Duration::from_secs(30),

@@ -22,57 +22,17 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gents::defra_node::EmbeddedNode;
 use gents::document_config::{FileTools, HostTools, Tools};
-use gents::graphql::escape_graphql_string;
-use gents::{DocumentRuntimeOptions, FileToolMode, Gents, ToolCeiling};
-use serde::Deserialize;
-
 use gents::AgentIdentity;
+use gents::{DocumentRuntimeOptions, FileToolMode, Gents, ToolCeiling};
 
 use crate::support::fixtures::{configure_behavior_tools, test_identity};
 use crate::support::interrupt::{create_runtime_request, wait_for_runtime_ready, BootedAgent};
 use crate::support::live_inference::{bind_target, live_target, wait_for_request_terminal};
+use crate::support::snapshots::fetch_tool_call_payloads_for_request;
 use crate::support::test_db;
 
 const SEED: &str = "{\r\n  \"max_turns\": 20,  \r\n  \"model_name\": \"fixture-model\"\r\n}\r\n";
-
-#[derive(Deserialize)]
-struct ToolCallRow {
-    tool_name: Option<String>,
-    status: Option<String>,
-    result: Option<String>,
-}
-
-async fn fetch_tool_calls(node: &EmbeddedNode, request_id: &str) -> Vec<ToolCallRow> {
-    let escaped = escape_graphql_string(request_id);
-    let query = format!(
-        r#"{{
-            AgentToolCall(filter: {{ request_id: {{ _eq: "{escaped}" }} }}) {{
-                tool_name
-                status
-                result
-            }}
-        }}"#
-    );
-    let resp = node.execute(&query).await;
-    assert!(
-        !resp.has_errors(),
-        "tool call query failed: {:?}",
-        resp.errors
-    );
-    resp.data
-        .as_ref()
-        .and_then(|data| data.get("AgentToolCall"))
-        .and_then(|rows| rows.as_array())
-        .map(|rows| {
-            rows.iter()
-                .cloned()
-                .map(|value| serde_json::from_value(value).expect("decode AgentToolCall row"))
-                .collect()
-        })
-        .unwrap_or_default()
-}
 
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "live: set GENTS_EVAL_TARGET and pass --ignored"]
@@ -161,11 +121,11 @@ async fn edit_file_live_model_lands_drifted_edit_without_write_file() {
         "unrelated line untouched:\n{text}"
     );
 
-    let calls = fetch_tool_calls(db.node.as_ref(), request_id).await;
+    let calls = fetch_tool_call_payloads_for_request(&db.node, request_id).await;
     assert!(!calls.is_empty(), "tool calls must be persisted");
     let edit_completed = calls.iter().any(|c| {
-        c.tool_name.as_deref() == Some("edit_file")
-            && c.status.as_deref() == Some("completed")
+        c.tool_name == "edit_file"
+            && c.lifecycle_state.as_deref() == Some("completed")
             && c.result
                 .as_deref()
                 .is_some_and(|r| r.contains("match_strategy"))
@@ -175,12 +135,10 @@ async fn edit_file_live_model_lands_drifted_edit_without_write_file() {
         "a completed edit_file call with match_strategy metadata is required; calls: {:?}",
         calls
             .iter()
-            .map(|c| (c.tool_name.clone(), c.status.clone()))
+            .map(|c| (c.tool_name.clone(), c.lifecycle_state.clone()))
             .collect::<Vec<_>>()
     );
-    let used_write_file = calls
-        .iter()
-        .any(|c| c.tool_name.as_deref() == Some("write_file"));
+    let used_write_file = calls.iter().any(|c| c.tool_name == "write_file");
     assert!(
         !used_write_file,
         "model fell back to write_file — the #738 failure pattern"

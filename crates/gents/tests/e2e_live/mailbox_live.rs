@@ -7,6 +7,7 @@ use gents::mailbox::{canonical_mailbox_write_decl, list_mailbox_items, MailboxSt
 use gents::{AgentIdentity, Collection, DatastoreToolSurfaceDocument};
 
 use crate::support::fixtures::{configure_behavior_tools, test_identity};
+use crate::support::interrupt::create_runtime_request_caused_by_source;
 use crate::support::live_inference::{
     bind_target, boot_live_agent, live_target, wait_for_request_terminal,
 };
@@ -86,23 +87,17 @@ async fn real_model_files_a_stamped_mailbox_item_through_granted_surface() {
         .expect("boot mailbox live agent");
     let request_id = "request-mailbox-live";
     let session_id = "session-mailbox-live";
-    let now = chrono::Utc::now().to_rfc3339();
     let prompt = "Call file_mailbox_item exactly once with title='Mailbox live verified', then answer MAILBOX_FILED. The tool owns notification identity and handling.";
-    let mutation = format!(
-        r#"mutation {{ create_AgentRequest(input: {{
-            request_id: "{request_id}", purpose: "normal", agent_did: "{agent_did}",
-            requester_did: "{requester}", behavior_id: "{behavior_id}",
-            session_id: "{session_id}", content: "{content}",
-            caused_by_source_doc_id: "{source_id}",
-            lifecycle_state: "pending", execution_origin: "interactive",
-            created_at: "{now}", retry_count: 0, max_retries: 2
-        }}) {{ _docID }} }}"#,
-        requester = escape_graphql_string(identity.did()),
-        content = escape_graphql_string(prompt),
-        source_id = escape_graphql_string(&source_id),
-    );
-    let response = db.node.execute(&mutation).await;
-    assert!(!response.has_errors(), "{:?}", response.errors);
+    create_runtime_request_caused_by_source(
+        db.node.as_ref(),
+        &agent_did,
+        &behavior_id,
+        request_id,
+        session_id,
+        &source_id,
+        prompt,
+    )
+    .await;
     assert_eq!(
         wait_for_request_terminal(db.node.as_ref(), request_id, Duration::from_secs(120)).await,
         "completed"

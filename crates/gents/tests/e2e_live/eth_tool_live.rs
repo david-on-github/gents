@@ -21,13 +21,13 @@ use gents::defra_node::EmbeddedNode;
 use gents::document_config::{IntegrationTools, Tools};
 use gents::graphql::escape_graphql_string;
 use gents::{AgentIdentity, DocumentRuntimeOptions, Gents, ToolCeiling};
-use serde::Deserialize;
 
 use crate::support::fixtures::{configure_behavior_tools, test_identity};
 use crate::support::interrupt::{create_runtime_request, wait_for_runtime_ready, BootedAgent};
 use crate::support::live_inference::{
     bind_target, live_target, wait_for_assistant_answer, wait_for_request_terminal, InferenceTarget,
 };
+use crate::support::snapshots::{fetch_tool_call_payloads_for_request, ToolCallPayload};
 use crate::support::test_db;
 
 const TOOL_ID: &str = "base-sepolia";
@@ -137,54 +137,24 @@ async fn create_eth_tool(node: &EmbeddedNode, agent_did: &str) {
     );
 }
 
-#[derive(Clone, Deserialize, Debug)]
-pub(crate) struct ToolCallRow {
-    pub(crate) tool_name: Option<String>,
-    pub(crate) args: Option<String>,
-    pub(crate) result: Option<String>,
-}
-
-pub(crate) async fn fetch_tool_calls(node: &EmbeddedNode, request_id: &str) -> Vec<ToolCallRow> {
-    let escaped = escape_graphql_string(request_id);
-    let query = format!(
-        r#"{{
-            AgentToolCall(filter: {{ request_id: {{ _eq: "{escaped}" }} }}) {{
-                tool_name
-                args
-                result
-            }}
-        }}"#
-    );
-    let resp = node.execute(&query).await;
-    assert!(
-        !resp.has_errors(),
-        "tool call query failed: {:?}",
-        resp.errors
-    );
-    resp.data
-        .as_ref()
-        .and_then(|data| data.get("AgentToolCall"))
-        .and_then(|rows| rows.as_array())
-        .map(|rows| {
-            rows.iter()
-                .cloned()
-                .map(|value| serde_json::from_value(value).expect("decode AgentToolCall row"))
-                .collect()
-        })
-        .unwrap_or_default()
+pub(crate) async fn fetch_tool_calls(
+    node: &Arc<EmbeddedNode>,
+    request_id: &str,
+) -> Vec<ToolCallPayload> {
+    fetch_tool_call_payloads_for_request(node, request_id).await
 }
 
 async fn wait_for_eth_query_tool_call(
-    node: &EmbeddedNode,
+    node: &Arc<EmbeddedNode>,
     request_id: &str,
     timeout: Duration,
-) -> ToolCallRow {
+) -> ToolCallPayload {
     let deadline = tokio::time::Instant::now() + timeout;
     let expected = format!("{TOOL_ID}_query");
     loop {
         let rows = fetch_tool_calls(node, request_id).await;
         if let Some(row) = rows.into_iter().find(|row| {
-            row.tool_name.as_deref() == Some(expected.as_str())
+            row.tool_name == expected
                 && row
                     .result
                     .as_deref()
@@ -277,9 +247,8 @@ async fn eth_tool_live_model_queries_base_sepolia() {
         "live eth query request must complete; last={terminal}"
     );
 
-    let call =
-        wait_for_eth_query_tool_call(db.node.as_ref(), request_id, Duration::from_secs(30)).await;
-    let args = call.args.unwrap_or_default();
+    let call = wait_for_eth_query_tool_call(&db.node, request_id, Duration::from_secs(30)).await;
+    let args = call.arguments.unwrap_or_default();
     assert!(
         args.contains("eth_blockNumber"),
         "model must call eth_blockNumber, args={args}"

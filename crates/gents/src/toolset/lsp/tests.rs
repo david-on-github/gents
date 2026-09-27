@@ -1596,14 +1596,18 @@ async fn rust_analyzer_hover_on_gents_crate() {
     {
         return;
     }
-    let crate_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let auth = crate_root.join("src/toolset/lsp/auth.rs");
-    let command = crate_root.join("src/toolset/shared/command.rs");
+    let workspace_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("workspace root");
+    let auth = workspace_root.join("crates/gents/src/toolset/lsp/auth.rs");
+    let policy = workspace_root.join("crates/gents-loop/src/tool_policy.rs");
     let advertised_line = first_line_containing(&auth, "pub fn lsp_advertised");
-    let meet_line = first_line_containing(&command, "pub fn meet(self, other: Self)");
+    let meet_line =
+        first_line_containing(&policy, "More restrictive mode wins: Disabled < Inherit") + 1;
     let tool = LspTool::new(
         sample_config(
-            crate_root,
+            workspace_root,
             FileToolMode::ReadOnly,
             "s-ra-gents",
             vec![rust_analyzer_server(45_000)],
@@ -1613,8 +1617,8 @@ async fn rust_analyzer_hover_on_gents_crate() {
     .unwrap();
 
     for (file, symbol) in [
-        ("src/toolset/lsp/auth.rs", "lsp_advertised"),
-        ("src/toolset/shared/command.rs", "meet"),
+        ("crates/gents/src/toolset/lsp/auth.rs", "lsp_advertised"),
+        ("crates/gents-loop/src/tool_policy.rs", "meet"),
     ] {
         let symbols = tool
             .call(LspArgs {
@@ -1639,7 +1643,7 @@ async fn rust_analyzer_hover_on_gents_crate() {
     let advertised = tool
         .call(LspArgs {
             action: "hover".into(),
-            file: Some("src/toolset/lsp/auth.rs".into()),
+            file: Some("crates/gents/src/toolset/lsp/auth.rs".into()),
             line: Some(advertised_line),
             symbol: Some("lsp_advertised".into()),
             query: None,
@@ -1658,7 +1662,7 @@ async fn rust_analyzer_hover_on_gents_crate() {
     let meet = tool
         .call(LspArgs {
             action: "hover".into(),
-            file: Some("src/toolset/shared/command.rs".into()),
+            file: Some("crates/gents-loop/src/tool_policy.rs".into()),
             line: Some(meet_line),
             symbol: Some("meet".into()),
             query: None,
