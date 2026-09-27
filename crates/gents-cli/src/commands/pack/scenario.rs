@@ -3803,6 +3803,68 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn security_scan_staging_installs_its_declared_schemas() {
+        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/security_scan");
+        let distribution = read_distribution_manifest(&pack).unwrap();
+        let schema_assets = distribution
+            .metadata
+            .assets
+            .iter()
+            .filter(|asset| asset.starts_with("schemas/") && asset.ends_with(".graphql"))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            distribution
+                .schemas
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            schema_assets
+        );
+
+        let staged = stage_scenario_pack(
+            &pack,
+            &distribution,
+            "did:key:scenario-owner",
+            "default-profile",
+            "did:key:scenario-owner:default",
+        )
+        .unwrap();
+        for schema in &distribution.schemas {
+            assert_eq!(
+                std::fs::read(staged.path().join(schema)).unwrap(),
+                std::fs::read(pack.join(schema)).unwrap(),
+                "staged schema {schema}"
+            );
+        }
+
+        let node = std::sync::Arc::new(
+            gents::defra_node::EmbeddedNode::builder()
+                .build()
+                .await
+                .unwrap(),
+        );
+        gents::ensure_runtime_schemas(&node).await.unwrap();
+        let access = ConfigAccess::Local(node.clone());
+        let phase = crate::commands::schema::apply_pack_schemas_if_present(&access, staged.path())
+            .await
+            .unwrap()
+            .expect("staged pack must have schemas");
+        assert_eq!(phase.schema_files.len(), schema_assets.len());
+
+        let (config, report) = crate::desired_state::load_manifest_root(staged.path());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let errors = crate::desired_state::validate::validate_manifest_against_live(
+            &config.unwrap(),
+            &access,
+        )
+        .await
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        node.shutdown().await;
+    }
+
     #[test]
     fn scenario_rejects_duplicate_dependency_configuration() {
         let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/grok_tui_port");
