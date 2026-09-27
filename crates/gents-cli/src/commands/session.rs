@@ -143,6 +143,11 @@ async fn open_offline_fork_store(home: &Path, data_dir: &Path) -> Result<Offline
     let builder = crate::persistent_node_builder_with_stored_identity(home, data_dir)?;
     fs::create_dir_all(data_dir)
         .with_context(|| format!("creating data directory {}", data_dir.display()))?;
+    // Only the held-store refusal carries the escape: an unconditional context
+    // would report an unrelated lock failure (a symlinked lock file, an
+    // unopenable path) as a store in use. `.context` keeps the inner error
+    // downcastable -- anyhow's chain downcast checks the context then the
+    // wrapped error -- so the typed refusal survives the hint.
     let claim = gents::home::lock_store(home, data_dir).map_err(|error| {
         match error.downcast_ref::<gents::home::StoreLockHeld>() {
             Some(_) => error.context(
