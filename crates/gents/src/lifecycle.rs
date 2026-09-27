@@ -55,7 +55,8 @@ pub use materialize::{
     ParentLink, RequestHopCause, RequestIdentity, RequestSigner, RequestSpec, RetryLink,
 };
 pub(crate) use materialize::{
-    build_session_message_request, write_pending_agent_request_with_lineage_and_conversation_title,
+    build_session_message_request, load_session_current_hop, load_session_current_hop_in_txn,
+    session_current_hop, write_pending_agent_request_with_lineage_and_conversation_title,
     write_pending_agent_request_with_lineage_workspace_and_conversation_title, SessionMessageCause,
     SessionMessageTarget,
 };

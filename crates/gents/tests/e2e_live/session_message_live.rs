@@ -110,7 +110,7 @@ fn completion_marker(tool_call_id: &str, tool_name: &str) -> String {
 #[ignore = "live: set GENTS_LIVE_SESSION_MESSAGE=1 and pass --ignored"]
 async fn live_local_create_session() -> Result<()> {
     if !live_enabled() {
-        eprintln!("GENTS_LIVE_SESSION_MESSAGE is not 1; skipping live local agent_new");
+        tracing::info!("GENTS_LIVE_SESSION_MESSAGE is not 1; skipping live local agent_new");
         return Ok(());
     }
 
@@ -189,7 +189,7 @@ async fn live_local_create_session() -> Result<()> {
         dump_session_diagnostics(db.node.as_ref(), session_id).await;
         panic!("agent_new must cause an AgentRequest linked to the orchestrator request");
     };
-    eprintln!("[live-local] caused request = {caused:?}");
+    tracing::info!("[live-local] caused request = {caused:?}");
     assert_eq!(
         caused.caused_by_parent_request_id.as_deref(),
         Some(request_id)
@@ -221,13 +221,13 @@ async fn live_local_create_session() -> Result<()> {
         Duration::from_secs(30),
     )
     .await;
-    eprintln!("[live-local] started session answer = {caused_answer:?}");
+    tracing::info!("[live-local] started session answer = {caused_answer:?}");
     assert!(
         !caused_answer.trim().is_empty(),
         "the started session must produce a non-empty assistant response"
     );
     if !caused_answer.to_lowercase().contains("paris") {
-        eprintln!("[live-local] SOFT-WARN: answer did not contain 'Paris': {caused_answer:?}");
+        tracing::warn!("[live-local] SOFT-WARN: answer did not contain 'Paris': {caused_answer:?}");
     }
 
     let settled = wait_for_tool_call_state(
@@ -802,8 +802,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
         "managed session lacks its terminal output: {managed_answer:?}"
     );
     if !managed_answer.contains("STEERING_ACK") {
-        eprintln!(
-            "[live-managed] SOFT-WARN: steering was not acknowledged in the active turn: {managed_answer:?}"
+        tracing::warn!("[live-managed] SOFT-WARN: steering was not acknowledged in the active turn: {managed_answer:?}"
         );
     }
     wait_for_tool_call_state(
@@ -1091,7 +1090,7 @@ If you receive a message STEERING_NOTE, do not call any tool for it; append STEE
 #[ignore = "live: set GENTS_LIVE_SESSION_MESSAGE=1 and pass --ignored"]
 async fn live_cross_node_create_session() -> Result<()> {
     if !live_enabled() {
-        eprintln!("GENTS_LIVE_SESSION_MESSAGE is not 1; skipping live cross-node agent_new");
+        tracing::info!("GENTS_LIVE_SESSION_MESSAGE is not 1; skipping live cross-node agent_new");
         return Ok(());
     }
 
@@ -1235,7 +1234,7 @@ async fn live_cross_node_create_session() -> Result<()> {
     let caused_a = wait_for_caused_request(db_a.node.as_ref(), request_id, Duration::from_secs(60))
         .await
         .expect("agent_new on A must author the caused request");
-    eprintln!("[live-cross] caused request on A = {caused_a:?}");
+    tracing::info!("[live-cross] caused request on A = {caused_a:?}");
     assert_eq!(caused_a.agent_did, did_b);
     assert_eq!(caused_a.requester_did.as_deref(), Some(did_a.as_str()));
     assert_eq!(caused_a.behavior_id, FAST_WORKER_BEHAVIOR_ID);
@@ -1257,7 +1256,7 @@ async fn live_cross_node_create_session() -> Result<()> {
             caused_a.request_id
         )
     });
-    eprintln!("[live-cross] caused request on B = {caused_b:?}");
+    tracing::info!("[live-cross] caused request on B = {caused_b:?}");
     assert_eq!(caused_b.agent_did, did_b);
     assert_eq!(caused_b.requester_did.as_deref(), Some(did_a.as_str()));
     assert_eq!(caused_b.admission_kind.as_deref(), Some("peer"));
@@ -1282,13 +1281,13 @@ async fn live_cross_node_create_session() -> Result<()> {
         Duration::from_secs(30),
     )
     .await;
-    eprintln!("[live-cross] answer on B = {answer_b:?}");
+    tracing::info!("[live-cross] answer on B = {answer_b:?}");
     assert!(
         !answer_b.trim().is_empty(),
         "the started session must produce a non-empty live response on B"
     );
     if !answer_b.to_lowercase().contains("paris") {
-        eprintln!("[live-cross] SOFT-WARN: answer did not contain 'Paris': {answer_b:?}");
+        tracing::warn!("[live-cross] SOFT-WARN: answer did not contain 'Paris': {answer_b:?}");
     }
 
     let terminal_a = wait_for_request_terminal(
@@ -1915,7 +1914,7 @@ async fn dump_session_diagnostics(node: &EmbeddedNode, session_id: &str) {
         }}"#
     );
     let resp = node.execute(&query).await;
-    eprintln!(
+    tracing::info!(
         "[diag] session {session_id}: {}",
         serde_json::to_string_pretty(&resp.data.unwrap_or_default()).unwrap_or_default()
     );

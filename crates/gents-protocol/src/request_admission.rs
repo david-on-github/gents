@@ -59,7 +59,7 @@ pub enum AgentRequestAdmissionKind {
     LocalSelf,
     RuntimeInternal,
     /// A request authored by another principal's agent (a cross-principal
-    /// `create_session`/`send_message`). The requester signs, the target
+    /// `agent_new`/`agent_message`). The requester signs, the target
     /// differs from the requester, and the target's `PeerAdmissionAuthority`
     /// ACP authorizes the requester DID. Replies route back to `requester_did`
     /// best-effort; there is no bridge, claim fence or cancel mirror.

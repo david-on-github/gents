@@ -147,6 +147,7 @@ pub(super) async fn prepare_signed_child(
         1,
         false,
         "2026-08-25T00:00:00Z",
+        parent.subagent_depth,
     )
     .unwrap();
     if variant == "wrong_physical_parent_edge" {
@@ -1209,6 +1210,7 @@ async fn replacement_goal_on_other_authenticated_chain_does_not_attach_to_old_ro
         1,
         false,
         "2026-08-28T00:00:00Z",
+        parent.subagent_depth,
     )
     .unwrap();
     crate::sign_agent_request_create(&identity, &mut child)

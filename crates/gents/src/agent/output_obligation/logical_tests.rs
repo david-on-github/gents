@@ -315,6 +315,7 @@ async fn generated_logical_output_obligation_cases_drive_signed_requests_and_dur
             1,
             false,
             "2026-09-05T00:00:01Z",
+            root_request.subagent_depth,
         )
         .unwrap();
         if !case["authenticated_child"].as_bool().unwrap() {

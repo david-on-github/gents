@@ -1628,7 +1628,6 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
             1,
             "expected exactly one Goal wrapup: {requests:?}"
         );
-        assert_eq!(goal_requests[0]["caused_by_parent_request_id"], parent);
         let wakes = requests
             .iter()
             .filter(|row| {
@@ -1639,6 +1638,14 @@ async fn exhausted_budget_after_failed_or_dead_request_materializes_wrapup_not_r
             wakes.len(),
             1,
             "besides the parent and the Goal wrapup, only the completion wake exists: {requests:?}"
+        );
+        // The completion wake is ordinary work in the Goal's session: when it
+        // runs and ends before the Goal owner acts, it is the latest request
+        // the wrapup continues; otherwise the failed parent is.
+        let wrapup_parent = goal_requests[0]["caused_by_parent_request_id"].clone();
+        assert!(
+            wrapup_parent == parent || wrapup_parent == wakes[0]["request_id"],
+            "the wrapup continues the failed parent or its completion wake: {requests:?}"
         );
         // Goal continuations are themselves scheduled work, like the wake.
         assert_eq!(goal_requests[0]["execution_origin"], "scheduled");

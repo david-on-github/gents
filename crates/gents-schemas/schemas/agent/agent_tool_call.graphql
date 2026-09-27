@@ -11,7 +11,7 @@
 # through the message block and recheck existing lifecycle authorization.
 # A separately spawned process is admitted by its accepted meta-call owner and
 # carries spawned_by_tool_call_doc_id; it is not another provider tool intent.
-# A create_session/send_message call is a background row: the request it
+# An agent_new/agent_message call is a background row: the request it
 # causes names this row through caused_by_parent_tool_call_doc_id, and that
 # request's terminal output terminalizes the row and notifies this session.
 type AgentToolCall @branchable {

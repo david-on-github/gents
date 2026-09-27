@@ -928,6 +928,7 @@ async fn pending_requests_are_scoped_by_principal_without_host_identity() {
         1,
         false,
         "2026-08-21T00:00:01Z",
+        pending[0].subagent_depth,
     )
     .expect("workspace-bound parent produces a coherent goal continuation");
     assert_eq!(

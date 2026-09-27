@@ -12,14 +12,17 @@ pub(crate) struct ToolNotificationPublication {
     pub(crate) presentation: Vec<gents_protocol::output::PresentationPart>,
 }
 
-/// How a completion's wake is written (Lean `CausalHop.completionWake`).
+/// What caused a completion, for its wake's hop (Lean
+/// `CausalHop.WakeSession`). The hop is computed from the session's current
+/// hop inside the publishing transaction. A wake over the bound is written like
+/// any other and refused at admission, so it becomes the session's latest
+/// request and every later same-session continuation copies its hop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CompletionWake {
-    /// Coalesce into, or create, the pending wake at this hop.
-    AtHop(u32),
-    /// The wake would exceed the woken principal's bound: the notification is
-    /// still appended, bound to the calling request, and no wake is written.
-    RefusedByHopBound { hop: u32, max_request_hop: u32 },
+    /// A native process completion: copies the session's current hop.
+    Continuation,
+    /// A session-message completion caused by a request at `cause_hop`.
+    CrossSession { cause_hop: u32 },
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -171,7 +174,7 @@ pub(crate) async fn persist_background_completion_with_message(
         wake_content,
         queue,
         existing_notification_doc_id,
-        CompletionWake::AtHop(parent.subagent_depth),
+        CompletionWake::Continuation,
     )
     .await
 }
@@ -438,17 +441,6 @@ async fn background_completion_transaction_attempt(
             "canonical notification replay request binding is invalid"
         );
         let bound = &rows[0];
-        if let CompletionWake::RefusedByHopBound { .. } = wake {
-            anyhow::ensure!(
-                bound.doc_id.as_deref() == Some(parent.doc_id.as_str()),
-                "canonical notification replay without a wake must bind its calling request"
-            );
-            return Ok(EnqueuedBackgroundCompletionInput {
-                request: None,
-                message_sequence: row.message.sequence,
-                created_request: false,
-            });
-        }
         anyhow::ensure!(
             row_matches_coalesced_source_and_key(
                 bound,
@@ -467,28 +459,21 @@ async fn background_completion_transaction_attempt(
         });
     }
 
+    let current_hop = crate::lifecycle::load_session_current_hop_in_txn(
+        txn,
+        &parent.agent_did,
+        &parent.session_id,
+    )
+    .await?;
     let wake_hop = match wake {
-        CompletionWake::AtHop(hop) => hop,
-        CompletionWake::RefusedByHopBound { .. } => {
-            let message_sequence =
-                next_append_sequence_in_transaction(txn, &parent.agent_did, &parent.session_id)
-                    .await?;
-            publish_native_tool_notification(
-                txn,
-                parent,
-                &parent.doc_id,
-                message_sequence,
-                message_key,
-                content,
-                native,
-            )
-            .await?;
-            return Ok(EnqueuedBackgroundCompletionInput {
-                request: None,
-                message_sequence,
-                created_request: false,
-            });
-        }
+        CompletionWake::Continuation => crate::lifecycle::next_request_hop(
+            crate::lifecycle::RequestHopCause::Continuation,
+            current_hop,
+        ),
+        CompletionWake::CrossSession { cause_hop } => crate::lifecycle::next_request_hop(
+            crate::lifecycle::RequestHopCause::CrossSession { cause_hop },
+            current_hop,
+        ),
     };
     let pending_rows: Vec<AgentRequestRow> =
         serde_json::from_value(response["data"]["pending"].clone())

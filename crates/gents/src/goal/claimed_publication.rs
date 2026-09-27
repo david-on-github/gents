@@ -109,16 +109,6 @@ async fn stage_claimed_continuation(
     let sequence = observed.continuation_sequence();
     let now = Utc::now();
     let created_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let mut create = prepare_goal_continuation(
-        &parent,
-        behavior,
-        &goal.goal_id,
-        content,
-        sequence,
-        wrapup,
-        &created_at,
-    )?;
-    let expected = GoalBackedRequestFingerprint::from_create(&create)?;
     let key = goal_continuation_identity(&goal.goal_id, parent_request_id, sequence)?.retry_key;
     let key = escape_graphql_string(&key);
     let response = txn.execute(&format!(r#"{{ AgentRequest(filter: {{ retry_key: {{ _eq: "{key}" }} }}) {{ {SIGNED_REQUEST_FIELDS} }} }}"#)).await?;
@@ -132,6 +122,21 @@ async fn stage_claimed_continuation(
         children.len() <= 1,
         "ambiguous claimed continuation receipt"
     );
+    // The session's current hop at first publication; a replay bounds it by
+    // the published continuation so it recomputes the same hop.
+    let session_hop = crate::lifecycle::session_current_hop(&requests, children.first());
+    let mut create = prepare_goal_continuation(
+        &parent,
+        behavior,
+        &goal.goal_id,
+        content,
+        sequence,
+        wrapup,
+        &created_at,
+        session_hop,
+    )?;
+    let expected = GoalBackedRequestFingerprint::from_create(&create)?;
+
     if let Some(child) = children.first() {
         verify_runtime_local_control_receipt(child, &goal.agent_did, parent_request_id)?;
         let actual: GoalBackedRequestFingerprint =

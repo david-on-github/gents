@@ -402,10 +402,16 @@ pub(crate) async fn plan(
         None
     };
     // Lean `CausalHop.nextHop` of a cross-session cause: past the caller, and
-    // never below the addressed session's own hop.
+    // never below the addressed session's current hop.
     let own_hop = match &active {
-        Some(active) => active.subagent_depth,
-        None => session_latest_hop(node, target).await?,
+        Some(active) => active.subagent_depth.max(
+            crate::lifecycle::load_session_current_hop(node, &target.agent_did, &target.session_id)
+                .await?,
+        ),
+        None => {
+            crate::lifecycle::load_session_current_hop(node, &target.agent_did, &target.session_id)
+                .await?
+        }
     };
     let hop = crate::lifecycle::next_request_hop(
         crate::lifecycle::RequestHopCause::CrossSession {
@@ -479,32 +485,6 @@ pub(crate) async fn plan(
         hop,
         write,
     }))
-}
-
-/// The hop of the addressed session's latest request, `0` for a new session.
-async fn session_latest_hop(node: &EmbeddedNode, target: &SessionMessageTarget) -> Result<u32> {
-    #[derive(Deserialize)]
-    struct HopRow {
-        #[serde(default)]
-        subagent_depth: Option<i64>,
-    }
-    let query = format!(
-        r#"{{ AgentRequest(filter: {{ session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }}, purpose: {{ _eq: "normal" }} }}, order: [{{ created_at: DESC }}, {{ request_id: DESC }}], limit: 1) {{ subagent_depth }} }}"#,
-        escape_graphql_string(&target.session_id),
-        escape_graphql_string(&target.agent_did),
-    );
-    let response = crate::graphql::graphql_with_transaction_retry(
-        node,
-        &query,
-        "load the addressed session's latest hop",
-    )
-    .await?;
-    Ok(
-        crate::graphql::first_row::<HopRow>(&response, "AgentRequest")?
-            .and_then(|row| row.subagent_depth)
-            .and_then(|hop| u32::try_from(hop).ok())
-            .unwrap_or(0),
-    )
 }
 
 /// The receipt a session-message row answers its invocation with. It names

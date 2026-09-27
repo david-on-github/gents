@@ -259,9 +259,6 @@ impl DefraSessionHook {
                 );
             }
         }
-        if interrupt {
-            crate::session_message::interrupt_session(&self.node, &target).await?;
-        }
         let receipt =
             match crate::session_message::commit(&self.node, &cause, &mut lifecycle, plan, !create)
                 .await
@@ -281,6 +278,19 @@ impl DefraSessionHook {
                     );
                 }
             };
+        // Stop the target's turn only once the message is durably delivered,
+        // so a failed commit never interrupts without delivering. The new
+        // request waits behind the interrupted one.
+        if interrupt {
+            if let Err(error) = crate::session_message::interrupt_session(&self.node, &target).await
+            {
+                tracing::warn!(
+                    target_session = %target.session_id,
+                    error = %format!("{error:#}"),
+                    "agent_message delivered, but interrupting the target's turn failed"
+                );
+            }
+        }
         Ok(self.skip_tool_result(tool_name, receipt))
     }
 }

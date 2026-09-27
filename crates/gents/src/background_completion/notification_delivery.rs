@@ -6,7 +6,7 @@ pub(super) struct SideEffects {
 }
 
 /// Append a native background tool's completion notification and its
-/// coalesced wake, which continues the calling session at its own hop.
+/// coalesced wake, which continues the session at its current hop.
 pub(crate) async fn append_background_tool_completion(
     node: &EmbeddedNode,
     parent_session_id: &str,
@@ -33,9 +33,9 @@ pub(crate) async fn append_background_tool_completion(
 
 /// Append the completion of a session-message row whose caused request, at
 /// `caused_hop`, reached its terminal. Its wake is caused by that other
-/// session (Lean `DurableLineage.ContinuationKind.sessionMessageCompletionWake`)
-/// and is refused, never the notification, beyond the woken principal's
-/// `max_request_hop` (Lean `CausalHop.completionWake`).
+/// session (Lean `DurableLineage.ContinuationKind.sessionMessageCompletionWake`);
+/// one over the woken principal's bound is written and refused at admission,
+/// after its notification (Lean `CausalHop.WakeSession`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn append_session_message_completion(
     node: &EmbeddedNode,
@@ -60,16 +60,6 @@ pub(crate) async fn append_session_message_completion(
         Some(caused_hop),
     )
     .await
-}
-
-/// Marks a notification whose wake the hop bound refused. Its presence in a
-/// published notice is what a replay reproduces.
-const WAKE_REFUSED_MARKER: &str = "<wake-refused";
-
-fn wake_refused_note(hop: u32, max_request_hop: u32) -> String {
-    format!(
-        "\n{WAKE_REFUSED_MARKER} reason=\"request_hop_exceeded\" hop=\"{hop}\" max_request_hop=\"{max_request_hop}\">This result did not start a new turn: the agent-to-agent hop limit was reached. The session waits for its user.</wake-refused>"
-    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -102,63 +92,11 @@ async fn append_completion(
         None => None,
     };
     let wake = match cross_session_cause_hop {
-        None => crate::lifecycle::queue::CompletionWake::AtHop(parent_request.subagent_depth),
-        Some(cause_hop) => {
-            let hop = crate::lifecycle::next_request_hop(
-                crate::lifecycle::RequestHopCause::CrossSession { cause_hop },
-                parent_request.subagent_depth,
-            );
-            let max_request_hop =
-                crate::document_config::load_agent_principal(node, &parent_request.agent_did)
-                    .await?
-                    .and_then(|principal| principal.max_request_hop)
-                    .unwrap_or(crate::document_config::DEFAULT_MAX_REQUEST_HOP);
-            // A replay reproduces the published decision, not today's bound.
-            let refused = match &existing_text {
-                Some(text) => text.contains(WAKE_REFUSED_MARKER),
-                None => !crate::lifecycle::request_hop_within_bound(max_request_hop, hop),
-            };
-            if refused {
-                crate::lifecycle::queue::CompletionWake::RefusedByHopBound {
-                    hop,
-                    max_request_hop,
-                }
-            } else {
-                crate::lifecycle::queue::CompletionWake::AtHop(hop)
-            }
-        }
-    };
-    let note = match &wake {
-        crate::lifecycle::queue::CompletionWake::RefusedByHopBound {
-            hop,
-            max_request_hop,
-        } => {
-            let note = match &existing_text {
-                Some(text) => text
-                    .find(&format!("\n{WAKE_REFUSED_MARKER}"))
-                    .map(|at| text[at..].to_owned())
-                    .unwrap_or_else(|| wake_refused_note(*hop, *max_request_hop)),
-                None => wake_refused_note(*hop, *max_request_hop),
-            };
-            tracing::warn!(
-                parent_session_id,
-                tool_call_doc_id,
-                hop,
-                max_request_hop,
-                "session-message completion wake refused by the hop bound; notification appended"
-            );
-            Some(note)
-        }
-        crate::lifecycle::queue::CompletionWake::AtHop(_) => None,
+        None => crate::lifecycle::queue::CompletionWake::Continuation,
+        Some(cause_hop) => crate::lifecycle::queue::CompletionWake::CrossSession { cause_hop },
     };
     let render = |budget: usize| {
-        let (mut text, mut parts) =
-            tool_completion_presentation(&tool_call_id, tool_name, status, result, reason, budget);
-        if let Some(note) = &note {
-            text.push_str(note);
-            parts.push(gents_protocol::output::PresentationPart::Literal { text: note.clone() });
-        }
-        (text, parts)
+        tool_completion_presentation(&tool_call_id, tool_name, status, result, reason, budget)
     };
     // A published notice is replayed exactly (Lean ToolDelivery
     // notification replay), so a redrive renders with the budget that notice

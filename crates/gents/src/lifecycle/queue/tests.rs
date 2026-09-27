@@ -394,7 +394,7 @@ impl CanonicalBackgroundFixture {
                     end_byte: notification_content.len() as u64,
                 }],
             },
-            super::CompletionWake::AtHop(self.parent.subagent_depth),
+            super::CompletionWake::Continuation,
         )
         .await
     }
@@ -532,6 +532,7 @@ mod pin_tests {
             continuation_sequence,
             false,
             "2030-01-01T00:00:00Z",
+            parent.subagent_depth,
         )
         .expect("prepare goal continuation");
         crate::lifecycle::materialize::sign_request(

@@ -618,6 +618,76 @@ pub fn next_request_hop(cause: RequestHopCause, own: u32) -> u32 {
     }
 }
 
+/// Lean `CausalHop` session current hop: the hop of the session's latest
+/// normal request (by `created_at`, then `request_id`), `0` for an empty
+/// session. Every same-session continuation copies it and every cross-session
+/// cause climbs past it. `before`, when given, bounds the latest request to
+/// those ordered before it, so a replay recomputes the hop its first
+/// publication observed.
+pub(crate) fn session_current_hop(
+    rows: &[gents_protocol::row::AgentRequestRow],
+    before: Option<&gents_protocol::row::AgentRequestRow>,
+) -> u32 {
+    let key = |row: &gents_protocol::row::AgentRequestRow| {
+        (
+            row.created_at.clone().unwrap_or_default(),
+            row.request_id.clone(),
+        )
+    };
+    let bound = before.map(key);
+    rows.iter()
+        .filter(|row| {
+            row.purpose.is_none_or(|purpose| {
+                purpose == gents_protocol::request_admission::RequestPurpose::Normal
+            })
+        })
+        .filter(|row| bound.as_ref().is_none_or(|bound| key(row) < *bound))
+        .max_by_key(|row| key(row))
+        .and_then(|row| row.subagent_depth)
+        .and_then(|hop| u32::try_from(hop).ok())
+        .unwrap_or(0)
+}
+
+fn session_hop_query(agent_did: &str, session_id: &str) -> String {
+    format!(
+        r#"{{ AgentRequest(filter: {{ agent_did: {{ _eq: "{}" }}, session_id: {{ _eq: "{}" }} }}) {{ _docID request_id purpose created_at subagent_depth }} }}"#,
+        escape_graphql_string(agent_did),
+        escape_graphql_string(session_id),
+    )
+}
+
+/// [`session_current_hop`] of a session, read in a caller's transaction.
+pub(crate) async fn load_session_current_hop_in_txn(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    agent_did: &str,
+    session_id: &str,
+) -> Result<u32> {
+    let response = txn
+        .execute(&session_hop_query(agent_did, session_id))
+        .await?;
+    let rows: Vec<gents_protocol::row::AgentRequestRow> =
+        serde_json::from_value(response["data"]["AgentRequest"].clone())
+            .context("decode session requests for its current hop")?;
+    Ok(session_current_hop(&rows, None))
+}
+
+/// [`session_current_hop`] of a session.
+pub(crate) async fn load_session_current_hop(
+    node: &EmbeddedNode,
+    agent_did: &str,
+    session_id: &str,
+) -> Result<u32> {
+    let response = crate::graphql::graphql_with_transaction_retry(
+        node,
+        &session_hop_query(agent_did, session_id),
+        "load a session's current hop",
+    )
+    .await?;
+    let rows =
+        crate::graphql::rows::<gents_protocol::row::AgentRequestRow>(&response, "AgentRequest")?;
+    Ok(session_current_hop(&rows, None))
+}
+
 /// Lean `CausalHop.admitHop`.
 pub fn request_hop_within_bound(max_request_hop: u32, hop: u32) -> bool {
     hop <= max_request_hop
