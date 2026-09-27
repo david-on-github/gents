@@ -97,7 +97,10 @@ pub(crate) mod test_support {
     /// new target must add it here. Enabling every callsite instead would leave
     /// the whole suite dispatching the runtime's per-operation logging, which
     /// costs it an order of magnitude.
-    const CAPTURED_EVENT_TARGETS: &[&str] = &[crate::agent::daemon::REQUEST_INTERRUPT_EVENT_TARGET];
+    const CAPTURED_EVENT_TARGETS: &[&str] = &[
+        crate::agent::daemon::REQUEST_INTERRUPT_EVENT_TARGET,
+        crate::config_client::write_telemetry::WRITE_ATTEMPT_EVENT_TARGET,
+    ];
 
     /// Keeps the captured targets enabled so a scoped subscriber observes them.
     ///
