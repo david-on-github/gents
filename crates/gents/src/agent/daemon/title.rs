@@ -122,10 +122,10 @@ fn title_generation_allowed(max_total_tokens: Option<i64>) -> bool {
 /// (bounded in time by `TITLE_GENERATION_TIMEOUT_SECS`), so a reasoning run
 /// is not truncated into a reasoning-only result by the visible-title cap.
 fn title_max_tokens(
-    behavior: &crate::config::ResolvedBehavior,
+    additional_params: Option<&serde_json::Value>,
     configured: Option<u64>,
 ) -> Option<u64> {
-    if crate::completion_factory::reasoning_disabled_on_wire(behavior) {
+    if crate::completion_factory::params_disable_reasoning(additional_params) {
         Some(TITLE_VISIBLE_MAX_TOKENS)
     } else {
         configured
@@ -308,7 +308,8 @@ impl<M: rig::completion::CompletionModel + 'static> TitleTask<M> {
                     crate::rendered_request::CaptureScopeKind::Title,
                 );
                 config.temperature = Some(0.0);
-                config.max_tokens = title_max_tokens(&self.behavior, config.max_tokens);
+                config.max_tokens =
+                    title_max_tokens(config.additional_params.as_ref(), config.max_tokens);
                 config.max_turns = 1;
                 config.retry_policy =
                     crate::agent::completion_retry::CompletionRetryPolicy::no_retry();

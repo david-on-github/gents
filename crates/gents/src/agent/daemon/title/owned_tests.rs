@@ -1190,43 +1190,115 @@ async fn fenced_title_output_fails_closed_without_retry() {
 
 #[tokio::test]
 async fn title_output_cap_applies_only_when_reasoning_is_disabled_on_the_wire() {
+    use crate::config::ReasoningEffort;
+    use crate::OpenAiWireApi;
     let fixture = TitleFixture::new().await;
     let configured = Some(1024);
+    let capped = Some(super::TITLE_VISIBLE_MAX_TOKENS);
     let mut behavior = (*fixture.behavior).clone();
-    for (kind, effort, expected) in [
-        (BackendProviderKind::OpenAiCompatible, None, configured),
+    let chat = OpenAiWireApi::ChatCompletions;
+    let responses = OpenAiWireApi::Responses;
+    for (kind, wire, effort, expected) in [
         (
             BackendProviderKind::OpenAiCompatible,
-            Some(crate::config::ReasoningEffort::Low),
+            chat,
+            None,
             configured,
         ),
         (
             BackendProviderKind::OpenAiCompatible,
-            Some(crate::config::ReasoningEffort::None),
-            Some(super::TITLE_VISIBLE_MAX_TOKENS),
+            chat,
+            Some(ReasoningEffort::Low),
+            configured,
+        ),
+        (
+            BackendProviderKind::OpenAiCompatible,
+            chat,
+            Some(ReasoningEffort::None),
+            capped,
+        ),
+        (
+            BackendProviderKind::OpenAiCompatible,
+            responses,
+            None,
+            configured,
+        ),
+        (
+            BackendProviderKind::OpenAiCompatible,
+            responses,
+            Some(ReasoningEffort::High),
+            configured,
+        ),
+        (
+            BackendProviderKind::OpenAiCompatible,
+            responses,
+            Some(ReasoningEffort::None),
+            capped,
         ),
         (
             BackendProviderKind::OpenRouter,
-            Some(crate::config::ReasoningEffort::None),
-            Some(super::TITLE_VISIBLE_MAX_TOKENS),
+            chat,
+            Some(ReasoningEffort::None),
+            capped,
+        ),
+        (
+            BackendProviderKind::ChatGptCodex,
+            responses,
+            None,
+            configured,
+        ),
+        (
+            BackendProviderKind::ChatGptCodex,
+            responses,
+            Some(ReasoningEffort::None),
+            capped,
         ),
         (
             BackendProviderKind::XaiGrokOAuth,
-            Some(crate::config::ReasoningEffort::None),
+            chat,
+            Some(ReasoningEffort::None),
             configured,
         ),
         (
             BackendProviderKind::ClaudeCliSubscription,
-            Some(crate::config::ReasoningEffort::None),
+            chat,
+            Some(ReasoningEffort::None),
             configured,
         ),
     ] {
         behavior.backend_provider_kind = kind;
+        behavior.openai_wire_api = wire;
         behavior.sampling.reasoning_effort = effort;
+        let config = crate::completion_factory::loop_config(
+            &behavior,
+            super::title_generation_preamble(),
+            0,
+            crate::rendered_request::CaptureScopeKind::Title,
+        );
         assert_eq!(
-            super::title_max_tokens(&behavior, configured),
+            super::title_max_tokens(config.additional_params.as_ref(), configured),
             expected,
-            "{kind:?} {effort:?}"
+            "{kind:?} {wire:?} {effort:?}"
         );
     }
+
+    // A later merge that re-enables thinking wins over the profile's
+    // reasoning-off setting, so the visible-title cap no longer applies.
+    behavior.backend_provider_kind = BackendProviderKind::OpenAiCompatible;
+    behavior.openai_wire_api = chat;
+    behavior.sampling.reasoning_effort = Some(ReasoningEffort::None);
+    let config = crate::completion_factory::loop_config(
+        &behavior,
+        super::title_generation_preamble(),
+        0,
+        crate::rendered_request::CaptureScopeKind::Title,
+    );
+    let overridden = crate::completion_factory::merge_optional_params(
+        config.additional_params,
+        Some(serde_json::json!({ "chat_template_kwargs": { "enable_thinking": true } })),
+    );
+    assert_eq!(
+        super::title_max_tokens(overridden.as_ref(), configured),
+        configured
+    );
 }

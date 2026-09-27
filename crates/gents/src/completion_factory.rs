@@ -346,18 +346,24 @@ fn reasoning_profile_params(
     }
 }
 
-/// Whether the profile's reasoning setting reaches the provider as an explicit
-/// reasoning-off request (`enable_thinking: false` or `reasoning.effort:
-/// "none"`). Unset effort, Grok (which never receives effort), and Claude
-/// (whose effort does not switch thinking off) leave reasoning possible.
-pub(crate) fn reasoning_disabled_on_wire(behavior: &ResolvedBehavior) -> bool {
-    behavior.sampling.reasoning_effort == Some(ReasoningEffort::None)
-        && matches!(
-            behavior.backend_provider_kind,
-            BackendProviderKind::OpenAiCompatible
-                | BackendProviderKind::OpenRouter
-                | BackendProviderKind::ChatGptCodex
-        )
+/// Whether final rendered provider params explicitly switch reasoning off.
+/// Reads the keys [`reasoning_profile_params`] writes, after every later merge,
+/// so an override of those keys wins. Claude's `output_config.effort` does not
+/// switch thinking off, and Grok receives no effort, so neither counts.
+pub(crate) fn params_disable_reasoning(params: Option<&serde_json::Value>) -> bool {
+    let Some(params) = params else {
+        return false;
+    };
+    if let Some(enabled) = params
+        .pointer("/chat_template_kwargs/enable_thinking")
+        .and_then(serde_json::Value::as_bool)
+    {
+        return !enabled;
+    }
+    params
+        .pointer("/reasoning/effort")
+        .and_then(serde_json::Value::as_str)
+        == Some(ReasoningEffort::None.as_str())
 }
 
 fn provider_additional_params(kind: BackendProviderKind) -> Option<serde_json::Value> {
