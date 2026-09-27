@@ -21,6 +21,10 @@
 //!   live_standard_backgrounding_uses_real_inference -- --ignored --nocapture
 //! ```
 //!
+//! The randomized soak additionally needs `GENTS_LIVE_SOAK=1`;
+//! `GENTS_LIVE_SOAK_ITERS` (default 20) and `GENTS_LIVE_SOAK_SEED` (random
+//! and logged when unset) shape the run.
+//!
 //! The cross-node test starts a session on another principal's node. The
 //! caused `AgentRequest` is authored on the caller's node, replicated to the
 //! target by the `subagent-coordinator` data-plane route, admitted there as a
@@ -3271,6 +3275,520 @@ async fn wait_for_completion_notification(
 }
 
 // ---------------------------------------------------------------------------
+// Test 11: randomized soak over the agents tools
+// ---------------------------------------------------------------------------
+
+const SOAK_GATES: usize = 3;
+
+fn soak_enabled() -> bool {
+    live_enabled() && std::env::var("GENTS_LIVE_SOAK").as_deref() == Ok("1")
+}
+
+/// Logs the seed when the soak fails anywhere, including inside a helper.
+struct SoakSeed(u64);
+
+impl Drop for SoakSeed {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            tracing::error!(
+                seed = self.0,
+                "[live-soak] FAILED; reproduce with GENTS_LIVE_SOAK_SEED={}",
+                self.0
+            );
+        }
+    }
+}
+
+/// Seeded random sequences of `agent_new`, `agent_message` (with and without
+/// interrupt), `agent_interrupt` and `agent_list` from two root sessions over
+/// a pool of answering and blocking agents, with the test releasing blocking
+/// gates at random. After quiescence the durable rows must satisfy the
+/// delegation invariants.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "live: set GENTS_LIVE_SESSION_MESSAGE=1 GENTS_LIVE_SOAK=1 and pass --ignored"]
+async fn live_randomized_soak() -> Result<()> {
+    use rand::{Rng, SeedableRng};
+
+    if !soak_enabled() {
+        return Ok(());
+    }
+    init_live_test_tracing();
+    let seed = std::env::var("GENTS_LIVE_SOAK_SEED")
+        .ok()
+        .map(|seed| seed.parse::<u64>().expect("GENTS_LIVE_SOAK_SEED is a u64"))
+        .unwrap_or_else(rand::random);
+    let iterations = std::env::var("GENTS_LIVE_SOAK_ITERS")
+        .ok()
+        .map(|n| {
+            n.parse::<usize>()
+                .expect("GENTS_LIVE_SOAK_ITERS is a count")
+        })
+        .unwrap_or(20);
+    let _seed_guard = SoakSeed(seed);
+    tracing::info!(
+        seed,
+        iterations,
+        "[live-soak] start; reproduce with GENTS_LIVE_SOAK_SEED={seed}"
+    );
+    let target = live_target();
+    assert_model_available(&target).await;
+
+    let workspace = tempfile::tempdir().expect("soak workspace");
+    let gates = (0..SOAK_GATES)
+        .map(|gate| workspace.path().join(format!("gate-{gate}")))
+        .collect::<Vec<_>>();
+    let fx = LivePrincipal::new(
+        "session-message-live-soak",
+        &target,
+        DELEGATING_ORCHESTRATOR_SYSTEM_PROMPT,
+    )
+    .await;
+    for (behavior_id, name) in [(ALPHA_BEHAVIOR_ID, "alpha"), (BETA_BEHAVIOR_ID, "beta")] {
+        fx.behavior(
+            &target,
+            behavior_id,
+            &code_worker_prompt(name, &code_word("FIRST"), &code_word("SECOND")),
+            "Knows a code word.",
+        )
+        .await;
+    }
+    let gate_rules = gates
+        .iter()
+        .enumerate()
+        .map(|(gate, release)| {
+            format!(
+                "When the latest request is exactly BLOCK_GATE_{gate}, call bash_unrestricted exactly once with these arguments: {}. Wait for it to finish, then reply exactly GATE_{gate}_PASSED.",
+                blocked_bash_args(&format!("GATE_{gate}_STARTED"), release, &format!("GATE_{gate}_PASSED"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fx.behavior(
+        &target,
+        BLOCKER_BEHAVIOR_ID,
+        &format!(
+            "You are agent blocker in an integration test.\n{gate_rules}\nFor any other request, call no tool and reply exactly BLOCKER_IDLE."
+        ),
+        "Runs gated jobs.",
+    )
+    .await;
+    let pool = [
+        ("alpha", ALPHA_BEHAVIOR_ID),
+        ("beta", BETA_BEHAVIOR_ID),
+        ("blocker", BLOCKER_BEHAVIOR_ID),
+    ];
+    authorize_session_targets(
+        fx.node(),
+        &fx.did,
+        &fx.orchestrator,
+        pool.iter()
+            .map(|(name, behavior_id)| fx.target(name, behavior_id))
+            .collect(),
+    )
+    .await;
+    configure_bash_agent_tools(
+        fx.node(),
+        &fx.did,
+        BLOCKER_BEHAVIOR_ID,
+        workspace.path(),
+        Vec::new(),
+    )
+    .await;
+    let agent = fx.boot(workspace.path()).await?;
+
+    let roots = ["session-live-soak-root-0", "session-live-soak-root-1"];
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
+    let message_for = |name: &str, rng: &mut rand::rngs::StdRng| -> String {
+        if name == "blocker" {
+            format!("BLOCK_GATE_{}", rng.random_range(0..SOAK_GATES))
+        } else if rng.random_bool(0.5) {
+            "What is your code word?".to_owned()
+        } else {
+            "What is your second code word?".to_owned()
+        }
+    };
+    // Sessions started so far, with the agent each runs. Interrupts favor
+    // blocker sessions, the ones likely to be busy.
+    let mut started: Vec<(String, &'static str)> = Vec::new();
+    let pick_for_interrupt = |started: &[(String, &'static str)],
+                              rng: &mut rand::rngs::StdRng|
+     -> (String, &'static str) {
+        let blockers = started
+            .iter()
+            .filter(|(_, name)| *name == "blocker")
+            .collect::<Vec<_>>();
+        let (session, name) = if !blockers.is_empty() && rng.random_bool(0.7) {
+            blockers[rng.random_range(0..blockers.len())]
+        } else {
+            &started[rng.random_range(0..started.len())]
+        };
+        (session.clone(), *name)
+    };
+    let agent_new = |name: &str, message: &str| {
+        format!("Call agent_new exactly once now with agent {name:?} and prompt {message:?}. After its receipt arrives, reply exactly OP_DONE and call no other tool.")
+    };
+    for step in 0..iterations {
+        let roll = rng.random_range(0..100);
+        let root = roots[rng.random_range(0..roots.len())];
+        let prompt = if step < roots.len() {
+            // Each root first starts a blocker, so interrupts meet busy sessions.
+            agent_new("blocker", &format!("BLOCK_GATE_{step}"))
+        } else if started.is_empty() || roll < 30 {
+            let (name, _) = pool[rng.random_range(0..pool.len())];
+            agent_new(name, &message_for(name, &mut rng))
+        } else if roll < 55 {
+            let interrupt = rng.random_bool(0.4);
+            let (session, name) = if interrupt {
+                pick_for_interrupt(&started, &mut rng)
+            } else {
+                started[rng.random_range(0..started.len())].clone()
+            };
+            let message = message_for(name, &mut rng);
+            format!("Call agent_message exactly once now with session_id {session:?}, message {message:?} and interrupt {interrupt}. After its receipt arrives, reply exactly OP_DONE and call no other tool.")
+        } else if roll < 72 {
+            let (session, _) = pick_for_interrupt(&started, &mut rng);
+            format!("Call agent_interrupt exactly once now with session_id {session:?}. Then reply exactly OP_DONE and call no other tool.")
+        } else if roll < 88 {
+            "Call agent_list exactly once now, then reply exactly OP_DONE and call no other tool."
+                .to_owned()
+        } else {
+            let gate = rng.random_range(0..SOAK_GATES);
+            std::fs::write(&gates[gate], b"release").expect("release soak gate");
+            tracing::info!(seed, step, gate, "[live-soak] released gate");
+            continue;
+        };
+        let root = if step < roots.len() {
+            roots[step]
+        } else {
+            root
+        };
+        let request_id = format!("req-live-soak-{step}");
+        tracing::info!(seed, step, root, %prompt, "[live-soak] op");
+        fx.request(&request_id, root, &prompt).await;
+        let state =
+            wait_for_request_terminal(fx.node(), &request_id, Duration::from_secs(300)).await;
+        tracing::info!(seed, step, %state, "[live-soak] op settled");
+        for caused in fetch_caused_requests(fx.node(), &request_id).await {
+            if started
+                .iter()
+                .any(|(session, _)| *session == caused.session_id)
+            {
+                continue;
+            }
+            if let Some((name, _)) = pool
+                .iter()
+                .find(|(_, behavior_id)| *behavior_id == caused.behavior_id)
+            {
+                started.push((caused.session_id, *name));
+            }
+        }
+    }
+    for gate in &gates {
+        std::fs::write(gate, b"release").expect("release soak gate");
+    }
+    wait_for_principal_quiescent(fx.node(), &fx.did, Duration::from_secs(900)).await;
+
+    let violations = soak_violations(&fx).await;
+    assert!(
+        violations.is_empty(),
+        "[live-soak] seed={seed} iterations={iterations}: invariant violations: {violations:#?}"
+    );
+    agent.shutdown().await;
+    Ok(())
+}
+
+/// An `agent_new`/`agent_message` row of the principal.
+#[derive(Debug, Clone, Deserialize)]
+struct SessionMessageToolRow {
+    #[serde(rename = "_docID")]
+    doc_id: String,
+    tool_call_id: String,
+    tool_name: String,
+    request_id: String,
+    session_id: String,
+    lifecycle_state: Option<String>,
+    completion_notification_delivered_at: Option<String>,
+}
+
+async fn session_message_tool_rows(
+    node: &EmbeddedNode,
+    agent_did: &str,
+) -> Vec<SessionMessageToolRow> {
+    let query = format!(
+        r#"{{ AgentToolCall(filter: {{ agent_did: {{ _eq: "{}" }}, tool_name: {{ _in: ["{}", "{}"] }} }}) {{ _docID tool_call_id tool_name request_id session_id lifecycle_state completion_notification_delivered_at }} }}"#,
+        escape_graphql_string(agent_did),
+        AGENT_NEW_TOOL_NAME,
+        AGENT_MESSAGE_TOOL_NAME,
+    );
+    let response = node.execute(&query).await;
+    assert!(
+        !response.has_errors(),
+        "query session-message rows failed: {:?}",
+        response.errors
+    );
+    response
+        .data
+        .as_ref()
+        .and_then(|data| data["AgentToolCall"].as_array())
+        .into_iter()
+        .flatten()
+        .map(|row| serde_json::from_value(row.clone()).expect("decode session-message row"))
+        .collect()
+}
+
+/// Wait until every request of the principal is terminal and every
+/// session-message row has settled and delivered its notification, twice in
+/// a row so a wake published by the last settlement is observed.
+async fn wait_for_principal_quiescent(node: &EmbeddedNode, agent_did: &str, timeout: Duration) {
+    let condition = format!(r#"{{ _eq: "{}" }}"#, escape_graphql_string(agent_did));
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut quiet_polls = 0;
+    loop {
+        let requests = requests_where(node, "agent_did", &condition).await;
+        let rows = session_message_tool_rows(node, agent_did).await;
+        let busy_requests = requests
+            .iter()
+            .filter(|row| !row.lifecycle_state.as_deref().is_some_and(is_terminal))
+            .collect::<Vec<_>>();
+        let busy_rows = rows
+            .iter()
+            .filter(|row| {
+                row.lifecycle_state.as_deref() == Some("running")
+                    || row.lifecycle_state.as_deref() == Some("pending")
+            })
+            .collect::<Vec<_>>();
+        if busy_requests.is_empty() && busy_rows.is_empty() {
+            quiet_polls += 1;
+            if quiet_polls >= 2 {
+                return;
+            }
+        } else {
+            quiet_polls = 0;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "principal never became quiescent; busy requests={busy_requests:?}; busy rows={busy_rows:?}"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// Every delegation invariant the durable rows violate.
+async fn soak_violations(fx: &LivePrincipal) -> Vec<String> {
+    let node = fx.node();
+    let max_request_hop = i64::from(
+        ensure_agent_principal(node, &fx.did)
+            .await
+            .expect("principal")
+            .max_request_hop
+            .unwrap_or(8),
+    );
+    let requests = requests_where(
+        node,
+        "agent_did",
+        &format!(r#"{{ _eq: "{}" }}"#, escape_graphql_string(&fx.did)),
+    )
+    .await;
+    let rows = session_message_tool_rows(node, &fx.did).await;
+    let by_id = requests
+        .iter()
+        .map(|row| (row.request_id.as_str(), row))
+        .collect::<std::collections::HashMap<_, _>>();
+    let by_doc = requests
+        .iter()
+        .map(|row| (row.doc_id.as_str(), row))
+        .collect::<std::collections::HashMap<_, _>>();
+    let rows_by_doc = rows
+        .iter()
+        .map(|row| (row.doc_id.as_str(), row))
+        .collect::<std::collections::HashMap<_, _>>();
+    let hop = |row: &SessionRequestRow| row.subagent_depth.unwrap_or(0);
+    let mut violations = Vec::new();
+    let mut caused_per_row = std::collections::HashMap::<&str, usize>::new();
+
+    for request in &requests {
+        let state = request.lifecycle_state.as_deref().unwrap_or("<none>");
+        if !is_terminal(state) {
+            violations.push(format!("non-terminal after quiescence: {request:?}"));
+        }
+        let refused_by_bound = state == "failed"
+            && request
+                .failure_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("max_request_hop"));
+        if hop(request) > max_request_hop && !refused_by_bound {
+            violations.push(format!(
+                "hop {} exceeds max_request_hop {max_request_hop}: {request:?}",
+                hop(request)
+            ));
+        }
+        if request.caused_by_parent_tool_call_id.is_some() {
+            // A request caused by agent_new/agent_message.
+            let Some(parent) = request
+                .caused_by_parent_request_id
+                .as_deref()
+                .and_then(|id| by_id.get(id))
+            else {
+                violations.push(format!(
+                    "caused request names no parent request: {request:?}"
+                ));
+                continue;
+            };
+            let Some(row) = request
+                .caused_by_parent_tool_call_doc_id
+                .as_deref()
+                .and_then(|doc| rows_by_doc.get(doc))
+            else {
+                violations.push(format!(
+                    "caused request names no session-message row: {request:?}"
+                ));
+                continue;
+            };
+            *caused_per_row.entry(row.doc_id.as_str()).or_default() += 1;
+            if Some(row.tool_call_id.as_str()) != request.caused_by_parent_tool_call_id.as_deref()
+                || row.request_id != parent.request_id
+                || row.session_id != parent.session_id
+            {
+                violations.push(format!(
+                    "caused request provenance disagrees with its row: request={request:?} row={row:?} parent={parent:?}"
+                ));
+            }
+            let expected_min = hop(parent) + 1;
+            let hop_ok = if row.tool_name == AGENT_NEW_TOOL_NAME {
+                hop(request) == expected_min && request.session_id != parent.session_id
+            } else {
+                hop(request) >= expected_min
+            };
+            if !hop_ok {
+                violations.push(format!(
+                    "{} hop {} does not follow the rule from caller hop {}: {request:?}",
+                    row.tool_name,
+                    hop(request),
+                    hop(parent)
+                ));
+            }
+            if is_terminal(state) {
+                if !matches!(
+                    row.lifecycle_state.as_deref(),
+                    Some("completed" | "failed" | "cancelled")
+                ) || row.completion_notification_delivered_at.is_none()
+                {
+                    violations.push(format!(
+                        "terminal caused request left its row unsettled or undelivered: request={request:?} row={row:?}"
+                    ));
+                }
+                let notifications = completion_notifications(node, &row.doc_id).await;
+                if notifications.len() != 1 {
+                    violations.push(format!(
+                        "terminal caused request produced {} notifications: request={request:?} row={row:?}",
+                        notifications.len()
+                    ));
+                }
+                for notification in notifications {
+                    let bound = notification
+                        .request_doc_id
+                        .as_deref()
+                        .and_then(|doc| by_doc.get(doc));
+                    if notification.session_id.as_deref() != Some(row.session_id.as_str())
+                        || !bound.is_some_and(|wake| {
+                            wake.session_id == row.session_id
+                                && wake.is_background_completion_wake()
+                        })
+                    {
+                        violations.push(format!(
+                            "notification is not bound to a wake in the caller's session: {notification:?} wake={bound:?} row={row:?}"
+                        ));
+                    }
+                }
+            }
+        } else if request.is_background_completion_wake() {
+            let parent = request
+                .caused_by_parent_request_id
+                .as_deref()
+                .and_then(|id| by_id.get(id));
+            match parent {
+                Some(parent) if parent.session_id == request.session_id => {
+                    if hop(request) < hop(parent) + 1 && !refused_by_bound {
+                        violations.push(format!(
+                            "wake hop {} is not past its session-message completion (owning hop {}): {request:?}",
+                            hop(request),
+                            hop(parent)
+                        ));
+                    }
+                }
+                _ => violations.push(format!(
+                    "wake names no owning request in its session: {request:?}"
+                )),
+            }
+        }
+    }
+    for row in &rows {
+        let caused = caused_per_row
+            .get(row.doc_id.as_str())
+            .copied()
+            .unwrap_or(0);
+        if caused > 1 || (row.lifecycle_state.as_deref() == Some("completed") && caused != 1) {
+            violations.push(format!("row caused {caused} requests: {row:?}"));
+        }
+    }
+
+    // Interrupts reach only their addressed session.
+    let mut addressed = HashSet::new();
+    let mut interrupting = 0;
+    for request in requests.iter().filter(|row| !row.is_title_audit()) {
+        for tool in timeline_tools(&fx.db.node, &request.request_id)
+            .await
+            .into_iter()
+            .filter(|tool| tool.request_id.as_deref() == Some(request.request_id.as_str()))
+        {
+            let args = serde_json::from_str::<serde_json::Value>(&tool.args).unwrap_or_default();
+            let result = tool
+                .result
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                .unwrap_or_default();
+            let interrupts = (tool.tool_name == AGENT_INTERRUPT_TOOL_NAME && result["ok"] == true)
+                || (tool.tool_name == AGENT_MESSAGE_TOOL_NAME && args["interrupt"] == true);
+            if result["status"] == "interrupting" {
+                interrupting += 1;
+            }
+            if interrupts {
+                if let Some(session) = args["session_id"].as_str() {
+                    addressed.insert(session.trim().to_owned());
+                }
+            }
+        }
+    }
+    for request in requests
+        .iter()
+        .filter(|row| row.lifecycle_state.as_deref() == Some("interrupted"))
+    {
+        if !addressed.contains(&request.session_id) {
+            violations.push(format!(
+                "request interrupted in a session no interrupt addressed: {request:?}"
+            ));
+        }
+    }
+    tracing::info!(
+        requests = requests.len(),
+        caused = caused_per_row.len(),
+        wakes = requests
+            .iter()
+            .filter(|row| row.is_background_completion_wake())
+            .count(),
+        interrupted = requests
+            .iter()
+            .filter(|row| row.lifecycle_state.as_deref() == Some("interrupted"))
+            .count(),
+        addressed = addressed.len(),
+        interrupting,
+        max_hop = requests.iter().map(hop).max().unwrap_or(0),
+        "[live-soak] invariant scan"
+    );
+    violations
+}
+
+// ---------------------------------------------------------------------------
 // System prompts
 // ---------------------------------------------------------------------------
 
@@ -3936,11 +4454,14 @@ struct SessionRequestRow {
     #[serde(rename = "_docID")]
     doc_id: String,
     request_id: String,
+    session_id: String,
     lifecycle_state: Option<String>,
     subagent_depth: Option<i64>,
     failure_reason: Option<String>,
     input: Option<RequestInput>,
     caused_by_parent_request_id: Option<String>,
+    caused_by_parent_tool_call_id: Option<String>,
+    caused_by_parent_tool_call_doc_id: Option<String>,
     caused_by_trigger_kind: Option<String>,
     purpose: Option<String>,
     created_at: Option<String>,
