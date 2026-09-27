@@ -27,7 +27,10 @@ pub const BACKGROUND_COMPLETION_WAKE_PROMPT: &str =
 const BACKGROUND_COMPLETION_NOTIFICATION_MESSAGE_PREFIX: &str =
     "background-completion-notification:";
 
-fn background_completion_notification_message_key(stable_id: &str, kind: &str) -> String {
+pub(crate) fn background_completion_notification_message_key(
+    stable_id: &str,
+    kind: &str,
+) -> String {
     format!("{BACKGROUND_COMPLETION_NOTIFICATION_MESSAGE_PREFIX}{stable_id}:{kind}")
 }
 
@@ -42,9 +45,7 @@ mod rendering;
 mod session_message;
 mod side_effects;
 
-pub(crate) use notification_delivery::{
-    append_background_tool_completion, append_session_message_completion,
-};
+pub(crate) use notification_delivery::append_background_tool_completion;
 pub(crate) use observer::run_background_completion_observer;
 pub(crate) use session_message::{settle_running_session_message_rows, settle_session_message_row};
 

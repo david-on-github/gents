@@ -12,19 +12,6 @@ pub(crate) struct ToolNotificationPublication {
     pub(crate) presentation: Vec<gents_protocol::output::PresentationPart>,
 }
 
-/// What caused a completion, for its wake's hop (Lean
-/// `CausalHop.WakeSession`). The hop is computed from the session's current
-/// hop inside the publishing transaction. A wake over the bound is written like
-/// any other and refused at admission, so it becomes the session's latest
-/// request and every later same-session continuation copies its hop.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum CompletionWake {
-    /// A native process completion: copies the session's current hop.
-    Continuation,
-    /// A session-message completion caused by a request at `cause_hop`.
-    CrossSession { cause_hop: u32 },
-}
-
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct BackgroundCompletionGateKey {
     node: usize,
@@ -85,7 +72,7 @@ pub(crate) async fn persist_background_completion_with_message_canonical(
     queue: RequestQueue,
     existing_notification_doc_id: Option<&str>,
     native: &ToolNotificationPublication,
-    wake: CompletionWake,
+    wake: crate::lifecycle::RequestHopCause,
 ) -> Result<EnqueuedBackgroundCompletionInput> {
     anyhow::ensure!(
         queue.source == QueueSource::BackgroundCompletion && queue.policy == QueuePolicy::Coalesce,
@@ -174,7 +161,7 @@ pub(crate) async fn persist_background_completion_with_message(
         wake_content,
         queue,
         existing_notification_doc_id,
-        CompletionWake::Continuation,
+        crate::lifecycle::RequestHopCause::Continuation,
     )
     .await
 }
@@ -189,7 +176,7 @@ pub(crate) async fn persist_background_completion_with_message_waking(
     wake_content: &str,
     queue: RequestQueue,
     existing_notification_doc_id: Option<&str>,
-    wake: CompletionWake,
+    wake: crate::lifecycle::RequestHopCause,
 ) -> Result<EnqueuedBackgroundCompletionInput> {
     use gents_protocol::output::{
         OutputOutcome, OutputSegment, OutputSource, OutputWriter, SegmentRun, SourceClose,
@@ -335,7 +322,7 @@ async fn background_completion_transaction_attempt(
     queue: &RequestQueue,
     existing_notification_doc_id: Option<&str>,
     native: &ToolNotificationPublication,
-    wake: CompletionWake,
+    wake: crate::lifecycle::RequestHopCause,
 ) -> Result<EnqueuedBackgroundCompletionInput> {
     use sha2::{Digest, Sha256};
 
@@ -459,22 +446,13 @@ async fn background_completion_transaction_attempt(
         });
     }
 
-    let current_hop = crate::lifecycle::load_session_current_hop_in_txn(
-        txn,
-        &parent.agent_did,
-        &parent.session_id,
-    )
-    .await?;
-    let wake_hop = match wake {
-        CompletionWake::Continuation => crate::lifecycle::next_request_hop(
-            crate::lifecycle::RequestHopCause::Continuation,
-            current_hop,
-        ),
-        CompletionWake::CrossSession { cause_hop } => crate::lifecycle::next_request_hop(
-            crate::lifecycle::RequestHopCause::CrossSession { cause_hop },
-            current_hop,
-        ),
-    };
+    let current_hop =
+        crate::session::load_session_current_hop_in_txn(txn, &parent.agent_did, &parent.session_id)
+            .await?;
+    // A wake over the bound is written like any other and refused at
+    // admission, so it becomes the session's latest request and every later
+    // same-session continuation copies its hop.
+    let wake_hop = crate::lifecycle::next_request_hop(wake, current_hop);
     let pending_rows: Vec<AgentRequestRow> =
         serde_json::from_value(response["data"]["pending"].clone())
             .context("decode pending AgentRequest rows")?;
@@ -556,29 +534,12 @@ async fn background_completion_transaction_attempt(
                     .doc_id
                     .as_deref()
                     .context("pending wake is missing _docID")?;
-                txn.execute(&format!(
-                    r#"mutation {{
-                        update_AgentRequest(
-                            filter: {{
-                                _docID: {{ _eq: "{}" }},
-                                agent_did: {{ _eq: "{}" }},
-                                lifecycle_state: {{ _eq: "pending" }}
-                            }},
-                            input: {{
-                                lifecycle_state: "superseded",
-                                superseded_by_request: "{}",
-                                superseded_by_request_doc_id: "{}",
-                                failure_reason: "raised to the hop of a later completion",
-                                terminalized_at: "{}",
-                                terminal_redrive_attempts: 0
-                            }}
-                        ) {{ _docID }}
-                    }}"#,
-                    escape_graphql_string(lower_doc_id),
-                    escape_graphql_string(&parent.agent_did),
-                    escape_graphql_string(&request_id),
-                    escape_graphql_string(&doc_id),
-                    escape_graphql_string(&chrono::Utc::now().to_rfc3339()),
+                txn.execute(&super::coalescing::supersede_pending_mutation(
+                    lower_doc_id,
+                    &parent.agent_did,
+                    &request_id,
+                    &doc_id,
+                    "raised to the hop of a later completion",
                 ))
                 .await?;
             }

@@ -347,47 +347,19 @@ impl TriggerEngine {
             node: node_scope,
             ctx: ctx_scope,
         };
-        let rendered = match crate::template::render_template(&intent.task.prompt_template, &scope)
-        {
-            Ok(s) => s,
-            Err(e) => {
-                let result = FireResult::Errored {
-                    error: format!("template: {e}"),
-                };
-                (intent.on_result)(result.clone());
-                return result;
-            }
-        };
-        let rendered_goal_objective = match intent.task.goal_objective_template.as_deref() {
-            Some(template) => match crate::template::render_template(template, &scope) {
-                Ok(objective) => Some(objective),
-                Err(error) => {
-                    let result = FireResult::Errored {
-                        error: format!("goal template: {error}"),
-                    };
-                    (intent.on_result)(result.clone());
-                    return result;
-                }
-            },
-            None if intent.task.goal_token_budget.is_some() => {
-                let result = FireResult::Errored {
-                    error: "goal token budget requires a goal objective template".to_string(),
-                };
-                (intent.on_result)(result.clone());
-                return result;
-            }
-            None => None,
-        };
-        if let Err(error) = crate::goal::validate_task_goal_declaration(
-            rendered_goal_objective.as_deref(),
+        let (rendered, rendered_goal_objective) = match crate::template::render_task(
+            &intent.task.prompt_template,
+            intent.task.goal_objective_template.as_deref(),
             intent.task.goal_token_budget,
+            &scope,
         ) {
-            let result = FireResult::Errored {
-                error: format!("goal declaration: {error}"),
-            };
-            (intent.on_result)(result.clone());
-            return result;
-        }
+            Ok(rendered) => rendered,
+            Err(error) => {
+                let result = FireResult::Errored { error };
+                (intent.on_result)(result.clone());
+                return result;
+            }
+        };
         let concurrency_agent_did = || {
             snapshot
                 .behavior(&intent.task.behavior_id)

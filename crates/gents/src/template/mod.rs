@@ -740,6 +740,24 @@ pub fn task_node_ctx(
     )
 }
 
+/// Render a Task's prompt and its Goal declaration, if any, in `scope`.
+pub(crate) fn render_task(
+    prompt_template: &str,
+    goal_objective_template: Option<&str>,
+    goal_token_budget: Option<i64>,
+    scope: &TemplateScope,
+) -> Result<(String, Option<String>), String> {
+    let prompt =
+        render_template(prompt_template, scope).map_err(|error| format!("template: {error}"))?;
+    let objective = goal_objective_template
+        .map(|template| render_template(template, scope))
+        .transpose()
+        .map_err(|error| format!("goal template: {error}"))?;
+    crate::goal::validate_task_goal_declaration(objective.as_deref(), goal_token_budget)
+        .map_err(|error| format!("goal declaration: {error}"))?;
+    Ok((prompt, objective))
+}
+
 pub fn parse_template_for_validation(template: &str) -> Result<Vec<VariableRef>, TemplateError> {
     if template.len() > MAX_TEMPLATE_BYTES {
         return Err(TemplateError::Parse(format!(

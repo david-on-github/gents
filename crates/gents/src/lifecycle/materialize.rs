@@ -618,78 +618,6 @@ pub fn next_request_hop(cause: RequestHopCause, own: u32) -> u32 {
     }
 }
 
-/// Lean `CausalHop.sessionCurrentHop`: the hop of the session's latest normal
-/// request, `0` for an empty session. `created_at` has whole-second precision,
-/// so several requests can share the latest second with no order between
-/// them; the current hop is the highest hop among them, which errs toward
-/// refusing a continuation, never toward running one below a refusal. Every
-/// same-session continuation copies it and every cross-session cause climbs
-/// past it.
-pub(crate) fn session_current_hop(rows: &[gents_protocol::row::AgentRequestRow]) -> u32 {
-    let at = |row: &gents_protocol::row::AgentRequestRow| {
-        row.created_at
-            .as_deref()
-            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-    };
-    let rows = rows
-        .iter()
-        .filter(|row| {
-            row.purpose.is_none_or(|purpose| {
-                purpose == gents_protocol::request_admission::RequestPurpose::Normal
-            })
-        })
-        .collect::<Vec<_>>();
-    let Some(latest) = rows.iter().map(|row| at(row)).max() else {
-        return 0;
-    };
-    rows.iter()
-        .filter(|row| at(row) == latest)
-        .filter_map(|row| row.subagent_depth)
-        .filter_map(|hop| u32::try_from(hop).ok())
-        .max()
-        .unwrap_or(0)
-}
-
-fn session_hop_query(agent_did: &str, session_id: &str) -> String {
-    format!(
-        r#"{{ AgentRequest(filter: {{ agent_did: {{ _eq: "{}" }}, session_id: {{ _eq: "{}" }} }}) {{ _docID request_id purpose created_at subagent_depth }} }}"#,
-        escape_graphql_string(agent_did),
-        escape_graphql_string(session_id),
-    )
-}
-
-/// [`session_current_hop`] of a session, read in a caller's transaction.
-pub(crate) async fn load_session_current_hop_in_txn(
-    txn: &crate::config_client::ConfigApplyTxn<'_>,
-    agent_did: &str,
-    session_id: &str,
-) -> Result<u32> {
-    let response = txn
-        .execute(&session_hop_query(agent_did, session_id))
-        .await?;
-    let rows: Vec<gents_protocol::row::AgentRequestRow> =
-        serde_json::from_value(response["data"]["AgentRequest"].clone())
-            .context("decode session requests for its current hop")?;
-    Ok(session_current_hop(&rows))
-}
-
-/// [`session_current_hop`] of a session.
-pub(crate) async fn load_session_current_hop(
-    node: &EmbeddedNode,
-    agent_did: &str,
-    session_id: &str,
-) -> Result<u32> {
-    let response = crate::graphql::graphql_with_transaction_retry(
-        node,
-        &session_hop_query(agent_did, session_id),
-        "load a session's current hop",
-    )
-    .await?;
-    let rows =
-        crate::graphql::rows::<gents_protocol::row::AgentRequestRow>(&response, "AgentRequest")?;
-    Ok(session_current_hop(&rows))
-}
-
 /// Lean `CausalHop.admitHop`.
 pub fn request_hop_within_bound(max_request_hop: u32, hop: u32) -> bool {
     hop <= max_request_hop
@@ -718,10 +646,11 @@ pub(crate) struct SessionMessageTarget {
 }
 
 /// Build and sign the request an `agent_new`/`agent_message` call
-/// materializes at `hop` (Lean `CausalHop.nextHop` of a cross-session cause).
-/// This is the single writer of the calling edge (`caused_by_parent_*`). The
-/// caller is the requester and signer: its own principal admits it as
-/// LocalSelf, any other target as Peer under that target's ACP.
+/// materializes at `hop` (Lean `DurableLineage.sessionMessageWrite`). This is
+/// the single writer of the calling edge (`caused_by_parent_*`). The caller is
+/// the requester and signer: its own principal admits it as LocalSelf, any
+/// other target as Peer under that target's ACP. A steering delivery carries
+/// `queue`, which orders it after the busy session's active request.
 pub(crate) async fn build_session_message_request(
     cause: &SessionMessageCause,
     target: &SessionMessageTarget,
@@ -730,6 +659,7 @@ pub(crate) async fn build_session_message_request(
     request_id: &str,
     retry_key: Option<String>,
     hop: u32,
+    queue: Option<gents_protocol::request_input::RequestQueue>,
 ) -> Result<gents_protocol::request_admission::AgentRequestCreate> {
     use gents_protocol::request_admission::{AgentRequestAdmissionRecord, RequestPurpose};
     anyhow::ensure!(
@@ -764,6 +694,7 @@ pub(crate) async fn build_session_message_request(
                 text: text.to_owned(),
                 source: gents_protocol::session::SessionTitleSource::Task,
             }),
+        queue,
         ..Default::default()
     };
     let spec = RequestSpec {
@@ -1137,47 +1068,6 @@ pub(super) async fn apply_request_session_projection(
     session::advance_session_request_observation_in_txn(txn, incoming, &request.content, now)
         .await?;
     Ok(())
-}
-
-#[cfg(test)]
-mod session_hop_tests {
-    use super::session_current_hop;
-
-    fn row(request_id: &str, created_at: &str, hop: i64) -> gents_protocol::row::AgentRequestRow {
-        serde_json::from_value(serde_json::json!({
-            "request_id": request_id,
-            "purpose": "normal",
-            "created_at": created_at,
-            "subagent_depth": hop,
-        }))
-        .unwrap()
-    }
-
-    /// Lean `CausalHop.same_second_tie_takes_the_highest_hop`: a refused
-    /// over-bound wake and a native wake written in the same second read as
-    /// the refused hop, whatever their request ids.
-    #[test]
-    fn a_same_second_tie_takes_the_highest_hop() {
-        let rows = [
-            row("parent", "2026-09-27T05:12:04Z", 0),
-            row("a-refused-wake", "2026-09-27T05:12:05Z", 9),
-            row("z-native-wake", "2026-09-27T05:12:05Z", 3),
-        ];
-        assert_eq!(session_current_hop(&rows), 9);
-        let reversed = [
-            row("parent", "2026-09-27T05:12:04Z", 0),
-            row("z-refused-wake", "2026-09-27T05:12:05Z", 9),
-            row("a-native-wake", "2026-09-27T05:12:05Z", 3),
-        ];
-        assert_eq!(session_current_hop(&reversed), 9);
-        // An earlier second never counts, however high its hop.
-        let later_root = [
-            row("refused-wake", "2026-09-27T05:12:04Z", 9),
-            row("user-root", "2026-09-27T05:12:05Z", 0),
-        ];
-        assert_eq!(session_current_hop(&later_root), 0);
-        assert_eq!(session_current_hop(&[]), 0);
-    }
 }
 
 #[cfg(test)]

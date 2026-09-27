@@ -31,6 +31,9 @@ mod wait_settlement;
 #[path = "tests/process_control_scope.rs"]
 mod process_control_scope;
 
+#[path = "tests/session_message_commit.rs"]
+mod session_message_commit;
+
 #[path = "tests/r4c_private_support.rs"]
 mod r4c_private_support;
 

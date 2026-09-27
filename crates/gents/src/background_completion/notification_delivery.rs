@@ -5,8 +5,12 @@ pub(super) struct SideEffects {
     pub(super) created_wake: bool,
 }
 
-/// Append a native background tool's completion notification and its
-/// coalesced wake, which continues the session at its current hop.
+/// Append a background tool's completion notification and its coalesced
+/// wake, written at `wake`'s hop: a native process continues its session, and
+/// a session-message row's completion is caused by the request it caused. A
+/// wake over the woken principal's bound is still written, after its
+/// notification, and refused at admission.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn append_background_tool_completion(
     node: &EmbeddedNode,
     parent_session_id: &str,
@@ -16,63 +20,7 @@ pub(crate) async fn append_background_tool_completion(
     status: &str,
     result: &str,
     reason: Option<&str>,
-) -> Result<()> {
-    append_completion(
-        node,
-        parent_session_id,
-        parent_request_id,
-        tool_call_doc_id,
-        tool_name,
-        status,
-        result,
-        reason,
-        None,
-    )
-    .await
-}
-
-/// Append the completion of a session-message row whose caused request, at
-/// `caused_hop`, reached its terminal. Its wake is caused by that other
-/// session (Lean `DurableLineage.ContinuationKind.sessionMessageCompletionWake`);
-/// one over the woken principal's bound is written and refused at admission,
-/// after its notification (Lean `CausalHop.WakeSession`).
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn append_session_message_completion(
-    node: &EmbeddedNode,
-    parent_session_id: &str,
-    parent_request_id: &str,
-    tool_call_doc_id: &str,
-    tool_name: &str,
-    status: &str,
-    result: &str,
-    reason: Option<&str>,
-    caused_hop: u32,
-) -> Result<()> {
-    append_completion(
-        node,
-        parent_session_id,
-        parent_request_id,
-        tool_call_doc_id,
-        tool_name,
-        status,
-        result,
-        reason,
-        Some(caused_hop),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn append_completion(
-    node: &EmbeddedNode,
-    parent_session_id: &str,
-    parent_request_id: &str,
-    tool_call_doc_id: &str,
-    tool_name: &str,
-    status: &str,
-    result: &str,
-    reason: Option<&str>,
-    cross_session_cause_hop: Option<u32>,
+    wake: crate::lifecycle::RequestHopCause,
 ) -> Result<()> {
     // Load the parent request up front so the completion notification is stamped
     // with the parent session's owning agent_did.
@@ -90,10 +38,6 @@ async fn append_completion(
     let existing_text = match &existing {
         Some(existing) => stored_notification_text(node, &parent_request, &existing.doc_id).await,
         None => None,
-    };
-    let wake = match cross_session_cause_hop {
-        None => crate::lifecycle::queue::CompletionWake::Continuation,
-        Some(cause_hop) => crate::lifecycle::queue::CompletionWake::CrossSession { cause_hop },
     };
     let render = |budget: usize| {
         tool_completion_presentation(&tool_call_id, tool_name, status, result, reason, budget)
@@ -230,7 +174,7 @@ pub(super) async fn ensure_notification_delivery(
     existing: Option<side_effects::ExistingNotification>,
     content: &str,
     message_key: &str,
-    wake: crate::lifecycle::queue::CompletionWake,
+    wake: crate::lifecycle::RequestHopCause,
     native: Option<crate::lifecycle::queue::ToolNotificationPublication>,
 ) -> Result<SideEffects> {
     let native = native.context("background notification requires its canonical provenance")?;

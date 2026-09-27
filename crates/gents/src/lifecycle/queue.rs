@@ -31,7 +31,7 @@ pub(crate) use atomic_inputs::persist_background_completion_with_message_waking;
 use atomic_inputs::steering_transaction_attempt;
 #[cfg(test)]
 use atomic_inputs::transaction_created_doc_id;
-pub(crate) use atomic_inputs::{CompletionWake, ToolNotificationPublication};
+pub(crate) use atomic_inputs::ToolNotificationPublication;
 pub use coalescing::reconcile_coalesced_pending_request;
 use coalescing::{
     parent_behavior_id, queue_row_to_enqueued_request, row_matches_coalesced_source_and_key,
@@ -40,9 +40,6 @@ pub(crate) use draining::drain_automated_wakeups_in_txn;
 pub use enqueue::enqueue_local_steering_request;
 #[cfg(test)]
 pub(crate) use enqueue::enqueue_steering_request;
-pub(crate) use enqueue::{
-    append_prepared_steering_in_txn, prepare_steering_append, PreparedSteering,
-};
 pub use gents_protocol::request_input::{
     GoalContinuationInput, QueuePolicy, QueueSource, RequestInput, RequestQueue,
 };

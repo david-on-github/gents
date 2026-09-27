@@ -71,6 +71,20 @@ async fn graphql_response_with_policy(
 ///
 /// This is the low-level form for callers that intentionally inspect GraphQL
 /// errors. Most callers should use [`graphql_with_transaction_retry`].
+/// Render a GraphQL string-list literal, emitting `null` for an empty list
+/// (never `[]`, which types as `JsonArray` and corrupts nillable array columns).
+pub(crate) fn graphql_string_list_literal<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
+    let items = values
+        .into_iter()
+        .map(|value| format!(r#""{}""#, escape_graphql_string(value)))
+        .collect::<Vec<_>>();
+    if items.is_empty() {
+        "null".to_string()
+    } else {
+        format!("[{}]", items.join(", "))
+    }
+}
+
 pub async fn graphql_response_with_transaction_retry(
     node: &EmbeddedNode,
     graphql: &str,

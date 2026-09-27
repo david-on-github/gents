@@ -142,13 +142,10 @@ impl super::ToolCallLifecycle {
         agent_did: &str,
         executions: &crate::hook::BackgroundExecutionRegistry,
     ) -> Result<ToolCallRecoveryReport> {
-        let tool_calls_recovered =
-            crate::background_completion::settle_running_session_message_rows(node, agent_did)
+        let tool_calls_recovered = recover_stuck_running_tool_calls(node, agent_did).await?
+            + Self::reconcile_orphaned_background_tools(node, agent_did, executions)
                 .await?
-                + recover_stuck_running_tool_calls(node, agent_did).await?
-                + Self::reconcile_orphaned_background_tools(node, agent_did, executions)
-                    .await?
-                    .tool_calls_terminalized;
+                .tool_calls_terminalized;
         let notifications_repaired =
             Self::reconcile_background_completion_side_effects(node, agent_did)
                 .await?
@@ -492,6 +489,7 @@ impl super::ToolCallLifecycle {
                 status,
                 "",
                 Some(reason),
+                crate::lifecycle::RequestHopCause::Continuation,
             )
             .await
             {
@@ -559,11 +557,13 @@ impl super::ToolCallLifecycle {
             };
             // A session-message completion's wake climbs past its caused
             // request; a kill or an unbound verdict continues this session.
-            let caused_hop = if crate::toolset::is_session_message_tool(&row.tool_name)
+            let wake = if crate::toolset::is_session_message_tool(&row.tool_name)
                 && !matches!(reason, Some("explicit_cancel" | "caused_request_unbound"))
             {
                 match session_message_caused_hop(node, &row, agent_did, session_id).await {
-                    Ok(Some(hop)) => Some(hop),
+                    Ok(Some(cause_hop)) => {
+                        crate::lifecycle::RequestHopCause::CrossSession { cause_hop }
+                    }
                     Ok(None) => continue,
                     Err(error) => {
                         tracing::warn!(doc_id = %row.doc_id, error = %format!("{error:#}"), "session-message completion cause is unresolved");
@@ -571,37 +571,20 @@ impl super::ToolCallLifecycle {
                     }
                 }
             } else {
-                None
+                crate::lifecycle::RequestHopCause::Continuation
             };
-            let appended = match caused_hop {
-                Some(caused_hop) => {
-                    crate::background_completion::append_session_message_completion(
-                        node,
-                        session_id,
-                        request_id,
-                        &row.doc_id,
-                        &row.tool_name,
-                        status,
-                        &output,
-                        reason,
-                        caused_hop,
-                    )
-                    .await
-                }
-                None => {
-                    crate::background_completion::append_background_tool_completion(
-                        node,
-                        session_id,
-                        request_id,
-                        &row.doc_id,
-                        &row.tool_name,
-                        status,
-                        &output,
-                        reason,
-                    )
-                    .await
-                }
-            };
+            let appended = crate::background_completion::append_background_tool_completion(
+                node,
+                session_id,
+                request_id,
+                &row.doc_id,
+                &row.tool_name,
+                status,
+                &output,
+                reason,
+                wake,
+            )
+            .await;
             match appended {
                 Ok(()) => report.side_effects_converged += 1,
                 Err(error) => tracing::warn!(
@@ -946,6 +929,7 @@ async fn append_recovered_background_tool_completion(
         status,
         "",
         Some(reason),
+        crate::lifecycle::RequestHopCause::Continuation,
     )
     .await
     {

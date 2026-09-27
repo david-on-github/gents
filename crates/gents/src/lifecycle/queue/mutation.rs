@@ -31,8 +31,8 @@ pub(super) async fn session_request_create_mutation(
 }
 
 /// A control continuation of `parent` written at `hop` (Lean
-/// `DurableLineage.ContinuationKind.hop`): the parent's own hop for a
-/// same-session continuation, higher for one caused by another session.
+/// `CausalHop.nextHop`): the session's current hop for a same-session
+/// continuation, higher for a wake caused by another session.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn session_request_create_mutation_at_hop(
     parent: &AgentRequest,

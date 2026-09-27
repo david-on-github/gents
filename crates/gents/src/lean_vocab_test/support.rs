@@ -110,6 +110,9 @@ pub(crate) struct LeanContractSnapshot {
     /// `Conformance.CausalHopContracts`: materialized hops and admission
     /// verdicts evaluated by `CausalHop.nextHop`/`CausalHop.admitHop`.
     pub(crate) causal_hop_contract: LeanCausalHopContract,
+    /// `ScopeTemplates` per-collection route rules, by Lean definition name.
+    pub(crate) scope_collection_rules:
+        std::collections::BTreeMap<String, Vec<LeanScopeCollectionRule>>,
     pub(crate) title_request_admission_cases: Vec<LeanTitleRequestAdmissionCase>,
     pub(crate) title_request_purpose_wire_cases: Vec<LeanTitleRequestPurposeWireCase>,
     pub(crate) title_usage_cases: Vec<LeanTitleUsageCase>,
@@ -170,6 +173,8 @@ pub(crate) struct LeanContractSnapshot {
     pub(crate) queued_steering_guard_cases: Vec<LeanQueuedSteeringGuardCase>,
     pub(crate) queue_deadline_conformance_cases: Vec<LeanQueueDeadlineConformanceCase>,
     pub(crate) recovery_sweep_cases: Vec<LeanRecoverySweepCase>,
+    /// `Recovery.killCases`: each kill observation with `killAction` of it.
+    pub(crate) session_message_kill_cases: Vec<LeanKillCase>,
     // `recovery_equivalence_cases` was deleted from the generated contract:
     // the synthetic recovery-equivalence fixtures are gone and the actual
     // recovery sweep (`recovery_sweep_cases`) is the remaining owner.
@@ -980,11 +985,40 @@ pub(crate) struct LeanAgentRequestAdmissionCase {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct LeanScopeCollectionRule {
+    pub(crate) collection: String,
+    pub(crate) field: String,
+    pub(crate) source: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LeanKillCase {
+    pub(crate) observation: String,
+    pub(crate) action: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct LeanCausalHopContract {
     pub(crate) default_max_request_hop: u32,
     pub(crate) step_cases: Vec<LeanCausalHopStepCase>,
     pub(crate) chain_cases: Vec<LeanCausalHopChainCase>,
     pub(crate) interrupt_cases: Vec<LeanAgentInterruptCase>,
+    pub(crate) write_cases: Vec<LeanSessionMessageWriteCase>,
+}
+
+/// One delivered session message (`DurableLineage.sessionMessageWrite`).
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LeanSessionMessageWriteCase {
+    pub(crate) name: String,
+    pub(crate) delivery: String,
+    pub(crate) caller_hop: u32,
+    pub(crate) own_hop: u32,
+    pub(crate) expected_hop: u32,
+    pub(crate) names_caller_tool_call: bool,
+    pub(crate) queued_after_active: bool,
 }
 
 /// One agent-interrupt permission question (`DurableLineage.interruptAllowed`).

@@ -311,7 +311,7 @@ impl ToolCallLifecycle {
         self.ensure_state(&[ToolCallState::Pending], "spawn_failed")?;
 
         let _ = command_denial;
-        let _ = self
+        let failed = self
             .terminalize_with_delivery(
                 ToolCallState::Pending,
                 super::super::delivery::TerminalFields {
@@ -324,6 +324,11 @@ impl ToolCallLifecycle {
                 "tool_call.spawn_failed_delivery",
             )
             .await?;
+        anyhow::ensure!(
+            failed,
+            "spawn_failed lost its pending compare for tool_call_id={}",
+            self.tool_call_id
+        );
         Ok(())
     }
 

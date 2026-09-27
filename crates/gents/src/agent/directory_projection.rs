@@ -23,7 +23,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::persona_presets::{builtin_preset_names, classify_tools};
 #[cfg(test)]
 use crate::graphql::ensure_no_errors;
-use crate::graphql::{escape_graphql_string, rows};
+use crate::graphql::{escape_graphql_string, graphql_string_list_literal, rows};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DirectoryEntry {
@@ -636,21 +636,6 @@ fn delete_directory_entry_mutation(source_did: &str, agent_did: &str) -> String 
             }}) {{ _docID }}
         }}"#
     )
-}
-
-/// Renders a GraphQL string-list literal. Empty renders as `null`, never
-/// `[]` — an empty list literal types as `JsonArray` and corrupts nillable
-/// array columns.
-fn graphql_string_list_literal<'a>(values: impl IntoIterator<Item = &'a str>) -> String {
-    let items = values
-        .into_iter()
-        .map(|value| format!(r#""{}""#, escape_graphql_string(value)))
-        .collect::<Vec<_>>();
-    if items.is_empty() {
-        "null".to_string()
-    } else {
-        format!("[{}]", items.join(", "))
-    }
 }
 
 fn graphql_nullable_datetime_literal(value: &str) -> String {

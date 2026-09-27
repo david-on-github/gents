@@ -4,7 +4,8 @@
 
 use crate::identity::AgentIdentity;
 use crate::tool_call_lifecycle::admission_fixture::{
-    complete_child, published_admission, published_session_message, PublishedAdmissionOptions,
+    complete_child, published_admission, published_session_message, PublishedAdmission,
+    PublishedAdmissionOptions,
 };
 use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
 use std::sync::Arc;
@@ -151,6 +152,29 @@ async fn generated_native_missing_parent_restart_cases_defer() {
     }
 }
 
+async fn settle(admission: &PublishedAdmission) -> usize {
+    crate::background_completion::settle_running_session_message_rows(
+        &admission.node,
+        &admission.agent_did,
+    )
+    .await
+    .unwrap()
+}
+
+fn assert_notification_reason(
+    notification: &str,
+    case: &crate::lean_vocab_test::LeanRecoverySweepCase,
+) {
+    match case.notification_reason.as_deref() {
+        Some(reason) => assert!(
+            notification.contains(&format!("<reason>{reason}</reason>")),
+            "{}: {notification}",
+            case.name
+        ),
+        None => assert!(!notification.contains("<reason>"), "{}", case.name),
+    }
+}
+
 /// An `agent_new`/`agent_message` row ends only on the terminal of the
 /// request it caused. The Lean row carries the observed
 /// cause; the fixture builds exactly that premise on an accepted call whose
@@ -187,14 +211,8 @@ async fn generated_session_message_recovery_cases_use_accepted_call() {
             .expect("publish a running session-message row without a receipt");
             let tool_doc_id = admission.tool.doc_id().unwrap().to_owned();
             let session_id = admission.tool.session_id().to_owned();
-            let report = ToolCallLifecycle::recover_all(&admission.node, &admission.agent_did)
-                .await
-                .unwrap();
-            assert_eq!(
-                report.tool_calls_recovered,
-                case.measure_before - case.measure_after,
-                "{name}"
-            );
+            let settled = settle(&admission).await;
+            assert_eq!(settled, case.measure_before - case.measure_after, "{name}");
             let escaped = crate::graphql::escape_graphql_string(&tool_doc_id);
             let response = admission
                 .node
@@ -217,14 +235,8 @@ async fn generated_session_message_recovery_cases_use_accepted_call() {
                 1,
                 "{name}: fails closed with a notification"
             );
-            assert!(
-                notifications[0].contains("caused_request_unbound"),
-                "{name}"
-            );
-            let second = ToolCallLifecycle::recover_all(&admission.node, &admission.agent_did)
-                .await
-                .unwrap();
-            assert_eq!(second.tool_calls_recovered, 0, "{name}: fails closed once");
+            assert_notification_reason(&notifications[0], case);
+            assert_eq!(settle(&admission).await, 0, "{name}: fails closed once");
             admission.node.shutdown().await;
             std::fs::remove_dir_all(admission.path).expect("remove exact recovery fixture");
             continue;
@@ -264,14 +276,8 @@ async fn generated_session_message_recovery_cases_use_accepted_call() {
             )
             .await;
         }
-        let report = ToolCallLifecycle::recover_all(&admission.node, &admission.agent_did)
-            .await
-            .unwrap();
-        assert_eq!(
-            report.tool_calls_recovered,
-            case.measure_before - case.measure_after,
-            "{name}"
-        );
+        let settled = settle(admission).await;
+        assert_eq!(settled, case.measure_before - case.measure_after, "{name}");
         let escaped = crate::graphql::escape_graphql_string(&tool_doc_id);
         let response = admission
             .node
@@ -290,10 +296,12 @@ async fn generated_session_message_recovery_cases_use_accepted_call() {
         if case.terminal_state == "cancelled" {
             assert_eq!(row["cancel_cause"], "interrupted", "{name}");
         }
-        let second = ToolCallLifecycle::recover_all(&admission.node, &admission.agent_did)
-            .await
-            .unwrap();
-        assert_eq!(second.tool_calls_recovered, 0, "{name}");
+        let session_id = admission.tool.session_id().to_owned();
+        let (notifications, _) =
+            completion_obligations(&admission.node, &session_id, &admission.agent_did).await;
+        assert_eq!(notifications.len(), 1, "{name}");
+        assert_notification_reason(&notifications[0], case);
+        assert_eq!(settle(admission).await, 0, "{name}");
         message.admission.node.shutdown().await;
         std::fs::remove_dir_all(&message.admission.path).expect("remove exact recovery fixture");
     }
@@ -378,166 +386,106 @@ async fn caused_result_is_delivered_after_the_row_outlives_its_stored_deadline()
     std::fs::remove_dir_all(&message.admission.path).expect("remove exact recovery fixture");
 }
 
-/// Lean `Recovery.killAction` `unresolved`: a kill ends a row that names no
-/// caused request directly, with a cancelled notification.
-#[tokio::test]
-async fn kill_cancels_a_row_that_names_no_caused_request() {
-    let admission = published_admission(PublishedAdmissionOptions {
-        name: "kill-unresolved-session-message".to_owned(),
+/// A running session-message row with the caused request a kill observes
+/// (Lean `Recovery.KillObservation`).
+async fn kill_fixture(observation: &str) -> (PublishedAdmission, Option<String>) {
+    let options = |start_running| PublishedAdmissionOptions {
+        name: format!("kill-session-message-{observation}"),
         real_identity: true,
         await_mode: AwaitMode::Background,
         tool_name: Some(crate::toolset::AGENT_NEW_TOOL_NAME.to_owned()),
-        start_running: true,
+        start_running,
         ..Default::default()
-    })
-    .await
-    .expect("publish a running session-message row without a receipt");
-    let mut tool = admission.tool;
-    let session_id = tool.session_id().to_owned();
-    assert_eq!(
-        crate::session_message::kill(&admission.node, &mut tool)
+    };
+    match observation {
+        "unresolved" => (published_admission(options(true)).await.unwrap(), None),
+        "causedLiveRemote" => {
+            let (mut admission, request) =
+                crate::tool_call_lifecycle::admission_fixture::published_admission_with_owner(
+                    options(false),
+                )
+                .await
+                .unwrap();
+            crate::tool_call_lifecycle::admission_fixture::materialize_session_message(
+                &admission.node,
+                &request,
+                &mut admission.tool,
+                "did:key:z6MkpeerRemoteSessionMessageTarget",
+                "work on the peer",
+            )
             .await
-            .unwrap(),
-        crate::session_message::KillOutcome::Cancelled
-    );
-    assert_eq!(
-        tool.state(),
-        crate::tool_call_lifecycle::ToolCallState::Cancelled
-    );
-    let (notifications, _) =
-        completion_obligations(&admission.node, &session_id, &admission.agent_did).await;
-    assert_eq!(notifications.len(), 1, "{notifications:?}");
-    assert!(notifications[0].contains("explicit_cancel"));
-    admission.node.shutdown().await;
-    std::fs::remove_dir_all(admission.path).unwrap();
-}
-
-/// Lean `Recovery.killAction` `causedLiveLocal`: the kill interrupts the local
-/// caused request and leaves the row to settle from that terminal.
-#[tokio::test]
-async fn kill_interrupts_a_live_local_caused_request() {
-    let message = published_session_message(PublishedAdmissionOptions {
-        name: "kill-live-local-session-message".to_owned(),
-        real_identity: true,
-        await_mode: AwaitMode::Background,
-        ..Default::default()
-    })
-    .await
-    .expect("publish accepted session message and materialize its request");
-    let mut tool = message.admission.tool;
-    let node = message.admission.node.clone();
-    assert_eq!(
-        crate::session_message::kill(&node, &mut tool)
-            .await
-            .unwrap(),
-        crate::session_message::KillOutcome::Interrupting {
-            request_id: message.caused_request_id.clone(),
+            .unwrap();
+            (admission, None)
         }
-    );
-    assert!(tool.is_running());
-    let response = node
-        .execute(&format!(
-            r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ interrupt_requested_at lifecycle_state }} }}"#,
-            crate::graphql::escape_graphql_string(&message.caused_request_doc_id)
-        ))
-        .await;
-    assert!(!response.has_errors(), "{:?}", response.errors);
-    let caused = &response.data.unwrap()["AgentRequest"][0];
-    assert!(
-        caused["interrupt_requested_at"].is_string() || caused["lifecycle_state"] == "interrupted",
-        "{caused}"
-    );
-    node.shutdown().await;
-    std::fs::remove_dir_all(&message.admission.path).unwrap();
+        "causedLiveLocal" | "causedTerminal" => {
+            let message = published_session_message(options(false)).await.unwrap();
+            if observation == "causedTerminal" {
+                complete_child(
+                    &message.admission.node,
+                    &message.caused_request_id,
+                    &message.admission.agent_did,
+                    "finished before the kill",
+                )
+                .await;
+            }
+            (message.admission, Some(message.caused_request_id))
+        }
+        other => panic!("unknown Lean kill observation {other}"),
+    }
 }
 
-/// Lean `Recovery.killAction` `causedTerminal`: a kill after the caused
-/// request ended settles the row from that terminal and delivers its result.
+/// Lean `Recovery.killAction` over every kill observation: a kill settles from
+/// an observed terminal, waits only on a local caused request it interrupted,
+/// and otherwise cancels the row now with a cancelled notification.
 #[tokio::test]
-async fn kill_settles_a_row_whose_caused_request_ended() {
-    let message = published_session_message(PublishedAdmissionOptions {
-        name: "kill-terminal-session-message".to_owned(),
-        real_identity: true,
-        await_mode: AwaitMode::Background,
-        ..Default::default()
-    })
-    .await
-    .expect("publish accepted session message and materialize its request");
-    let node = message.admission.node.clone();
-    let did = message.admission.agent_did.clone();
-    let session_id = message.admission.tool.session_id().to_owned();
-    complete_child(
-        &node,
-        &message.caused_request_id,
-        &did,
-        "finished before the kill",
-    )
-    .await;
-    let mut tool = message.admission.tool;
-    assert_eq!(
-        crate::session_message::kill(&node, &mut tool)
+async fn generated_kill_cases_drive_the_session_message_kill() {
+    use crate::session_message::KillOutcome;
+    use crate::tool_call_lifecycle::ToolCallState;
+    let cases = &crate::lean_vocab_test::lean_contract_snapshot().session_message_kill_cases;
+    assert_eq!(cases.len(), 4);
+    for case in cases {
+        let (admission, caused_request_id) = kill_fixture(&case.observation).await;
+        let node = admission.node.clone();
+        let did = admission.agent_did.clone();
+        let session_id = admission.tool.session_id().to_owned();
+        let mut tool = admission.tool;
+        let outcome = crate::session_message::kill(&node, &mut tool)
             .await
-            .unwrap(),
-        crate::session_message::KillOutcome::Settled
-    );
-    assert_eq!(
-        tool.state(),
-        crate::tool_call_lifecycle::ToolCallState::Completed
-    );
-    let (notifications, _) = completion_obligations(&node, &session_id, &did).await;
-    assert_eq!(notifications.len(), 1, "{notifications:?}");
-    assert!(notifications[0].contains("finished before the kill"));
-    node.shutdown().await;
-    std::fs::remove_dir_all(&message.admission.path).unwrap();
+            .unwrap();
+        let (notifications, _) = completion_obligations(&node, &session_id, &did).await;
+        match case.action.as_str() {
+            "settle" => {
+                assert_eq!(outcome, KillOutcome::Settled, "{case:?}");
+                assert_eq!(tool.state(), ToolCallState::Completed, "{case:?}");
+                assert_eq!(notifications.len(), 1, "{notifications:?}");
+                assert!(notifications[0].contains("finished before the kill"));
+            }
+            "interruptCaused" => {
+                assert_eq!(
+                    outcome,
+                    KillOutcome::Interrupting {
+                        request_id: caused_request_id.unwrap()
+                    },
+                    "{case:?}"
+                );
+                assert!(tool.is_running(), "{case:?}");
+                assert!(notifications.is_empty(), "{notifications:?}");
+            }
+            "interruptAndCancelRow" | "cancelRow" => {
+                assert_eq!(outcome, KillOutcome::Cancelled, "{case:?}");
+                assert_eq!(tool.state(), ToolCallState::Cancelled, "{case:?}");
+                assert_eq!(notifications.len(), 1, "{notifications:?}");
+                assert!(notifications[0].contains("explicit_cancel"));
+            }
+            other => panic!("unknown Lean kill action {other}"),
+        }
+        node.shutdown().await;
+        std::fs::remove_dir_all(admission.path).unwrap();
+    }
 }
 
-/// Lean `Recovery.killAction` `causedLiveRemote`: a kill never waits on a
-/// peer; it asks the peer to interrupt and cancels the row now.
-#[tokio::test]
-async fn kill_cancels_a_row_whose_caused_request_runs_on_a_peer() {
-    let (mut admission, request) =
-        crate::tool_call_lifecycle::admission_fixture::published_admission_with_owner(
-            PublishedAdmissionOptions {
-                name: "kill-remote-session-message".to_owned(),
-                real_identity: true,
-                await_mode: AwaitMode::Background,
-                tool_name: Some(crate::toolset::AGENT_NEW_TOOL_NAME.to_owned()),
-                start_running: false,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-    let node = admission.node.clone();
-    crate::tool_call_lifecycle::admission_fixture::materialize_session_message(
-        &node,
-        &request,
-        &mut admission.tool,
-        "did:key:z6MkpeerRemoteSessionMessageTarget",
-        "work on the peer",
-    )
-    .await
-    .unwrap();
-    let session_id = admission.tool.session_id().to_owned();
-    let mut tool = admission.tool;
-    assert_eq!(
-        crate::session_message::kill(&node, &mut tool)
-            .await
-            .unwrap(),
-        crate::session_message::KillOutcome::Cancelled
-    );
-    assert_eq!(
-        tool.state(),
-        crate::tool_call_lifecycle::ToolCallState::Cancelled
-    );
-    let (notifications, _) = completion_obligations(&node, &session_id, &admission.agent_did).await;
-    assert_eq!(notifications.len(), 1, "{notifications:?}");
-    assert!(notifications[0].contains("explicit_cancel"));
-    node.shutdown().await;
-    std::fs::remove_dir_all(admission.path).unwrap();
-}
-
-/// Lean `CausalHop.WakeSession` through real admission: a session-message
+/// Lean `CausalHop.same_second_tie_takes_the_highest_hop` through real
+/// admission: a session-message
 /// completion whose wake is over the woken principal's bound still delivers
 /// its notification; admission refuses the wake as a visible failure; and a
 /// later native completion wake copies the refused hop and is refused too.
@@ -670,7 +618,7 @@ async fn an_over_bound_completion_notifies_and_admission_refuses_its_wakes() {
             background_completion_wake_version: None,
         },
         None,
-        crate::lifecycle::queue::CompletionWake::Continuation,
+        crate::lifecycle::RequestHopCause::Continuation,
     )
     .await
     .unwrap();

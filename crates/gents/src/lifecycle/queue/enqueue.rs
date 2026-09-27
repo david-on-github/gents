@@ -30,41 +30,6 @@ pub(crate) async fn enqueue_steering_request(
     content: &str,
     input: RequestInput,
 ) -> Result<EnqueuedAgentRequest> {
-    // Lean `DurableLineage.own_session_continuations_copy`: user steering is
-    // written at the session's current hop.
-    let hop =
-        crate::lifecycle::load_session_current_hop(node, &parent.agent_did, &parent.session_id)
-            .await?;
-    let prepared = prepare_steering_append(parent, content, input, hop).await?;
-    let prepared = &prepared;
-    crate::config_client::ConfigAccess::transact_local(
-        node,
-        None,
-        "lifecycle.enqueue_steering",
-        move |txn| {
-            Box::pin(async move { append_prepared_steering_in_txn(txn, parent, prepared).await })
-        },
-    )
-    .await
-}
-
-/// A signed steering append beneath one exact committed parent, ready to be
-/// written inside a caller's transaction.
-pub(crate) struct PreparedSteering {
-    request_id: String,
-    mutation: String,
-}
-
-/// Build and sign one unkeyed user- or steering-sourced append at `hop`. A
-/// user append is a same-session continuation at the session's current hop; a
-/// steering append is agent-authored by another session and climbs past its
-/// caller (Lean `DurableLineage.ContinuationKind`).
-pub(crate) async fn prepare_steering_append(
-    parent: &AgentRequest,
-    content: &str,
-    input: RequestInput,
-    hop: u32,
-) -> Result<PreparedSteering> {
     let queue = input
         .queue
         .as_ref()
@@ -79,32 +44,41 @@ pub(crate) async fn prepare_steering_append(
         queue.background_completion_wake_version.is_none(),
         "steering enqueue must not carry the background wake marker"
     );
-
     let behavior_id = parent_behavior_id(parent)?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let mutation = session_request_create_mutation_at_hop(
-        parent,
-        hop,
-        &behavior_id,
-        content,
-        ExecutionOrigin::Interactive,
-        input,
-        &request_id,
-        &now,
+    let (behavior_id, content, input, request_id, now) =
+        (&behavior_id, content, &input, &request_id, &now);
+    crate::config_client::ConfigAccess::transact_local(
+        node,
         None,
+        "lifecycle.enqueue_steering",
+        move |txn| {
+            Box::pin(async move {
+                // Lean `CausalHop.continuation_preserves_hop`: user steering
+                // copies the session's current hop, read under the write gate
+                // so a higher append committed first is never missed.
+                let hop = crate::session::load_session_current_hop_in_txn(
+                    txn,
+                    &parent.agent_did,
+                    &parent.session_id,
+                )
+                .await?;
+                let mutation = session_request_create_mutation_at_hop(
+                    parent,
+                    hop,
+                    behavior_id,
+                    content,
+                    ExecutionOrigin::Interactive,
+                    input.clone(),
+                    request_id,
+                    now,
+                    None,
+                )
+                .await?;
+                steering_transaction_attempt(txn, parent, request_id, &mutation).await
+            })
+        },
     )
-    .await?;
-    Ok(PreparedSteering {
-        request_id,
-        mutation,
-    })
-}
-
-pub(crate) async fn append_prepared_steering_in_txn(
-    txn: &ConfigApplyTxn<'_>,
-    parent: &AgentRequest,
-    prepared: &PreparedSteering,
-) -> Result<EnqueuedAgentRequest> {
-    steering_transaction_attempt(txn, parent, &prepared.request_id, &prepared.mutation).await
+    .await
 }

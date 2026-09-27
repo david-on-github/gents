@@ -1481,14 +1481,6 @@ async fn terminalize_transaction(
         }),
         created_at: now.to_rfc3339_opts(SecondsFormat::Nanos, true),
     };
-    let segment_response = txn
-        .execute_with_variables(
-            CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
-            &output_segment_create_variables(&segment)?,
-        )
-        .await?;
-    let close_doc_id = created_doc_id(&segment_response, "AgentOutputSegment")?;
-
     let completed_at = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
     // A call settled from Pending never started; it records neither a start
     // nor a latency.
@@ -1533,10 +1525,18 @@ async fn terminalize_transaction(
         .as_array()
         .is_some_and(|rows| !rows.is_empty())
     {
-        // Transaction rollback discards the created closure: a loser cannot
-        // leave an unpaired output fact or consume a delivery sequence.
+        // The compare precedes every write, so a loser commits nothing: no
+        // closure without its terminal, and no delivery sequence consumed.
         return Ok(false);
     }
+
+    let segment_response = txn
+        .execute_with_variables(
+            CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
+            &output_segment_create_variables(&segment)?,
+        )
+        .await?;
+    let close_doc_id = created_doc_id(&segment_response, "AgentOutputSegment")?;
 
     // A spawned process is not a provider invocation.  Its terminal output
     // is closed above under its own physical source, while its later
@@ -2698,6 +2698,7 @@ mod spawned_background_tests {
             "completed",
             final_bytes,
             None,
+            crate::lifecycle::RequestHopCause::Continuation,
         )
         .await
         .unwrap();

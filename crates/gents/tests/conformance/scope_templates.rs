@@ -31,32 +31,19 @@ fn lean_string_list(definition: &str) -> Vec<String> {
         .collect()
 }
 
-/// A `CollectionRule` literal from the Lean scope model:
-/// `(collection, field, source)`.
+/// A `CollectionRule` of the Lean scope model: `(collection, field, source)`.
 fn lean_collection_rules(definition: &str) -> Vec<(String, String, String)> {
-    let marker = format!("def {definition} : List CollectionRule :=");
-    let body = LEAN_SCOPE_STATE
-        .split_once(&marker)
+    crate::lean_vocab_test::lean_contract_snapshot()
+        .scope_collection_rules
+        .get(definition)
         .unwrap_or_else(|| panic!("Lean scope model omitted {definition}"))
-        .1
-        .split("\n\n")
-        .next()
-        .expect("Lean rule list body");
-    let quoted_after = |line: &str, key: &str| {
-        line.split_once(&format!("{key} := \""))
-            .and_then(|(_, rest)| rest.split_once('"'))
-            .map(|(value, _)| value.to_string())
-    };
-    body.lines()
-        .filter_map(|line| {
-            let collection = quoted_after(line, "collection")?;
-            let field = quoted_after(line, "field").expect("rule field");
-            let source = line
-                .split_once("source := .")
-                .and_then(|(_, rest)| rest.split(|c: char| !c.is_alphanumeric()).next())
-                .expect("rule source")
-                .to_string();
-            Some((collection, field, source))
+        .iter()
+        .map(|rule| {
+            (
+                rule.collection.clone(),
+                rule.field.clone(),
+                rule.source.clone(),
+            )
         })
         .collect()
 }

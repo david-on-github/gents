@@ -59,7 +59,7 @@ impl DefraSessionHook {
                     "/",
                     tool_name,
                     "the agents tools are not enabled for this behavior",
-                    tools.names(),
+                    tools.target_names(),
                 )
             );
         }
@@ -86,7 +86,7 @@ impl DefraSessionHook {
                         "/agent",
                         &agent,
                         format!("'{agent}' is not an allowed agent for this behavior"),
-                        tools.names(),
+                        tools.target_names(),
                     )
                 );
             };
@@ -158,15 +158,15 @@ impl DefraSessionHook {
                         "/session_id",
                         &target_session,
                         "session is neither this agent's own nor one it started on an allowed agent",
-                        tools.names(),
+                        tools.target_names(),
                     )
                 );
             };
             if parsed.interrupt {
                 if let Some(reason) = crate::session_message::interrupt_refusal(
                     &self.node,
-                    &caller.session_id,
-                    &target,
+                    &crate::session_origin::SessionScope::of_request(&caller),
+                    &crate::session_message::target_scope(&caller.agent_did, &target),
                 )
                 .await?
                 {
@@ -184,13 +184,14 @@ impl DefraSessionHook {
             )
         };
         let field = if create { "prompt" } else { "message" };
-        let body = match owned_body(field, body.0, body.1) {
-            Ok(body) => body,
-            Err(message) => refuse!(
-                FailureClass::ArgumentInvalid,
-                invalid_tool_arguments_payload(tool_name, "/", message)
-            ),
-        };
+        let body =
+            match crate::session_message::message_body(field, body.0.as_ref(), body.1.as_ref()) {
+                Ok(body) => body,
+                Err(message) => refuse!(
+                    FailureClass::ArgumentInvalid,
+                    invalid_tool_arguments_payload(tool_name, "/", message)
+                ),
+            };
 
         let live = count_live_backgrounded_rows(&self.node, &request_id).await?;
         if live >= MAX_BACKGROUNDED_TOOLS_PER_PARENT {
@@ -204,7 +205,7 @@ impl DefraSessionHook {
             &self.node,
             &caller.agent_did,
             &target.behavior_id,
-            body.as_body(),
+            body,
         )
         .await?
         {
@@ -248,10 +249,7 @@ impl DefraSessionHook {
         // call instead. A peer checks its own bound at admission.
         if target.agent_did == caller.agent_did {
             let max_request_hop =
-                crate::document_config::load_agent_principal(&self.node, &caller.agent_did)
-                    .await?
-                    .and_then(|principal| principal.max_request_hop)
-                    .unwrap_or(crate::document_config::DEFAULT_MAX_REQUEST_HOP);
+                crate::request_admission::max_request_hop(&self.node, &caller.agent_did).await?;
             if !crate::lifecycle::request_hop_within_bound(max_request_hop, plan.hop()) {
                 refuse!(
                     FailureClass::ArgumentInvalid,
@@ -265,8 +263,10 @@ impl DefraSessionHook {
             {
                 Ok(receipt) => serde_json::to_string(&receipt)?,
                 Err(error) => {
-                    // The row never left pending and nothing was delivered, so
-                    // the invocation reply is the failure.
+                    // The durable row is still pending, so nothing was
+                    // delivered and the invocation reply is the failure. On an
+                    // unknown outcome `spawn_failed` refuses a row that left
+                    // pending, and the hook fails instead.
                     refuse!(
                         FailureClass::ServiceUnavailable,
                         service_unavailable_payload(
@@ -282,7 +282,8 @@ impl DefraSessionHook {
         // so a failed commit never interrupts without delivering. The new
         // request waits behind the interrupted one.
         if interrupt {
-            if let Err(error) = crate::session_message::interrupt_session(&self.node, &target).await
+            let scope = crate::session_message::target_scope(&caller.agent_did, &target);
+            if let Err(error) = crate::session_message::interrupt_session(&self.node, &scope).await
             {
                 tracing::warn!(
                     target_session = %target.session_id,
@@ -353,7 +354,7 @@ impl DefraSessionHook {
                 "/",
                 tool_name,
                 "the agents tools are not enabled for this behavior",
-                tools.names(),
+                tools.target_names(),
             ));
         }
         if tool_name == crate::toolset::AGENT_LIST_TOOL_NAME {
@@ -395,9 +396,13 @@ impl DefraSessionHook {
                 "only the session that started this session may interrupt it",
             ));
         };
-        if let Some(reason) =
-            crate::session_message::interrupt_refusal(&self.node, &caller.session_id, &target)
-                .await?
+        let target = crate::session_message::target_scope(&caller.agent_did, &target);
+        if let Some(reason) = crate::session_message::interrupt_refusal(
+            &self.node,
+            &crate::session_origin::SessionScope::of_request(&caller),
+            &target,
+        )
+        .await?
         {
             return Ok(interrupt_refused_payload(tool_name, session, &reason));
         }
@@ -408,37 +413,6 @@ impl DefraSessionHook {
             "status": if interrupted.is_some() { "interrupting" } else { "idle" },
             "request_id": interrupted
         })))
-    }
-}
-
-/// An owned message body, parsed once from the accepted arguments.
-enum OwnedBody {
-    Prompt(String),
-    Task(crate::session_message::TaskBody),
-}
-
-impl OwnedBody {
-    fn as_body(&self) -> crate::session_message::MessageBody<'_> {
-        match self {
-            Self::Prompt(prompt) => crate::session_message::MessageBody::Prompt(prompt),
-            Self::Task(task) => crate::session_message::MessageBody::Task(task),
-        }
-    }
-}
-
-fn owned_body(
-    field: &str,
-    prompt: Option<String>,
-    task: Option<crate::session_message::TaskBody>,
-) -> Result<OwnedBody, String> {
-    match (prompt, task) {
-        (Some(prompt), None) if !prompt.trim().is_empty() => {
-            Ok(OwnedBody::Prompt(prompt.trim().to_owned()))
-        }
-        (None, Some(task)) if !task.task_id.trim().is_empty() => Ok(OwnedBody::Task(task)),
-        (Some(_), None) => Err(format!("{field} must be non-empty")),
-        (None, Some(_)) => Err("task.task_id must be non-empty".to_owned()),
-        _ => Err(format!("provide exactly one of {field} or task")),
     }
 }
 

@@ -16,6 +16,8 @@ pub struct SessionRequestFact {
     pub requester_did: Option<String>,
     pub behavior_id: String,
     pub created_at: String,
+    /// The signed causal hop (`subagent_depth`).
+    pub hop: u32,
     pub observed: gents_protocol::session::SessionRequestObservation,
 }
 
@@ -116,6 +118,7 @@ async fn load_request_facts_in_txn(
         r#"{{
             AgentRequest({}) {{
                 _docID request_id agent_did session_id requester_did behavior_id created_at lifecycle_state
+                subagent_depth
             }}
         }}"#,
         scoped_request_filter(agent_did, session_id, requester_scope)
@@ -162,6 +165,11 @@ async fn load_request_facts_in_txn(
                     .and_then(serde_json::Value::as_str)
                     .context("request row omitted created_at")?
                     .to_string(),
+                hop: row
+                    .get("subagent_depth")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|hop| u32::try_from(hop).ok())
+                    .unwrap_or(0),
                 observed: gents_protocol::session::SessionRequestObservation {
                     request_doc_id: row
                         .get("_docID")
@@ -181,6 +189,52 @@ async fn load_request_facts_in_txn(
             })
         })
         .collect()
+}
+
+/// Lean `CausalHop.sessionCurrentHop`: the hop of the session's latest
+/// request under the canonical order. `created_at` has whole-second
+/// precision, so the requests sharing the latest second have no order between
+/// them; the current hop is the highest hop among them, which errs toward
+/// refusing a continuation, never toward running one below a refusal.
+pub(crate) fn session_current_hop(facts: &[SessionRequestFact]) -> u32 {
+    let at =
+        |fact: &SessionRequestFact| chrono::DateTime::parse_from_rfc3339(&fact.created_at).ok();
+    let Some(latest) = facts.iter().map(at).max() else {
+        return 0;
+    };
+    facts
+        .iter()
+        .filter(|fact| at(fact) == latest)
+        .map(|fact| fact.hop)
+        .max()
+        .unwrap_or(0)
+}
+
+/// [`session_current_hop`] over every requester of a session, in a caller's
+/// transaction. Every same-session continuation copies it and every
+/// cross-session cause climbs past it.
+pub(crate) async fn load_session_current_hop_in_txn(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    agent_did: &str,
+    session_id: &str,
+) -> Result<u32> {
+    Ok(session_current_hop(
+        &load_request_facts_in_txn(txn, agent_did, session_id, None).await?,
+    ))
+}
+
+/// [`load_session_current_hop_in_txn`] in its own read transaction.
+pub(crate) async fn load_session_current_hop(
+    node: &EmbeddedNode,
+    agent_did: &str,
+    session_id: &str,
+) -> Result<u32> {
+    let (agent_did, session_id) = (agent_did.to_owned(), session_id.to_owned());
+    crate::config_client::ConfigAccess::transact_local(node, None, "session.current_hop", |txn| {
+        let (agent_did, session_id) = (agent_did.clone(), session_id.clone());
+        Box::pin(async move { load_session_current_hop_in_txn(txn, &agent_did, &session_id).await })
+    })
+    .await
 }
 
 /// Read the actual request head, never the session's presentation cache.
@@ -730,5 +784,52 @@ mod observation_refresh_tests {
                 Ok(())
             }),
         ).await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod session_hop_tests {
+    use super::{session_current_hop, SessionRequestFact};
+
+    fn fact(request_id: &str, created_at: &str, hop: u32) -> SessionRequestFact {
+        SessionRequestFact {
+            agent_did: "did:test:agent".into(),
+            session_id: "session".into(),
+            requester_did: None,
+            behavior_id: "general".into(),
+            created_at: created_at.into(),
+            hop,
+            observed: gents_protocol::session::SessionRequestObservation {
+                request_doc_id: format!("doc-{request_id}"),
+                request_id: request_id.into(),
+                lifecycle_state: gents_protocol::request_lifecycle::RequestLifecycleState::Pending,
+            },
+        }
+    }
+
+    /// Lean `CausalHop.same_second_tie_takes_the_highest_hop`: a refused
+    /// over-bound wake and a native wake written in the same second read as
+    /// the refused hop, whatever their request ids.
+    #[test]
+    fn a_same_second_tie_takes_the_highest_hop() {
+        let facts = [
+            fact("parent", "2026-09-27T05:12:04Z", 0),
+            fact("a-refused-wake", "2026-09-27T05:12:05Z", 9),
+            fact("z-native-wake", "2026-09-27T05:12:05Z", 3),
+        ];
+        assert_eq!(session_current_hop(&facts), 9);
+        let reversed = [
+            fact("parent", "2026-09-27T05:12:04Z", 0),
+            fact("z-refused-wake", "2026-09-27T05:12:05Z", 9),
+            fact("a-native-wake", "2026-09-27T05:12:05Z", 3),
+        ];
+        assert_eq!(session_current_hop(&reversed), 9);
+        // An earlier second never counts, however high its hop.
+        let later_root = [
+            fact("refused-wake", "2026-09-27T05:12:04Z", 9),
+            fact("user-root", "2026-09-27T05:12:05Z", 0),
+        ];
+        assert_eq!(session_current_hop(&later_root), 0);
+        assert_eq!(session_current_hop(&[]), 0);
     }
 }

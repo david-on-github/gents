@@ -394,7 +394,7 @@ impl CanonicalBackgroundFixture {
                     end_byte: notification_content.len() as u64,
                 }],
             },
-            super::CompletionWake::Continuation,
+            crate::lifecycle::RequestHopCause::Continuation,
         )
         .await
     }

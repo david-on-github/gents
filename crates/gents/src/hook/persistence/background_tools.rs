@@ -316,6 +316,7 @@ impl DefraSessionHook {
                                 BACKGROUND_TIMEOUT_NOTIFICATION.0,
                                 "",
                                 Some(BACKGROUND_TIMEOUT_NOTIFICATION.1),
+                                crate::lifecycle::RequestHopCause::Continuation,
                             ),
                         )
                         .await
@@ -349,6 +350,7 @@ impl DefraSessionHook {
                                 "cancelled",
                                 "",
                                 Some("explicit_cancel"),
+                                crate::lifecycle::RequestHopCause::Continuation,
                             ),
                         )
                         .await
@@ -421,6 +423,7 @@ impl DefraSessionHook {
                                 "completed",
                                 &notification_result,
                                 None,
+                                crate::lifecycle::RequestHopCause::Continuation,
                             ),
                         )
                         .await
@@ -497,6 +500,7 @@ impl DefraSessionHook {
                                 "failed",
                                 &notification_result,
                                 Some("tool_failed"),
+                                crate::lifecycle::RequestHopCause::Continuation,
                             ),
                         )
                         .await
@@ -533,6 +537,7 @@ impl DefraSessionHook {
                             "failed",
                             &reason,
                             Some("tool_panicked"),
+                            crate::lifecycle::RequestHopCause::Continuation,
                         ),
                     )
                     .await
@@ -1064,6 +1069,7 @@ impl DefraSessionHook {
             "cancelled",
             "",
             Some(notification_reason),
+            crate::lifecycle::RequestHopCause::Continuation,
         )
         .await
         {

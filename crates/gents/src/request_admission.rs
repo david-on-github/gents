@@ -603,8 +603,15 @@ async fn verify_request_input(
     let runtime_control = admission.kind == AgentRequestAdmissionKind::RuntimeInternal
         && admission.runtime_source_kind == Some(RuntimeInternalSourceKind::LocalControl);
     if let Some(queue) = &input.queue {
+        // A steering append is also a session-message delivery: it carries
+        // the caller's full request and tool call edge (Lean
+        // `DurableLineage.sessionMessageWrite`). Other runtime queue sources
+        // stay local-control only.
+        let session_message_steering = queue.source == QueueSource::Steering
+            && row.caused_by_parent_request_doc_id.is_some()
+            && row.caused_by_parent_tool_call_doc_id.is_some();
         deny_if(
-            queue.source == QueueSource::User || runtime_control,
+            queue.source == QueueSource::User || runtime_control || session_message_steering,
             "runtime queue source requires authenticated local-control issuance",
         )?;
     }
@@ -650,15 +657,23 @@ async fn request_hop_admitted(node: &EmbeddedNode, row: &AgentRequestRow) -> Adm
         return Ok(true);
     }
     let target = required_row_string(row.agent_did.as_deref(), "agent_did")?;
-    let max_request_hop = crate::document_config::load_agent_principal(node, target)
+    let max_request_hop = max_request_hop(node, target)
         .await
-        .map_err(AgentRequestAdmissionError::unavailable)?
-        .and_then(|principal| principal.max_request_hop)
-        .unwrap_or(crate::document_config::DEFAULT_MAX_REQUEST_HOP);
+        .map_err(AgentRequestAdmissionError::unavailable)?;
     Ok(crate::lifecycle::request_hop_within_bound(
         max_request_hop,
         hop,
     ))
+}
+
+/// The target principal's `max_request_hop`, defaulted when unset.
+pub(crate) async fn max_request_hop(node: &EmbeddedNode, agent_did: &str) -> anyhow::Result<u32> {
+    Ok(
+        crate::document_config::load_agent_principal(node, agent_did)
+            .await?
+            .and_then(|principal| principal.max_request_hop)
+            .unwrap_or(crate::document_config::DEFAULT_MAX_REQUEST_HOP),
+    )
 }
 
 fn request_workspace(row: &AgentRequestRow) -> crate::lifecycle::WorkspaceLineage {
@@ -745,7 +760,7 @@ async fn load_exact_parent_request(
 }
 
 /// Read the existing canonical configuration owner in one scoped snapshot.
-async fn load_request_context(
+pub(crate) async fn load_request_context(
     node: &EmbeddedNode,
     agent_did: &str,
     behavior_id: &str,

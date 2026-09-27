@@ -647,10 +647,9 @@ async fn generated_r6_notification_precedes_continuation_claim() {
     std::fs::remove_dir_all(admission.path).unwrap();
 }
 
-/// Lean `DurableLineage.retry_copies_session_current_hop` with
-/// `CausalHop.later_native_wake_after_refusal_is_refused`: a recovery retry of
-/// a wake the hop bound refused copies the session's current hop, so it is
-/// refused too.
+/// Lean `CausalHop.continuation_preserves_admission` over
+/// `CausalHop.sessionCurrentHop`: a recovery retry of a wake the hop bound
+/// refused copies the session's current hop, so it is refused too.
 #[tokio::test]
 async fn a_retried_over_bound_wake_is_refused_again() {
     let case = lean_r6_backgrounding_case("failed_background_wake_with_budget_redrives");

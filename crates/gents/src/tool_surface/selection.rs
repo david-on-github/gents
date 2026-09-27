@@ -89,6 +89,20 @@ impl SubagentToolConfig {
     pub(crate) fn target(&self, name: &str) -> Option<&SubagentTargetDocument> {
         self.targets.iter().find(|target| target.name == name)
     }
+
+    pub(crate) fn target_names(&self) -> Vec<String> {
+        self.targets
+            .iter()
+            .map(|target| target.name.clone())
+            .collect()
+    }
+
+    /// Whether a target in the allowlist runs `behavior_id` on `agent_did`.
+    pub(crate) fn allows(&self, agent_did: &str, behavior_id: &str) -> bool {
+        self.targets
+            .iter()
+            .any(|target| target.target_agent_did == agent_did && target.behavior_id == behavior_id)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

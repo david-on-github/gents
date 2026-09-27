@@ -130,7 +130,10 @@ async fn stage_claimed_continuation(
             .subagent_depth
             .and_then(|hop| u32::try_from(hop).ok())
             .context("claimed continuation receipt lacks its hop")?,
-        None => crate::lifecycle::session_current_hop(&requests),
+        None => {
+            crate::session::load_session_current_hop_in_txn(txn, &goal.agent_did, &goal.session_id)
+                .await?
+        }
     };
     let mut create = prepare_goal_continuation(
         &parent,

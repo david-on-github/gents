@@ -316,9 +316,9 @@ async fn redrive_in_transaction(
     else {
         return Ok(RedriveOutcome::Ineligible);
     };
-    // Lean `DurableLineage.ContinuationKind.retry`: the retried wake copies
+    // Lean `CausalHop.continuation_preserves_hop`: the retried wake copies
     // the session's current hop, like every same-session continuation.
-    let hop = crate::lifecycle::load_session_current_hop_in_txn(txn, agent_did, session_id).await?;
+    let hop = crate::session::load_session_current_hop_in_txn(txn, agent_did, session_id).await?;
     let response = txn
         .execute_local_response(&redrive_mutation(candidate, request_id, &retry_key, hop).await?)
         .await?;

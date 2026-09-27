@@ -39,7 +39,6 @@ impl BackgroundCompletionObserver {
     }
 
     async fn run(&mut self) -> Result<()> {
-        self.settle_session_message_rows().await?;
         self.run_reconcilers().await?;
         let mut reconciler_tick = tokio::time::interval(Duration::from_secs(5));
         loop {
@@ -47,7 +46,6 @@ impl BackgroundCompletionObserver {
                 biased;
                 _ = self.cancel.cancelled() => return Ok(()),
                 _ = reconciler_tick.tick() => {
-                    self.settle_session_message_rows().await?;
                     self.run_reconcilers().await?;
                     continue;
                 }
@@ -63,9 +61,8 @@ impl BackgroundCompletionObserver {
             if dropped > 0 {
                 tracing::warn!(
                     dropped,
-                    "background completion observer dropped messages; scanning running session-message rows"
+                    "background completion observer dropped messages; running the recovery sweeps"
                 );
-                self.settle_session_message_rows().await?;
                 self.run_reconcilers().await?;
             }
 
@@ -94,14 +91,6 @@ impl BackgroundCompletionObserver {
                 );
             }
         }
-    }
-
-    async fn settle_session_message_rows(&mut self) -> Result<()> {
-        let settled = settle_running_session_message_rows(&self.node, &self.local_did).await?;
-        if settled > 0 {
-            tracing::debug!(settled, "settled session-message rows");
-        }
-        Ok(())
     }
 
     async fn run_reconcilers(&mut self) -> Result<()> {

@@ -38,35 +38,16 @@ pub async fn reconcile_coalesced_pending_request(
         return Ok(None);
     };
 
-    let escaped_agent_did = escape_graphql_string(agent_did);
     for duplicate in matching.iter().skip(1) {
-        let terminalized_at = escape_graphql_string(&chrono::Utc::now().to_rfc3339());
-        let duplicate_doc_id = escape_graphql_string(
+        let mutation = supersede_pending_mutation(
             duplicate
                 .doc_id
                 .as_deref()
                 .context("pending AgentRequest row is missing _docID")?,
-        );
-        let survivor_request_id = escape_graphql_string(&survivor.request_id);
-        let mutation = format!(
-            r#"mutation {{
-                update_AgentRequest(
-                    filter: {{
-                        _docID: {{ _eq: "{duplicate_doc_id}" }},
-                        agent_did: {{ _eq: "{escaped_agent_did}" }},
-                        lifecycle_state: {{ _eq: "pending" }}
-                    }},
-                    input: {{
-                        lifecycle_state: "superseded",
-                        superseded_by_request: "{survivor_request_id}",
-                        superseded_by_request_doc_id: "{survivor_doc_id}",
-                        failure_reason: "coalesced into earlier queued request",
-                        terminalized_at: "{terminalized_at}",
-                        terminal_redrive_attempts: 0
-                    }}
-                ) {{ _docID }}
-            }}"#,
-            survivor_doc_id = escape_graphql_string(&survivor.doc_id),
+            agent_did,
+            &survivor.request_id,
+            &survivor.doc_id,
+            "coalesced into earlier queued request",
         );
         crate::config_client::ConfigAccess::write_local_idempotent_update_response(
             node,
@@ -77,6 +58,41 @@ pub async fn reconcile_coalesced_pending_request(
     }
 
     Ok(Some(survivor))
+}
+
+/// Supersede one still-pending request of `agent_did` by the survivor.
+pub(super) fn supersede_pending_mutation(
+    doc_id: &str,
+    agent_did: &str,
+    survivor_request_id: &str,
+    survivor_doc_id: &str,
+    reason: &str,
+) -> String {
+    format!(
+        r#"mutation {{
+            update_AgentRequest(
+                filter: {{
+                    _docID: {{ _eq: "{}" }},
+                    agent_did: {{ _eq: "{}" }},
+                    lifecycle_state: {{ _eq: "pending" }}
+                }},
+                input: {{
+                    lifecycle_state: "superseded",
+                    superseded_by_request: "{}",
+                    superseded_by_request_doc_id: "{}",
+                    failure_reason: "{}",
+                    terminalized_at: "{}",
+                    terminal_redrive_attempts: 0
+                }}
+            ) {{ _docID }}
+        }}"#,
+        escape_graphql_string(doc_id),
+        escape_graphql_string(agent_did),
+        escape_graphql_string(survivor_request_id),
+        escape_graphql_string(survivor_doc_id),
+        escape_graphql_string(reason),
+        escape_graphql_string(&chrono::Utc::now().to_rfc3339()),
+    )
 }
 
 async fn matching_coalesced_pending_requests(

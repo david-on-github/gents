@@ -24,6 +24,7 @@ const ORPHANED_BACKGROUND_TOOL_SWEEP_IDS: &[&str] =
 const BACKGROUND_COMPLETION_SIDE_EFFECT_SWEEP_IDS: &[&str] =
     &["tool_call_lifecycle_reconcile_background_completion_side_effects"];
 const INFERENCE_CALL_SWEEP_IDS: &[&str] = &["inference_call_recover_all_stale_calls"];
+const SESSION_MESSAGE_SWEEP_IDS: &[&str] = &["tool_call_lifecycle_recover_session_message_rows"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeriodicRecoverySweepMetadata {
@@ -39,6 +40,8 @@ pub enum PeriodicRecoverySweepOutcome {
     OrphanedBackgroundTools(OrphanedBackgroundToolReport),
     BackgroundCompletionSideEffects(BackgroundCompletionSideEffectReport),
     InferenceCalls(InferenceCallRecoveryReport),
+    /// Session-message rows settled from their caused requests.
+    SessionMessageRows(usize),
 }
 
 impl PeriodicRecoverySweepOutcome {
@@ -49,6 +52,7 @@ impl PeriodicRecoverySweepOutcome {
             Self::OrphanedBackgroundTools(report) => report.is_noop(),
             Self::BackgroundCompletionSideEffects(report) => report.is_noop(),
             Self::InferenceCalls(report) => report.calls_recovered == 0,
+            Self::SessionMessageRows(settled) => *settled == 0,
         }
     }
 }
@@ -99,6 +103,10 @@ const PERIODIC_RECOVERY_SWEEP_METADATA: &[PeriodicRecoverySweepMetadata] = &[
         sweep_ids: INFERENCE_CALL_SWEEP_IDS,
         rust_function: "InferenceCall::recover_all",
     },
+    PeriodicRecoverySweepMetadata {
+        sweep_ids: SESSION_MESSAGE_SWEEP_IDS,
+        rust_function: "background_completion::settle_running_session_message_rows",
+    },
 ];
 
 const PERIODIC_RECOVERY_SWEEP_EXECUTORS: &[PeriodicRecoverySweepExecutor] = &[
@@ -121,6 +129,10 @@ const PERIODIC_RECOVERY_SWEEP_EXECUTORS: &[PeriodicRecoverySweepExecutor] = &[
     PeriodicRecoverySweepExecutor {
         metadata_index: 4,
         run: recover_inference_calls,
+    },
+    PeriodicRecoverySweepExecutor {
+        metadata_index: 5,
+        run: settle_session_message_rows,
     },
 ];
 
@@ -212,5 +224,17 @@ fn recover_inference_calls<'a>(
         InferenceCall::recover_all(node, agent_did)
             .await
             .map(PeriodicRecoverySweepOutcome::InferenceCalls)
+    })
+}
+
+fn settle_session_message_rows<'a>(
+    node: &'a std::sync::Arc<EmbeddedNode>,
+    agent_did: &'a str,
+    _background_executions: &'a crate::hook::BackgroundExecutionRegistry,
+) -> BoxFuture<'a, Result<PeriodicRecoverySweepOutcome>> {
+    Box::pin(async move {
+        crate::background_completion::settle_running_session_message_rows(node, agent_did)
+            .await
+            .map(PeriodicRecoverySweepOutcome::SessionMessageRows)
     })
 }

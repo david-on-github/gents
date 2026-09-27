@@ -1048,7 +1048,7 @@ async fn a_lower_hop_wake_never_consumes_a_higher_hop_notification() {
         "review notifications",
         background_hints(&parent),
         None,
-        CompletionWake::CrossSession { cause_hop: 1 },
+        crate::lifecycle::RequestHopCause::CrossSession { cause_hop: 1 },
     )
     .await
     .unwrap();
@@ -1096,7 +1096,7 @@ async fn a_lower_hop_wake_never_consumes_a_higher_hop_notification() {
     assert_eq!(lower["superseded_by_request_doc_id"], raised_wake.as_str());
 }
 
-/// An agent loop, Lean `CausalHop.ping_pong_halts_at_max`: session A
+/// An agent loop, Lean `CausalHop.continuation_preserves_admission`: session A
 /// messages B and starts a background process in the same turn. B's result
 /// needs a wake over the bound; A's process wake must not run that result at
 /// A's old hop, now or later.
@@ -1127,7 +1127,7 @@ async fn a_refused_cross_session_wake_refuses_every_later_native_wake() {
         "review notifications",
         background_hints(&parent),
         None,
-        CompletionWake::Continuation,
+        crate::lifecycle::RequestHopCause::Continuation,
     )
     .await
     .unwrap();
@@ -1141,7 +1141,7 @@ async fn a_refused_cross_session_wake_refuses_every_later_native_wake() {
         "review notifications",
         background_hints(&parent),
         None,
-        CompletionWake::CrossSession { cause_hop: bound },
+        crate::lifecycle::RequestHopCause::CrossSession { cause_hop: bound },
     )
     .await
     .unwrap();
@@ -1171,7 +1171,7 @@ async fn a_refused_cross_session_wake_refuses_every_later_native_wake() {
         "review notifications",
         background_hints(&parent),
         None,
-        CompletionWake::Continuation,
+        crate::lifecycle::RequestHopCause::Continuation,
     )
     .await
     .unwrap();

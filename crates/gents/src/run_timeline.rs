@@ -832,7 +832,6 @@ pub struct TimelineToolCallEvent {
 }
 
 pub fn build_run_timeline(mut rows: RunTimelineRows) -> RunTimeline {
-    link_caused_requests(&mut rows.tool_calls, &rows.requests);
     let root_request_id = rows.request.request_id.clone();
     let session_id = rows.request.session_id.clone();
     let mut included_request_ids = BTreeSet::from([root_request_id.clone()]);
@@ -1154,26 +1153,6 @@ pub fn child_bridge_is_corroborated(
             && nonempty(tool_call.request_id.as_deref()) == Some(root_request.request_id.as_str())
             && tool_call.tool_call_id == parent_tool_call_id
     })
-}
-
-/// Each tool call's caused request is the loaded request whose
-/// `caused_by_parent_tool_call_doc_id` names that exact physical call.
-pub fn link_caused_requests(
-    tool_calls: &mut [TimelineToolCallRow],
-    requests: &[TimelineRequestRow],
-) {
-    for tool_call in tool_calls {
-        let Some(doc_id) = nonempty(tool_call.doc_id.as_deref()) else {
-            continue;
-        };
-        let mut caused = requests.iter().filter(|request| {
-            nonempty(request.caused_by_parent_tool_call_doc_id.as_deref()) == Some(doc_id)
-        });
-        tool_call.child_request_id = match (caused.next(), caused.next()) {
-            (Some(request), None) => Some(request.request_id.clone()),
-            _ => None,
-        };
-    }
 }
 
 fn request_only_control_link_is_corroborated(request: &TimelineRequestRow) -> bool {

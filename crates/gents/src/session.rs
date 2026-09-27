@@ -48,6 +48,7 @@ pub(crate) use observations::{
     update_session_title_with_source,
 };
 pub use observations::{load_latest_request_in_txn, SessionRequestFact};
+pub(crate) use observations::{load_session_current_hop, load_session_current_hop_in_txn};
 #[cfg(test)]
 pub(crate) use output::count_request_output_scans;
 #[cfg(test)]

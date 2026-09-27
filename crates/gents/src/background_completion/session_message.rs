@@ -57,9 +57,9 @@ pub(crate) async fn settle_running_session_message_rows(
 }
 
 /// Observer arm: a request that reached a durable terminal may be the one a
-/// local running session-message row caused. A session-message request names
-/// its row through `caused_by_parent_tool_call_doc_id`, so only that row is
-/// settled; a steering continuation names none, so its terminal rescans.
+/// local running session-message row caused, which it names through
+/// `caused_by_parent_tool_call_doc_id`; only that row is settled here. Any
+/// other terminal is left to the periodic sweep.
 pub(super) async fn settle_rows_after_request_update(
     node: &Arc<EmbeddedNode>,
     local_did: &str,
@@ -88,7 +88,7 @@ pub(super) async fn settle_rows_after_request_update(
         return Ok(0);
     }
     let Some(tool_doc_id) = request.caused_by_parent_tool_call_doc_id else {
-        return settle_running_session_message_rows(node, local_did).await;
+        return Ok(0);
     };
     let query = format!(
         r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }}, {} }}, limit: 1) {{ {SESSION_MESSAGE_ROW_FIELDS} }} }}"#,
@@ -162,6 +162,7 @@ pub(crate) async fn settle_session_message_row(
                 "failed",
                 reason,
                 Some(REASON),
+                crate::lifecycle::RequestHopCause::Continuation,
             )
             .await?;
             return Ok(true);
@@ -179,7 +180,7 @@ pub(crate) async fn settle_session_message_row(
     if !lifecycle.settle_session_message(&terminal).await? {
         return Ok(false);
     }
-    append_session_message_completion(
+    append_background_tool_completion(
         node.as_ref(),
         lifecycle.session_id(),
         &calling_request_id,
@@ -188,7 +189,9 @@ pub(crate) async fn settle_session_message_row(
         terminal.notification_status(),
         terminal.output(),
         terminal.completion_reason(),
-        crate::session_message::caused_hop(&caused),
+        crate::lifecycle::RequestHopCause::CrossSession {
+            cause_hop: crate::session_message::caused_hop(&caused),
+        },
     )
     .await?;
     Ok(true)

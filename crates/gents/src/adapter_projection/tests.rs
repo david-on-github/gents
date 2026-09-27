@@ -1290,3 +1290,62 @@ fn external_contract_fixtures_validate_without_runtime_dependencies() {
         }
     }
 }
+
+/// An `agent_new` row names the request it caused in the run timeline, read
+/// through `session_origin::caused_requests`, and the projection carries
+/// that delegation.
+#[tokio::test]
+async fn an_agent_new_row_links_the_request_it_caused() {
+    use crate::tool_call_lifecycle::admission_fixture::{
+        published_session_message, PublishedAdmissionOptions,
+    };
+    let message = published_session_message(PublishedAdmissionOptions {
+        name: "timeline-caused-request".to_owned(),
+        real_identity: true,
+        await_mode: crate::tool_call_lifecycle::AwaitMode::Background,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let node = message.admission.node.clone();
+    let caller_request_id = crate::request_binding::load_agent_request_by_doc_id(
+        &node,
+        message.admission.tool.request_doc_id().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .request_id;
+    let tool_call_id = message.admission.tool.tool_call_id().to_owned();
+    let rows = crate::run_timeline_fetch::load_run_timeline_rows(
+        &crate::config_client::ConfigAccess::Local(node.clone()),
+        &caller_request_id,
+    )
+    .await
+    .unwrap();
+    let row = rows
+        .tool_calls
+        .iter()
+        .find(|row| row.tool_call_id == tool_call_id)
+        .expect("agent_new row in the timeline");
+    assert_eq!(
+        row.child_request_id.as_deref(),
+        Some(message.caused_request_id.as_str())
+    );
+
+    let timeline = crate::run_timeline::build_run_timeline(rows);
+    let envelope = build_adapter_projection(
+        AdapterProjectionKind::AtifTrajectory,
+        &timeline,
+        &ProjectionContext::default(),
+    );
+    assert!(
+        projection_delegations(&envelope).contains(&ProjectionDelegation {
+            parent_request_id: caller_request_id,
+            child_request_id: message.caused_request_id.clone(),
+            parent_tool_call_id: Some(tool_call_id),
+        })
+    );
+    node.shutdown().await;
+    std::fs::remove_dir_all(&message.admission.path).unwrap();
+}
