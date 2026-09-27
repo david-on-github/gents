@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import time
 import uuid
@@ -2918,10 +2919,10 @@ def query_documents(endpoint: str, session_id: str) -> dict[str, Any]:
         _docID request_id lifecycle_state terminalized_at interrupt_requested_at terminal_output input
       }}
       AgentMessage(filter: {{session_id: {{_eq: \"{escaped}\"}}}}, order: {{sequence: ASC}}) {{
-        _docID request_doc_id sequence role blocks
+        _docID request_doc_id sequence role
       }}
       AgentToolCall(filter: {{session_id: {{_eq: \"{escaped}\"}}}}, order: {{started_at: ASC}}) {{
-        request_id request_doc_id tool_call_id tool_name status lifecycle_state completed_at
+        _docID request_id request_doc_id tool_call_id tool_name status lifecycle_state completed_at
       }}
     }}"""
     data = graphql_query(endpoint, query, timeout=10)
@@ -3071,43 +3072,107 @@ def self_test_document_polling() -> dict[str, int]:
     return {"accepted": 3, "rejected": rejected}
 
 
-def is_persisted_subprocess_probe(messages: list[dict[str, Any]]) -> bool:
-    """Find the command marker in the call's assistant header and its result."""
-    marker = "gents-subprocess-probe"
+SUBPROCESS_MARKER = "gents-subprocess-probe"
 
-    def carries(message: dict[str, Any]) -> bool:
-        blocks = json_field(message.get("blocks"))
-        return marker in (blocks if isinstance(blocks, str) else json.dumps(blocks))
+# A projection produced by the native owner, checked in with its contract.
+CODEX_PROJECTION_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "crates/gents/tests/fixtures/adapter_projections/envelopes"
+    / "openai_codex_run_trace.envelope.json"
+)
 
-    return any(carries(m) for m in messages if m.get("role") == "assistant") and any(
-        carries(m) for m in messages if m.get("role") == "user"
+
+def trace_projection(gents: str, graphql: str, request_id: str) -> dict[str, Any]:
+    """Present one request through the native `gents trace project` owner."""
+    completed = subprocess.run(
+        [gents, "trace", "project", "--graphql", graphql,
+         "--request-id", request_id, "--projection", "openai-codex"],
+        check=True, capture_output=True, text=True,
     )
+    return json.loads(completed.stdout)
+
+
+def persisted_subprocess_calls(
+    projection: dict[str, Any],
+    request_id: str,
+    tool_rows: list[dict[str, Any]],
+    marker: str = SUBPROCESS_MARKER,
+) -> list[str]:
+    """The `AgentToolCall` doc ids whose own arguments and result carry `marker`.
+
+    The projection presents each call's arguments and result together, so
+    both halves belong to one call; that call is then bound to exactly one
+    durable row of the same request.
+    """
+    items = projection.get("output", {}).get("projection", {}).get("items")
+    require(isinstance(items, list), f"trace projection has no items: {projection}")
+    doc_ids = []
+    for item in items:
+        if not (
+            item.get("type") == "tool_call"
+            and item.get("request_id") == request_id
+            and marker in str(item.get("arguments") or "")
+            and marker in str(item.get("output") or "")
+        ):
+            continue
+        rows = [
+            row
+            for row in tool_rows
+            if row.get("request_id") == request_id and row.get("tool_call_id") == item.get("id")
+        ]
+        require(len(rows) == 1, f"tool call {item.get('id')!r} binds {len(rows)} durable rows")
+        doc_ids.append(rows[0]["_docID"])
+    return doc_ids
 
 
 def self_test_persisted_subprocess_probe() -> dict[str, int]:
-    marker = "gents-subprocess-probe"
-    call = {"role": "assistant", "blocks": [{"tool_call": {"args": {"command": marker}}}]}
-    result = {"role": "user", "blocks": json.dumps([{"tool_result": marker}])}
+    envelope = json.loads(CODEX_PROJECTION_FIXTURE.read_text())
+    request_id = envelope["source_request_id"]
+    call = next(
+        item for item in envelope["output"]["projection"]["items"] if item["type"] == "tool_call"
+    )
+    marker = "adapter_projection"
+    require(marker in call["arguments"] and marker in call["output"], "fixture call drifted")
+    row = {"_docID": "call-doc", "request_id": request_id, "tool_call_id": call["id"]}
     require(
-        is_persisted_subprocess_probe([call, result]),
-        "valid subprocess transcript marker was rejected",
+        persisted_subprocess_calls(envelope, request_id, [row], marker) == ["call-doc"],
+        "the fixture call was not bound to its durable row",
     )
-    invalid = (
-        [call],
-        [result],
-        [dict(call, role="user"), result],
-    )
+
+    def with_call(**changes: Any) -> dict[str, Any]:
+        items = [
+            dict(item, **changes) if item is call else item
+            for item in envelope["output"]["projection"]["items"]
+        ]
+        return {"output": {"projection": {"items": items}}}
+
+    rejected = 0
+    for projection in (with_call(output="no marker"), with_call(arguments="{}")):
+        require(
+            not persisted_subprocess_calls(projection, request_id, [row], marker),
+            "a call missing one half of the marker was accepted",
+        )
+        rejected += 1
     require(
-        not any(is_persisted_subprocess_probe(messages) for messages in invalid),
-        "a transcript without both the call and its result was accepted",
+        not persisted_subprocess_calls(envelope, "other-request", [row], marker),
+        "a call of another request was accepted",
     )
-    return {"accepted": 1, "rejected": len(invalid)}
+    rejected += 1
+    for rows in ([], [row, dict(row, _docID="twin")]):
+        try:
+            persisted_subprocess_calls(envelope, request_id, rows, marker)
+        except AssertionError:
+            rejected += 1
+        else:
+            raise AssertionError(f"a call bound to {len(rows)} rows was accepted")
+    return {"accepted": 1, "rejected": rejected}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", help="Grok leader Unix socket (not needed for --edge offline)")
     parser.add_argument("--graphql", help="Optional Gents GraphQL endpoint for document assertions")
+    parser.add_argument("--gents", default="gents", help="gents binary used for trace projection")
     parser.add_argument("--cwd", default=str(Path.cwd()), help="session/new cwd")
     parser.add_argument("--timeout", type=float, default=600.0, help="socket timeout seconds")
     parser.add_argument(
@@ -3206,10 +3271,20 @@ def main() -> int:
             if args.edge in ("tool", "all"):
                 require(documents.get("AgentToolCall"), "tool edge lacks AgentToolCall document")
             if args.edge in ("subprocess", "all"):
+                subprocess_calls = [
+                    doc_id
+                    for turn in turns
+                    for doc_id in persisted_subprocess_calls(
+                        trace_projection(args.gents, args.graphql, turn["request_id"]),
+                        turn["request_id"],
+                        documents.get("AgentToolCall", []),
+                    )
+                ]
                 require(
-                    is_persisted_subprocess_probe(documents.get("AgentMessage", [])),
-                    "subprocess edge lacks the persisted command and its output",
+                    subprocess_calls,
+                    "subprocess edge lacks a call whose arguments and result carry the command",
                 )
+                output["subprocess_tool_call_doc_ids"] = subprocess_calls
             output["documents"] = {
                 "sessions": len(documents.get("AgentSession", [])),
                 "requests": len(documents.get("AgentRequest", [])),

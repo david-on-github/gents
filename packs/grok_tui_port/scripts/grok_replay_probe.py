@@ -13,7 +13,7 @@ import subprocess
 from datetime import datetime
 from typing import Any
 
-from grok_edge_probe import LeaderClient
+from grok_edge_probe import CODEX_PROJECTION_FIXTURE, LeaderClient
 from grok_probe_common import graphql_escape, graphql_query, require
 
 
@@ -80,15 +80,13 @@ def self_test() -> dict[str, int]:
             rejected += 1
         else:
             raise AssertionError(f"accepted {rows} in {session}")
-    projection = {"output": {"projection": {"items": [
-        {"type": "request", "id": "r1"},
-        {"type": "message", "role": "user", "request_id": "r1", "content": "hi"},
-        {"type": "message", "role": "assistant", "request_id": "r1", "content": "hello "},
-        {"type": "tool_call", "request_id": "r1", "name": "read_file"},
-        {"type": "message", "role": "assistant", "request_id": "r1", "content": "world"},
-        {"type": "message", "role": "assistant", "request_id": "r0", "content": "earlier"},
-    ]}}}
-    require(expected_assistant_text(projection, "r1") == "hello world", "assistant text drifted")
+    envelope = json.loads(CODEX_PROJECTION_FIXTURE.read_text())
+    require(
+        expected_assistant_text(envelope, envelope["source_request_id"])
+        == "I will inspect the workspace.Projection contracts verified.",
+        "assistant text drifted from the native projection fixture",
+    )
+    require(expected_assistant_text(envelope, "other-request") == "", "another request's text leaked")
     require(timestamp_ms("1970-01-01T00:00:01Z") == 1000, "timestamp parse drifted")
     return {"accepted": 4, "rejected": rejected}
 
