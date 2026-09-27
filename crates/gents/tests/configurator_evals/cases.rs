@@ -34,6 +34,58 @@ async fn behavior_configuration(
     Ok(serde_json::json!({"behavior":behavior,"context":context,"tools":tools}))
 }
 
+fn exposes_unscoped_defra_query(datastore: &serde_json::Value) -> Result<bool> {
+    let datastore: Option<gents::document_config::DatastoreTools> =
+        serde_json::from_value(datastore.clone())
+            .context("decoding Builder datastore for effective query policy")?;
+    let tools = gents::document_config::Tools {
+        tools_id: "automation-query-grader".into(),
+        agent_did: "did:key:automation-query-grader".into(),
+        datastore,
+        ..Default::default()
+    };
+    let config = gents::tool_surface::BehaviorToolConfig::from_tools_document(
+        "Builder",
+        &tools,
+        &gents::ToolCeiling::meta_only(),
+        Vec::new(),
+    )?;
+    let explanation = config.explain_with_runtime(true, &tools.agent_did, &Default::default());
+    let effective = explanation
+        .policy
+        .effective
+        .get("defra_query")
+        .context("effective query policy missing from tool surface explanation")?;
+    Ok(explanation
+        .tool_names
+        .iter()
+        .any(|name| name == gents::defra_query::DEFRA_QUERY_TOOL_NAME)
+        && effective.iter().any(|entry| entry == "collections:all"))
+}
+
+#[test]
+fn automation_query_grader_uses_effective_collection_scope() {
+    for (datastore, unscoped) in [
+        (serde_json::json!({"enable_defra_query": true}), true),
+        (
+            serde_json::json!({"enable_defra_query": true, "defra_query_collections": []}),
+            true,
+        ),
+        (
+            serde_json::json!({"enable_defra_query": true, "defra_query_collections": ["EvalAutomationInput"]}),
+            false,
+        ),
+        (
+            serde_json::json!({"enable_defra_query": true, "defra_query_collections": ["agent-config"]}),
+            false,
+        ),
+        (serde_json::json!({"enable_defra_query": false}), false),
+        (serde_json::json!({}), false),
+    ] {
+        assert_eq!(exposes_unscoped_defra_query(&datastore).unwrap(), unscoped);
+    }
+}
+
 /// Exercise the generated default in a new session without changing its grants.
 pub(super) async fn verify_builder_execution(
     activation: &stages::ActivationFence,
@@ -347,7 +399,7 @@ async fn run_document_automation(
     let mut builder_after = behavior_configuration(node, owner, None).await?;
     let datastore = &builder_after["tools"]["datastore"];
     ensure!(
-        datastore["enable_defra_query"] != true,
+        !exposes_unscoped_defra_query(datastore)?,
         "automation enabled unrestricted query tools"
     );
     ensure!(
