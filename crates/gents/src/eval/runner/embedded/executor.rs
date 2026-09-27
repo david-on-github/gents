@@ -781,10 +781,24 @@ async fn submit_and_observe(
             interrupt_and_settle(&home.node, &request_id).await
         }
         // Nothing is left to settle the request, so its row would only be
-        // watched until the stage deadline and read as a deadline.
+        // watched until the stage deadline and read as a deadline. One last
+        // read first: the request may have settled within the same poll.
         () = runtime_exited(runtime) => {
-            stopped = true;
-            Err(anyhow!("the trial runtime exited before the request settled"))
+            match tokio::time::timeout(
+                POLL,
+                await_terminal(&home.node, &request_id, Duration::MAX, Duration::ZERO, POLL),
+            )
+            .await
+            {
+                Ok(Ok(observed)) => {
+                    stopped = false;
+                    Ok(observed)
+                }
+                _ => {
+                    stopped = true;
+                    Err(anyhow!("the trial runtime exited before the request settled"))
+                }
+            }
         }
     };
     let observed = match observed {
