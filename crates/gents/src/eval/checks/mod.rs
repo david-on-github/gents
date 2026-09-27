@@ -8,7 +8,6 @@
 pub mod captured_fields_match;
 pub mod captured_rows_count;
 pub mod final_message_matches;
-pub mod terminal_state;
 pub mod tool_calls_expected;
 
 use std::collections::BTreeMap;
@@ -19,7 +18,6 @@ use serde_json::{json, Value};
 use crate::eval::checks::captured_fields_match::CapturedFieldsMatch;
 use crate::eval::checks::captured_rows_count::CapturedRowsCount;
 use crate::eval::checks::final_message_matches::FinalMessageMatches;
-use crate::eval::checks::terminal_state::TerminalState;
 use crate::eval::checks::tool_calls_expected::ToolCallsExpected;
 use crate::eval::runner::executor::StageEvidence;
 use crate::eval::OutcomeKind;
@@ -83,7 +81,6 @@ impl CheckRegistry {
         registry.register(Box::new(CapturedFieldsMatch));
         registry.register(Box::new(CapturedRowsCount));
         registry.register(Box::new(FinalMessageMatches));
-        registry.register(Box::new(TerminalState));
         registry.register(Box::new(ToolCallsExpected));
         registry
     }
@@ -242,7 +239,6 @@ mod tests {
                 "captured_fields_match",
                 "captured_rows_count",
                 "final_message_matches",
-                "terminal_state",
                 "tool_calls_expected"
             ]
         );
@@ -252,6 +248,52 @@ mod tests {
             ("captured_rows_count", "1")
         );
         assert!(registry.get("no_such_check").is_none());
+    }
+
+    #[test]
+    fn failure_feedback_names_the_failure_and_quotes_the_last_tool_error_bounded() {
+        use crate::eval::runner::embedded::observe::ToolCallEvidence;
+        use crate::eval::runner::scripted::ScriptedExecutor;
+        use crate::eval::ProviderReason;
+
+        let call = |name: &str, status: &str, result: String| ToolCallEvidence {
+            tool_name: name.into(),
+            status: Some(status.into()),
+            lifecycle_state: None,
+            tool_failure_class: None,
+            started_at: None,
+            completed_at: None,
+            args: Value::Null,
+            result: Value::String(result),
+        };
+        let mut stage = ScriptedExecutor::failed_evidence(
+            "did:x",
+            "s1",
+            OutcomeKind::Provider,
+            Some(ProviderReason::Rejected),
+        )
+        .stages
+        .remove(0);
+        stage.tool_calls = vec![
+            call("read", "failed", "first error".into()),
+            call(
+                "write",
+                "failed",
+                format!("permission denied {}", "x".repeat(5_000)),
+            ),
+            call("list", "completed", "ok".into()),
+        ];
+        let text = failure_feedback(&stage);
+        assert!(
+            text.starts_with("stage ended failed; failure_kind provider; provider_reason rejected"),
+            "{text}"
+        );
+        assert!(
+            text.contains("last tool error: write: permission denied"),
+            "{text}"
+        );
+        assert!(!text.contains("first error"), "{text}");
+        assert!(text.len() < 400, "{}", text.len());
     }
 }
 
