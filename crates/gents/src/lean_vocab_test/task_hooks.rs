@@ -51,6 +51,15 @@ pub(crate) enum LeanTaskOutcome {
     Interrupted,
 }
 
+/// `Conformance.TaskHooksContracts.HookInvocation`: one thing the modeled
+/// orchestration asked an external owner to do.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum LeanHookInvocation {
+    Hook { hook_id: String },
+    Work,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LeanTaskHookAdmissionCase {
@@ -71,6 +80,9 @@ pub(crate) struct LeanTaskHookRunCase {
     pub(crate) after_success_attempted: Vec<LeanHookAttempt>,
     pub(crate) after_failure_attempted: Vec<LeanHookAttempt>,
     pub(crate) finally_attempted: Vec<LeanHookAttempt>,
+    /// `invocationTrace` of the modeled run: the whole ordered sequence, so a
+    /// consumer compares cross-phase order rather than per-phase slices.
+    pub(crate) invocation_trace: Vec<LeanHookInvocation>,
     pub(crate) cleanup_errors: Vec<String>,
     pub(crate) expected_outcome: LeanTaskOutcome,
     pub(crate) expected_final_outcome: LeanTaskOutcome,

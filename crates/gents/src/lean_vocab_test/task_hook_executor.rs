@@ -1,7 +1,7 @@
 use crate::document_config::{TaskHook, TaskHookPhase};
 use crate::lean_vocab_test::{
     lean_task_hook_admission_cases, lean_task_hook_run_cases, LeanCommandResult, LeanHookAttempt,
-    LeanTaskHook, LeanTaskOutcome, LeanTaskPrimaryError,
+    LeanHookInvocation, LeanTaskHook, LeanTaskOutcome, LeanTaskPrimaryError,
 };
 use crate::task_hooks::{
     effective_timeout_secs, run_task_hooks, HookAttempt, HookCommandResult, HookPrimaryError,
@@ -66,6 +66,13 @@ enum Invocation {
     Work,
 }
 
+fn invocation(generated: &LeanHookInvocation) -> Invocation {
+    match generated {
+        LeanHookInvocation::Hook { hook_id } => Invocation::Hook(hook_id.clone()),
+        LeanHookInvocation::Work => Invocation::Work,
+    }
+}
+
 /// Stands in for the host execution owner exactly as `TaskHooks.scriptedExec`
 /// does: an unscripted occurrence is observed to have exited zero.
 struct ScriptedExec {
@@ -119,14 +126,6 @@ fn attempted_hook_ids(attempts: &[LeanHookAttempt]) -> Vec<&str> {
         .iter()
         .map(|attempt| attempt.hook_id.as_str())
         .collect()
-}
-
-fn configured_phase<'a>(hooks: &'a [LeanTaskHook], hook_id: &str) -> &'a str {
-    hooks
-        .iter()
-        .find(|hook| hook.hook_id == hook_id)
-        .map(|hook| hook.phase.as_str())
-        .unwrap_or_else(|| panic!("the executor attempted an unconfigured hook {hook_id:?}"))
 }
 
 fn assert_attempts(case: &str, phase: &str, actual: &[HookAttempt], expected: &[LeanHookAttempt]) {
@@ -184,14 +183,13 @@ async fn generated_task_hook_run_cases_drive_the_production_hook_executor() {
             )
         });
 
-        let invoked = exec.invoked();
         assert_eq!(
-            invoked
+            exec.invoked(),
+            case.invocation_trace
                 .iter()
-                .filter(|invocation| **invocation == Invocation::Work)
-                .count(),
-            usize::from(case.expected_agent_ran),
-            "{}: the owned work ran a different number of times than the model records an agent attempt",
+                .map(invocation)
+                .collect::<Vec<_>>(),
+            "{}: the host and the owned work were invoked in a different sequence than the model's trace",
             case.name
         );
         assert_eq!(
@@ -200,46 +198,6 @@ async fn generated_task_hook_run_cases_drive_the_production_hook_executor() {
             "{}: the executor disagrees on whether the owned work ran",
             case.name
         );
-        for (phase, expected) in [
-            ("before", &case.before_attempted),
-            ("after_success", &case.after_success_attempted),
-            ("after_failure", &case.after_failure_attempted),
-            ("finally", &case.finally_attempted),
-        ] {
-            let attempted = invoked
-                .iter()
-                .filter_map(|invocation| match invocation {
-                    Invocation::Hook(hook_id)
-                        if configured_phase(&case.hooks, hook_id) == phase =>
-                    {
-                        Some(hook_id.as_str())
-                    }
-                    _ => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                attempted,
-                attempted_hook_ids(expected),
-                "{}: the host was asked to run a different {phase} sequence than the model's trace",
-                case.name
-            );
-        }
-        if case.expected_agent_ran {
-            let ahead_of_work = invoked
-                .iter()
-                .take_while(|invocation| **invocation != Invocation::Work)
-                .filter_map(|invocation| match invocation {
-                    Invocation::Hook(hook_id) => Some(hook_id.as_str()),
-                    Invocation::Work => None,
-                })
-                .collect::<Vec<_>>();
-            assert_eq!(
-                ahead_of_work,
-                attempted_hook_ids(&case.before_attempted),
-                "{}: only the modeled before phase may run ahead of the owned work",
-                case.name
-            );
-        }
         assert_attempts(
             &case.name,
             "before",
