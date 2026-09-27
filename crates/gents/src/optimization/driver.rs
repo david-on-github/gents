@@ -2099,6 +2099,16 @@ mod tests {
         };
         let error = check_resume(&request(), &other_policy, &origin()).unwrap_err();
         assert!(job_refused(&error).unwrap().0.contains("policy"));
+
+        let mut retargeted = request();
+        retargeted.target_field = TargetField::TaskPromptTemplate;
+        retargeted.task_id = Some("plan".into());
+        let error = check_resume(&retargeted, &policy, &origin()).unwrap_err();
+        assert!(job_refused(&error).unwrap().0.contains("target"));
+        let mut task_origin = origin();
+        task_origin.target.field = TargetField::TaskPromptTemplate;
+        task_origin.target.id = "plan".into();
+        check_resume(&retargeted, &policy, &task_origin).unwrap();
     }
 
     /// C1 (constraint 15): the capture list is frozen with the job, so a

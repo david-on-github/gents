@@ -701,6 +701,45 @@ pub(crate) async fn accepting_harness(job_id: &str) -> (Harness, JobRequest) {
     (harness, request)
 }
 
+pub(crate) const CANDIDATE_TEMPLATE: &str =
+    "Do {{ args.goal }} for {{ doc.owner }}, and say why.\n";
+
+/// [`accepting_harness`] for a task prompt template target: the live task
+/// `plan` of the monitor behavior and a pack holding it as a sidecar.
+pub(crate) async fn accepting_task_harness(job_id: &str) -> (Harness, JobRequest) {
+    use crate::optimization::subject::tests::{write_task_fixture_pack, FIXTURE_TEMPLATE};
+    let harness = Harness::new().await;
+    harness
+        .install(vec![(
+            Collection::Task,
+            json!({
+                "task_id": "plan",
+                "agent_did": OWNER,
+                "behavior_id": "monitor",
+                "prompt_template": FIXTURE_TEMPLATE,
+            }),
+        )])
+        .await;
+    let pack = harness.jobs_dir.parent().unwrap().join("task-subject");
+    write_task_fixture_pack(&pack, false);
+    let executor = script(base_executor(), "baseline", &VALIDATION_CASES, |_| fail());
+    let request = JobRequest {
+        baseline_pack: pack,
+        target_field: TargetField::TaskPromptTemplate,
+        task_id: Some("plan".into()),
+        ..harness.request(job_id, DEFINITION, budgets(1_000))
+    };
+    let outcome = settle(
+        &harness,
+        &request,
+        &executor,
+        &repeating_proposer(CANDIDATE_TEMPLATE),
+    )
+    .await;
+    assert_eq!(outcome.state, JobState::ReadyToPromote, "{outcome:#?}");
+    (harness, request)
+}
+
 /// A harness whose job finished without accepting anything: three cases
 /// improve and three tie, so p = 8/64 = 125000 ppm.
 pub(crate) async fn rejecting_harness(job_id: &str) -> (Harness, JobRequest) {

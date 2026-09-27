@@ -373,9 +373,12 @@ mod tests {
     use crate::eval::runner::freeze::tests::OWNER;
     use crate::optimization::driver::job_dir;
     use crate::optimization::driver::matrix::{
-        accepting_harness, rejecting_harness, Harness, BASELINE_PROMPT, CANDIDATE_PROMPT,
+        accepting_harness, accepting_task_harness, rejecting_harness, Harness, BASELINE_PROMPT,
+        CANDIDATE_PROMPT, CANDIDATE_TEMPLATE,
     };
     use crate::optimization::job::load_job;
+    use crate::optimization::subject::tests::FIXTURE_TEMPLATE;
+    use crate::optimization::target::TargetField;
     use crate::Collection;
     use serde_json::json;
 
@@ -403,6 +406,64 @@ mod tests {
                             .to_owned()
                     })
             })
+    }
+
+    async fn live_template(access: &ConfigAccess) -> Option<String> {
+        read_closure(access)
+            .await
+            .iter()
+            .find_map(|(collection, value)| {
+                (*collection == Collection::Task && value["task_id"] == "plan").then(|| {
+                    value["prompt_template"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+            })
+    }
+
+    #[tokio::test]
+    async fn a_task_template_promotion_writes_the_task_and_reverts_it() {
+        let (harness, request) = accepting_task_harness("promote-task").await;
+        let digest = checkpoint_digest(&harness, &request.job_id).await;
+        let job = load_job(harness.access(), OWNER, &request.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.origin.target.field, TargetField::TaskPromptTemplate);
+        assert_eq!(job.origin.target.id, "plan");
+        let before = read_closure(harness.access()).await;
+
+        let promotion = promote(harness.access(), OWNER, &request.job_id, &digest, OWNER)
+            .await
+            .unwrap();
+        assert_eq!(promotion.previous_text, FIXTURE_TEMPLATE);
+        assert_eq!(
+            live_template(harness.access()).await.as_deref(),
+            Some(CANDIDATE_TEMPLATE)
+        );
+        assert_eq!(
+            live_prompt(harness.access()).await.as_deref(),
+            Some(BASELINE_PROMPT),
+            "the context is untouched"
+        );
+        let after = read_closure(harness.access()).await;
+        assert_eq!(after.len(), before.len());
+
+        revert(
+            harness.access(),
+            OWNER,
+            &request.job_id,
+            &promotion.target_digest,
+            OWNER,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            live_template(harness.access()).await.as_deref(),
+            Some(FIXTURE_TEMPLATE)
+        );
+        assert_eq!(state(&harness, &request.job_id).await, JobState::Reverted);
     }
 
     async fn state(harness: &Harness, job_id: &str) -> JobState {
