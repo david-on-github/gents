@@ -425,8 +425,9 @@ mod tests {
         );
     }
 
-    /// A task template is rendered with its variables when a seed stage fires
-    /// the task; a candidate that drops one would render another prompt shape.
+    /// A task's trigger renders the template with its variables when a seed
+    /// stage fires it; a candidate that drops one would render another prompt
+    /// shape.
     #[test]
     fn a_task_candidate_that_drops_a_template_variable_is_rejected() {
         let task = task_fixture(false);

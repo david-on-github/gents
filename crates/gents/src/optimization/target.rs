@@ -16,8 +16,8 @@ use crate::config_client::{
 use crate::Collection;
 
 /// The one field of one document an optimization job may change (ruling
-/// R2): a context's system prompt, or the prompt template a seed stage
-/// renders when it fires a task.
+/// R2): a context's system prompt, or the prompt template a task's trigger
+/// renders when a seed stage fires it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetField {

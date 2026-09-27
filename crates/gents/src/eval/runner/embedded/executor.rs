@@ -706,7 +706,7 @@ async fn run_stages(
     workspace: &Path,
     ready: &watch::Receiver<Reconciled>,
 ) -> Vec<StageEvidence> {
-    let mut stages: Vec<StageEvidence> = Vec::new();
+    let mut stages = Vec::new();
     for stage in &spec.stages {
         spec.progress.stage_started(&stage.stage_id);
         let evidence = run_stage(spec, cancel, home, locator, workspace, stage, ready).await;
@@ -990,7 +990,7 @@ async fn submit_stage(
 
 /// A seed stage: once the runtime's event sources are reconciled, write the
 /// document and take the request the pack's trigger fires for it. The wait for
-/// the event sources shares the runtime-ready budget; the wait for the fire
+/// the event sources gets its own runtime-ready budget; the wait for the fire
 /// spends the stage's own deadline, and what it leaves is returned with the
 /// request for the terminal wait.
 async fn seed_and_await_fire(
