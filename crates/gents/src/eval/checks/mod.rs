@@ -6,19 +6,21 @@
 //! alone.
 
 pub mod captured_rows_count;
+pub mod tool_calls_expected;
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::eval::checks::captured_rows_count::CapturedRowsCount;
+use crate::eval::checks::tool_calls_expected::ToolCallsExpected;
 use crate::eval::runner::executor::StageEvidence;
 use crate::eval::OutcomeKind;
 
 /// Bumped when the builtin set changes in a way that could move a score.
 /// Frozen into every run's origin.
-pub const CHECK_REGISTRY_VERSION: &str = "1";
+pub const CHECK_REGISTRY_VERSION: &str = "2";
 
 /// What one check concluded about one stage. `score_bp` is `None` when the
 /// verdict is not evidence about the subject, such as a grader fault.
@@ -73,6 +75,7 @@ impl CheckRegistry {
             checks: BTreeMap::new(),
         };
         registry.register(Box::new(CapturedRowsCount));
+        registry.register(Box::new(ToolCallsExpected));
         registry
     }
 
@@ -110,6 +113,74 @@ impl Default for CheckRegistry {
     }
 }
 
+/// The longest excerpt of evidence a check quotes, in chars.
+const EXCERPT_CHARS: usize = 120;
+
+/// Feedback is rendered into the proposer's prompt once per verdict, so each
+/// is capped.
+const FEEDBACK_BYTES: usize = 2048;
+
+/// `text` cut to `max` chars, marked when cut.
+fn excerpt(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    }
+}
+
+/// `satisfied` of `total` requirements held, scored in proportion. `total`
+/// is never zero: a check with nothing to require rejects its params.
+fn graded(satisfied: usize, total: usize, feedback: Option<String>) -> CheckVerdict {
+    let met = satisfied == total;
+    CheckVerdict {
+        kind: if met {
+            OutcomeKind::Passed
+        } else {
+            OutcomeKind::ModelAcceptance
+        },
+        score_bp: Some((satisfied * 10_000 / total) as u32),
+        raw: json!({
+            "reason_code": if met { "met" } else { "unmet" },
+            "satisfied": satisfied,
+            "total": total,
+        }),
+        feedback: feedback.map(|mut text| {
+            if text.len() > FEEDBACK_BYTES {
+                text.truncate(text.floor_char_boundary(FEEDBACK_BYTES - "…".len()));
+                text.push('…');
+            }
+            text
+        }),
+    }
+}
+
+/// The check could not reach a verdict, which is no evidence about the
+/// subject.
+fn grader(reason_code: &str, detail: impl Into<String>) -> CheckVerdict {
+    CheckVerdict {
+        kind: OutcomeKind::Grader,
+        score_bp: None,
+        raw: json!({ "reason_code": reason_code, "detail": detail.into() }),
+        feedback: None,
+    }
+}
+
+/// The reason codes every graded check shares.
+fn graded_reason_codes(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+    [
+        ("met", "every requirement held; score 10000"),
+        (
+            "unmet",
+            "some requirement failed; score is satisfied / total in basis points",
+        ),
+        ("bad_params", "grader: params did not parse or require nothing"),
+    ]
+    .iter()
+    .chain(extra)
+    .map(|(code, line)| (code.to_string(), line.to_string()))
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,7 +188,10 @@ mod tests {
     #[test]
     fn the_builtin_registry_holds_the_seed_check_under_its_own_name() {
         let registry = CheckRegistry::builtin();
-        assert_eq!(registry.names(), vec!["captured_rows_count"]);
+        assert_eq!(
+            registry.names(),
+            vec!["captured_rows_count", "tool_calls_expected"]
+        );
         let check = registry.get("captured_rows_count").expect("the seed check");
         assert_eq!(
             (check.name(), check.version()),
