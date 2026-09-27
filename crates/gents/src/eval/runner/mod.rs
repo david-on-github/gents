@@ -158,8 +158,16 @@ fn cancel_requested(run_dir: &Path, cancel: &CancellationToken) -> bool {
     false
 }
 
-/// Remove the marker a cancelled run left, if any.
+/// Remove the marker a cancelled run left, if any. A run a live process
+/// still holds is refused instead: its marker and `progress.json` are that
+/// process's.
 fn clear_cancel(run_dir: &Path) -> Result<()> {
+    if running_elsewhere(run_dir) {
+        return Err(anyhow::Error::from(FreezeRefused(format!(
+            "run {} is still running in another process",
+            run_dir.display()
+        ))));
+    }
     let marker = run_dir.join(CANCEL_MARKER);
     match std::fs::remove_file(&marker) {
         Ok(()) => {
@@ -355,6 +363,7 @@ pub(crate) async fn execute_frozen(
         let stop = AtomicBool::new(false);
         let mut retried: Vec<u32> = Vec::new();
         let mut tripped: Option<u32> = None;
+        let mut failed: Option<anyhow::Error> = None;
         {
             let mut running = futures::stream::iter(planned.iter().map(|slot| {
                 execute_trial(
@@ -397,8 +406,17 @@ pub(crate) async fn execute_frozen(
                         next = running.next() => next,
                     }
                 };
-                let Some(slot) = next.transpose()? else {
-                    break;
+                let slot = match next {
+                    None => break,
+                    Some(Ok(slot)) => slot,
+                    // The trials still in flight are cancelled and drained
+                    // rather than dropped, which would detach their runtimes.
+                    Some(Err(error)) => {
+                        failed.get_or_insert(error);
+                        stop.store(true, Ordering::Relaxed);
+                        cancel.cancel();
+                        continue;
+                    }
                 };
                 match slot {
                     Slot::Skipped => {}
@@ -427,6 +445,9 @@ pub(crate) async fn execute_frozen(
             }
         }
 
+        if let Some(error) = failed {
+            return Err(error);
+        }
         if let Some(consecutive_not_evidence) = tripped {
             tracing::error!(
                 run_id,
@@ -1155,6 +1176,42 @@ mod tests {
 
         async fn load_trials(&self, owner: &str, run_id: &str) -> Result<Vec<TrialRecord>> {
             self.inner.load_trials(owner, run_id).await
+        }
+    }
+
+    /// An executor whose trials run until they are cancelled, and count how
+    /// many of them saw that cancellation and wound down.
+    #[derive(Default)]
+    struct SettlesOnCancel {
+        settled: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl TrialExecutor for SettlesOnCancel {
+        fn isolation(&self) -> Isolation {
+            Isolation::Embedded
+        }
+
+        async fn provision(&self, _spec: &TrialSpec) -> TrialLocator {
+            TrialLocator {
+                trial_agent_did: "did:key:trial".into(),
+                session_id: "session".into(),
+                home_hint: None,
+            }
+        }
+
+        async fn execute(&self, _spec: &TrialSpec, cancel: CancellationToken) -> TrialEvidence {
+            cancel.cancelled().await;
+            self.settled.fetch_add(1, Ordering::SeqCst);
+            passed()
+        }
+
+        async fn recollect(
+            &self,
+            _at: &TrialLocator,
+            _captures: &[Capture],
+        ) -> Option<TrialEvidence> {
+            None
         }
     }
 
@@ -2177,6 +2234,87 @@ mod tests {
         assert_eq!(outcome.completed, 1);
         assert!(!outcome.cancelled);
         assert!(!marker.exists());
+    }
+
+    /// One trial's error stops the pass, but the trials already in flight are
+    /// cancelled and drained before it leaves, so none is dropped mid-run
+    /// with its runtime detached.
+    #[tokio::test]
+    async fn an_error_in_one_trial_drains_the_trials_in_flight() {
+        let (launching, pack) = launching("captured_rows_count").await;
+        let mut request = request(&launching, &pack, "run-drain");
+        request.concurrency = 2;
+        let frozen = freeze(&launching.access, &request, Isolation::Embedded)
+            .await
+            .unwrap();
+        let executor = SettlesOnCancel::default();
+        let recorder = FaultingRecorder::new(&launching.access).failing("create_trial", 2);
+        let error = execute_frozen(
+            &frozen,
+            &recorder,
+            &executor,
+            &CheckRegistry::builtin(),
+            CancellationToken::new(),
+            &options(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("injected"), "{error:#}");
+        assert_eq!(
+            executor.settled.load(Ordering::SeqCst),
+            1,
+            "the trial in flight saw the cancellation and wound down"
+        );
+    }
+
+    /// A second `run` or `resume` of a run a live process holds refuses
+    /// before it clears that process's cancel marker or resets its progress.
+    #[tokio::test]
+    async fn run_and_resume_refuse_a_run_held_by_a_live_process() {
+        let (launching, pack) = launching("captured_rows_count").await;
+        let mut request = request(&launching, &pack, "run-held");
+        one_slot(&mut request);
+        let frozen = freeze(&launching.access, &request, Isolation::Embedded)
+            .await
+            .unwrap();
+        let holder = ProgressWriter::new(&frozen.run_dir);
+        let _held = holder.hold();
+        let marker = request_cancel(&launching.runs_dir(), "run-held").unwrap();
+
+        let ran = run(
+            &launching.access,
+            &request,
+            &ScriptedExecutor::new().with_default(passed()),
+            &CheckRegistry::builtin(),
+            CancellationToken::new(),
+            &options(),
+        )
+        .await
+        .unwrap_err();
+        let resumed = resume(
+            &launching.access,
+            OWNER,
+            "run-held",
+            &launching.runs_dir(),
+            &ScriptedExecutor::new().with_default(passed()),
+            &CheckRegistry::builtin(),
+            CancellationToken::new(),
+            &options(),
+        )
+        .await
+        .unwrap_err();
+        for error in [ran, resumed] {
+            assert!(
+                freeze_refused(&error).is_some_and(|refusal| refusal.0.contains("still running")),
+                "{error:#}"
+            );
+        }
+        assert!(marker.exists(), "the holder's cancel request survives");
+        assert!(running_elsewhere(&frozen.run_dir));
+        assert!(load_trials(&launching.access, OWNER, "run-held")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
