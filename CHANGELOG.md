@@ -131,11 +131,11 @@ source consistency checks, not a separate runtime compatibility version.
 - Interrupting a claimed request before inference starts now terminalizes it
   at once instead of waiting out the execution lease and a recovery sweep
   (#1809). The per-request interrupt observer starts at the claim, and workspace
-  inspection, generated-title work and pre-inference compaction are all raced
-  against the latch. The terminal request records whether the request had
-  attempted any provider call: `failure_reason` is `interrupted before any
-  provider call` when none was attempted, and `interrupted` otherwise, which
-  does not by itself mean a call reached the provider.
+  inspection, prompt assembly and pre-inference compaction are all raced against
+  the latch. The terminal request records whether the request had attempted any
+  provider call: `failure_reason` is `interrupted before any provider call` when
+  none was attempted, and `interrupted` otherwise, which does not by itself mean
+  a call reached the provider.
 - Stateless (`store:false`) Responses requests to xAI/Grok and ChatGPT Codex
   now always request `include: ["reasoning.encrypted_content"]`, even with no
   reasoning effort configured, so replayed reasoning resolves without

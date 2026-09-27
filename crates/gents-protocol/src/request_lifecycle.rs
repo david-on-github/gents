@@ -21,11 +21,10 @@ pub mod interrupt_terminal_reason {
 
     /// Positive evidence that the request attempted no provider call before the
     /// interrupt landed. Admission mints one call sequence per attempt ahead of
-    /// every step that could reach a provider, and a request's inference,
-    /// pre-inference compaction and generated-title calls share that one
-    /// counter, so a zero count rules a provider call out for all three. Absent
-    /// output is not evidence: a request can call a provider and publish
-    /// nothing.
+    /// every step that could reach a provider, and a request's inference and its
+    /// pre-inference compaction share that one counter, so a zero count rules a
+    /// provider call out for both. Absent output is not evidence: a request can
+    /// call a provider and publish nothing.
     pub const BEFORE_ANY_PROVIDER_CALL: &str = "interrupted before any provider call";
 }
 

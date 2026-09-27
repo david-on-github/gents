@@ -139,9 +139,9 @@ async fn current_call_join_reflects_the_minted_call() {
 /// The interrupt terminal reason reads this counter, so what it guarantees runs
 /// one way only: `acquire_current_call` mints a sequence before it validates the
 /// backend binding and before it acquires a permit, so zero rules a provider
-/// call out while a nonzero count says only that one was attempted. The
-/// compaction and title sub-scopes clone the request's counter, so one read
-/// covers every provider call the request can attempt.
+/// call out while a nonzero count says only that one was attempted. Every
+/// sub-scope clones the request's counter, so one read covers every provider
+/// call the request can attempt.
 #[tokio::test]
 async fn provider_call_count_counts_attempted_admissions() {
     assert_eq!(super::current_request_provider_call_count(), None);
@@ -169,15 +169,18 @@ async fn provider_call_count_counts_attempted_admissions() {
             "a call refused for its backend binding has already consumed a sequence"
         );
 
-        let title = scope_call(CallKind::OneOff, 1, async {
+        let inference = scope_call(CallKind::Inference, 1, async {
             registry.acquire_current_call_for_test().await
         })
         .await;
-        assert!(title.is_err(), "an empty backend binding admits no call");
+        assert!(
+            inference.is_err(),
+            "an empty backend binding admits no call"
+        );
         assert_eq!(
             super::current_request_provider_call_count(),
             Some(2),
-            "the title sub-scope advances the same request counter"
+            "a second sub-scope advances the same request counter"
         );
     })
     .await;

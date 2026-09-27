@@ -79,9 +79,8 @@ async fn seed_titled_session(
     request: &AgentRequest,
     behavior: &ResolvedBehavior,
 ) -> anyhow::Result<()> {
-    // A session that already has a title keeps generated-title work off the
-    // provider, so a zero provider-call count is a fact about this test rather
-    // than a race with the title task.
+    // A session that already has a title keeps the owner from dispatching a
+    // detached title request while this one is being interrupted.
     let title = gents_protocol::session::SessionTitle {
         text: "pre-inference interrupt".into(),
         source: gents_protocol::session::SessionTitleSource::Task,
@@ -168,6 +167,7 @@ async fn interrupt_while_preparing_provider_input_terminalizes_through_the_owner
     let mut daemon = BehaviorDaemon::new(
         node.clone(),
         behavior.clone(),
+        None,
         Arc::new(ProviderCallCountingModel(provider_calls.clone())),
         prompt.preamble().to_owned(),
         Arc::new(vec![Box::new(PreInferenceBlockingTool {
@@ -204,8 +204,11 @@ async fn interrupt_while_preparing_provider_input_terminalizes_through_the_owner
             loop {
                 let row = request_terminal_row(node.as_ref(), &request_doc_id)
                     .await
-                    .expect("read the claimed request row");
-                if entered.load(Ordering::SeqCst) && row["lifecycle_state"] == "claimed" {
+                    .expect("read the owned request row");
+                // The owner fences prompt assembly behind the same processing
+                // state as inference, so the pre-inference window is owned and
+                // nonterminal rather than still claimed.
+                if entered.load(Ordering::SeqCst) && row["lifecycle_state"] == "processing" {
                     return;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
