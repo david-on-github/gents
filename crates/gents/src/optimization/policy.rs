@@ -708,6 +708,16 @@ mod tests {
             candidate_trials: 1,
         };
         assert!(!cost_ok(&params(), &totals));
+        // Only the allowed side past the width is the exact answer: ok.
+        assert!(cost_ok(
+            &params(),
+            &TokenTotals {
+                baseline_tokens: 1 << 63,
+                baseline_trials: 1,
+                candidate_tokens: 1,
+                candidate_trials: 1 << 63,
+            }
+        ));
     }
 
     #[test]
