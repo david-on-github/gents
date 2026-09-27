@@ -52,10 +52,10 @@ pub(crate) async fn enqueue_admitted_steering_request(
         .as_ref()
         .context("atomic steering enqueue requires queue input")?;
     anyhow::ensure!(
-        queue.source == QueueSource::Steering
+        matches!(queue.source, QueueSource::Steering | QueueSource::User)
             && queue.policy == QueuePolicy::Append
             && queue.key.is_none(),
-        "atomic steering enqueue requires an unkeyed append"
+        "atomic steering enqueue requires an unkeyed user or steering append"
     );
     anyhow::ensure!(
         queue.background_completion_wake_version.is_none(),
@@ -95,4 +95,42 @@ pub(crate) async fn enqueue_admitted_steering_request(
     .await?;
 
     Ok(enqueued)
+}
+
+/// Append a `send_message` request to a busy session. The caller signed it
+/// through the session-message writer as a user-origin append queued after
+/// the session's active request; the append shares the steering transaction.
+pub(crate) async fn enqueue_session_message_steering(
+    node: &EmbeddedNode,
+    active: &AgentRequest,
+    create: &gents_protocol::request_admission::AgentRequestCreate,
+) -> Result<EnqueuedAgentRequest> {
+    let queue = create
+        .input
+        .queue
+        .as_ref()
+        .context("session-message steering requires queue input")?;
+    anyhow::ensure!(
+        queue.source == QueueSource::User
+            && queue.policy == QueuePolicy::Append
+            && queue.key.is_none()
+            && queue.queued_after_request_id.as_deref() == Some(active.request_id.as_str())
+            && create.session_id == active.session_id
+            && create.agent_did == active.agent_did,
+        "session-message steering must append after the session's active request"
+    );
+    let request_mutation = create.graphql_mutation().map_err(anyhow::Error::msg)?;
+    let request_mutation = &request_mutation;
+    let request_id = create.request_id.as_str();
+    crate::config_client::ConfigAccess::transact_local(
+        node,
+        None,
+        "lifecycle.enqueue_session_message_steering",
+        move |txn| {
+            Box::pin(async move {
+                steering_transaction_attempt(txn, active, request_id, request_mutation).await
+            })
+        },
+    )
+    .await
 }

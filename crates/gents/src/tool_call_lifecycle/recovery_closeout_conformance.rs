@@ -6,7 +6,7 @@ use crate::identity::AgentIdentity;
 use crate::tool_call_lifecycle::admission_fixture::{
     complete_child, published_admission, published_session_message, PublishedAdmissionOptions,
 };
-use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
 use std::sync::Arc;
 
 /// Fixture writes to a `@branchable` collection also advance its collection
@@ -441,7 +441,6 @@ async fn generated_registered_background_task_deletion_cases_use_live_worker() {
         serde_json::json!({"tool_name": "bash", "args": {}}),
         None,
         AwaitMode::Background,
-        CancelPolicy::Cascade,
         true,
     )
     .await

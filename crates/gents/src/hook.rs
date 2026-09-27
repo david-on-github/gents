@@ -14,9 +14,7 @@ use tokio_util::sync::CancellationToken;
 use crate::background_tools::LiveToolOutputRegistry;
 use crate::meta_tools::selected_remote_identity;
 use crate::session;
-use crate::tool_call_lifecycle::{
-    AwaitMode, CancelCause, ChildTerminal, InterruptDisposition, ToolCallLifecycle,
-};
+use crate::tool_call_lifecycle::{AwaitMode, CancelCause, InterruptDisposition, ToolCallLifecycle};
 use crate::truncation::TruncationLimits;
 
 pub(crate) mod persistence;
@@ -656,7 +654,6 @@ impl DefraSessionHook {
         args: &str,
         deadline_at: DateTime<Utc>,
         await_mode: AwaitMode,
-        cancel_policy: crate::tool_call_lifecycle::CancelPolicy,
     ) -> anyhow::Result<ToolCallLifecycle> {
         let registered = self
             .state
@@ -717,7 +714,6 @@ impl DefraSessionHook {
             accepted,
             deadline_at,
             await_mode,
-            cancel_policy,
         )?
         .with_selected_tool_identity(selected))
     }
@@ -1042,18 +1038,7 @@ impl DefraSessionHook {
 
         let count = lifecycles.len();
         for mut lifecycle in lifecycles {
-            if lifecycle.is_subagent_bridge() && lifecycle.await_mode() != AwaitMode::Foreground {
-                tracing::debug!(
-                    "leaving background subagent bridge running after parent deadline sweep"
-                );
-            } else {
-                // Foreground subagent bridges take the same deadline
-                // transition as native tools: `timedOut`, never a fabricated
-                // `ChildTerminal::Dead` — the child may still be live, and its
-                // terminalization belongs to the subagent-liveness sweep
-                // (#1002; Lean `ToolExecution.Transition.timeout`).
-                let _ = lifecycle.timeout().await?;
-            }
+            let _ = lifecycle.timeout().await?;
         }
         Ok(count)
     }
@@ -1079,7 +1064,6 @@ impl DefraSessionHook {
                     .cancel_during_run(CancelCause::Interrupted)
                     .await
                     .map(|won| cancelled += usize::from(won)),
-                InterruptDisposition::Background => self.retain_interrupted_bridge(lifecycle).await,
                 InterruptDisposition::Cancel | InterruptDisposition::Retain => Ok(()),
             };
             if let Err(error) = applied {
@@ -1103,16 +1087,7 @@ impl DefraSessionHook {
 
         let count = lifecycles.len();
         for mut lifecycle in lifecycles {
-            if lifecycle.is_subagent_bridge() {
-                lifecycle
-                    .bridge_failure(ChildTerminal::Failed {
-                        reason: result.to_string(),
-                        failure_class,
-                    })
-                    .await?;
-            } else {
-                lifecycle.fail(result, failure_class).await?;
-            }
+            lifecycle.fail(result, failure_class).await?;
         }
         Ok(count)
     }
@@ -1150,20 +1125,9 @@ impl DefraSessionHook {
 }
 
 #[async_trait::async_trait]
-impl
-    gents_loop::session_hook::CanonicalSessionHook<
-        crate::streaming::AcceptedToolCall,
-        crate::streaming::SpawnAdmissionPlan,
-    > for DefraSessionHook
+impl gents_loop::session_hook::CanonicalSessionHook<crate::streaming::AcceptedToolCall>
+    for DefraSessionHook
 {
-    async fn preplan_spawn_admissions(
-        &self,
-        message: &Message,
-        internal_call_ids: &[String],
-    ) -> anyhow::Result<Vec<crate::streaming::SpawnAdmissionPlan>> {
-        DefraSessionHook::preplan_spawn_admissions(self, message, internal_call_ids).await
-    }
-
     async fn adopt_accepted_tool_calls(
         &self,
         calls: Vec<(String, crate::streaming::AcceptedToolCall)>,

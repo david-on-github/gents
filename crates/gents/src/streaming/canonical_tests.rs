@@ -3,73 +3,6 @@ use crate::lifecycle::{ClaimOutcome, RequestLifecycle};
 use std::{sync::Arc, time::Duration};
 
 #[test]
-fn delegated_input_replay_requires_exact_presence_source_and_bytes() {
-    let source = gents_protocol::output::PayloadRef {
-        close_doc_id: "close-1".into(),
-        stream: 2,
-    };
-    let exact = gents_protocol::output::DelegatedToolInput {
-        source: source.clone(),
-        arguments: r#"{"name":"child"}"#.into(),
-        parent_subagent_depth: 1,
-    };
-    let wrong_source = gents_protocol::output::DelegatedToolInput {
-        source: gents_protocol::output::PayloadRef {
-            close_doc_id: "close-other".into(),
-            stream: 2,
-        },
-        arguments: exact.arguments.clone(),
-        parent_subagent_depth: exact.parent_subagent_depth,
-    };
-
-    assert!(super::canonical::delegated_input_matches(
-        false, None, &source, None, 0,
-    ));
-    assert!(!super::canonical::delegated_input_matches(
-        false,
-        Some(&exact),
-        &source,
-        Some(&exact.arguments),
-        exact.parent_subagent_depth,
-    ));
-    assert!(super::canonical::delegated_input_matches(
-        true,
-        Some(&exact),
-        &source,
-        Some(&exact.arguments),
-        exact.parent_subagent_depth,
-    ));
-    assert!(!super::canonical::delegated_input_matches(
-        true,
-        Some(&wrong_source),
-        &source,
-        Some(&exact.arguments),
-        exact.parent_subagent_depth,
-    ));
-    assert!(!super::canonical::delegated_input_matches(
-        true,
-        Some(&exact),
-        &source,
-        Some("different"),
-        exact.parent_subagent_depth,
-    ));
-    assert!(!super::canonical::delegated_input_matches(
-        true,
-        None,
-        &source,
-        Some(&exact.arguments),
-        exact.parent_subagent_depth,
-    ));
-    assert!(!super::canonical::delegated_input_matches(
-        true,
-        Some(&exact),
-        &source,
-        Some(&exact.arguments),
-        exact.parent_subagent_depth + 1,
-    ));
-}
-
-#[test]
 fn live_reasoning_preview_preserves_exact_small_text_and_bounded_unicode_tail() {
     let mut preview = String::new();
     super::append_live_reasoning_preview(&mut preview, "考える");
@@ -396,7 +329,7 @@ async fn first_publication_rejects_native_message_that_differs_from_reconstructi
             encoded,
             expected: Arc::new(expected),
             tool_deadline_at: lifecycle.claimed_deadline_at().unwrap().to_rfc3339(),
-            spawn_admissions: Vec::new(),
+            background_calls: Vec::new(),
         },
     )
     .await
@@ -434,7 +367,7 @@ async fn publish_tool_turn_for_rollback_test(
         encoded,
         expected: Arc::new(message.clone()),
         tool_deadline_at: lifecycle.claimed_deadline_at().unwrap().to_rfc3339(),
-        spawn_admissions: Vec::new(),
+        background_calls: Vec::new(),
     };
     // Exercise the canonical publication owner, not a test-side write script.
     super::canonical::publish_provider_turn(node, lifecycle.execution_generation().unwrap(), plan)
@@ -888,7 +821,7 @@ async fn provider_closure_cannot_precede_committed_source_timestamp() {
             encoded,
             expected: Arc::new(message),
             tool_deadline_at: lifecycle.claimed_deadline_at().unwrap().to_rfc3339(),
-            spawn_admissions: Vec::new(),
+            background_calls: Vec::new(),
         },
         now,
     )
@@ -1583,7 +1516,6 @@ async fn post_commit_receipt_loss_replays_into_exact_committed_publication() {
         a.clone(),
         deadline,
         crate::tool_call_lifecycle::AwaitMode::Foreground,
-        crate::tool_call_lifecycle::CancelPolicy::Cascade,
     )
     .unwrap();
     let mut replay_dispatch = crate::tool_call_lifecycle::ToolCallLifecycle::from_accepted(
@@ -1593,7 +1525,6 @@ async fn post_commit_receipt_loss_replays_into_exact_committed_publication() {
         b.clone(),
         deadline,
         crate::tool_call_lifecycle::AwaitMode::Foreground,
-        crate::tool_call_lifecycle::CancelPolicy::Cascade,
     )
     .unwrap();
     let (first_start, replay_start) = tokio::join!(

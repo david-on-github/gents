@@ -8,7 +8,6 @@ use super::modes::{BashMode, FileToolMode};
 use std::path::PathBuf;
 
 use crate::document_config::SubagentTargetDocument;
-use crate::tool_call_lifecycle::AwaitMode;
 use crate::toolset::{
     default_read_only_command_policy, CommandExecutionMode, CommandExecutionPolicy,
     CommandNetworkMode,
@@ -16,45 +15,25 @@ use crate::toolset::{
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SubagentToolConfig {
+    /// The `create_session` allowlist, by friendly name.
     pub targets: Vec<SubagentTargetDocument>,
-    pub spawn_enabled: bool,
-    pub steering_enabled: bool,
-    pub background_enabled: bool,
-    pub default_await_mode: AwaitMode,
-    /// When false (default), cross-deployment (remote-DID) subagent delegation is
-    /// disabled: remote-DID targets are not surfaced to the model and remote spawns
-    /// are rejected at runtime. Cross-deployment is deferred pending ACP; only
-    /// trusted-fleet deployments should opt in.
-    pub allow_cross_deployment: bool,
+    pub enabled: bool,
 }
 
 impl SubagentToolConfig {
     /// Project the canonical `Tools.subagents` group. Targets are NOT populated
     /// here: `SubagentTools.target_ids` are references to SubagentTarget
-    /// documents, resolved and pushed by the runtime snapshot owner. Every
-    /// control defaults to disabled when the group or flag is absent; selecting
-    /// targets never implicitly enables spawn.
+    /// documents, resolved and pushed by the runtime snapshot owner. The tools
+    /// default to disabled when the group or flag is absent; selecting targets
+    /// never implicitly enables them.
     pub(crate) fn from_document(tools: &crate::document_config::Tools) -> Result<Self> {
         tools.validate()?;
-        let group = tools.subagents.as_ref();
-        let background_enabled = group
-            .and_then(|group| group.background_enabled)
-            .unwrap_or(false);
-        let default_await_mode = match group.and_then(|group| group.default_await_mode.as_deref()) {
-            None => AwaitMode::default(),
-            Some(value) => AwaitMode::from_persisted(value)
-                .ok_or_else(|| anyhow::anyhow!("invalid subagent default await mode {value:?}"))?,
-        };
         Ok(Self {
             targets: Vec::new(),
-            spawn_enabled: group.and_then(|group| group.spawn_enabled).unwrap_or(false),
-            steering_enabled: group
-                .and_then(|group| group.steering_enabled)
-                .unwrap_or(false),
-            background_enabled,
-            default_await_mode,
-            allow_cross_deployment: group
-                .and_then(|group| group.allow_cross_principal)
+            enabled: tools
+                .subagents
+                .as_ref()
+                .and_then(|group| group.enabled)
                 .unwrap_or(false),
         })
     }
@@ -104,18 +83,11 @@ impl SubagentToolConfig {
     }
 
     pub(crate) fn tools_enabled(&self) -> bool {
-        self.spawn_enabled && !self.targets.is_empty()
+        self.enabled && !self.targets.is_empty()
     }
 
-    /// Inspection is part of the background-subagent capability. A behavior
-    /// that can launch a child asynchronously must also be able to read that
-    /// child's transcript without requiring the stronger steering permission.
-    pub(crate) fn background_inspection_tools_enabled(&self) -> bool {
-        self.tools_enabled() && self.background_enabled
-    }
-
-    pub(crate) fn steer_subagent_enabled(&self) -> bool {
-        self.background_inspection_tools_enabled() && self.steering_enabled
+    pub(crate) fn target(&self, name: &str) -> Option<&SubagentTargetDocument> {
+        self.targets.iter().find(|target| target.name == name)
     }
 }
 

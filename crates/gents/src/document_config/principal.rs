@@ -77,6 +77,7 @@ pub(crate) async fn load_agent_principal_record(
                 enabled
                 created_at
                 created_by
+                max_request_hop
             }}
         }}"#
     );

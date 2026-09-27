@@ -290,7 +290,7 @@ async fn accepted_tool_arguments_read_only_the_accepted_message() {
         publish_accepted_on_claimed_request, published_admission_with_owner,
         PublishedAdmissionOptions,
     };
-    use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy};
+    use crate::tool_call_lifecycle::AwaitMode;
     use gents_protocol::output::{
         MessageBlock, MessagePublication, MessageRole, OutputOutcome, PayloadRef, TranscriptMessage,
     };
@@ -327,7 +327,6 @@ async fn accepted_tool_arguments_read_only_the_accepted_message() {
         second_arguments.clone(),
         Some(second_plan),
         AwaitMode::Background,
-        CancelPolicy::Cascade,
         true,
     )
     .await

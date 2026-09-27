@@ -1,6 +1,6 @@
 //! Physical request-scope checks that require the private accepted-call seam.
 
-use super::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+use super::{AwaitMode, ToolCallLifecycle};
 use crate::background_completion::{
     project_background_subagent_completion, BackgroundCompletionOutcome,
 };
@@ -306,7 +306,6 @@ async fn subagent_liveness_sweep_ignores_foreign_did_children() {
                 await_mode: AwaitMode::Background,
             }),
             AwaitMode::Background,
-            CancelPolicy::Cascade,
             true,
         )
         .await

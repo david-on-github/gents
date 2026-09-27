@@ -733,7 +733,7 @@ mod tests {
         child_request_id: &str,
         turn: usize,
     ) -> String {
-        use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+        use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
         use gents_protocol::message::{AssistantContent, Message, ToolCall, ToolFunction};
         writer
             .start_provider_attempt(
@@ -786,7 +786,6 @@ mod tests {
             accepted,
             lifecycle.claimed_deadline_at().unwrap(),
             AwaitMode::Background,
-            CancelPolicy::Cascade,
         )
         .expect("adopt accepted bridge");
         bridge

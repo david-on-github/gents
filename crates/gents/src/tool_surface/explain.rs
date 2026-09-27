@@ -129,13 +129,9 @@ impl BehaviorToolConfig {
         active_behavior_ids: &HashSet<String>,
     ) -> ToolSurface {
         let mut subagent_tools = self.subagent_tools().clone();
-        let allow_cross_deployment = subagent_tools.allow_cross_deployment;
         subagent_tools.targets.retain(|target| {
-            if target.target_agent_did == own_agent_did {
-                active_behavior_ids.contains(&target.behavior_id)
-            } else {
-                allow_cross_deployment
-            }
+            target.target_agent_did != own_agent_did
+                || active_behavior_ids.contains(&target.behavior_id)
         });
         self.resolve_with_subagent_tools_for_runtime_availability(availability, subagent_tools)
     }
@@ -316,13 +312,13 @@ fn explain_subagents(
     if !included.is_empty() {
         builder.include_many("subagent", included);
     } else if config.subagent_tools().tools_enabled() {
-        builder.unavailable("subagent", "spawn_subagent");
+        builder.unavailable("subagent", crate::toolset::CREATE_SESSION_TOOL_NAME);
         builder.warn(
             "subagent_targets_unavailable",
-            "Subagent spawning is configured, but all targets were filtered out by active-behavior or cross-deployment availability.",
+            "create_session is configured, but every local target's behavior is inactive.",
         );
     } else {
-        builder.exclude("subagent", "spawn_subagent");
+        builder.exclude("subagent", crate::toolset::CREATE_SESSION_TOOL_NAME);
     }
 }
 
@@ -477,18 +473,13 @@ fn policy_summary(policy: &ToolPolicySurface) -> BTreeMap<String, Vec<String>> {
     summary.insert(
         "subagent".to_string(),
         vec![
-            format!("spawn:{}", policy.spawn),
-            format!("steering:{}", policy.steering),
-            format!("cross_deployment:{}", policy.cross_deployment),
+            format!("session_messages:{}", policy.session_messages),
             format!("targets:{}", policy.subagent_targets.kind()),
         ],
     );
     summary.insert(
         "background_process".to_string(),
-        vec![
-            format!("enabled:{}", policy.background),
-            format!("tools:{}", policy.background_tools.kind()),
-        ],
+        vec![format!("tools:{}", policy.background_tools.kind())],
     );
     summary.insert(
         "skills".to_string(),
@@ -520,7 +511,7 @@ mod target_scope_tests {
     use crate::tool_surface::{ResolvedToolSelection, SubagentToolConfig, ToolCeiling};
 
     #[test]
-    fn remote_target_explanation_uses_destination_principal() {
+    fn remote_target_stays_listed_and_inactive_local_target_is_dropped() {
         let target = SubagentTargetDocument {
             target_id: "remote-worker".into(),
             agent_did: "did:key:caller".into(),
@@ -530,19 +521,22 @@ mod target_scope_tests {
             description: None,
             tags: Vec::new(),
         };
-        for (allow_remote, local_behaviors, expected) in [
-            (false, HashSet::from(["worker".to_owned()]), 0),
-            (true, HashSet::new(), 1),
+        for (target_agent_did, local_behaviors, expected) in [
+            ("did:key:remote", HashSet::new(), 1),
+            ("did:key:caller", HashSet::new(), 0),
+            ("did:key:caller", HashSet::from(["worker".to_owned()]), 1),
         ] {
+            let target = SubagentTargetDocument {
+                target_agent_did: target_agent_did.into(),
+                ..target.clone()
+            };
             let config = BehaviorToolConfig::from_selection_with_subagent_tools(
                 "coordinator",
                 ResolvedToolSelection::default(),
                 &ToolCeiling::meta_only(),
                 SubagentToolConfig {
                     targets: vec![target.clone()],
-                    spawn_enabled: true,
-                    allow_cross_deployment: allow_remote,
-                    ..Default::default()
+                    enabled: true,
                 },
                 Vec::new(),
             )

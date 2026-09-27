@@ -6,17 +6,6 @@
 //!
 //! Lifecycle is daemon-visible only; subprocess kill mechanics, output
 //! streaming, and persistent processes are out of scope.
-//!
-//! ## R2 maintenance obligations
-//!
-//! This module implements R2 ("Rust subagent data plane"):
-//!
-//! - SubagentSource (R3) consumes `create_subagent_request` and the bridge methods.
-//! - Agent-facing tools (R4) are routed via hook integration that uses
-//!   `new_subagent` and recognizes spawn_subagent / wait_task / etc. tool names.
-//! - Cross-reference validation (target resolution, parent existence) is wired
-//!   by R3's `SubagentSource` work.
-//! - Cross-principal delegation (R6) lands with source-inc/gents#9.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolCallState {
@@ -102,52 +91,21 @@ impl AwaitMode {
     pub const ALL: &'static [AwaitMode] = &[AwaitMode::Foreground, AwaitMode::Background];
 }
 
-/// Whether an explicit cancellation of a subagent bridge also interrupts its
-/// linked child request (cascade) or leaves the child running (detach).
-/// Interrupting or terminalizing the parent request never applies it.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum CancelPolicy {
-    Cascade,
-    Detach,
-}
-
-impl CancelPolicy {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CancelPolicy::Cascade => "cascade",
-            CancelPolicy::Detach => "detach",
-        }
-    }
-
-    pub fn from_persisted(s: &str) -> Option<Self> {
-        match s {
-            "cascade" => Some(CancelPolicy::Cascade),
-            "detach" => Some(CancelPolicy::Detach),
-            _ => None,
-        }
-    }
-
-    pub const ALL: &'static [CancelPolicy] = &[CancelPolicy::Cascade, CancelPolicy::Detach];
-}
-
 /// What interrupting a request does to one of its owned tool calls
-/// (Lean `Subagent.Interrupt.disposition`). The cancellation policy is not an
-/// input: an interrupt never reaches background work or subagents.
+/// (Lean `Background.Interrupt.disposition`). An interrupt never reaches
+/// background work, including a `create_session`/`send_message` row.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum InterruptDisposition {
-    /// Never-dispatched intents and running foreground native calls.
+    /// Never-dispatched intents and running foreground calls.
     Cancel,
-    /// A running awaited subagent bridge becomes background work.
-    Background,
     /// Background work and terminal rows.
     Retain,
 }
 
 impl InterruptDisposition {
-    pub fn of(state: ToolCallState, await_mode: AwaitMode, child_linked: bool) -> Self {
+    pub fn of(state: ToolCallState, await_mode: AwaitMode) -> Self {
         match (state, await_mode) {
             (ToolCallState::Pending, _) => Self::Cancel,
-            (ToolCallState::Running, AwaitMode::Foreground) if child_linked => Self::Background,
             (ToolCallState::Running, AwaitMode::Foreground) => Self::Cancel,
             _ => Self::Retain,
         }
@@ -156,7 +114,6 @@ impl InterruptDisposition {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Cancel => "cancel",
-            Self::Background => "background",
             Self::Retain => "retain",
         }
     }
@@ -195,52 +152,6 @@ impl CancelCause {
     ];
 }
 
-/// The four non-.completed terminal states a child AgentRequest can reach.
-/// Used as the argument shape to bridge_failure to project the child terminal
-/// onto a parent ToolCallState (.failed for most, .cancelled for .interrupted).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ChildTerminal {
-    Failed {
-        reason: String,
-        failure_class: FailureClass,
-    },
-    Dead,
-    Interrupted,
-    Superseded,
-}
-
-impl ChildTerminal {
-    /// Lean B2 projection: .interrupted → .cancelled, all others → .failed.
-    pub fn projected_state(&self) -> ToolCallState {
-        match self {
-            ChildTerminal::Interrupted => ToolCallState::Cancelled,
-            _ => ToolCallState::Failed,
-        }
-    }
-
-    /// Persisted vocabulary names for conformance enumeration.
-    pub const ALL_KIND: &'static [&'static str] = &["failed", "dead", "interrupted", "superseded"];
-}
-
-/// Returned by `bridge_cancel_cascade` (wrapped in Option) after an explicit
-/// bridge cancellation. The caller performs the write to the child
-/// AgentRequest's interrupt_requested_at field. None means no cascade is
-/// required: the bridge tool is native (no child link) or detached.
-#[derive(Clone, Debug)]
-pub struct CascadeIntent {
-    pub child_request_id: String,
-    pub at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Clone, Debug)]
-pub enum CascadeDispatch {
-    Local {
-        intent: CascadeIntent,
-        child: gents_protocol::row::AgentRequestRow,
-    },
-    RemoteIntentWritten,
-}
-
 use std::sync::Arc;
 
 use defra_node::EmbeddedNode;
@@ -256,8 +167,6 @@ pub use query::{
 };
 mod recovery;
 pub(crate) mod runtime;
-pub mod subagent_request;
-pub(crate) mod subagent_workspace;
 mod transition;
 
 pub use gents_loop::tool_call_lifecycle::{FailureClass, ToolOutcome};
@@ -283,13 +192,9 @@ mod request_scope_conformance;
 pub(crate) use crate::streaming::AcceptedToolCall;
 pub use recovery::{
     deadline_at_is_expired, deadline_is_expired, BackgroundCompletionSideEffectReport,
-    OrphanedBackgroundToolReport, SubagentLivenessReport, TerminalParentToolReport,
-    ToolCallRecoveryReport,
+    OrphanedBackgroundToolReport, TerminalParentToolReport, ToolCallRecoveryReport,
 };
-pub use subagent_request::{
-    create_subagent_request, create_subagent_request_with_request_id,
-    create_subagent_request_with_trusted_parent_request_id, MAX_SUBAGENT_DEPTH,
-};
+pub(crate) use transition::CausedRequestTerminal;
 pub use transition::IllegalToolCallTransition;
 
 /// State machine struct for an individual tool call. Mirrors `RequestLifecycle`
@@ -330,11 +235,6 @@ pub struct ToolCallLifecycle {
     cancel_cause: Option<CancelCause>,
     selected_tool_identity: Option<SelectedToolIdentity>,
     pub(crate) await_mode: AwaitMode,
-    pub(crate) cancel_policy: CancelPolicy,
-    pub(crate) child_request_id: Option<String>,
-    pub(crate) spawn_target_did: Option<String>,
-    pub(crate) spawn_behavior_id: Option<String>,
-    pub(crate) unclaimed_deadline_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -370,18 +270,11 @@ impl ToolCallLifecycle {
         accepted: AcceptedToolCall,
         deadline_at: chrono::DateTime<chrono::Utc>,
         await_mode: AwaitMode,
-        cancel_policy: CancelPolicy,
     ) -> anyhow::Result<Self> {
         anyhow::ensure!(
-            accepted.delegated_input.is_none(),
-            "delegated tool admission requires the remote-host lifecycle owner"
+            accepted.await_mode == await_mode,
+            "dispatch await mode conflicts with the accepted publication"
         );
-        if let Some(plan) = accepted.spawn_admission.as_ref() {
-            anyhow::ensure!(
-                plan.await_mode == await_mode,
-                "dispatch await mode conflicts with immutable spawn admission"
-            );
-        }
         Ok(Self {
             node,
             request_id: String::new(),
@@ -408,20 +301,6 @@ impl ToolCallLifecycle {
             cancel_cause: None,
             selected_tool_identity: None,
             await_mode,
-            cancel_policy,
-            child_request_id: accepted
-                .spawn_admission
-                .as_ref()
-                .map(|plan| plan.child_request_id.clone()),
-            spawn_target_did: accepted
-                .spawn_admission
-                .as_ref()
-                .map(|plan| plan.spawn_target_did.clone()),
-            spawn_behavior_id: accepted
-                .spawn_admission
-                .as_ref()
-                .map(|plan| plan.spawn_behavior_id.clone()),
-            unclaimed_deadline_at: None,
         })
     }
 
@@ -468,11 +347,6 @@ impl ToolCallLifecycle {
             cancel_cause: None,
             selected_tool_identity: None,
             await_mode: AwaitMode::Foreground,
-            cancel_policy: CancelPolicy::Cascade,
-            child_request_id: None,
-            spawn_target_did: None,
-            spawn_behavior_id: None,
-            unclaimed_deadline_at: None,
         }
     }
 
@@ -504,74 +378,6 @@ impl ToolCallLifecycle {
             });
         }
         self
-    }
-
-    /// Add the child edge to an already accepted direct invocation before its
-    /// one pending-to-running transition. The provider header remains the
-    /// only source of the parent tool intent; this only supplies the runtime
-    /// child allocation owned by the subagent bridge.
-    pub(crate) fn with_subagent_bridge(
-        mut self,
-        await_mode: AwaitMode,
-        cancel_policy: CancelPolicy,
-        child_request_id: String,
-        spawn_target_did: String,
-    ) -> Self {
-        self.await_mode = await_mode;
-        self.cancel_policy = cancel_policy;
-        self.child_request_id = Some(child_request_id);
-        self.spawn_target_did = Some(spawn_target_did);
-        self
-    }
-
-    /// Construct an unbound subagent lifecycle value, not dispatch authority.
-    /// Canonical invocation must adopt the immutable published spawn admission
-    /// through `from_accepted`; this constructor does not create a tool row.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_subagent(
-        node: Arc<EmbeddedNode>,
-        request_id: String,
-        session_id: String,
-        agent_did: String,
-        tool_call_id: String,
-        message_sequence: u32,
-        tool_name: String,
-        _args: String,
-        deadline_at: chrono::DateTime<chrono::Utc>,
-        await_mode: AwaitMode,
-        cancel_policy: CancelPolicy,
-        child_request_id: String,
-        spawn_target_did: String,
-    ) -> Self {
-        Self {
-            node,
-            request_id,
-            request_doc_id: None,
-            session_id,
-            agent_did,
-            requester_did: None,
-            tool_call_id,
-            call_id: None,
-            message_sequence,
-            tool_name,
-            accepted_header_doc_id: None,
-            arguments: None,
-            execution_generation: None,
-            spawned_by_tool_call_doc_id: None,
-            doc_id: None,
-            deadline_at,
-            state: ToolCallState::Pending,
-            started_at: None,
-            failure_class: None,
-            cancel_cause: None,
-            selected_tool_identity: None,
-            await_mode,
-            cancel_policy,
-            child_request_id: Some(child_request_id),
-            spawn_target_did: Some(spawn_target_did),
-            spawn_behavior_id: None,
-            unclaimed_deadline_at: None,
-        }
     }
 
     /// Construct an unbound legacy background lifecycle value. Canonical
@@ -612,11 +418,6 @@ impl ToolCallLifecycle {
             cancel_cause: None,
             selected_tool_identity: None,
             await_mode: AwaitMode::Background,
-            cancel_policy: CancelPolicy::Cascade,
-            child_request_id: None,
-            spawn_target_did: None,
-            spawn_behavior_id: None,
-            unclaimed_deadline_at: None,
         }
     }
 
@@ -636,18 +437,19 @@ impl ToolCallLifecycle {
         self.deadline_at <= now
     }
 
-    pub(crate) fn is_subagent_bridge(&self) -> bool {
-        self.child_request_id.is_some()
+    /// A `create_session`/`send_message` row (Lean
+    /// `ToolOperation.sessionMessage`): no host process backs it, and its
+    /// terminal is the terminal output of the request it caused.
+    pub(crate) fn is_session_message(&self) -> bool {
+        crate::toolset::is_session_message_tool(&self.tool_name)
     }
 
     pub(crate) fn interrupt_disposition(&self) -> InterruptDisposition {
-        InterruptDisposition::of(self.state, self.await_mode, self.is_subagent_bridge())
+        InterruptDisposition::of(self.state, self.await_mode)
     }
 
     pub(crate) fn is_background_tool_bridge(&self) -> bool {
-        self.child_request_id.is_none()
-            && self.await_mode == AwaitMode::Background
-            && self.spawned_by_tool_call_doc_id.is_none()
+        self.await_mode == AwaitMode::Background && self.spawned_by_tool_call_doc_id.is_none()
     }
 
     pub(crate) fn is_spawned_background(&self) -> bool {
@@ -659,11 +461,15 @@ impl ToolCallLifecycle {
     }
 
     pub(crate) fn is_bridge(&self) -> bool {
-        self.is_subagent_bridge() || self.is_background_tool_bridge()
+        self.is_background_tool_bridge()
     }
 
+    /// A background row owes its completion notification only once it ran; a
+    /// call refused before dispatch was answered by its invocation reply.
     pub(crate) fn terminal_persistence_status(&self, completion_reason: Option<&str>) -> String {
-        if self.is_background_tool_bridge() || self.is_spawned_background() {
+        if (self.is_background_tool_bridge() || self.is_spawned_background())
+            && self.state != ToolCallState::Pending
+        {
             completion_reason
                 .map(|reason| format!("completionPending:{reason}"))
                 .unwrap_or_else(|| "completionPending".to_string())
@@ -776,16 +582,16 @@ impl ToolCallLifecycle {
         self.state = state;
     }
 
+    /// Replace the in-memory deadline before the row's one pending-to-running
+    /// transition persists it.
+    pub(crate) fn set_deadline_at(&mut self, deadline_at: chrono::DateTime<chrono::Utc>) {
+        debug_assert_eq!(self.state, ToolCallState::Pending);
+        self.deadline_at = deadline_at;
+    }
+
     #[cfg(test)]
     pub(crate) fn set_started_at(&mut self, t: Option<chrono::DateTime<chrono::Utc>>) {
         self.started_at = t;
-    }
-
-    pub(crate) fn set_unclaimed_deadline_at(
-        &mut self,
-        deadline_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) {
-        self.unclaimed_deadline_at = deadline_at;
     }
 }
 
@@ -814,10 +620,9 @@ mod tests {
     async fn constructors_preserve_bridge_classification_and_terminal_status() {
         let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
         let deadline = chrono::Utc::now() + chrono::Duration::minutes(1);
-        let check = |tool: &ToolCallLifecycle, subagent, background, plain: &str, reason: &str| {
-            assert_eq!(tool.is_subagent_bridge(), subagent);
+        let check = |tool: &ToolCallLifecycle, background, plain: &str, reason: &str| {
             assert_eq!(tool.is_background_tool_bridge(), background);
-            assert_eq!(tool.is_bridge(), subagent || background);
+            assert_eq!(tool.is_bridge(), background);
             assert_eq!(tool.terminal_persistence_status(None), plain);
             assert_eq!(
                 tool.terminal_persistence_status(Some("tool_failed")),
@@ -835,7 +640,7 @@ mod tests {
             "{}".into(),
             deadline,
         );
-        check(&native, false, false, "completed", "completed");
+        check(&native, false, "completed", "completed");
         for (input, expected) in [
             (Some("  did:test:requester  "), Some("did:test:requester")),
             (Some(""), None),
@@ -859,29 +664,10 @@ mod tests {
         // Recovery selects completionPending rows to redrive native-tool effects.
         check(
             &background,
-            false,
             true,
             "completionPending",
             "completionPending:tool_failed",
         );
-        for mode in [AwaitMode::Foreground, AwaitMode::Background] {
-            let subagent = ToolCallLifecycle::new_subagent(
-                node.clone(),
-                "request".into(),
-                "session".into(),
-                "did:test:owner".into(),
-                "subagent".into(),
-                0,
-                "spawn_agent".into(),
-                "{}".into(),
-                deadline,
-                mode,
-                CancelPolicy::Cascade,
-                "child".into(),
-                "did:test:target".into(),
-            );
-            check(&subagent, true, false, "completed", "completed");
-        }
         node.shutdown().await;
     }
 
@@ -958,7 +744,7 @@ mod tests {
 }
 
 #[cfg(test)]
-mod subagent_vocabulary {
+mod persisted_vocabulary {
     use super::*;
 
     #[test]
@@ -970,40 +756,10 @@ mod subagent_vocabulary {
     }
 
     #[test]
-    fn cancel_policy_round_trip_via_persisted_vocab() {
-        for &policy in CancelPolicy::ALL {
-            assert_eq!(CancelPolicy::from_persisted(policy.as_str()), Some(policy));
-        }
-        assert_eq!(CancelPolicy::from_persisted("unknown"), None);
-    }
-
-    #[test]
     fn cancel_cause_round_trip_via_persisted_vocab() {
         for &cause in CancelCause::ALL {
             assert_eq!(CancelCause::from_persisted(cause.as_str()), Some(cause));
         }
         assert_eq!(CancelCause::from_persisted("unknown"), None);
-    }
-
-    #[test]
-    fn child_terminal_projection_partition() {
-        // .interrupted → .cancelled; everything else → .failed
-        assert_eq!(
-            ChildTerminal::Failed {
-                reason: "x".to_string(),
-                failure_class: FailureClass::External
-            }
-            .projected_state(),
-            ToolCallState::Failed
-        );
-        assert_eq!(ChildTerminal::Dead.projected_state(), ToolCallState::Failed);
-        assert_eq!(
-            ChildTerminal::Interrupted.projected_state(),
-            ToolCallState::Cancelled
-        );
-        assert_eq!(
-            ChildTerminal::Superseded.projected_state(),
-            ToolCallState::Failed
-        );
     }
 }

@@ -17,8 +17,7 @@ use serde::Deserialize;
 use crate::graphql::escape_graphql_string;
 
 use super::{
-    AwaitMode, CancelCause, CancelPolicy, FailureClass, SelectedToolIdentity, ToolCallLifecycle,
-    ToolCallState,
+    AwaitMode, CancelCause, FailureClass, SelectedToolIdentity, ToolCallLifecycle, ToolCallState,
 };
 
 fn decode_selected_tool_identity(
@@ -66,15 +65,9 @@ struct ToolCallRow {
     cancel_cause: Option<String>,
     selected_service_id: Option<String>,
     selected_tool_name: Option<String>,
-    // v3 subagent fields — nullable for v2 rows that pre-date the schema migration.
     await_mode: Option<String>,
-    cancel_policy: Option<String>,
-    child_request_id: Option<String>,
     #[serde(default)]
     spawned_by_tool_call_doc_id: Option<String>,
-    spawn_target_did: Option<String>,
-    spawn_behavior_id: Option<String>,
-    unclaimed_deadline_at: Option<String>,
 }
 
 impl ToolCallLifecycle {
@@ -161,12 +154,7 @@ impl ToolCallLifecycle {
                     selected_service_id
                     selected_tool_name
                     await_mode
-                    cancel_policy
-                    child_request_id
                     spawned_by_tool_call_doc_id
-                    spawn_target_did
-                    spawn_behavior_id
-                    unclaimed_deadline_at
         }}}}"#
         );
 
@@ -267,26 +255,12 @@ impl ToolCallLifecycle {
             .and_then(AwaitMode::from_persisted)
             .ok_or_else(|| anyhow!("AgentToolCall is missing a valid await_mode"))?;
 
-        let cancel_policy = row
-            .cancel_policy
-            .as_deref()
-            .and_then(CancelPolicy::from_persisted)
-            .ok_or_else(|| anyhow!("AgentToolCall is missing a valid cancel_policy"))?;
-
-        let child_request_id = row.child_request_id.filter(|s| !s.is_empty());
         if spawned_by_tool_call_doc_id.is_some() {
             anyhow::ensure!(
-                await_mode == AwaitMode::Background && child_request_id.is_none(),
-                "spawned lifecycle must be childless background work"
+                await_mode == AwaitMode::Background,
+                "spawned lifecycle must be background work"
             );
         }
-        let spawn_target_did = row.spawn_target_did.filter(|s| !s.is_empty());
-        let spawn_behavior_id = row.spawn_behavior_id.filter(|s| !s.is_empty());
-        let unclaimed_deadline_at = row
-            .unclaimed_deadline_at
-            .as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc));
         let selected_tool_identity =
             decode_selected_tool_identity(row.selected_service_id, row.selected_tool_name)?;
 
@@ -364,11 +338,6 @@ impl ToolCallLifecycle {
             cancel_cause,
             selected_tool_identity,
             await_mode,
-            cancel_policy,
-            child_request_id,
-            spawn_target_did,
-            spawn_behavior_id,
-            unclaimed_deadline_at,
         }))
     }
 }
@@ -519,7 +488,6 @@ mod tests {
             accepted,
             deadline,
             AwaitMode::Foreground,
-            CancelPolicy::Cascade,
         )
         .expect("accepted lifecycle")
         .with_selected_tool_identity(Some(selected));
@@ -541,6 +509,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_path);
     }
 }
-
-#[cfg(test)]
-mod cascade_scope_tests;

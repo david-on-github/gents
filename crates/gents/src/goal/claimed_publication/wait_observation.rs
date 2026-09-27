@@ -215,7 +215,7 @@ async fn observe_waits(
             .execute(&format!(
                 r#"{{ AgentToolCall(filter: {{ {scope}, tool_call_id: {{ _eq: "{handle_escaped}" }} }},
                     limit: 2) {{ _docID tool_call_id request_doc_id tool_call_key
-                    lifecycle_state await_mode child_request_id spawned_by_tool_call_doc_id }} }}"#
+                    lifecycle_state await_mode spawned_by_tool_call_doc_id }} }}"#
             ))
             .await?;
         let targets = rows(&targets, "AgentToolCall")?;
@@ -225,9 +225,7 @@ async fn observe_waits(
         };
         required(target, "_docID")?;
         anyhow::ensure!(
-            required(target, "tool_call_id")? == handle
-                && target["await_mode"] == "background"
-                && target["child_request_id"].is_null(),
+            required(target, "tool_call_id")? == handle && target["await_mode"] == "background",
             "waited target is not an authorized background tool"
         );
         let target_state = required(target, "lifecycle_state")?;

@@ -57,8 +57,9 @@ pub(super) fn background_completion_gate(
     gate
 }
 
-/// Atomically persist background input. Goal-owned sessions bind it to its
-/// parent without waking; otherwise reuse or create the coalesced pending wake.
+/// Atomically persist background input and reuse or create the coalesced
+/// pending wake. A Goal on the session, in any status, never suppresses the
+/// wake (Lean `CompletionContinuation.enqueueWake?`).
 /// A concurrent claim conflicts and retries, so a wake cannot precede its input.
 /// The single transaction owner for fresh input and canonical receipt replay.
 /// An observed receipt ID is reloaded and validated inside this transaction.
@@ -296,10 +297,6 @@ async fn background_completion_transaction_attempt(
 ) -> Result<EnqueuedBackgroundCompletionInput> {
     use sha2::{Digest, Sha256};
 
-    let goal_owned =
-        crate::goal::load_canonical_goal_in_txn(txn, &parent.agent_did, &parent.session_id)
-            .await?
-            .is_some();
     let escaped_session_id = escape_graphql_string(&parent.session_id);
     let escaped_agent_did = escape_graphql_string(&parent.agent_did);
     let notification_filter = match existing_notification_doc_id {
@@ -401,54 +398,20 @@ async fn background_completion_transaction_attempt(
             "canonical notification replay request binding is invalid"
         );
         let bound = &rows[0];
-        let parent_bound = bound.doc_id.as_deref() == Some(parent.doc_id.as_str());
-        let wake_bound = row_matches_coalesced_source_and_key(
-            bound,
-            QueueSource::BackgroundCompletion,
-            queue_key,
-        );
         anyhow::ensure!(
-            (goal_owned && parent_bound) || (!goal_owned && wake_bound),
-            "canonical notification replay uses the wrong Goal/wake binding"
+            row_matches_coalesced_source_and_key(
+                bound,
+                QueueSource::BackgroundCompletion,
+                queue_key,
+            ),
+            "canonical notification replay is not bound to its coalesced wake"
         );
-        let request = if goal_owned {
-            None
-        } else {
-            Some(
-                queue_row_to_enqueued_request(bound)
-                    .context("canonical wake binding is incomplete")?,
-            )
-        };
+        let request = Some(
+            queue_row_to_enqueued_request(bound).context("canonical wake binding is incomplete")?,
+        );
         return Ok(EnqueuedBackgroundCompletionInput {
             request,
             message_sequence: row.message.sequence,
-            created_request: false,
-        });
-    }
-
-    if goal_owned {
-        // GoalSource owns automatic continuation for this session, including when
-        // its Goal is terminal or paused. The durable input belongs to the
-        // request whose background work actually produced it.
-        anyhow::ensure!(
-            !parent.doc_id.trim().is_empty() && !parent.request_id.trim().is_empty(),
-            "Goal-owned background notification requires a parent request binding"
-        );
-        let message_sequence =
-            next_append_sequence_in_transaction(txn, &parent.agent_did, &parent.session_id).await?;
-        publish_native_tool_notification(
-            txn,
-            parent,
-            &parent.doc_id,
-            message_sequence,
-            message_key,
-            content,
-            native,
-        )
-        .await?;
-        return Ok(EnqueuedBackgroundCompletionInput {
-            request: None,
-            message_sequence,
             created_request: false,
         });
     }

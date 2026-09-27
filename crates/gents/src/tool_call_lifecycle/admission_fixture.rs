@@ -43,7 +43,7 @@ use defra_node::EmbeddedNode;
 use crate::identity::AgentIdentity;
 use crate::lifecycle::{ClaimOutcome, RequestLifecycle};
 use crate::streaming::DefraStreamWriter;
-use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
 
 /// Options for the published admission fixtures.
 ///
@@ -692,7 +692,6 @@ async fn publish_depth_target_bridge(
             await_mode: AwaitMode::Background,
         }),
         AwaitMode::Background,
-        CancelPolicy::Cascade,
         true,
     )
     .await
@@ -756,7 +755,6 @@ async fn published_background_bridge_at_parent_depth(
             await_mode: AwaitMode::Background,
         }),
         AwaitMode::Background,
-        CancelPolicy::Cascade,
         true,
     )
     .await

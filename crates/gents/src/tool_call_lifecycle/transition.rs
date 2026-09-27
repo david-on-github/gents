@@ -16,10 +16,7 @@ use defra_node::{EmbeddedNode, QueryResponse};
 use crate::graphql::{escape_graphql_string, response_has_documents};
 use crate::toolset::CommandPolicyDenial;
 
-use super::{
-    AwaitMode, CancelCause, CancelPolicy, CascadeDispatch, CascadeIntent, ChildTerminal,
-    FailureClass, ToolCallLifecycle, ToolCallState,
-};
+use super::{AwaitMode, CancelCause, FailureClass, ToolCallLifecycle, ToolCallState};
 
 async fn execute_mutation_with_retry(
     node: &EmbeddedNode,
@@ -30,7 +27,7 @@ async fn execute_mutation_with_retry(
 }
 
 /// Error returned when a transition method is called from an illegal
-/// pre-state, or when a subagent-specific guard is violated.
+/// pre-state.
 /// Programmer error, not a user-visible failure.
 #[derive(Clone, Debug, thiserror::Error, PartialEq, Eq)]
 pub enum IllegalToolCallTransition {
@@ -46,24 +43,10 @@ pub enum IllegalToolCallTransition {
     ModeAlreadyBackground,
     #[error("await_mode flip rejected: tool already Foreground")]
     ModeAlreadyForeground,
-    #[error("cancel_policy flip rejected: tool already Detach")]
-    PolicyAlreadyDetach,
-    #[error("detach rejected: tool has no child_request_id (only a bridged subagent may detach)")]
-    DetachRequiresChildLink,
-    #[error("bridge_complete called on tool without child_request_id")]
-    BridgeCompleteRequiresChildLink,
-    #[error("bridge_failure called on tool without child_request_id")]
-    BridgeFailureRequiresChildLink,
-    #[error("bridge_cancel_cascade called on tool not in .cancelled state")]
-    CascadeRequiresCancelled,
-    #[error("create_subagent_request rejected: depth exceeds maxSubagentDepth")]
-    SubagentDepthExceeded,
     #[error("AgentRequest parent linkage incoherent: must set both or neither parent fields")]
     ParentLinkageIncoherent,
-    #[error("native complete() called on subagent-typed tool (child_request_id is set)")]
-    NativeCompleteOnSubagentTool,
-    #[error("native fail() called on subagent-typed tool (child_request_id is set)")]
-    NativeFailOnSubagentTool,
+    #[error("foreground rejected: a create_session/send_message row is background-only")]
+    SessionMessageIsBackgroundOnly,
 }
 
 impl ToolCallLifecycle {
@@ -94,10 +77,7 @@ impl ToolCallLifecycle {
         self.failure_class = current.failure_class;
         self.cancel_cause = current.cancel_cause;
         self.await_mode = current.await_mode;
-        self.cancel_policy = current.cancel_policy;
-        self.child_request_id = current.child_request_id;
         self.spawned_by_tool_call_doc_id = current.spawned_by_tool_call_doc_id;
-        self.unclaimed_deadline_at = current.unclaimed_deadline_at;
         Ok(())
     }
 
@@ -133,10 +113,7 @@ impl ToolCallLifecycle {
         self.failure_class = current.failure_class;
         self.cancel_cause = current.cancel_cause;
         self.await_mode = current.await_mode;
-        self.cancel_policy = current.cancel_policy;
-        self.child_request_id = current.child_request_id;
         self.spawned_by_tool_call_doc_id = current.spawned_by_tool_call_doc_id;
-        self.unclaimed_deadline_at = current.unclaimed_deadline_at;
         Ok(())
     }
 
@@ -157,43 +134,11 @@ impl ToolCallLifecycle {
             }))
         }
     }
-
-    /// Lean `SpawnClaimFence.unclaimedDeadlineApplies` re-evaluated for a
-    /// foreground-to-background flip: a same-principal spawn waiting in the
-    /// background carries no unclaimed bound. Every writer that flips a bridge
-    /// to background includes this fragment in the same write.
-    pub(crate) fn background_flip_unclaimed_fragment(
-        spawn_target_did: Option<&str>,
-        agent_did: &str,
-    ) -> &'static str {
-        if spawn_target_did == Some(agent_did) {
-            ", unclaimed_deadline_at: null"
-        } else {
-            ""
-        }
-    }
-
-    fn clear_unclaimed_deadline_fragment(&self) -> &'static str {
-        if self.unclaimed_deadline_at.is_some() {
-            ", unclaimed_deadline_at: null"
-        } else {
-            ""
-        }
-    }
-
-    fn resupply_unclaimed_deadline_fragment(&self) -> String {
-        self.unclaimed_deadline_at
-            .map(|deadline| {
-                let escaped_deadline = escape_graphql_string(
-                    &deadline.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                );
-                format!(r#", unclaimed_deadline_at: "{escaped_deadline}""#)
-            })
-            .unwrap_or_default()
-    }
 }
 
-mod bridge;
+mod cancel;
+mod session_message;
+pub(crate) use session_message::CausedRequestTerminal;
 mod mode_policy;
 mod native;
 

@@ -103,10 +103,14 @@ pub(crate) async fn write_pending_agent_request_with_lineage_and_conversation_ti
         None,
         None,
         None,
+        None,
     )
     .await
 }
 
+/// Write one signed pending request. `session_id` names an existing session
+/// the request continues; absent mints a new session.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_pending_agent_request_with_lineage_workspace_and_conversation_title(
     node: &EmbeddedNode,
     actor: ::identity::Did,
@@ -120,13 +124,18 @@ pub(crate) async fn write_pending_agent_request_with_lineage_workspace_and_conve
     request_id: Option<&str>,
     requester_did: Option<&str>,
     trigger_doc_id: Option<&str>,
+    session_id: Option<&str>,
 ) -> Result<EnqueuedAgentRequest> {
     let request_id = request_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let session_id = uuid::Uuid::new_v4().to_string();
+    let session_id = session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let create = build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title(
         agent_did,
         behavior_id,
@@ -330,11 +339,10 @@ pub struct RequestIdentity {
     pub created_at: String,
 }
 
-/// Parent-request linkage: the logical and physical identifiers of the
-/// request (and, for a subagent spawn, the tool call) that caused this one,
-/// plus its resulting depth. Used both for subagent spawns and for other
-/// requests that are simply linked to one parent at some depth (a control
-/// continuation, a background-wake redrive successor).
+/// Causal lineage: the logical and physical identifiers of the request (and,
+/// for `create_session`/`send_message`, the tool call) that caused this one,
+/// plus the resulting causal hop (`subagent_depth`). A request-only link is a
+/// control continuation that copies its predecessor's hop.
 #[derive(Default)]
 pub struct ParentLink {
     pub depth: u32,
@@ -585,6 +593,154 @@ pub(crate) async fn write_pending_title_request(
     .await?;
     crate::watcher::agent_request_from_mutation_response(&response, "create_AgentRequest")?
         .context("title request creation omitted its exact durable request")
+}
+
+/// Why a request exists, for its causal hop (Lean `CausalHop.Cause`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestHopCause {
+    /// A user, trigger or schedule root.
+    Root,
+    /// `create_session`/`send_message` materialized it from a tool call.
+    ToolCall,
+    /// A retry, goal continuation, steering or completion wake of the same work.
+    Continuation,
+}
+
+/// Lean `CausalHop.nextHop`.
+pub fn next_request_hop(cause: RequestHopCause, predecessor_hop: u32) -> u32 {
+    match cause {
+        RequestHopCause::Root => 0,
+        RequestHopCause::ToolCall => predecessor_hop.saturating_add(1),
+        RequestHopCause::Continuation => predecessor_hop,
+    }
+}
+
+/// Lean `CausalHop.admitHop`.
+pub fn request_hop_within_bound(max_request_hop: u32, hop: u32) -> bool {
+    hop <= max_request_hop
+}
+
+/// The calling edge a `create_session`/`send_message` request records: the
+/// caller's principal (its requester and signer), request and tool call.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionMessageCause {
+    pub(crate) caller_agent_did: String,
+    pub(crate) caller_request_id: String,
+    pub(crate) caller_request_doc_id: String,
+    pub(crate) caller_hop: u32,
+    pub(crate) tool_call_id: String,
+    pub(crate) tool_call_doc_id: String,
+    pub(crate) correlation: Option<String>,
+}
+
+/// Where a session-message request runs. The target principal's own
+/// behavior configures it; nothing is inherited from the caller.
+#[derive(Debug, Clone)]
+pub(crate) struct SessionMessageTarget {
+    pub(crate) agent_did: String,
+    pub(crate) behavior_id: String,
+    pub(crate) session_id: String,
+}
+
+/// Build and sign the request a `create_session`/`send_message` call
+/// materializes. This is the single writer of the calling edge
+/// (`caused_by_parent_*`) and of its hop, one further than the caller's. The
+/// caller is the requester and signer: its own principal admits it as
+/// LocalSelf, any other target as Peer under that target's ACP.
+pub(crate) async fn build_session_message_request(
+    cause: &SessionMessageCause,
+    target: &SessionMessageTarget,
+    content: &str,
+    title: Option<&str>,
+    queue: Option<gents_protocol::request_input::RequestQueue>,
+    retry_key: Option<String>,
+) -> Result<gents_protocol::request_admission::AgentRequestCreate> {
+    use gents_protocol::request_admission::{AgentRequestAdmissionRecord, RequestPurpose};
+    anyhow::ensure!(
+        !cause.caller_request_id.trim().is_empty()
+            && !cause.caller_request_doc_id.trim().is_empty()
+            && !cause.tool_call_id.trim().is_empty()
+            && !cause.tool_call_doc_id.trim().is_empty(),
+        "session-message lineage requires the full calling request and tool call edge"
+    );
+    let prompt_selection = crate::skills::prompt_slash_skill_selection(content);
+    let admission = if target.agent_did == cause.caller_agent_did {
+        AgentRequestAdmissionRecord::local_self(&cause.caller_agent_did)
+    } else {
+        AgentRequestAdmissionRecord::peer(&cause.caller_agent_did)
+    };
+    let identity = RequestIdentity {
+        requester_did: Some(cause.caller_agent_did.clone()),
+        request_id: uuid::Uuid::new_v4().to_string(),
+        agent_did: target.agent_did.clone(),
+        behavior_id: target.behavior_id.clone(),
+        session_id: target.session_id.clone(),
+        content: prompt_selection.prompt.clone(),
+        execution_origin: ExecutionOrigin::Interactive,
+        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+    };
+    let input = gents_protocol::request_input::RequestInput {
+        selected_skill_ids: prompt_selection.selected_skill_ids,
+        initial_title: title
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(|text| gents_protocol::session::SessionTitle {
+                text: text.to_owned(),
+                source: gents_protocol::session::SessionTitleSource::Task,
+            }),
+        queue,
+        ..Default::default()
+    };
+    let spec = RequestSpec {
+        trigger_lineage: TriggerLineage {
+            correlation: cause.correlation.clone(),
+            ..Default::default()
+        },
+        subagent: Some(ParentLink {
+            depth: next_request_hop(RequestHopCause::ToolCall, cause.caller_hop),
+            parent_request_id: cause.caller_request_id.clone(),
+            parent_request_doc_id: cause.caller_request_doc_id.clone(),
+            parent_tool_call_id: Some(cause.tool_call_id.clone()),
+            parent_tool_call_doc_id: Some(cause.tool_call_doc_id.clone()),
+        }),
+        input,
+        retry_key,
+        ..RequestSpec::new(RequestPurpose::Normal, identity, admission)
+    };
+    let signer = crate::identity::RegisteredIdentity::from_registered_did(
+        cause.caller_agent_did.clone(),
+        None,
+    )
+    .context("load the caller's registered identity to sign its session message")?;
+    build_signed_request(spec, RequestSigner::Identity(&signer)).await
+}
+
+/// Persist a session-message request built by [`build_session_message_request`].
+pub(crate) async fn write_session_message_request(
+    node: &EmbeddedNode,
+    create: &gents_protocol::request_admission::AgentRequestCreate,
+) -> Result<EnqueuedAgentRequest> {
+    let mutation = create.graphql_mutation().map_err(anyhow::Error::msg)?;
+    let response = crate::config_client::ConfigAccess::write_local_response(
+        node,
+        "lifecycle.materialize_session_message",
+        &mutation,
+    )
+    .await?;
+    let doc_id = resolve_created_agent_request_doc_id(
+        node,
+        &response,
+        "create_AgentRequest",
+        &escape_graphql_string(&create.request_id),
+        "querying created session-message AgentRequest doc id failed",
+        "session-message AgentRequest create returned no _docID",
+    )
+    .await?;
+    Ok(EnqueuedAgentRequest {
+        doc_id,
+        request_id: create.request_id.clone(),
+        session_id: create.session_id.clone(),
+    })
 }
 
 pub async fn activate_workspace_bound_request(

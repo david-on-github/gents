@@ -26,9 +26,8 @@ enum BackgroundTaskResult {
     ExecutorStatus(Result<()>),
     Reconcile(Result<()>),
     Control(Result<()>),
-    SubagentCompletion(Result<()>),
+    BackgroundCompletion(Result<()>),
     GraphRunReconcile(Result<()>),
-    CrossDeploymentCancelMirror(Result<()>),
     PairingReconcile(Result<()>),
     EnrollmentReconcile(Result<()>),
     RegistryHeartbeat(Result<()>),
@@ -45,11 +44,8 @@ impl BackgroundTaskResult {
             Self::ExecutorStatus(result) => result.context("executor status task"),
             Self::Reconcile(result) => result.context("generation supervisor task"),
             Self::Control(result) => result.context("control watcher task"),
-            Self::SubagentCompletion(result) => result.context("subagent completion task"),
+            Self::BackgroundCompletion(result) => result.context("background completion task"),
             Self::GraphRunReconcile(result) => result.context("graph run reconcile task"),
-            Self::CrossDeploymentCancelMirror(result) => {
-                result.context("cross-deployment cancellation task")
-            }
             Self::PairingReconcile(result) => result.context("pairing reconcile task"),
             Self::EnrollmentReconcile(result) => result.context("enrollment reconcile task"),
             Self::RegistryHeartbeat(result) => result.context("registry heartbeat task"),
@@ -617,12 +613,8 @@ async fn run_agent_owned(
     let trigger_engine_schedule_snapshot_rx = active_snapshot_rx.clone();
     let trigger_engine_event_snapshot_rx = active_snapshot_rx.clone();
     let trigger_engine_goal_snapshot_rx = active_snapshot_rx.clone();
-    let trigger_engine_subagent_snapshot_rx = active_snapshot_rx.clone();
     let trigger_engine_engine_snapshot_rx = active_snapshot_rx.clone();
     let trigger_engine_materializer_snapshot_rx = active_snapshot_rx.clone();
-    let trigger_engine_peer_admission: Arc<
-        dyn crate::agent::p2p_reconcile::PeerAdmissionAuthority,
-    > = Arc::new(enrollment_handle.clone());
     let trigger_engine_cancel = cancel.child_token();
     let trigger_engine_startup_barrier = startup_barrier.clone();
     // Construct the `ManualSource` up-front so the `ManualTriggerHandle` can
@@ -673,13 +665,6 @@ async fn run_agent_owned(
             )
             .with_runtime_observer(trigger_engine_runtime_observer),
         );
-        let subagent_source: Box<dyn crate::trigger_engine::TriggerSource> =
-            Box::new(crate::trigger_engine::subagent_source::SubagentSource::new(
-                trigger_engine_subagent_snapshot_rx,
-                trigger_engine_node.clone(),
-                trigger_engine_peer_admission,
-                trigger_engine_cancel.clone(),
-            ));
         let goal_source: Box<dyn crate::trigger_engine::TriggerSource> =
             Box::new(crate::trigger_engine::goal_source::GoalSource::new(
                 trigger_engine_goal_snapshot_rx,
@@ -692,7 +677,6 @@ async fn run_agent_owned(
             schedule_source,
             event_source,
             goal_source,
-            subagent_source,
             manual_source_box,
         ];
         let engine = crate::trigger_engine::TriggerEngine::new(
@@ -792,7 +776,7 @@ async fn run_agent_owned(
     let completion_background_executions = agent.background_execution_registry.clone();
     let completion_cancel = cancel.child_token();
     background_tasks.spawn(async move {
-        BackgroundTaskResult::SubagentCompletion(
+        BackgroundTaskResult::BackgroundCompletion(
             crate::background_completion::run_background_completion_observer(
                 completion_node,
                 completion_agent_did,
@@ -812,23 +796,6 @@ async fn run_agent_owned(
                 graph_run_node,
                 graph_run_owner_did,
                 graph_run_cancel,
-            )
-            .await,
-        )
-    });
-
-    let cancel_mirror_node = agent.node.clone();
-    let cancel_mirror_snapshot_rx = active_snapshot_rx.clone();
-    let cancel_mirror_peer_admission: Arc<dyn crate::agent::p2p_reconcile::PeerAdmissionAuthority> =
-        Arc::new(enrollment_handle.clone());
-    let cancel_mirror_cancel = cancel.child_token();
-    background_tasks.spawn(async move {
-        BackgroundTaskResult::CrossDeploymentCancelMirror(
-            crate::trigger_engine::cross_deployment_cancel_mirror::run_cross_deployment_cancel_mirror(
-                cancel_mirror_node,
-                cancel_mirror_snapshot_rx,
-                cancel_mirror_peer_admission,
-                cancel_mirror_cancel,
             )
             .await,
         )

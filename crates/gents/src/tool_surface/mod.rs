@@ -187,7 +187,7 @@ impl ToolSurface {
     }
 
     pub(crate) fn subagent_targets(&self) -> &[SubagentTargetDocument] {
-        if self.subagent_tools.spawn_enabled {
+        if self.subagent_tools.enabled {
             &self.subagent_tools.targets
         } else {
             &[]

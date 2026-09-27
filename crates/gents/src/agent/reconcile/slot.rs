@@ -20,24 +20,11 @@ use std::collections::HashMap;
 
 const BEHAVIOR_EXECUTOR_QUEUE_CAPACITY: usize = 32;
 // A configured backend may advertise a very large inference limit. Local
-// request workers are a separate bounded resource: each active worker may
-// retain at most MAX_SUBAGENT_DEPTH parked ancestor continuations.
+// request workers are a separate bounded resource.
 const MAX_BEHAVIOR_WORKERS: usize = 256;
 
 fn bounded_active_limit(requested: usize) -> usize {
-    let depth =
-        usize::try_from(crate::tool_call_lifecycle::MAX_SUBAGENT_DEPTH).unwrap_or(usize::MAX);
-    let max_active = MAX_BEHAVIOR_WORKERS / depth.saturating_add(1);
-    requested.max(1).min(max_active.max(1))
-}
-
-fn parked_limit(active_limit: usize) -> usize {
-    let depth =
-        usize::try_from(crate::tool_call_lifecycle::MAX_SUBAGENT_DEPTH).unwrap_or(usize::MAX);
-    active_limit
-        .checked_mul(depth)
-        .unwrap_or(MAX_BEHAVIOR_WORKERS - active_limit)
-        .min(MAX_BEHAVIOR_WORKERS - active_limit)
+    requested.max(1).min(MAX_BEHAVIOR_WORKERS)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,10 +274,8 @@ where
             "local behavior worker capacity was bounded"
         );
     }
-    let capacity = WorkerCapacity::new(executor_capacity, parked_limit(executor_capacity));
-    let worker_task_count = executor_capacity
-        .checked_add(capacity.parked_limit())
-        .expect("bounded worker task count");
+    let capacity = WorkerCapacity::new(executor_capacity);
+    let worker_task_count = executor_capacity;
     let (dispatcher, request_rx) = mpsc::channel(BEHAVIOR_EXECUTOR_QUEUE_CAPACITY);
     let request_rx = Arc::new(Mutex::new(request_rx));
     let (state_tx, state_rx) = watch::channel(BehaviorSlotState::Active);
@@ -522,14 +507,10 @@ where
         + 'static,
     Fut: std::future::Future<Output = Result<()>> + Send + 'static,
 {
-    let parked_capacity = capacity.parked_limit();
-    let worker_count = executor_capacity
-        .checked_add(parked_capacity)
-        .expect("bounded worker task count");
+    let worker_count = executor_capacity;
     tracing::info!(
         behavior_id = %behavior.behavior_id,
         executor_capacity,
-        parked_capacity,
         worker_count,
         queue_capacity = BEHAVIOR_EXECUTOR_QUEUE_CAPACITY,
         "behavior executor worker pool starting"
@@ -555,7 +536,6 @@ where
             behavior_id = %behavior.behavior_id,
             worker_index,
             executor_capacity,
-            parked_capacity,
             "behavior executor worker spawned"
         );
     }

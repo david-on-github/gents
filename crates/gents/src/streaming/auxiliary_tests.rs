@@ -507,7 +507,7 @@ async fn generated_auxiliary_cases_drive_owned_begin_close_and_publication_guard
                 encoded: Arc::new(encoded),
                 expected: Arc::new(message),
                 tool_deadline_at: chrono::Utc::now().to_rfc3339(),
-                spawn_admissions: Vec::new(),
+                background_calls: Vec::new(),
             },
         )
         .await;

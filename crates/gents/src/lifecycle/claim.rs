@@ -185,63 +185,6 @@ async fn fetch_interrupt_and_ttl(
     Ok((interrupt, valid))
 }
 
-/// Lean `SpawnClaimFence.claimFencedByIntent`: a subagent child whose
-/// physical spawn bridge carries a durable cancel intent is refused at claim,
-/// without waiting for the cancel mirror to latch the child's own interrupt.
-/// The intent applies only to the child the bridge receipt resolves through
-/// its reciprocal parent lineage and target principal; a row that merely names
-/// the bridge is stopped only through its own interrupt latch.
-async fn spawn_bridge_cancel_intent(
-    node: &EmbeddedNode,
-    request: &crate::watcher::AgentRequest,
-) -> Result<Option<String>> {
-    let Some(bridge_doc_id) = request
-        .caused_by_parent_tool_call_doc_id
-        .as_deref()
-        .filter(|id| !id.trim().is_empty())
-    else {
-        return Ok(None);
-    };
-    let bridge = escape_graphql_string(bridge_doc_id);
-    let response = crate::graphql::graphql_with_transaction_retry(
-        node,
-        &format!(
-            r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{bridge}" }} }}, limit: 1) {{ cancel_cascade_intent_at }} }}"#
-        ),
-        "claim spawn bridge cancel intent",
-    )
-    .await?;
-    #[derive(serde::Deserialize)]
-    struct IntentRow {
-        cancel_cascade_intent_at: Option<String>,
-    }
-    let Some(intent_at) = crate::graphql::first_row::<IntentRow>(&response, "AgentToolCall")?
-        .and_then(|row| row.cancel_cascade_intent_at)
-        .filter(|at| !at.trim().is_empty())
-    else {
-        return Ok(None);
-    };
-    let bridge_child = crate::descendant_graph::resolve_bridge_receipt_child(
-        crate::descendant_graph::DescendantGraphAccess::Local(node),
-        bridge_doc_id,
-    )
-    .await
-    .context("resolve spawn bridge child at claim")?;
-    if bridge_child
-        .as_ref()
-        .and_then(|child| child.doc_id.as_deref())
-        != Some(request.doc_id.as_str())
-    {
-        tracing::warn!(
-            request_id = %request.request_id,
-            bridge_doc_id,
-            "claimant names a cancelled spawn bridge without corroborating its lineage; bridge intent not applied"
-        );
-        return Ok(None);
-    }
-    Ok(Some(intent_at))
-}
-
 impl RequestLifecycle {
     pub async fn claim(&mut self) -> Result<ClaimOutcome> {
         self.claim_inner(false).await
@@ -266,10 +209,6 @@ impl RequestLifecycle {
         self.ensure_state(&[LocalLifecycleState::Pending], "claim")?;
         let (interrupt_requested_at, valid_until) =
             fetch_interrupt_and_ttl(&self.node, &self.request.doc_id).await?;
-        let interrupt_requested_at = match interrupt_requested_at {
-            Some(interrupt_at) => Some(interrupt_at),
-            None => spawn_bridge_cancel_intent(&self.node, &self.request).await?,
-        };
         if let Some(interrupt_at) = interrupt_requested_at {
             self.transition_pending_to_interrupted(&interrupt_at)
                 .await?;

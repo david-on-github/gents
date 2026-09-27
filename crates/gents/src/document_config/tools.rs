@@ -748,22 +748,6 @@ impl Tools {
                 subagents.target_ids.iter().map(String::as_str),
                 false,
             );
-            positive(
-                &mut errors,
-                "subagents.cross_principal_spawn_timeout_secs",
-                subagents.cross_principal_spawn_timeout_secs,
-            );
-            match subagents.default_await_mode.as_deref() {
-                None | Some("foreground") => {}
-                Some("background") if subagents.background_enabled.unwrap_or(false) => {}
-                Some("background") => errors.push(
-                    "subagents.default_await_mode background requires background_enabled"
-                        .to_owned(),
-                ),
-                Some(_) => errors.push(
-                    "subagents.default_await_mode must be foreground or background".to_owned(),
-                ),
-            }
         }
         if let Some(datastore) = &self.datastore {
             names(

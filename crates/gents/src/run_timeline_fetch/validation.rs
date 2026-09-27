@@ -270,7 +270,6 @@ pub(super) fn validate_child_tool_bridges(
         if nonempty(tool.request_doc_id.as_deref()) != Some(root_doc_id)
             || nonempty(tool.request_id.as_deref()) != Some(root.request_id.as_str())
             || tool.tool_call_id != logical_tool_id
-            || nonempty(tool.child_request_id.as_deref()) != Some(child.request_id.as_str())
         {
             anyhow::bail!(
                 "child AgentRequest {} has a mismatched physical AgentToolCall bridge {}",

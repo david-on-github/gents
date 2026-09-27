@@ -31,7 +31,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         lifecycle.start_running().await?;
@@ -105,7 +104,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         lifecycle.start_running().await?;
@@ -144,7 +142,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         lifecycle.start_running().await?;

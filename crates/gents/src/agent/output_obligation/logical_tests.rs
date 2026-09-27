@@ -2,7 +2,7 @@ use super::*;
 use crate::identity::{AgentIdentity, KeyIdentity};
 use crate::lifecycle::{ClaimOutcome, RequestLifecycle, RequestTerminalOutcome, TerminalizeResult};
 use crate::streaming::DefraStreamWriter;
-use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
 use gents_protocol::request_admission::{AgentRequestAdmissionRecord, AgentRequestCreate};
 use gents_protocol::row::AgentRequestRow;
 use serde_json::{json, Value};
@@ -145,7 +145,6 @@ async fn terminalize_accepted_tool(
         accepted,
         deadline,
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
     )
     .unwrap();
     tool.start_running().await.unwrap();
@@ -221,7 +220,6 @@ async fn non_deadline_request_terminalization_does_not_timeout_running_wait() {
             accepted,
             lifecycle.claimed_deadline_at().expect("claimed deadline"),
             AwaitMode::Foreground,
-            CancelPolicy::Cascade,
         )
         .unwrap();
         tool.start_running().await.unwrap();
@@ -652,7 +650,6 @@ async fn same_tool_calls_with_conflicting_declared_counts_reject_the_gate() {
             accepted,
             deadline,
             AwaitMode::Foreground,
-            CancelPolicy::Cascade,
         )
         .unwrap();
         tool.start_running().await.unwrap();

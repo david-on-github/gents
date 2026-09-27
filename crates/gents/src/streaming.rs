@@ -28,28 +28,8 @@ pub struct AcceptedToolCall {
     pub(crate) tool_name: String,
     pub(crate) execution_generation: String,
     pub(crate) arguments: gents_protocol::output::PayloadRef,
-    pub(crate) delegated_input: Option<gents_protocol::output::DelegatedToolInput>,
-    /// Present only when the hook validated a `spawn_subagent` invocation
-    /// before its provider turn was accepted.  These are immutable bridge
-    /// genesis facts, not dispatch-time metadata.
-    pub(crate) spawn_admission: Option<SpawnAdmissionPlan>,
-}
-
-/// Immutable child provenance prepared by the hook before provider
-/// publication.  The provider header remains the only tool invocation; this
-/// merely makes the bridge's child edge available when that header creates its
-/// pending lifecycle row.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SpawnAdmissionPlan {
-    pub(crate) tool_call_id: String,
-    pub(crate) child_request_id: String,
-    pub(crate) spawn_target_did: String,
-    /// Exact immutable behavior route selected before provider publication.
-    /// Remote materializers must never recover this from provider arguments.
-    pub(crate) spawn_behavior_id: String,
-    /// Authenticated parent workspace snapshot.  This is bridge provenance,
-    /// not a tool argument or workspace grant.
-    pub(crate) delegated_workspace: Option<gents_protocol::output::DelegatedWorkspace>,
+    /// Immutable await mode fixed at accepted publication. Only a
+    /// `create_session`/`send_message` call is published in background.
     pub(crate) await_mode: crate::tool_call_lifecycle::AwaitMode,
 }
 
@@ -172,7 +152,7 @@ impl DefraStreamWriter {
                     .claimed_deadline_at()
                     .context("authored publication is missing request deadline")?
                     .to_rfc3339(),
-                spawn_admissions: Vec::new(),
+                background_calls: Vec::new(),
             },
         )
         .await?;
@@ -341,18 +321,6 @@ impl DefraStreamWriter {
         attempt: u32,
         message: &gents_protocol::message::Message,
     ) -> Result<canonical::PublishedProviderTurn> {
-        self.publish_native_turn_with_spawn_admissions(lifecycle, turn, attempt, message, &[])
-            .await
-    }
-
-    pub(crate) async fn publish_native_turn_with_spawn_admissions(
-        &self,
-        lifecycle: &crate::lifecycle::RequestLifecycle,
-        turn: usize,
-        attempt: u32,
-        message: &gents_protocol::message::Message,
-        spawn_admissions: &[SpawnAdmissionPlan],
-    ) -> Result<canonical::PublishedProviderTurn> {
         use gents_protocol::output::{OutputSegment, OutputSource, OutputWriter};
 
         let request = lifecycle.request();
@@ -430,7 +398,7 @@ impl DefraStreamWriter {
                     .claimed_deadline_at()
                     .context("accepted tool call is missing its request deadline")?
                     .to_rfc3339(),
-                spawn_admissions: spawn_admissions.to_vec(),
+                background_calls: canonical::session_message_call_ids(message),
             },
         )
         .await?;
@@ -553,7 +521,6 @@ impl gents_loop::stream_writer::CanonicalStreamWriter<crate::lifecycle::RequestL
     for DefraStreamWriter
 {
     type AcceptedToolCall = AcceptedToolCall;
-    type SpawnAdmissionPlan = SpawnAdmissionPlan;
 
     async fn publish_authored_message(
         &self,
@@ -607,23 +574,15 @@ impl gents_loop::stream_writer::CanonicalStreamWriter<crate::lifecycle::RequestL
         DefraStreamWriter::close_provider_attempt(self, lifecycle, turn, attempt, close).await
     }
 
-    async fn publish_native_turn_with_spawn_admissions(
+    async fn publish_native_turn(
         &self,
         lifecycle: &crate::lifecycle::RequestLifecycle,
         turn: usize,
         attempt: u32,
         message: &gents_protocol::message::Message,
-        spawn_admissions: &[SpawnAdmissionPlan],
     ) -> Result<gents_loop::stream_writer::CanonicalPublishedTurn<AcceptedToolCall>> {
-        let published = DefraStreamWriter::publish_native_turn_with_spawn_admissions(
-            self,
-            lifecycle,
-            turn,
-            attempt,
-            message,
-            spawn_admissions,
-        )
-        .await?;
+        let published =
+            DefraStreamWriter::publish_native_turn(self, lifecycle, turn, attempt, message).await?;
         Ok(gents_loop::stream_writer::CanonicalPublishedTurn {
             message_doc_id: published.message_doc_id,
             accepted_tools: published.accepted_tools,

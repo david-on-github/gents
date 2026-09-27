@@ -4,7 +4,7 @@ use crate::lifecycle::{
     extract_single_doc_id, ClaimOutcome, RequestLifecycle, DEFAULT_REQUEST_MAX_RETRIES,
 };
 use crate::streaming::DefraStreamWriter;
-use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
 use gents_protocol::request_lifecycle::RequestLifecycleState;
 use gents_protocol::{
     message::{AssistantContent, Message, ToolCall, ToolFunction},
@@ -354,7 +354,6 @@ impl CanonicalBackgroundFixture {
             accepted.pop().expect("one accepted tool"),
             deadline,
             AwaitMode::Foreground,
-            CancelPolicy::Cascade,
         )?;
         tool.start_running().await?;
         let mut tool = tool

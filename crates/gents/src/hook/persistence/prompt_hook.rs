@@ -81,9 +81,9 @@ impl DefraSessionHook {
                 }
             };
         }
-        if tool_name == SPAWN_SUBAGENT_TOOL_NAME {
+        if crate::toolset::is_session_message_tool(tool_name) {
             let result = self
-                .persist_spawn_subagent_tool_call(tool_call_id, internal_call_id, args)
+                .persist_session_message_tool_call(tool_name, tool_call_id, internal_call_id, args)
                 .instrument(tracing::info_span!(
                     "tool.call",
                     tool_name = %tool_name,
@@ -96,97 +96,7 @@ impl DefraSessionHook {
                     self.record_success();
                     action
                 }
-                Err(e) => self.on_tool_persistence_error("persist spawn_subagent tool call", &e),
-            };
-        }
-        if tool_name == WAIT_SUBAGENT_TOOL_NAME {
-            let result = self
-                .persist_wait_subagent_tool_call(tool_call_id, internal_call_id, args)
-                .instrument(tracing::info_span!(
-                    "tool.call",
-                    tool_name = %tool_name,
-                    tool_call_id = %internal_call_id,
-                ))
-                .await;
-
-            return match result {
-                Ok(action) => {
-                    self.record_success();
-                    action
-                }
-                Err(e) => self.on_tool_persistence_error("persist wait_subagent tool call", &e),
-            };
-        }
-        if tool_name == LIST_SUBAGENTS_TOOL_NAME {
-            let result = self
-                .persist_list_subagents_tool_call(tool_call_id, internal_call_id, args)
-                .instrument(tracing::info_span!(
-                    "tool.call",
-                    tool_name = %tool_name,
-                    tool_call_id = %internal_call_id,
-                ))
-                .await;
-
-            return match result {
-                Ok(action) => {
-                    self.record_success();
-                    action
-                }
-                Err(e) => self.on_tool_persistence_error("persist list_subagents tool call", &e),
-            };
-        }
-        if tool_name == READ_SUBAGENT_TOOL_NAME {
-            let result = self
-                .persist_read_subagent_tool_call(tool_call_id, internal_call_id, args)
-                .instrument(tracing::info_span!(
-                    "tool.call",
-                    tool_name = %tool_name,
-                    tool_call_id = %internal_call_id,
-                ))
-                .await;
-
-            return match result {
-                Ok(action) => {
-                    self.record_success();
-                    action
-                }
-                Err(e) => self.on_tool_persistence_error("persist read_subagent tool call", &e),
-            };
-        }
-        if tool_name == STEER_SUBAGENT_TOOL_NAME {
-            let result = self
-                .persist_steer_subagent_tool_call(tool_call_id, internal_call_id, args)
-                .instrument(tracing::info_span!(
-                    "tool.call",
-                    tool_name = %tool_name,
-                    tool_call_id = %internal_call_id,
-                ))
-                .await;
-
-            return match result {
-                Ok(action) => {
-                    self.record_success();
-                    action
-                }
-                Err(e) => self.on_tool_persistence_error("persist steer_subagent tool call", &e),
-            };
-        }
-        if tool_name == CANCEL_SUBAGENT_TOOL_NAME {
-            let result = self
-                .persist_cancel_subagent_tool_call(tool_call_id, internal_call_id, args)
-                .instrument(tracing::info_span!(
-                    "tool.call",
-                    tool_name = %tool_name,
-                    tool_call_id = %internal_call_id,
-                ))
-                .await;
-
-            return match result {
-                Ok(action) => {
-                    self.record_success();
-                    action
-                }
-                Err(e) => self.on_tool_persistence_error("persist cancel_subagent tool call", &e),
+                Err(e) => self.on_tool_persistence_error("persist session-message tool call", &e),
             };
         }
         if tool_name == SPAWN_PROCESS_TOOL_NAME {
@@ -293,7 +203,6 @@ impl DefraSessionHook {
                     args,
                     deadline_at,
                     crate::tool_call_lifecycle::AwaitMode::Foreground,
-                    crate::tool_call_lifecycle::CancelPolicy::Cascade,
                 )
                 .await?;
             lc.start_running().await?;
@@ -350,7 +259,6 @@ impl DefraSessionHook {
                     args,
                     deadline_at,
                     crate::tool_call_lifecycle::AwaitMode::Foreground,
-                    crate::tool_call_lifecycle::CancelPolicy::Cascade,
                 )
                 .await?;
             match denial {
@@ -403,11 +311,6 @@ impl DefraSessionHook {
                         ToolOutcome::TimedOut { .. } => {
                             let _ = lc.timeout().await?;
                         }
-                        _ if lc.interrupt_disposition()
-                            == crate::tool_call_lifecycle::InterruptDisposition::Background =>
-                        {
-                            self.retain_interrupted_bridge(lc).await?;
-                        }
                         _ => {
                             let _ = lc.cancel_during_run(CancelCause::Interrupted).await?;
                         }
@@ -435,23 +338,6 @@ impl DefraSessionHook {
             // The outcome arrives as data, so there is nothing to classify or
             // strip: the model-facing text is the only text there is.
             let result = outcome.model_facing_text();
-
-            // Background subagent dispatch published its immediate receipt
-            // under a separate authored source. Rig still reports the Skip as
-            // a completed tool outcome; acknowledging it must not close the
-            // running bridge or manufacture a second ToolResult.
-            if self
-                .in_flight_lifecycles
-                .lock()
-                .await
-                .get(internal_call_id)
-                .is_some_and(|lifecycle| {
-                    lifecycle.is_subagent_bridge()
-                        && lifecycle.await_mode() == crate::tool_call_lifecycle::AwaitMode::Background
-                })
-            {
-                return Ok(HookAction::Continue);
-            }
 
             let tool_call_doc_id = {
                 let lifecycles = self.in_flight_lifecycles.lock().await;

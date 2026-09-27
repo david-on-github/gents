@@ -1,24 +1,9 @@
 use super::*;
 
 /// Bytes of normalized output a completion notification summarizes. The
-/// notification wakes the parent; `read_process` and `read_subagent` page the
-/// full output, so the summary stays small even when a tool's own output
-/// budget is larger.
+/// notification wakes the session; `read_process` pages the full output, so
+/// the summary stays small even when a tool's own output budget is larger.
 pub(crate) const NOTIFICATION_SUMMARY_BYTES: usize = 4000;
-
-pub(super) fn render_notification(edge: &ChildEdge, status: &str, summary: &str) -> String {
-    format!(
-        r#"<subagent-notification child_request_id="{child_request_id}" child_session_id="{child_session_id}" behavior_id="{behavior_id}" parent_tool_call_id="{parent_tool_call_id}" status="{status}">
-<summary>{summary}</summary>
-</subagent-notification>"#,
-        child_request_id = xml_escape_attr(&edge.child_request_id),
-        child_session_id = xml_escape_attr(&edge.child_session_id),
-        behavior_id = xml_escape_attr(&edge.behavior_id),
-        parent_tool_call_id = xml_escape_attr(&edge.parent_tool_call_id),
-        status = xml_escape_attr(status),
-        summary = xml_escape_text(summary),
-    )
-}
 
 pub(super) fn render_tool_completion(
     tool_call_id: &str,
@@ -131,43 +116,6 @@ pub(super) fn tool_completion_presentation(
     (format!("{prefix}{rendered_result}{suffix}"), parts)
 }
 
-pub(super) fn subagent_notification_presentation(
-    edge: &ChildEdge,
-    status: &str,
-    summary: &str,
-    source: &str,
-) -> (String, Vec<gents_protocol::output::PresentationPart>) {
-    use gents_protocol::output::PresentationPart;
-    let rendered = render_notification(edge, status, summary);
-    let prefix = format!(
-        r#"<subagent-notification child_request_id="{}" child_session_id="{}" behavior_id="{}" parent_tool_call_id="{}" status="{}">
-<summary>"#,
-        xml_escape_attr(&edge.child_request_id),
-        xml_escape_attr(&edge.child_session_id),
-        xml_escape_attr(&edge.behavior_id),
-        xml_escape_attr(&edge.parent_tool_call_id),
-        xml_escape_attr(status),
-    );
-    let suffix = "</summary>\n</subagent-notification>".to_string();
-    let mut parts = vec![PresentationPart::Literal { text: prefix }];
-    if compact_summary(source) == summary {
-        let (_, mut source_parts) =
-            tool_completion_presentation("", "", "", source, None, NOTIFICATION_SUMMARY_BYTES);
-        source_parts.remove(0);
-        source_parts.pop();
-        parts.extend(source_parts);
-    } else {
-        // Failure summaries may be synthesized by the verified child-terminal
-        // owner rather than copied from tool output. They remain small wrapper
-        // metadata while the header still proves the exact bridge source.
-        parts.push(PresentationPart::Literal {
-            text: xml_escape_text(summary),
-        });
-    }
-    parts.push(PresentationPart::Literal { text: suffix });
-    (rendered, parts)
-}
-
 pub(super) fn compact_summary(value: &str) -> String {
     let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
     const LIMIT: usize = NOTIFICATION_SUMMARY_BYTES;
@@ -218,32 +166,6 @@ mod canonical_presentation_tests {
                 render_tool_completion("call<&>", "bash", "failed", result, Some("reason<&>"))
             );
         }
-    }
-
-    #[test]
-    fn composed_subagent_notification_matches_existing_renderer() {
-        let edge = ChildEdge {
-            parent_request_id: "parent".into(),
-            parent_request_doc_id: "parent-doc".into(),
-            parent_agent_did: "did:test:parent".into(),
-            parent_requester_did: None,
-            parent_tool_call_id: "call<&>".into(),
-            parent_tool_call_doc_id: "tool-doc".into(),
-            parent_session_id: "parent-session".into(),
-            child_request_id: "child<&>".into(),
-            child_request_doc_id: "child-doc".into(),
-            child_session_id: "session".into(),
-            child_agent_did: "did:test:child".into(),
-            child_requester_did: None,
-            behavior_id: "behavior".into(),
-            await_mode: crate::tool_call_lifecycle::AwaitMode::Background,
-            lifecycle_state: "completed".into(),
-        };
-        let source = "  child\nresult <&> ✓ ";
-        let summary = compact_summary(source);
-        let (rendered, _) =
-            subagent_notification_presentation(&edge, "completed", &summary, source);
-        assert_eq!(rendered, render_notification(&edge, "completed", &summary));
     }
 }
 

@@ -34,12 +34,6 @@ mod process_control_scope;
 #[path = "tests/r4c_private_support.rs"]
 mod r4c_private_support;
 
-#[path = "tests/r4_subagent_control.rs"]
-mod r4_subagent_control;
-
-#[path = "tests/r4_wait_subagent_guard.rs"]
-mod r4_wait_subagent_guard;
-
 #[path = "tests/r4c_list_background_tools.rs"]
 mod r4c_list_background_tools;
 
@@ -2972,7 +2966,6 @@ async fn interrupt_cancels_native_tools_and_keeps_children_running() {
         "child-bridge",
         deadline,
         crate::tool_call_lifecycle::AwaitMode::Background,
-        crate::tool_call_lifecycle::CancelPolicy::Cascade,
         child_request_id,
     )
     .await;
@@ -4021,7 +4014,6 @@ async fn parent_deadline_sweep_times_out_foreground_bridge_without_child_evidenc
         "bridge-deadline-call",
         chrono::Utc::now() - chrono::Duration::seconds(5),
         crate::tool_call_lifecycle::AwaitMode::Foreground,
-        crate::tool_call_lifecycle::CancelPolicy::Cascade,
         "bridge-deadline-child",
     )
     .await;
@@ -4034,7 +4026,6 @@ async fn parent_deadline_sweep_times_out_foreground_bridge_without_child_evidenc
         "bridge-open-call",
         chrono::Utc::now() + chrono::Duration::minutes(5),
         crate::tool_call_lifecycle::AwaitMode::Foreground,
-        crate::tool_call_lifecycle::CancelPolicy::Cascade,
         "bridge-deadline-child",
     )
     .await;
@@ -4664,7 +4655,6 @@ async fn foreground_waiter_keeps_waiting_when_bridge_was_linked_under_it() {
         "linked-bridge",
         deadline,
         crate::tool_call_lifecycle::AwaitMode::Foreground,
-        crate::tool_call_lifecycle::CancelPolicy::Cascade,
         "child-linked",
     )
     .await;

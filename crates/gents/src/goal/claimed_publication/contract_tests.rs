@@ -10,7 +10,7 @@ use serde_json::json;
 
 use crate::lifecycle::{ClaimOutcome, RequestTerminalOutcome, TerminalizeResult};
 use crate::tool_call_lifecycle::admission_fixture::publish_accepted_on_claimed_request;
-use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, SpawnedBackgroundToolAdmission};
+use crate::tool_call_lifecycle::{AwaitMode, SpawnedBackgroundToolAdmission};
 
 // Reuse the existing real-DB Goal fixture and independent signed-field checks.
 #[path = "../operator_resume/support.rs"]
@@ -70,7 +70,6 @@ async fn run_generated_running_wait() {
         json!({"tool_name":"bash","args":{"command":"sleep 1"}}),
         None,
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         true,
     )
     .await
@@ -98,7 +97,6 @@ async fn run_generated_running_wait() {
         json!({"tool_call_id":handle,"timeout_secs":1}),
         None,
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         true,
     )
     .await
@@ -234,7 +232,6 @@ async fn run_generated_wait_observations() {
                 json!({"tool_call_id":unrelated_handle,"timeout_secs":1}),
                 None,
                 AwaitMode::Foreground,
-                CancelPolicy::Cascade,
                 true,
             )
             .await
@@ -299,7 +296,6 @@ async fn run_generated_wait_observations() {
                 json!({"tool_name":"bash","args":{"command":"sleep 1"}}),
                 None,
                 AwaitMode::Foreground,
-                CancelPolicy::Cascade,
                 true,
             )
             .await
@@ -352,7 +348,6 @@ async fn run_generated_wait_observations() {
                 json!({"command":"sleep 1"}),
                 None,
                 AwaitMode::Foreground,
-                CancelPolicy::Cascade,
                 false,
             )
             .await
@@ -391,7 +386,6 @@ async fn run_generated_wait_observations() {
                 },
                 None,
                 AwaitMode::Foreground,
-                CancelPolicy::Cascade,
                 observed_wait["replied"] != false,
             )
             .await
@@ -566,7 +560,7 @@ async fn run_generated_wait_observations() {
         let result = if case.observation["storage_failed"] == true {
             // Fail the waited-target read inside the publication transaction.
             ConfigApplyTxn::with_read_storage_failure(
-                "await_mode child_request_id spawned_by_tool_call_doc_id",
+                "await_mode spawned_by_tool_call_doc_id",
                 publication,
             )
             .await

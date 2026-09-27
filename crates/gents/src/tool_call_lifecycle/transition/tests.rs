@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::super::{AwaitMode, CancelPolicy, ToolCallLifecycle, ToolCallState};
+use super::super::{AwaitMode, ToolCallLifecycle, ToolCallState};
 use super::IllegalToolCallTransition;
 
 /// Build a minimal in-memory node. Schema setup is not required for these
@@ -30,7 +30,6 @@ async fn subagent_lc_in_running() -> ToolCallLifecycle {
         "{}".to_string(),
         test_deadline(),
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         "child-req-1".to_string(),
         "did:test:target".to_string(),
     );
@@ -119,7 +118,6 @@ async fn background_rejects_already_background() {
         "{}".to_string(),
         test_deadline(),
         AwaitMode::Background, // start already in Background
-        CancelPolicy::Cascade,
         "child-req-bg-2".to_string(),
         "did:test:target".to_string(),
     );
@@ -177,7 +175,6 @@ async fn foreground_rejects_already_foreground() {
         "{}".to_string(),
         test_deadline(),
         AwaitMode::Foreground, // start already in Foreground
-        CancelPolicy::Cascade,
         "child-req-fg-1".to_string(),
         "did:test:target".to_string(),
     );
@@ -267,7 +264,6 @@ async fn detach_rejects_terminal_state() {
         "{}".to_string(),
         test_deadline(),
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         "child-req-detach-2".to_string(),
         "did:test:target".to_string(),
     );
@@ -332,7 +328,6 @@ async fn bridge_failure_rejects_pending_state() {
         "{}".to_string(),
         test_deadline(),
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         "child-1".to_string(),
         "did:test:target".to_string(),
     );
@@ -423,7 +418,6 @@ async fn bridge_complete_rejects_pending_state() {
         "{}".to_string(),
         test_deadline(),
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         "child-1".to_string(),
         "did:test:target".to_string(),
     );
@@ -454,7 +448,6 @@ async fn bridge_cancel_cascade_returns_intent_for_cascade_subagent() {
         "{}".to_string(),
         test_deadline(),
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         "child-cas-1".to_string(),
         "did:test:target".to_string(),
     );
@@ -479,7 +472,6 @@ async fn bridge_cancel_cascade_returns_none_for_detached() {
         "{}".to_string(),
         test_deadline(),
         AwaitMode::Foreground,
-        CancelPolicy::Detach,
         "child-cas-2".to_string(),
         "did:test:target".to_string(),
     );
@@ -526,7 +518,6 @@ async fn bridge_cancel_cascade_rejects_non_cancelled_state() {
         "{}".to_string(),
         test_deadline(),
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         "child-cas-4".to_string(),
         "did:test:target".to_string(),
     );

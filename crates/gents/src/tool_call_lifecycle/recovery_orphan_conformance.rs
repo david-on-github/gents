@@ -9,7 +9,7 @@ use crate::lifecycle::{RequestLifecycle, RequestTerminalOutcome, TerminalizeResu
 use crate::tool_call_lifecycle::admission_fixture::{
     published_admission_with_owner, PublishedAdmission, PublishedAdmissionOptions,
 };
-use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
 use crate::{Collection, ConfigAccess};
 use gents_protocol::output::TerminalOutput;
 use serde_json::json;

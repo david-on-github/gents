@@ -1265,7 +1265,6 @@ pub(crate) const GOAL_BACKED_REQUEST_FINGERPRINT_FIELDS: &str = r#"
     enrollment_request_digest enrollment_admin_did
     enrollment_authorization_sequence enrollment_authorization_expires_at
     runtime_issuer_did runtime_source_request_id runtime_source_kind
-    runtime_bridge_author_did
 "#;
 
 /// Stable logical request identity for goal-backed submission retries.
@@ -1321,7 +1320,6 @@ pub(crate) struct GoalBackedRequestFingerprint {
     runtime_issuer_did: Option<String>,
     runtime_source_request_id: Option<String>,
     runtime_source_kind: Option<String>,
-    runtime_bridge_author_did: Option<String>,
 }
 
 impl GoalBackedRequestFingerprint {
@@ -1419,7 +1417,6 @@ impl GoalBackedRequestFingerprint {
                 .admission
                 .runtime_source_kind
                 .map(|kind| kind.as_str().to_string()),
-            runtime_bridge_author_did: request.admission.runtime_bridge_author_did.clone(),
         })
     }
 }

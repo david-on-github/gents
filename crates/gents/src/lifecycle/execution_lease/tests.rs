@@ -659,7 +659,7 @@ async fn dead_revocation_accounts_tools_without_reading_corrupt_delivery_payload
         AGENT_OUTPUT_SEGMENT_FIELDS, CREATE_AGENT_MESSAGE_MUTATION,
         CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
     };
-    use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+    use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
     use gents_protocol::message::{AssistantContent, Message, ToolCall, ToolFunction};
     use gents_protocol::output::{
         MessageBlock, MessagePublication, MessageRole, OutputOutcome, OutputSegment, OutputSource,
@@ -713,7 +713,6 @@ async fn dead_revocation_accounts_tools_without_reading_corrupt_delivery_payload
         running.clone(),
         Utc::now() + chrono::Duration::minutes(5),
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
     )
     .unwrap();
     running_lifecycle.start_running().await.unwrap();

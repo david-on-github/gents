@@ -10,10 +10,6 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::config_client::ConfigAccess;
-use crate::descendant_graph::{
-    resolve_descendant_graph, resolve_descendant_root_request_id, DescendantGraphAccess,
-    DescendantQuery, MAX_DESCENDANT_PAGE_LIMIT,
-};
 use crate::graphql::escape_graphql_string;
 use crate::run_timeline::{
     build_run_timeline, RunActivityRows, RunTimeline, RunTimelineRows, TimelineCompactionRow,
@@ -27,8 +23,8 @@ use gents_protocol::graphql::graphql_rows_from_response;
 const MAX_RUN_ACTIVITY_ROWS: usize = 10_000;
 
 /// Canonical tool payloads in an exact authorized session scope. Runtime
-/// consumers share the timeline's physical intent binding and delegated-input
-/// rules instead of maintaining another argument reconstruction path.
+/// consumers share the timeline's physical intent binding instead of
+/// maintaining another argument reconstruction path.
 pub(crate) async fn load_session_tool_calls(
     access: &ConfigAccess,
     agent_did: &str,
@@ -73,23 +69,18 @@ pub(crate) async fn load_accepted_tool_arguments(
     .await?;
     let mut arguments = Vec::with_capacity(observations.len());
     for observation in observations {
-        // Delegated arguments are carried on the host row itself.
-        let messages = if observation.delegated_input.is_some() {
-            Vec::new()
-        } else {
-            let sequence = observation
-                .row
-                .message_sequence
-                .context("accepted tool lacks its accepted message sequence")?;
-            event_loaders::resolve_timeline_messages_at_sequence(
-                access,
-                agent_did,
-                session_id,
-                requester_did,
-                sequence,
-            )
-            .await?
-        };
+        let sequence = observation
+            .row
+            .message_sequence
+            .context("accepted tool lacks its accepted message sequence")?;
+        let messages = event_loaders::resolve_timeline_messages_at_sequence(
+            access,
+            agent_did,
+            session_id,
+            requester_did,
+            sequence,
+        )
+        .await?;
         arguments.push(event_loaders::resolve_tool_payloads(observation, &messages)?.args);
     }
     Ok(arguments)
@@ -97,12 +88,6 @@ pub(crate) async fn load_accepted_tool_arguments(
 
 pub async fn load_run_timeline(access: &ConfigAccess, request_id: &str) -> Result<RunTimeline> {
     let mut timeline = build_run_timeline(load_run_timeline_rows(access, request_id).await?);
-    match load_timeline_descendant_edges(access, request_id).await {
-        Ok(edges) => timeline.descendant_edges = edges,
-        Err(error) => {
-            timeline.descendant_graph_diagnostics_error = Some(error.to_string());
-        }
-    }
     if let Some(agent_did) = timeline.agent_did.as_deref() {
         match crate::load_background_completion_diagnostics(access, agent_did).await {
             Ok(diagnostics) => {
@@ -244,37 +229,6 @@ pub async fn load_run_activity_rows(
         tool_calls,
         truncated,
     })
-}
-
-async fn load_timeline_descendant_edges(
-    access: &ConfigAccess,
-    request_id: &str,
-) -> Result<Vec<crate::DescendantEdge>> {
-    let descendant_root =
-        resolve_descendant_root_request_id(DescendantGraphAccess::Config(access), request_id)
-            .await?;
-    let mut after = None;
-    let mut edges = Vec::new();
-    loop {
-        let page = resolve_descendant_graph(
-            DescendantGraphAccess::Config(access),
-            &DescendantQuery {
-                after: after.clone(),
-                limit: MAX_DESCENDANT_PAGE_LIMIT,
-                ..DescendantQuery::all(&descendant_root)
-            },
-        )
-        .await?;
-        // This loop only follows cursors it was just handed; an anchor that
-        // vanished between pages would restart the scope and duplicate edges.
-        anyhow::ensure!(!page.stale_cursor, "descendant graph changed while paging");
-        edges.extend(page.edges);
-        if !page.has_more {
-            break;
-        }
-        after = page.next_cursor;
-    }
-    Ok(edges)
 }
 
 pub async fn load_run_timeline_rows(

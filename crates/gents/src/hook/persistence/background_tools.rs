@@ -67,7 +67,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         parent_lifecycle.start_running().await?;
@@ -619,7 +618,6 @@ impl DefraSessionHook {
                 args,
                 parent_deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         lifecycle.start_running().await?;
@@ -745,7 +743,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         lifecycle.start_running().await?;
@@ -803,7 +800,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         lifecycle.start_running().await?;
@@ -888,7 +884,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         control_lifecycle.start_running().await?;
@@ -983,6 +978,30 @@ impl DefraSessionHook {
                 .await;
         }
 
+        if lifecycle.is_session_message() {
+            let interrupted = crate::session_message::interrupt_caused_request(
+                &self.node,
+                lifecycle
+                    .doc_id()
+                    .context("session-message row lacks physical identity")?,
+                &self.agent_did,
+            )
+            .await?;
+            let result = json_string(json!({
+                "ok": interrupted.is_some(),
+                "tool_call_id": background_tool_call_id,
+                "status": if interrupted.is_some() { "interrupting" } else { "not_running" },
+                "request_id": interrupted,
+                "error": null
+            }));
+            return self
+                .complete_control_tool_call(
+                    &mut control_lifecycle,
+                    CANCEL_PROCESS_TOOL_NAME,
+                    result,
+                )
+                .await;
+        }
         let notification_tool_name = lifecycle.tool_name().to_string();
         let notification_request_id = lifecycle.request_id().to_string();
         let notification_reason = parsed
@@ -1091,15 +1110,6 @@ fn cancel_process_reply(
     }))
 }
 
-fn background_timeout_terminal() -> ChildTerminal {
-    ChildTerminal::Failed {
-        reason: "background tool deadline exceeded".to_string(),
-        failure_class: FailureClass::External,
-    }
-}
-
-const BACKGROUND_TIMEOUT_COMPLETION_REASON: &str = "deadline_exceeded";
-
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()
@@ -1112,11 +1122,7 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 
 #[cfg(test)]
 mod ownership_projection_tests {
-    use super::{
-        background_timeout_terminal, project_background_completion_if_owned,
-        BACKGROUND_TIMEOUT_COMPLETION_REASON,
-    };
-    use crate::tool_call_lifecycle::{ChildTerminal, FailureClass};
+    use super::project_background_completion_if_owned;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -1150,18 +1156,5 @@ mod ownership_projection_tests {
 
         assert!(matches!(output, Some(Ok(()))));
         assert!(projected.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn background_timeout_preserves_failure_metadata() {
-        assert_eq!(BACKGROUND_TIMEOUT_COMPLETION_REASON, "deadline_exceeded");
-        let terminal = background_timeout_terminal();
-        assert_eq!(
-            terminal,
-            ChildTerminal::Failed {
-                reason: "background tool deadline exceeded".to_string(),
-                failure_class: FailureClass::External,
-            }
-        );
     }
 }
