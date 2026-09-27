@@ -383,6 +383,7 @@ async fn terminalize_execution_with_time(
                 ).await?;
                 validate_title_sources_decided(request_doc_id, &records)?;
             }
+            let mut reader = session::TxnCanonicalReader::new(txn, agent, row.requester_did.as_deref());
             let eligible = |header: &&session::canonical_rows::TranscriptMessageRow| {
                 header.message.role == MessageRole::Assistant &&
                 matches!(header.message.publication, MessagePublication::RequestExecution { .. }
@@ -414,18 +415,14 @@ async fn terminalize_execution_with_time(
                         .filter(|header| &header.doc_id == message_doc_id).collect::<Vec<_>>();
                     anyhow::ensure!(matching.len() == 1, "terminal selection lacks exact owned assistant header");
                     if !matches!(authority, TerminalAuthority::Revocation { .. }) {
-                        session::load_canonical_message_in_txn(
-                            txn, message_doc_id, agent, row.requester_did.as_deref()
-                        ).await?;
+                        reader.load_message(message_doc_id).await?;
                     }
                 }
                 TerminalOutput::NoMessage => {
                     for header in headers.iter().filter(eligible) {
                         anyhow::ensure!(!matches!(authority, TerminalAuthority::Revocation { .. }),
                             "NoMessage cannot replace an owned assistant header during revocation");
-                        match session::load_canonical_message_in_txn(
-                            txn, &header.doc_id, agent, row.requester_did.as_deref()
-                        ).await {
+                        match reader.load_message(&header.doc_id).await {
                             Ok(_) => anyhow::bail!("NoMessage cannot replace a reconstructable owned assistant header"),
                             // Match eligibleOwnedAssistantExists: invalid output
                             // is retained, but does not become terminal payload.
@@ -468,7 +465,7 @@ async fn terminalize_execution_with_time(
             // Any missing reply, lost tool CAS or validation error rolls it all back.
             if !title {
                 super::terminal_tools::account_tools_in_txn(
-                txn, &row, &headers, owner,
+                txn, &mut reader, &row, &headers, owner,
                 effective_outcome == RequestTerminalOutcome::Completed, &timestamp,
             ).await?;
             session::refresh_session_request_observation_in_txn(

@@ -845,10 +845,7 @@ async fn completed_terminalization_scans_request_output_once_for_many_tools() {
         None,
     ))
     .await;
-    assert_eq!(
-        result.unwrap(),
-        crate::lifecycle::TerminalizeResult::Won
-    );
+    assert_eq!(result.unwrap(), crate::lifecycle::TerminalizeResult::Won);
     assert_eq!(scans, 1, "request output scanned once per accepted tool");
     node.shutdown().await;
 }

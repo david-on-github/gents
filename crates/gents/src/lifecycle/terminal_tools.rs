@@ -72,6 +72,7 @@ fn directly_bound<'a>(
 
 pub(super) async fn account_tools_in_txn(
     txn: &ConfigApplyTxn<'_>,
+    reader: &mut crate::session::TxnCanonicalReader<'_, '_>,
     request: &AgentRequestRow,
     headers: &[TranscriptMessageRow],
     generation: &str,
@@ -214,13 +215,7 @@ pub(super) async fn account_tools_in_txn(
                         candidates
                     );
                 }
-                crate::session::load_canonical_message_in_txn(
-                    txn,
-                    &deliveries[0].doc_id,
-                    agent,
-                    request.requester_did.as_deref(),
-                )
-                .await?;
+                reader.load_message(&deliveries[0].doc_id).await?;
             }
         }
         // A request's exceptional terminal never stops its subagents: an

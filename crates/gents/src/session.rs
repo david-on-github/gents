@@ -55,7 +55,7 @@ pub use output::{
 };
 pub(crate) use output::{
     load_canonical_message_in_txn, load_request_headers_in_txn, resolve_canonical_replay_tags,
-    validate_canonical_replay_boundary, CanonicalReplayScope,
+    validate_canonical_replay_boundary, CanonicalReplayScope, TxnCanonicalReader,
 };
 pub(crate) use output::{load_canonical_payload_from_node, load_canonical_payload_in_txn};
 pub use query::{
