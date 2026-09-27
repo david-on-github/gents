@@ -951,3 +951,76 @@ fn canonical_request_conversion_rejects_negative_lease_duration() {
         "{error:#}"
     );
 }
+
+/// A request delivered first can lose its same-session claim to a row that
+/// sorts ahead of it in `(created_at, request_id)` order: a completion wake
+/// published in the same second as a Goal continuation. The losing claim leaves
+/// the continuation pending, so its blocker's terminal transition must deliver
+/// it again rather than the delivery cooldown or the fallback poll.
+#[tokio::test]
+async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
+    use crate::lifecycle::{ClaimOutcome, ExecutionOrigin, RequestLifecycle};
+
+    let node = test_node().await;
+    crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
+    let agent_did = "did:key:z-watcher-requeue";
+    let session = "sess-requeue";
+    let second = "2026-09-27T19:47:28Z";
+    let continuation_id = "goal-cont-00000000000000000003-requeue";
+    let wake_id = "background-completion-sess-requeue-00000000000000000000";
+    let deliver = Duration::from_secs(5);
+
+    insert_agent_request_row(
+        node.as_ref(),
+        agent_did,
+        continuation_id,
+        session,
+        "pending",
+        second,
+    )
+    .await;
+    let mut watcher = DefraWatcher::new(node.clone(), agent_did);
+    let continuation = tokio::time::timeout(deliver, watcher.next_request())
+        .await
+        .expect("first delivery")
+        .expect("watcher open")
+        .expect("pending scan");
+    assert_eq!(continuation.request_id, continuation_id);
+
+    let wake_doc_id =
+        insert_agent_request_row(node.as_ref(), agent_did, wake_id, session, "pending", second)
+            .await;
+    let mut lifecycle = RequestLifecycle::new_with_execution_binding(
+        node.clone(),
+        "behavior",
+        agent_did,
+        continuation,
+        60,
+        ExecutionOrigin::Interactive,
+        "backend",
+    );
+    assert_eq!(lifecycle.claim().await.unwrap(), ClaimOutcome::Queued);
+
+    let wake = tokio::time::timeout(deliver, watcher.next_request())
+        .await
+        .expect("wake delivery")
+        .expect("watcher open")
+        .expect("pending scan");
+    assert_eq!(wake.request_id, wake_id);
+    set_request_processing(node.as_ref(), &wake_doc_id).await;
+    set_request_terminal_completed(node.as_ref(), &wake_doc_id).await;
+
+    let started = Instant::now();
+    let redelivered = tokio::time::timeout(deliver, watcher.next_request())
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "queued continuation was not redelivered within {deliver:?} of its blocker's \
+                 terminal transition (cooldown {PROCESSED_REQUEST_COOLDOWN:?})"
+            )
+        })
+        .expect("watcher open")
+        .expect("pending scan");
+    assert_eq!(redelivered.request_id, continuation_id);
+    assert!(started.elapsed() < deliver);
+}
