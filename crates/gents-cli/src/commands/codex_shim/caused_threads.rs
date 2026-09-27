@@ -105,14 +105,17 @@ pub(super) async fn load_caused_thread(
 }
 
 impl CausedThread {
-    /// Re-read this thread's latest request; its origin and parent are fixed.
-    pub(super) async fn refresh(&mut self, state: &ShimState) -> Result<()> {
-        let scope = SessionScope {
+    pub(super) fn scope(&self) -> SessionScope {
+        SessionScope {
             agent_did: self.agent_did.clone(),
             session_id: self.session_id.clone(),
             requester_did: self.requester_did.clone(),
-        };
-        if let Some(latest) = load_session_head(&state.node, &scope).await? {
+        }
+    }
+
+    /// Re-read this thread's latest request; its origin and parent are fixed.
+    pub(super) async fn refresh(&mut self, state: &ShimState) -> Result<()> {
+        if let Some(latest) = load_session_head(&state.node, &self.scope()).await? {
             self.apply_latest(&latest);
         }
         Ok(())

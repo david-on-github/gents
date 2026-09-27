@@ -55,20 +55,17 @@ pub(super) async fn handle_turn_request(
                 }),
             );
             if let Some(thread) = caused.as_ref() {
-                // The Codex user speaks for the root thread, so only threads
-                // that root started directly may be interrupted from here.
-                if !gents::session_message::agent_interrupt_allowed(
-                    &thread.root_session_id,
-                    &thread.session_id,
-                    Some(thread.parent_session_id.as_str()),
-                ) {
-                    return send_error(
-                        outbound,
-                        request_id,
-                        JSONRPC_INVALID_PARAMS,
-                        "only the session that started this session may interrupt it".to_string(),
-                    )
-                    .await;
+                // The Codex user speaks for the root thread.
+                let caller = gents::session_origin::SessionScope {
+                    agent_did: state.agent_did.to_string(),
+                    session_id: thread.root_session_id.clone(),
+                    requester_did: Some(state.local_requester_did().to_string()),
+                };
+                if let Some(refusal) =
+                    gents::session_message::interrupt_refusal(&state.node, &caller, &thread.scope())
+                        .await?
+                {
+                    return send_error(outbound, request_id, JSONRPC_INVALID_PARAMS, refusal).await;
                 }
             }
             match caused {

@@ -514,6 +514,7 @@ async fn request_show_expanded_view_surfaces_background_tools_and_child_lineage(
                 create_AgentRequest(input: {{purpose: "normal", 
                     request_id: "{child_request_id}",
                     agent_did: "{agent_did}",
+                    requester_did: "{agent_did}",
                     behavior_id: "child-behavior",
                     session_id: "{child_session_id}",
                     content: "request caused by the agent_new tool call",
@@ -530,6 +531,24 @@ async fn request_show_expanded_view_surfaces_background_tools_and_child_lineage(
             }}"#,
             parent_doc_id = escape_graphql_string(&parent_doc_id),
             tool_call_doc_id = escape_graphql_string(&tool_call_doc_id),
+        ),
+    )
+    .await?;
+    // The runtime records the starting request as the session's provenance.
+    graphql_query(
+        &graphql,
+        &format!(
+            r#"mutation {{
+                create_AgentSession(input: {{
+                    session_id: "{child_session_id}",
+                    agent_did: "{agent_did}",
+                    requester_did: "{agent_did}",
+                    behavior_id: "child-behavior",
+                    created_at: "2026-05-20T10:00:03Z",
+                    provenance: {{parent_request_doc_id: "{parent_doc_id}"}}
+                }}) {{ _docID }}
+            }}"#,
+            parent_doc_id = escape_graphql_string(&parent_doc_id),
         ),
     )
     .await?;

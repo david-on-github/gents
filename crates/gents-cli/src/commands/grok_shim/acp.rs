@@ -2086,11 +2086,15 @@ mod tests {
     #[tokio::test]
     async fn history_picker_scopes_searches_paginates_and_preserves_legacy_sessions() {
         let (_dir, service) = test_service().await;
-        for (id, requester) in [
-            ("older", "null"),
-            ("newer", "\"did:test:grok-shim\""),
-            ("foreign-session", "\"did:test:foreign\""),
-            ("child", "\"did:test:grok-shim\""),
+        for (id, requester, provenance) in [
+            ("older", "null", ""),
+            ("newer", "\"did:test:grok-shim\"", ""),
+            ("foreign-session", "\"did:test:foreign\"", ""),
+            (
+                "child",
+                "\"did:test:grok-shim\"",
+                r#"provenance: {parent_request_doc_id: "doc-a"},"#,
+            ),
         ] {
             let result = service
                 .config
@@ -2098,7 +2102,7 @@ mod tests {
                 .execute(&format!(
                     r#"mutation {{ create_AgentSession(input: {{
                 session_id: "{id}", agent_did: "did:test:grok-shim", requester_did: {requester},
-                behavior_id: "did:test:grok-shim:default", created_at: "2026-09-01T00:00:00Z"
+                {provenance} behavior_id: "did:test:grok-shim:default", created_at: "2026-09-01T00:00:00Z"
             }}) {{ _docID }} }}"#
                 ))
                 .await;

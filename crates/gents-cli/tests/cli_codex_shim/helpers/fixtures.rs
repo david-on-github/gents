@@ -706,5 +706,27 @@ pub(super) async fn seed_caused_running_request(
         now = escape_graphql_string(&chrono::Utc::now().to_rfc3339()),
     );
     graphql_query(graphql, &mutation).await?;
+    // The runtime records the starting request as the session's provenance.
+    graphql_query(
+        graphql,
+        &format!(
+            r#"mutation {{
+                create_AgentSession(input: {{
+                    session_id: "{session_id}",
+                    agent_did: "{agent_did}",
+                    {requester_field}
+                    behavior_id: "{behavior_id}",
+                    created_at: "{now}",
+                    provenance: {{parent_request_doc_id: "{parent_doc_id}"}}
+                }}) {{ _docID }}
+            }}"#,
+            session_id = escape_graphql_string(&session_id),
+            agent_did = escape_graphql_string(&agent_did),
+            behavior_id = escape_graphql_string(behavior_id),
+            now = escape_graphql_string(&chrono::Utc::now().to_rfc3339()),
+            parent_doc_id = escape_graphql_string(&parent_doc_id),
+        ),
+    )
+    .await?;
     Ok((request_id, session_id))
 }

@@ -3576,7 +3576,8 @@ mod tests {
         lifecycle_state: &str,
     ) -> gents_protocol::row::AgentRequestRow {
         let owner = escape_graphql_string(parent.agent_did.as_deref().unwrap());
-        let requester = "null";
+        // An agent_new session's requester is the principal that started it.
+        let requester = format!("\"{owner}\"");
         let behavior =
             escape_graphql_string(parent.behavior_id.as_deref().expect("fixture behavior"));
         let logical_parent = escape_graphql_string(&parent.request_id);
@@ -3585,6 +3586,15 @@ mod tests {
         let child = escape_graphql_string(child_request_id);
         let state = escape_graphql_string(lifecycle_state);
         let now = chrono::Utc::now().to_rfc3339();
+        crate::commands::grok_shim::test_fixtures::seed_started_session(
+            node,
+            parent.agent_did.as_deref().unwrap(),
+            "session-1-child",
+            parent.agent_did.as_deref(),
+            parent.behavior_id.as_deref().expect("fixture behavior"),
+            parent.doc_id.as_deref().unwrap(),
+        )
+        .await;
         let response = node.execute(&format!(r#"mutation {{create_AgentRequest(input: {{
             request_id: "{child}", purpose: "normal", agent_did: "{owner}", requester_did: {requester}, behavior_id: "{behavior}", session_id: "session-1-child",
             caused_by_parent_request_id: "{logical_parent}", caused_by_parent_request_doc_id: "{physical_parent}", caused_by_parent_tool_call_id: "call-1", caused_by_parent_tool_call_doc_id: "{tool}", content: "child work", lifecycle_state: "{state}", created_at: "{now}"
@@ -3595,7 +3605,7 @@ mod tests {
             "AgentRequest",
         )
         .unwrap();
-        serde_json::from_value(json!({"_docID":doc,"request_id":child_request_id,"agent_did":parent.agent_did,"requester_did":null,"behavior_id":parent.behavior_id,"session_id":"session-1-child", "caused_by_parent_request_id":parent.request_id,"caused_by_parent_request_doc_id":parent.doc_id,"caused_by_parent_tool_call_id":"call-1","caused_by_parent_tool_call_doc_id":tool_doc_id})).unwrap()
+        serde_json::from_value(json!({"_docID":doc,"request_id":child_request_id,"agent_did":parent.agent_did,"requester_did":parent.agent_did,"behavior_id":parent.behavior_id,"session_id":"session-1-child", "caused_by_parent_request_id":parent.request_id,"caused_by_parent_request_doc_id":parent.doc_id,"caused_by_parent_tool_call_id":"call-1","caused_by_parent_tool_call_doc_id":tool_doc_id})).unwrap()
     }
 
     /// Transition a seeded tool call to its terminal completed state with a
@@ -3678,7 +3688,7 @@ mod tests {
         let tool = seed_tool_call(&node, selected, "call-1", "agent_new", "running", "").await;
         let child = seed_child_request(&node, selected, &tool, "child", "processing").await;
         assert_eq!(child.agent_did.as_deref(), Some(principal.as_str()));
-        assert_eq!(child.requester_did, None);
+        assert_eq!(child.requester_did.as_deref(), Some(principal.as_str()));
         seed_assistant_message(&node, &child, 1, "child output").await;
         complete_child_request(&node, &child).await;
         complete_tool_call(&node, &tool, "done").await;
@@ -4296,8 +4306,16 @@ mod tests {
         let child = seed_child_request(&node, &parent, &tool, "pane-child", "processing").await;
         let mut followup = None;
         for (id, requester, text) in [
-            ("pane-child", None, "Original child output"),
-            ("pane-followup", None, "Steered child output"),
+            (
+                "pane-child",
+                Some(agent_did.as_str()),
+                "Original child output",
+            ),
+            (
+                "pane-followup",
+                Some(agent_did.as_str()),
+                "Steered child output",
+            ),
             ("pane-foreign", Some("did:foreign"), "MUST NOT LEAK"),
         ] {
             let row = if id == "pane-child" {

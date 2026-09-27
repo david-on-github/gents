@@ -12,9 +12,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use defra_node::EmbeddedNode;
 use gents::graphql::{escape_graphql_string, graphql_with_transaction_retry};
-use gents_protocol::output::TerminalOutput;
 use gents_protocol::row::AgentRequestRow;
-use gents_protocol::transcript::present_message;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -200,7 +198,6 @@ struct HeadActivity {
     tokens_used: u64,
     tools: Vec<(Option<String>, Option<String>)>,
     terminalized_at: Option<String>,
-    terminal_output: Option<TerminalOutput>,
 }
 
 #[derive(Debug, Default)]
@@ -233,8 +230,6 @@ struct HeadRow {
     doc_id: String,
     #[serde(default)]
     terminalized_at: Option<String>,
-    #[serde(default)]
-    terminal_output: Option<TerminalOutput>,
 }
 
 #[derive(Deserialize)]
@@ -245,9 +240,9 @@ struct CauseRow {
     message_sequence: Option<i64>,
 }
 
-/// Sessions whose origin was caused by this exact physical request.
+/// Sessions this exact physical request started.
 pub(crate) async fn caused_by_request(
-    node: &EmbeddedNode,
+    node: &Arc<EmbeddedNode>,
     request: &AgentRequestRow,
 ) -> Result<Vec<CausedSession>> {
     load_direct_caused_sessions(node, request).await
@@ -370,51 +365,45 @@ pub(crate) async fn handle(
         });
     };
     if method == SUBAGENT_CANCEL_METHOD {
-        return cancel(&node, id, &session, context_window).await;
+        let caller = roots
+            .iter()
+            .find(|root| root.session_id == session.root_session_id)
+            .context("caused session resolved outside the connection's sessions")?;
+        return cancel(&node, id, caller, &session, context_window).await;
     }
     let activity = load_activity(&node, std::slice::from_ref(&session), None).await?;
     Ok(json!({"snapshot": snapshot(&node, &session, &activity, context_window).await?}))
 }
 
-/// Interrupt the current turn of a caused session. The connection speaks for
-/// its root sessions, so only sessions a root started directly qualify.
+/// Interrupt the current turn of a caused session, under the same
+/// spawner-only rule as `agent_interrupt`. The connection speaks for the root
+/// session the lookup resolved.
 async fn cancel(
     node: &Arc<EmbeddedNode>,
     id: &str,
+    caller: &SessionScope,
     session: &CausedSession,
     context_window: u64,
 ) -> Result<Value> {
-    anyhow::ensure!(
-        gents::session_message::agent_interrupt_allowed(
-            &session.root_session_id,
-            id,
-            Some(session.caused_by_scope.session_id.as_str()),
-        ),
-        "only the session that started this session may interrupt it"
-    );
-    if session.latest.is_terminal() {
-        let activity = load_activity(node, std::slice::from_ref(session), None).await?;
-        let snapshot = snapshot(node, session, &activity, context_window).await?;
-        let status = snapshot["status"]
-            .as_str()
-            .unwrap_or("completed")
-            .to_owned();
-        return Ok(json!({"subagentId": id, "cancelled": false,
-            "outcome": {"kind": "already_finished", "status": status}}));
+    if let Some(refusal) =
+        gents::session_message::interrupt_refusal(node, caller, &session.scope).await?
+    {
+        anyhow::bail!(refusal);
     }
-    let request_doc_id = session
-        .latest
-        .doc_id
-        .as_deref()
-        .context("caused session head omitted physical identity")?;
-    gents::interrupt_request_by_doc_id(
-        node,
-        request_doc_id,
-        &session.scope.agent_did,
-        session.scope.requester_did.as_deref(),
-    )
-    .await?;
-    Ok(json!({"subagentId": id, "cancelled": true, "outcome": {"kind": "cancelled"}}))
+    if gents::session_message::interrupt_session(node, &session.scope)
+        .await?
+        .is_some()
+    {
+        return Ok(json!({"subagentId": id, "cancelled": true, "outcome": {"kind": "cancelled"}}));
+    }
+    let activity = load_activity(node, std::slice::from_ref(session), None).await?;
+    let snapshot = snapshot(node, session, &activity, context_window).await?;
+    let status = snapshot["status"]
+        .as_str()
+        .unwrap_or("completed")
+        .to_owned();
+    Ok(json!({"subagentId": id, "cancelled": false,
+        "outcome": {"kind": "already_finished", "status": status}}))
 }
 
 async fn snapshot(
@@ -470,10 +459,7 @@ async fn snapshot(
             object.insert("errorCount".into(), json!(progress.error_count));
         }
         "completed" => {
-            object.insert(
-                "output".into(),
-                json!(final_output(node, latest, head.terminal_output.as_ref()).await?),
-            );
+            object.insert("output".into(), json!(final_output(node, latest).await?));
             object.insert("toolCalls".into(), json!(progress.tool_call_count));
             object.insert("turns".into(), json!(progress.turn_count));
         }
@@ -497,41 +483,17 @@ async fn snapshot(
     Ok(value)
 }
 
-async fn final_output(
-    node: &Arc<EmbeddedNode>,
-    request: &AgentRequestRow,
-    terminal_output: Option<&TerminalOutput>,
-) -> Result<String> {
-    let Some(selection) = terminal_output else {
-        anyhow::bail!("terminal caused request omitted canonical terminal output");
-    };
-    let TerminalOutput::Message { message_doc_id } = selection else {
-        return Ok(String::new());
-    };
+/// The completed caused request's answer, from the exact terminal owner.
+async fn final_output(node: &Arc<EmbeddedNode>, request: &AgentRequestRow) -> Result<String> {
     let request_doc_id = request
         .doc_id
         .as_deref()
         .context("terminal caused request omitted physical identity")?;
-    let agent_did = request
-        .agent_did
-        .as_deref()
-        .context("terminal caused request omitted agent_did")?;
-    let access = gents::ConfigAccess::Local(node.clone());
-    let (header, message) = gents::session::load_canonical_message(
-        &access,
-        message_doc_id,
-        agent_did,
-        request.requester_did.as_deref(),
-    )
-    .await
-    .context("resolving exact canonical caused-session terminal output")?;
-    anyhow::ensure!(
-        Some(header.session_id.as_str()) == request.session_id.as_deref()
-            && header.request_doc_id.as_deref() == Some(request_doc_id)
-            && header.role == gents_protocol::output::MessageRole::Assistant,
-        "canonical caused-session terminal output crossed exact request scope"
-    );
-    Ok(present_message(&message).body_markdown)
+    match gents::load_caused_request_terminal(node, request_doc_id).await? {
+        Some(gents::tool_call_lifecycle::CausedRequestTerminal::Completed { output }) => Ok(output),
+        Some(_) => anyhow::bail!("caused request did not complete"),
+        None => anyhow::bail!("completed caused request has no replicated terminal output yet"),
+    }
 }
 
 impl Activity {
@@ -613,7 +575,7 @@ async fn load_activity(
         r#"{{
             InferenceCall(filter: {{_or: [{usage_scopes}], call_kind: {{_eq: "inference"}}, call_state: {{_in: ["completed", "failed", "cancelled"]}}}}) {{ request_doc_id prompt_tokens completion_tokens }}
             AgentToolCall(filter: {{_or: [{tool_scopes}]}}) {{ request_doc_id tool_name lifecycle_state }}
-            AgentRequest(filter: {{_docID: {{_in: [{head_ids}]}}}}) {{ _docID terminalized_at terminal_output }}
+            AgentRequest(filter: {{_docID: {{_in: [{head_ids}]}}}}) {{ _docID terminalized_at }}
             {causes}
         }}"#
     );
@@ -642,7 +604,6 @@ async fn load_activity(
     for row in decode_rows::<HeadRow>(&response, "AgentRequest")? {
         if let Some(head) = activity.heads.get_mut(&row.doc_id) {
             head.terminalized_at = row.terminalized_at;
-            head.terminal_output = row.terminal_output;
         }
     }
     if !causes.is_empty() {

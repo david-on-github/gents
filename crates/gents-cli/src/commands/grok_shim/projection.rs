@@ -2878,6 +2878,15 @@ mod tests {
         let escaped_tool_doc = gents::graphql::escape_graphql_string(parent_tool_call_doc_id);
         let escaped_child = gents::graphql::escape_graphql_string(child_request_id);
         let escaped_created = gents::graphql::escape_graphql_string(created_at);
+        crate::commands::grok_shim::test_fixtures::seed_started_session(
+            &engine.node,
+            "did:test:grok-shim",
+            "s-chron-child",
+            Some("did:test:grok-shim"),
+            "test-child",
+            parent_request_doc_id,
+        )
+        .await;
         let mutation = format!(
             r#"mutation {{
                 create_AgentRequest(input: {{purpose: "normal", 

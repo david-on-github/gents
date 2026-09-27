@@ -292,21 +292,13 @@ async fn load_request_show_snapshot(
     .with_context(|| format!("loading AgentToolCall rows for {request_id}"))?;
     let tool_rows = value_array(&tool_response, "/data/AgentToolCall");
 
-    let request_doc_id = canonical_request
-        .doc_id
-        .clone()
-        .context("request show missing physical identity")?;
     let access = ConfigAccess::Graphql(graphql.to_string());
-    let child_requests = gents::session_origin::load_session_origins(
-        gents::session_origin::OriginReader::Access(&access),
-        &[request_doc_id],
-        "",
-    )
-    .await
-    .with_context(|| format!("loading sessions started by {request_id}"))?
-    .iter()
-    .map(child_request_view)
-    .collect::<Vec<_>>();
+    let child_requests = crate::caused_sessions::started_by_request(&access, &canonical_request)
+        .await
+        .with_context(|| format!("loading sessions started by {request_id}"))?
+        .into_iter()
+        .map(|(_, first)| serde_json::to_value(first).map(|row| child_request_view(&row)))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let request_terminal = canonical_request.is_terminal();
     let request_agent_did = canonical_request.agent_did.unwrap_or_default();

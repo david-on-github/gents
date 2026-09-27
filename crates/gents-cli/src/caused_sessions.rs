@@ -1,118 +1,97 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+//! Shim views of the sessions a session started. Lineage itself is read only
+//! through `gents::session_origin`; this module maps its links onto the
+//! request rows the shims present.
+
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use gents::config_client::ConfigAccess;
 use gents::defra_node::EmbeddedNode;
 use gents::graphql::escape_graphql_string;
-use gents::session::load_latest_request_in_txn;
+use gents::session::{load_latest_request_in_txn, public_request_filter, session_scope_filter};
 pub(crate) use gents::session_origin::SessionScope;
-use gents::session_origin::{
-    load_caused_session_origins, load_request_scope, load_session_origins,
-    load_session_request_doc_ids, OriginReader,
-};
+use gents::session_origin::{lineage, load_session, started_by, SessionLink};
 use gents_protocol::row::AgentRequestRow;
 use serde_json::Value;
 
-/// A session whose origin (its first public request) was caused by a request
-/// in another session.
+/// A session another session's request started.
 #[derive(Clone, Debug)]
 pub(crate) struct CausedSession {
     pub(crate) scope: SessionScope,
     pub(crate) behavior_id: String,
     pub(crate) root_session_id: String,
     pub(crate) caused_by_scope: SessionScope,
-    /// Distance from the root of the resolved causal chain, starting at one.
+    /// Distance from the root of the resolved chain, starting at one.
     pub(crate) depth: u32,
+    /// The request that started the session, carrying the causing edge.
     pub(crate) first: AgentRequestRow,
     pub(crate) latest: AgentRequestRow,
 }
 
-const HEAD_FIELDS: &str = "_docID request_id agent_did session_id requester_did behavior_id \
+const REQUEST_FIELDS: &str = "_docID request_id agent_did session_id requester_did behavior_id \
      content lifecycle_state superseded_by_request failure_reason created_at subagent_depth \
      caused_by_parent_request_id caused_by_parent_request_doc_id caused_by_parent_tool_call_id \
      caused_by_parent_tool_call_doc_id";
 
-/// Sessions whose origin was caused by this exact physical request.
+fn access(node: &Arc<EmbeddedNode>) -> ConfigAccess {
+    ConfigAccess::Local(node.clone())
+}
+
+/// Sessions started by this exact physical request.
 pub(crate) async fn load_direct_caused_sessions(
-    node: &EmbeddedNode,
+    node: &Arc<EmbeddedNode>,
     cause: &AgentRequestRow,
 ) -> Result<Vec<CausedSession>> {
-    let cause_scope = row_scope(cause)?;
-    let cause_doc_id = cause
-        .doc_id
-        .clone()
-        .filter(|id| !id.is_empty())
-        .context("caused sessions require a physical request")?;
-    let origins =
-        load_session_origins(OriginReader::Node(node), &[cause_doc_id], "content").await?;
+    let parent = row_scope(cause)?;
     let mut caused = Vec::new();
-    for origin in origins {
-        let Some(session) = caused_session(
-            origin,
-            cause_scope.clone(),
-            cause_scope.session_id.clone(),
-            1,
-        )?
-        else {
+    for (link, first) in started_by_request(&access(node), cause).await? {
+        let latest = load_session_head(node, &link.scope)
+            .await?
+            .unwrap_or_else(|| first.clone());
+        let Some(behavior_id) = first.behavior_id.clone() else {
             continue;
         };
-        caused.push(with_head(node, session).await?);
+        caused.push(CausedSession {
+            scope: link.scope,
+            behavior_id,
+            root_session_id: parent.session_id.clone(),
+            caused_by_scope: parent.clone(),
+            depth: 1,
+            first,
+            latest,
+        });
     }
     Ok(caused)
 }
 
-/// Walk every session transitively caused by the given roots. Each session
-/// has one origin, so its parent does not depend on which roots are passed,
-/// and each session is visited once, so message loops terminate. Use
+/// Every session transitively started by the given roots. Each session has
+/// one starter, so it is visited once and message loops terminate. Use
 /// [`load_direct_caused_sessions`] or [`load_caused_session`] where one level
 /// or one session is enough.
 pub(crate) async fn load_caused_sessions(
-    node: &EmbeddedNode,
+    node: &Arc<EmbeddedNode>,
     roots: &[SessionScope],
 ) -> Result<Vec<CausedSession>> {
-    let reader = OriginReader::Node(node);
+    let access = access(node);
     let mut visited = roots.iter().cloned().collect::<HashSet<_>>();
-    let mut placement = roots
+    let mut frontier = roots
         .iter()
-        .map(|scope| (scope.clone(), (scope.session_id.clone(), 0_u32)))
-        .collect::<HashMap<_, _>>();
-    let mut frontier = roots.to_vec();
+        .map(|scope| (scope.clone(), scope.session_id.clone(), 0_u32))
+        .collect::<Vec<_>>();
     let mut caused = Vec::new();
-
-    while !frontier.is_empty() {
-        let by_doc_id = load_session_request_doc_ids(reader, &frontier)
-            .await?
-            .into_iter()
-            .collect::<BTreeMap<_, _>>();
-        let doc_ids = by_doc_id.keys().cloned().collect::<Vec<_>>();
-        let mut next = Vec::new();
-        for origin in load_session_origins(reader, &doc_ids, "content").await? {
-            let Some(cause) = origin
-                .get("caused_by_parent_request_doc_id")
-                .and_then(Value::as_str)
-                .and_then(|doc_id| by_doc_id.get(doc_id))
-                .cloned()
-            else {
-                continue;
-            };
-            let Some(scope) = SessionScope::of_row(&origin) else {
-                continue;
-            };
-            if !visited.insert(scope.clone()) {
+    while let Some((scope, root, depth)) = frontier.pop() {
+        for link in lineage(&access, &scope).await?.started {
+            if !visited.insert(link.scope.clone()) {
                 continue;
             }
-            let (root_session_id, depth) = placement[&cause].clone();
-            let Some(session) = caused_session(origin, cause, root_session_id.clone(), depth + 1)?
-            else {
-                continue;
-            };
-            placement.insert(scope.clone(), (root_session_id, depth + 1));
-            caused.push(with_head(node, session).await?);
-            next.push(scope);
+            let child = link.scope.clone();
+            if let Some(session) = view(node, link, scope.clone(), root.clone(), depth + 1).await? {
+                caused.push(session);
+                frontier.push((child, root.clone(), depth + 1));
+            }
         }
-        frontier = next;
     }
-
     caused.sort_by(|left, right| {
         left.depth
             .cmp(&right.depth)
@@ -122,96 +101,137 @@ pub(crate) async fn load_caused_sessions(
     Ok(caused)
 }
 
-/// Resolve one session label to the caused session it names by walking its
-/// origins upward until `is_root` accepts an ancestor. Returns `None` when
-/// the label is not caused or no accepted root is among its ancestors.
+/// Resolve one session label to the session it names by following its
+/// starters until `is_root` accepts one. `None` when the label names no
+/// started session or no accepted root is among its starters.
 pub(crate) async fn load_caused_session(
-    node: &EmbeddedNode,
+    node: &Arc<EmbeddedNode>,
     session_id: &str,
     is_root: impl Fn(&SessionScope) -> bool,
 ) -> Result<Option<CausedSession>> {
-    let reader = OriginReader::Node(node);
-    let mut chain = Vec::<(Value, SessionScope)>::new();
-    let mut seen = HashSet::new();
-    let mut label = session_id.to_string();
+    let access = access(node);
+    let Some(session) = load_session(&access, session_id, None).await? else {
+        return Ok(None);
+    };
+    let mut scope = SessionScope::from(&session);
+    let mut chain = Vec::<SessionLink>::new();
+    let mut seen = HashSet::from([scope.clone()]);
     loop {
-        let mut origins = load_caused_session_origins(reader, &label, "content").await?;
-        anyhow::ensure!(
-            origins.len() <= 1,
-            "ambiguous caused session label across canonical scopes: {label}"
-        );
-        let Some(origin) = origins.pop() else {
+        let Some(link) = started_by(&access, &scope).await? else {
             return Ok(None);
         };
-        let scope = SessionScope::of_row(&origin).context("caused origin omitted its scope")?;
-        if !seen.insert(scope) {
+        if !seen.insert(link.scope.clone()) {
             return Ok(None);
         }
-        let cause_doc_id = origin
-            .get("caused_by_parent_request_doc_id")
-            .and_then(Value::as_str)
-            .context("caused origin omitted its cause")?;
-        let Some(cause_scope) = load_request_scope(reader, cause_doc_id).await? else {
-            return Ok(None);
-        };
-        let reached_root = is_root(&cause_scope);
-        label = cause_scope.session_id.clone();
-        chain.push((origin, cause_scope));
+        let reached_root = is_root(&link.scope);
+        scope = link.scope.clone();
+        chain.push(link);
         if reached_root {
             break;
         }
     }
     let depth = u32::try_from(chain.len()).context("caused session chain is too deep")?;
-    let root_session_id = chain
+    let root = chain
         .last()
-        .map(|(_, root)| root.session_id.clone())
+        .map(|link| link.scope.session_id.clone())
         .context("caused session chain is empty")?;
-    let (origin, cause) = chain.swap_remove(0);
-    let Some(session) = caused_session(origin, cause, root_session_id, depth)? else {
-        return Ok(None);
+    let parent = chain.swap_remove(0);
+    let started = SessionLink {
+        scope: SessionScope::from(&session),
+        cause_request_doc_id: parent.cause_request_doc_id,
     };
-    Ok(Some(with_head(node, session).await?))
+    view(node, started, parent.scope, root, depth).await
 }
 
-fn caused_session(
-    origin: Value,
+/// The public request that started a linked session: the earliest one in
+/// that session carrying the link's causing request.
+pub(crate) async fn starting_request(
+    access: &ConfigAccess,
+    link: &SessionLink,
+) -> Result<Option<AgentRequestRow>> {
+    let filter = public_request_filter(&format!(
+        r#"{}, caused_by_parent_request_doc_id: {{ _eq: "{}" }}"#,
+        session_scope_filter(
+            &link.scope.agent_did,
+            &link.scope.session_id,
+            link.scope.requester_did.as_deref(),
+        ),
+        escape_graphql_string(&link.cause_request_doc_id)
+    ));
+    let mut rows = request_rows(
+        access,
+        &format!("{{AgentRequest(filter: {{{filter}}}) {{{REQUEST_FIELDS}}}}}"),
+    )
+    .await?;
+    rows.sort_by(|left, right| {
+        left.created_at
+            .cmp(&right.created_at)
+            .then_with(|| left.request_id.cmp(&right.request_id))
+    });
+    Ok(rows.into_iter().next())
+}
+
+/// The sessions this exact request started, with each one's starting request.
+pub(crate) async fn started_by_request(
+    access: &ConfigAccess,
+    cause: &AgentRequestRow,
+) -> Result<Vec<(SessionLink, AgentRequestRow)>> {
+    let cause_doc_id = cause
+        .doc_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .context("started sessions require a physical request")?;
+    let mut started = Vec::new();
+    for link in lineage(access, &row_scope(cause)?).await?.started {
+        if link.cause_request_doc_id != cause_doc_id {
+            continue;
+        }
+        if let Some(first) = starting_request(access, &link).await? {
+            started.push((link, first));
+        }
+    }
+    Ok(started)
+}
+
+/// Present one started session: its stored behavior, the request that
+/// started it and its current head.
+async fn view(
+    node: &Arc<EmbeddedNode>,
+    link: SessionLink,
     caused_by_scope: SessionScope,
     root_session_id: String,
     depth: u32,
 ) -> Result<Option<CausedSession>> {
-    let first: AgentRequestRow =
-        serde_json::from_value(origin).context("decoding caused session origin")?;
-    let scope = row_scope(&first)?;
-    let Some(behavior_id) = first
-        .behavior_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|id| !id.is_empty())
-        .map(ToOwned::to_owned)
-    else {
+    let access = access(node);
+    let Some(session) = load_session(
+        &access,
+        &link.scope.session_id,
+        link.scope.requester_did.as_deref(),
+    )
+    .await?
+    .filter(|session| SessionScope::from(session) == link.scope) else {
         return Ok(None);
     };
+    let Some(first) = starting_request(&access, &link).await? else {
+        return Ok(None);
+    };
+    let latest = load_session_head(node, &link.scope)
+        .await?
+        .unwrap_or_else(|| first.clone());
     Ok(Some(CausedSession {
-        scope,
-        behavior_id,
+        scope: link.scope,
+        behavior_id: session.behavior_id,
         root_session_id,
         caused_by_scope,
         depth,
-        latest: first.clone(),
         first,
+        latest,
     }))
-}
-
-async fn with_head(node: &EmbeddedNode, mut session: CausedSession) -> Result<CausedSession> {
-    if let Some(latest) = load_session_head(node, &session.scope).await? {
-        session.latest = latest;
-    }
-    Ok(session)
 }
 
 /// The latest request of one session, selected by the canonical head owner.
 pub(crate) async fn load_session_head(
-    node: &EmbeddedNode,
+    node: &Arc<EmbeddedNode>,
     scope: &SessionScope,
 ) -> Result<Option<AgentRequestRow>> {
     let head = ConfigAccess::transact_local(node, None, "caused_sessions.head", |txn| {
@@ -231,21 +251,25 @@ pub(crate) async fn load_session_head(
     };
     // The exact `_docID` read carries no `order`, so `limit` cannot hide it.
     let query = format!(
-        r#"{{AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 2) {{ {HEAD_FIELDS} }}}}"#,
+        r#"{{AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 2) {{ {REQUEST_FIELDS} }}}}"#,
         escape_graphql_string(&head.observed.request_doc_id)
     );
-    let mut heads = OriginReader::Node(node)
-        .data(&query, "caused session head")
+    let mut heads = request_rows(&access(node), &query).await?;
+    anyhow::ensure!(heads.len() <= 1, "ambiguous caused session head");
+    Ok(heads.pop())
+}
+
+async fn request_rows(access: &ConfigAccess, query: &str) -> Result<Vec<AgentRequestRow>> {
+    access
+        .execute(query)
         .await?
-        .get("AgentRequest")
+        .pointer("/data/AgentRequest")
         .and_then(Value::as_array)
         .cloned()
-        .unwrap_or_default();
-    anyhow::ensure!(heads.len() <= 1, "ambiguous caused session head");
-    heads
-        .pop()
-        .map(|row| serde_json::from_value(row).context("decoding caused session head"))
-        .transpose()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| serde_json::from_value(row).context("decoding AgentRequest row"))
+        .collect()
 }
 
 fn row_scope(row: &AgentRequestRow) -> Result<SessionScope> {

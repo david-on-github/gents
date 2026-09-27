@@ -774,3 +774,49 @@ pub(super) async fn complete_canonical_spawned_process_output(
         response.errors
     );
 }
+
+/// Record that `session_id` was started by the request `parent_request_doc_id`,
+/// the stored provenance every lineage reader follows. Idempotent per scope.
+pub(super) async fn seed_started_session(
+    node: &EmbeddedNode,
+    agent_did: &str,
+    session_id: &str,
+    requester_did: Option<&str>,
+    behavior_id: &str,
+    parent_request_doc_id: &str,
+) {
+    use gents::graphql::escape_graphql_string;
+    let requester = requester_did
+        .map(|did| format!("\"{}\"", escape_graphql_string(did)))
+        .unwrap_or_else(|| "null".to_owned());
+    let existing = node
+        .execute(&format!(
+            r#"{{ AgentSession(filter: {{session_id: {{_eq: "{}"}}, agent_did: {{_eq: "{}"}}, requester_did: {{_eq: {requester}}}}}) {{ _docID }} }}"#,
+            escape_graphql_string(session_id),
+            escape_graphql_string(agent_did),
+        ))
+        .await;
+    assert!(!existing.has_errors(), "{:?}", existing.errors);
+    if existing
+        .data
+        .as_ref()
+        .and_then(|data| data.get("AgentSession"))
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|rows| !rows.is_empty())
+    {
+        return;
+    }
+    let created = node
+        .execute(&format!(
+            r#"mutation {{ create_AgentSession(input: {{
+                session_id: "{}", agent_did: "{}", requester_did: {requester}, behavior_id: "{}",
+                created_at: "2026-09-01T00:00:00Z", provenance: {{parent_request_doc_id: "{}"}}
+            }}) {{ _docID }} }}"#,
+            escape_graphql_string(session_id),
+            escape_graphql_string(agent_did),
+            escape_graphql_string(behavior_id),
+            escape_graphql_string(parent_request_doc_id),
+        ))
+        .await;
+    assert!(!created.has_errors(), "{:?}", created.errors);
+}

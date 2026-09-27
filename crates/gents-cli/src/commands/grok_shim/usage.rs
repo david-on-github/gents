@@ -196,7 +196,7 @@ impl Totals {
 }
 
 pub(super) async fn session_usage(
-    node: &EmbeddedNode,
+    node: &std::sync::Arc<EmbeddedNode>,
     principal: &str,
     behavior: &str,
     session: &str,

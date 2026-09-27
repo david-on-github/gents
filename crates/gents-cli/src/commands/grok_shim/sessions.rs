@@ -146,7 +146,6 @@ async fn scan_requests(
                 r#"{{ AgentRequest(filter: {{ {scope} }}, order: {{request_id: ASC}}, limit: {PAGE_SIZE}) {{
             _docID request_id session_id agent_did requester_did behavior_id
             content created_at terminalized_at lifecycle_state runtime_source_kind
-            caused_by_parent_request_id caused_by_parent_request_doc_id
         }} }}"#,
             ),
             "Grok session request history",
@@ -300,7 +299,7 @@ async fn list_entries(
             node,
             &format!(
                 r#"{{ AgentSession(filter: {{session_id: {{_in: [{ids}]}}}}) {{
-            session_id agent_did requester_did behavior_id
+            session_id agent_did requester_did behavior_id provenance
         }} }}"#
             ),
             "Grok history session owners",
@@ -325,9 +324,18 @@ async fn list_entries(
             let Some(first) = summary.first.as_ref() else {
                 continue;
             };
-            // Children are hydrated under their parent, not offered as roots.
-            if first.caused_by_parent_request_id.is_some()
-                || first.caused_by_parent_request_doc_id.is_some()
+            // A session another session started is hydrated under its
+            // starter, not offered as a root; its stored provenance says so.
+            let provenance = match owner.get("provenance") {
+                Some(Value::String(encoded)) => {
+                    serde_json::from_str(encoded).unwrap_or(Value::Null)
+                }
+                Some(value) => value.clone(),
+                None => Value::Null,
+            };
+            if provenance
+                .get("parent_request_doc_id")
+                .is_some_and(|parent| !parent.is_null())
             {
                 continue;
             }

@@ -115,6 +115,13 @@ pub(super) fn update_running_background_tools(
         {
             running.insert(tool.tool_call_key.clone());
         }
+        // A started or messaged agent session runs past the turn; the
+        // after-turn watcher completes its item.
+        ToolProjectionStatus::Agent(projection)
+            if projection.status == ProjectionStatus::InProgress =>
+        {
+            running.insert(tool.tool_call_key.clone());
+        }
         ToolProjectionStatus::Mcp(_)
         | ToolProjectionStatus::Agent(_)
         | ToolProjectionStatus::Command(_)
@@ -418,6 +425,31 @@ fn shell_join(argv: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn running_agent_items_stay_tracked_for_the_after_turn_watcher() {
+        let mut running = BTreeSet::new();
+        let started = test_tool(
+            gents::toolset::AGENT_NEW_TOOL_NAME,
+            "running",
+            r#"{"agent":"worker","prompt":"inspect"}"#,
+        );
+        update_running_background_tools(&mut running, &started, &tool_projection_status(&started));
+        assert!(running.contains(&started.tool_call_key));
+
+        let completed = test_tool(
+            gents::toolset::AGENT_NEW_TOOL_NAME,
+            "completed",
+            r#"{"agent":"worker","prompt":"inspect"}"#,
+        )
+        .with_result(r#"{"session_id":"child"}"#);
+        update_running_background_tools(
+            &mut running,
+            &completed,
+            &tool_projection_status(&completed),
+        );
+        assert!(running.is_empty());
+    }
 
     #[test]
     fn background_tool_projects_as_codex_unified_exec_startup() {
