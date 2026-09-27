@@ -236,7 +236,12 @@ pub fn cost_ok(policy: &PolicyV2, tokens: &TokenTotals) -> bool {
     let baseline = (tokens.baseline_tokens as u128)
         .checked_mul(tokens.candidate_trials as u128)
         .and_then(|product| product.checked_mul(10_000 + policy.max_token_increase_bp as u128));
-    matches!((candidate, baseline), (Some(candidate), Some(baseline)) if candidate <= baseline)
+    match (candidate, baseline) {
+        (Some(candidate), Some(baseline)) => candidate <= baseline,
+        // Only the allowed side past the width: the exact answer over naturals.
+        (Some(_), None) => true,
+        _ => false,
+    }
 }
 
 fn gcd(a: u128, b: u128) -> u128 {
