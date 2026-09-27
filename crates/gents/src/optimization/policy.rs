@@ -17,7 +17,7 @@ use crate::eval::PairedEvidence;
 pub const POLICY_VERSION: &str = "v2";
 
 /// Cases at or below this count are tested by exact enumeration.
-const EXACT_CASE_LIMIT: usize = 20;
+pub(crate) const EXACT_CASE_LIMIT: usize = 20;
 
 // The exact branch packs one sign bit per case into a single `u64` mask, so the
 // limit has to stay inside that word.

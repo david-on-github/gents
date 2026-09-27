@@ -582,7 +582,11 @@ pub struct JobOutcome {
 /// `alpha_effective = alpha / max_rounds` is a Bonferroni correction for an
 /// optimizer that tries several candidates on one validation split, so the
 /// divisor has to be the number of candidates the budget allows.
-pub(crate) fn check_policy(request: &JobRequest, policy: &PolicyV2) -> Result<()> {
+pub(crate) fn check_policy(
+    request: &JobRequest,
+    policy: &PolicyV2,
+    definition: &EvalDefinition,
+) -> Result<()> {
     if policy.min_pairs == 0 {
         return Err(refused("policy min_pairs must be at least 1"));
     }
@@ -954,12 +958,12 @@ async fn freeze_job(
     policy: &PolicyV2,
 ) -> Result<JobRecord> {
     validate_job_id(&request.job_id)?;
-    check_policy(request, policy)?;
     check_seed_spacing(request, policy)?;
     let owner = request.owner.as_str();
     let definition = load_definition(access, owner, &request.definition_id)
         .await
         .map_err(as_job_refusal)?;
+    check_policy(request, policy, &definition)?;
 
     let source = materialize_pack(
         &request.baseline_pack,
@@ -1562,8 +1566,9 @@ fn outcome(job: &JobRecord, state: JobState) -> JobOutcome {
 mod tests {
     use super::matrix::findings_capture as findings;
     use super::*;
+    use crate::document_config::EvalCase;
     use crate::eval::{DefinitionRef, SubjectRef};
-    use crate::optimization::policy::PolicyV2;
+    use crate::optimization::policy::{PolicyV2, EXACT_CASE_LIMIT};
     use crate::optimization::target::{Target, TargetField};
     use serde_json::json;
     use std::path::PathBuf;
@@ -2082,33 +2087,44 @@ mod tests {
     fn a_policy_that_disagrees_with_the_round_budget_is_refused() {
         let mut policy = PolicyV2::uncalibrated();
         policy.max_rounds = 5;
-        let error = check_policy(&request(), &policy).unwrap_err();
+        let error = check_policy(&request(), &policy, &definition()).unwrap_err();
         let refusal = job_refused(&error).unwrap_or_else(|| panic!("{error:#}"));
         assert!(refusal.0.contains("max_rounds"), "{}", refusal.0);
 
         policy.max_rounds = 3;
-        check_policy(&request(), &policy).unwrap();
+        check_policy(&request(), &policy, &definition()).unwrap();
     }
 
-    /// `min_pairs = 0` lets a case with no pairs count as evidence, and too
-    /// few Monte Carlo samples let a p-value of zero decide; both are refused
-    /// by field.
+    /// `min_pairs = 0` lets a case with no pairs count as evidence, and a
+    /// Monte Carlo p-value coarser than the effective alpha cannot reach it;
+    /// both are refused by field. Few samples are fine while the validation
+    /// split is small enough to enumerate exactly.
     #[test]
     fn a_policy_that_cannot_gate_is_refused_by_field() {
         let mut policy = PolicyV2::uncalibrated();
         policy.min_pairs = 0;
-        let error = check_policy(&request(), &policy).unwrap_err();
+        let error = check_policy(&request(), &policy, &definition()).unwrap_err();
         let refusal = job_refused(&error).unwrap_or_else(|| panic!("{error:#}"));
         assert!(refusal.0.contains("min_pairs"), "{}", refusal.0);
 
         let mut policy = PolicyV2::uncalibrated();
-        policy.monte_carlo_samples = 999;
-        let error = check_policy(&request(), &policy).unwrap_err();
+        policy.monte_carlo_samples = 1;
+        check_policy(&request(), &policy, &definition()).unwrap();
+
+        let mut large = definition();
+        let template = large.cases[1].clone();
+        large.cases.extend((0..EXACT_CASE_LIMIT).map(|i| EvalCase {
+            case_id: format!("val-{i}"),
+            ..template.clone()
+        }));
+        // alpha_effective is 16_666 ppm: 60 samples resolve 16_393 ppm, 59 only 16_666.
+        policy.monte_carlo_samples = 59;
+        let error = check_policy(&request(), &policy, &large).unwrap_err();
         let refusal = job_refused(&error).unwrap_or_else(|| panic!("{error:#}"));
         assert!(refusal.0.contains("monte_carlo_samples"), "{}", refusal.0);
 
-        policy.monte_carlo_samples = 1_000;
-        check_policy(&request(), &policy).unwrap();
+        policy.monte_carlo_samples = 60;
+        check_policy(&request(), &policy, &large).unwrap();
     }
 
     /// F2: a resume must repeat the request the job was frozen from.
