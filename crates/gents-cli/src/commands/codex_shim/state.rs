@@ -222,6 +222,7 @@ impl ShimState {
 }
 
 impl ConnectionState {
+    #[cfg(test)]
     pub(super) async fn has_turn_stream(&self, thread_id: &str, turn_id: &str) -> bool {
         self.turn_streams
             .lock()

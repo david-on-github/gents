@@ -1429,11 +1429,7 @@ mod tests {
     fn background_await_mode_merges_subagent_background_true_into_meta() {
         // The exact persisted value `background` => `subagentBackground:
         // true` in the meta envelope; anything else stays foreground.
-        let presentations = args_result(
-            "doc-Task",
-            r#"{"description":"scout the repo"}"#,
-            None,
-        );
+        let presentations = args_result("doc-Task", r#"{"description":"scout the repo"}"#, None);
         let mut row = tool_row("Task", Some("running"));
         row.await_mode = Some("background".to_string());
         let projection = project_tool_rows(&[row], &presentations);
@@ -2294,7 +2290,6 @@ mod tests {
             "running",
             arguments,
             result,
-            None,
             spawned_by,
             Some(message_sequence),
             Some(created_at),

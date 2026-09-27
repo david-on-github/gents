@@ -155,7 +155,7 @@ pub(super) async fn start_gents_turn(
         &submitted,
         &mut projection,
         cancel_rx,
-        TurnStreamOptions::fresh(thread_id.clone()),
+        TurnStreamOptions::fresh(),
     )
     .await
     {

@@ -18,8 +18,8 @@ use super::super::command_projection::{
 };
 use super::super::compaction_projection::decode_gents_compaction_progress;
 use super::super::progress::{
-    codex_turn_status, content_delta, decode_gents_tool_call_progress, gents_turn_progress_query,
-    hydrate_gents_tool_call_progress, terminal_error_message, timestamp_millis,
+    codex_turn_status, content_delta, gents_turn_progress_query, hydrate_gents_tool_call_progress,
+    terminal_error_message, timestamp_millis,
 };
 use super::super::protocol::{
     send_committed_user_message, send_notification, send_thread_status_changed,
@@ -108,50 +108,38 @@ struct ReasoningObservation {
 
 #[derive(Clone, Debug)]
 pub(in crate::commands::codex_shim) struct TurnStreamOptions {
-    pub(super) projection_root_session_id: String,
     pub(super) baseline_turn: Option<codex::Turn>,
     pub(super) follow_steering: bool,
     pub(super) enforce_timeout: bool,
 }
 
 impl TurnStreamOptions {
-    pub(in crate::commands::codex_shim) fn fresh(root_session_id: impl Into<String>) -> Self {
+    pub(in crate::commands::codex_shim) fn fresh() -> Self {
         Self {
-            projection_root_session_id: root_session_id.into(),
             baseline_turn: None,
             follow_steering: true,
             enforce_timeout: true,
         }
     }
 
-    pub(in crate::commands::codex_shim) fn resumed_subagent(
-        root_session_id: impl Into<String>,
-        baseline_turn: codex::Turn,
-    ) -> Self {
+    pub(in crate::commands::codex_shim) fn resumed_subagent(baseline_turn: codex::Turn) -> Self {
         Self {
-            projection_root_session_id: root_session_id.into(),
             baseline_turn: Some(baseline_turn),
             follow_steering: false,
             enforce_timeout: false,
         }
     }
 
-    pub(in crate::commands::codex_shim) fn fresh_subagent(
-        root_session_id: impl Into<String>,
-    ) -> Self {
+    pub(in crate::commands::codex_shim) fn fresh_subagent() -> Self {
         Self {
-            projection_root_session_id: root_session_id.into(),
             baseline_turn: None,
             follow_steering: false,
             enforce_timeout: false,
         }
     }
 
-    pub(in crate::commands::codex_shim) fn fresh_background_completion(
-        root_session_id: impl Into<String>,
-    ) -> Self {
+    pub(in crate::commands::codex_shim) fn fresh_background_completion() -> Self {
         Self {
-            projection_root_session_id: root_session_id.into(),
             baseline_turn: None,
             follow_steering: true,
             enforce_timeout: false,
@@ -159,11 +147,9 @@ impl TurnStreamOptions {
     }
 
     pub(in crate::commands::codex_shim) fn resumed_background_completion(
-        root_session_id: impl Into<String>,
         baseline_turn: codex::Turn,
     ) -> Self {
         Self {
-            projection_root_session_id: root_session_id.into(),
             baseline_turn: Some(baseline_turn),
             follow_steering: true,
             enforce_timeout: false,

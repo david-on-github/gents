@@ -2041,13 +2041,7 @@ impl TurnManager {
         // The pager creates child panes on spawned and finalizes them on
         // finished. Deliver their transcript/tools between those boundaries.
         let deferred_children = self
-            .stream_readable_child_updates(
-                session_id,
-                sender,
-                projections,
-                cursor,
-                child_depth,
-            )
+            .stream_readable_child_updates(session_id, sender, projections, cursor, child_depth)
             .await?;
         for event in child_finishes {
             if event
@@ -2152,8 +2146,8 @@ impl TurnManager {
             .context("parent projection identity missing")?;
         // A session is caused by the request that caused its first request,
         // and that request is older, so this recursion follows a tree.
-        for child in super::projection::caused_sessions::caused_by_request(&self.node, &parent)
-            .await?
+        for child in
+            super::projection::caused_sessions::caused_by_request(&self.node, &parent).await?
         {
             let session_id = child.scope.session_id.as_str();
             if session_id == parent_session_id
@@ -3681,15 +3675,7 @@ mod tests {
         assert_ne!(receipts[0].doc_id, receipts[1].doc_id);
         let selected = &receipts[0];
         seed_assistant_message(&node, selected, 1, "selected output").await;
-        let tool = seed_tool_call(
-            &node,
-            selected,
-            "call-1",
-            "create_session",
-            "running",
-            "",
-        )
-        .await;
+        let tool = seed_tool_call(&node, selected, "call-1", "create_session", "running", "").await;
         let child = seed_child_request(&node, selected, &tool, "child", "processing").await;
         assert_eq!(child.agent_did.as_deref(), Some(principal.as_str()));
         assert_eq!(child.requester_did, None);
@@ -4157,15 +4143,7 @@ mod tests {
         let first_receipt = seed_runtime_wake(&node, &agent_did, "internal wake instruction").await;
         let first = first_receipt.request_id.clone();
         seed_assistant_message(&node, &first_receipt, 1, "Wake A is working.").await;
-        seed_tool_call(
-            &node,
-            &first_receipt,
-            "wake-a-tool",
-            "bash",
-            "running",
-            "",
-        )
-        .await;
+        seed_tool_call(&node, &first_receipt, "wake-a-tool", "bash", "running", "").await;
         let mut after = String::new();
         let mut delivery_after = String::new();
         manager
@@ -4314,15 +4292,7 @@ mod tests {
         )
         .unwrap();
         let parent: gents_protocol::row::AgentRequestRow = serde_json::from_value(json!({"_docID":doc,"request_id":"pane-root","agent_did":agent_did,"requester_did":agent_did,"behavior_id":behavior,"session_id":"session-1"})).unwrap();
-        let tool = seed_tool_call(
-            &node,
-            &parent,
-            "call-1",
-            "create_session",
-            "running",
-            "",
-        )
-        .await;
+        let tool = seed_tool_call(&node, &parent, "call-1", "create_session", "running", "").await;
         let child = seed_child_request(&node, &parent, &tool, "pane-child", "processing").await;
         let mut followup = None;
         for (id, requester, text) in [
@@ -4366,7 +4336,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
         .await;
         let child_tool_doc = crate::commands::grok_shim::test_fixtures::seed_canonical_tool_call(
@@ -4376,7 +4345,6 @@ mod tests {
             "bash",
             "running",
             r#"{"command":"echo CHILD_BG_OUTPUT"}"#,
-            None,
             None,
             Some(&spawn_doc),
             None,
@@ -4560,15 +4528,8 @@ mod tests {
             tokio::spawn(async move { manager.handle_prompt(prompt, &sender, &engine).await })
         };
         let root_receipt = wait_for_pending_request(&node, &agent_did).await;
-        let late_tool_doc = seed_tool_call(
-            &node,
-            &root_receipt,
-            "late-bash",
-            "bash",
-            "running",
-            "",
-        )
-        .await;
+        let late_tool_doc =
+            seed_tool_call(&node, &root_receipt, "late-bash", "bash", "running", "").await;
         seed_assistant_message(&node, &root_receipt, 1, "Root response.").await;
         let mut after = String::new();
         let mut delivery_after = String::new();

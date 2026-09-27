@@ -57,13 +57,12 @@ async fn watch_loaded_subagent_thread(
     baseline_turn: Option<codex::Turn>,
 ) -> Result<()> {
     let child_thread_id = link.session_id.clone();
-    let root_session_id = link.root_session_id.clone();
     let mut projected_request_id = link.latest_request_id.clone();
     if link.client_projection.is_some_and(|head| head.is_active()) {
         let announce_turn = baseline_turn.is_none();
         let options = baseline_turn.map_or_else(
-            || TurnStreamOptions::fresh_subagent(root_session_id.clone()),
-            |turn| TurnStreamOptions::resumed_subagent(root_session_id.clone(), turn),
+            || TurnStreamOptions::fresh_subagent(),
+            |turn| TurnStreamOptions::resumed_subagent(turn),
         );
         project_child_request(connection, state, &link, options, announce_turn).await?;
     }
@@ -116,7 +115,7 @@ async fn watch_loaded_subagent_thread(
             connection,
             state,
             &link,
-            TurnStreamOptions::fresh_subagent(root_session_id.clone()),
+            TurnStreamOptions::fresh_subagent(),
             true,
         )
         .await?;

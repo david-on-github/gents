@@ -6,11 +6,6 @@ pub(super) struct LiveCodexShim {
     pub(super) codex_home: std::path::PathBuf,
     pub(super) graphql: String,
     pub(super) agent_did: String,
-    pub(super) behavior_id: String,
-    tools_id: String,
-    pub(super) backend_id: String,
-    pub(super) inference_profile_id: String,
-    pub(super) model_name: String,
     pub(super) shim_port: u16,
     pub(super) shim_trace: std::path::PathBuf,
     pub(super) _server: ServeProcess,
@@ -75,11 +70,6 @@ pub(super) async fn start_live_codex_shim_with_write_tools(
     }
     let init = run_init_json(&home_dir, &init_args)?;
     let agent_did = agent_did_from_init(&init)?;
-    let behavior_id = init_output_string(&init, "default_behavior_id")?;
-    let tools_id = init_output_string(&init, "tools_id")?;
-    let backend_id = init_output_string(&init, "backend_id")?;
-    let inference_profile_id = init_output_string(&init, "inference_profile_id")?;
-    let model_name = init_output_string(&init, "model_name")?;
     let shim_port = allocate_port()?;
     let shim_port_string = shim_port.to_string();
     let codex_home = home_dir.join(".gents").join("codex-ui");
@@ -107,22 +97,8 @@ pub(super) async fn start_live_codex_shim_with_write_tools(
         home_dir,
         graphql,
         agent_did,
-        behavior_id,
-        tools_id,
-        backend_id,
-        inference_profile_id,
-        model_name,
         shim_port,
         shim_trace,
         _server: server,
     })
-}
-
-fn init_output_string(init: &Value, key: &str) -> Result<String> {
-    let nested = format!("/init/{key}");
-    init.get(key)
-        .or_else(|| init.pointer(&nested))
-        .and_then(Value::as_str)
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| anyhow!("init output missing {key}: {init}"))
 }
