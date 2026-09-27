@@ -8,7 +8,7 @@ use futures::StreamExt;
 use gents_loop::output_obligation::OutputObligationCheck;
 use tracing::Instrument;
 
-use super::{BehaviorDaemon, HandleRequestOutcome};
+use super::{BehaviorDaemon, HandleRequestOutcome, ShutdownDrainFailure};
 use crate::admission::{self, CallKind};
 use crate::agent::loop_stream::{LoopReplayInput, TaggedMessage};
 use crate::compaction::ReductionOptions;
@@ -500,12 +500,19 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                             let item = match tokio::select! {
                                 biased;
                                 _ = shutdown.changed() => {
-                                    // No output write here: embedded writes issued during
-                                    // runtime teardown can stall shutdown. Recovery closes
-                                    // the request; received bytes since the last flush are
-                                    // not retained on shutdown.
                                     drop(stream);
-                                    return Err(anyhow!("shutdown requested during inference stream"));
+                                    match tokio::time::timeout(
+                                        crate::config_client::EMBEDDED_TRANSACTION_STORAGE_STEP_TIMEOUT,
+                                        processor.persist_received_partial_turn("persist received assistant turn during graceful shutdown"),
+                                    ).await {
+                                        Ok(Ok(_)) => return Err(anyhow!("shutdown requested during inference stream")),
+                                        Ok(Err(error)) => return Err(ShutdownDrainFailure {
+                                            reason: format!("partial-turn persistence failed: {error:#}"),
+                                        }.into()),
+                                        Err(_) => return Err(ShutdownDrainFailure {
+                                            reason: "partial-turn persistence exceeded the embedded storage-step deadline; commit outcome must be recovered from durable state".into(),
+                                        }.into()),
+                                    }
                                 }
                                 _ = interrupt_rx.changed() => {
                                     request_token.cancel();
@@ -1363,7 +1370,10 @@ mod tests {
         .unwrap();
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-        daemon.process_request(request.clone(), shutdown_rx).await;
+        daemon
+            .process_request(request.clone(), shutdown_rx)
+            .await
+            .unwrap();
 
         let escaped_session_id = crate::graphql::escape_graphql_string(&request.session_id);
         let query = format!(
@@ -1511,7 +1521,10 @@ mod tests {
         )
         .unwrap();
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        daemon.process_request(wake.clone(), shutdown_rx).await;
+        daemon
+            .process_request(wake.clone(), shutdown_rx)
+            .await
+            .unwrap();
 
         // This direct daemon fixture has no watcher/router. The creator must
         // publish title work, but cannot dispatch its provider call here.
@@ -1669,7 +1682,10 @@ mod tests {
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
         let first_doc_id = first.doc_id.clone();
-        daemon.process_request(first, shutdown_rx.clone()).await;
+        daemon
+            .process_request(first, shutdown_rx.clone())
+            .await
+            .unwrap();
         assert!(
             calls.load(Ordering::SeqCst) > 0,
             "the admitted request must reach the provider before revocation"
@@ -1709,7 +1725,7 @@ mod tests {
         assert!(!revoked.has_errors(), "{:?}", revoked.errors);
         let second = create_routed_request(node.as_ref(), &behavior, &requester_did).await;
         let second_doc_id = second.doc_id.clone();
-        daemon.process_request(second, shutdown_rx).await;
+        daemon.process_request(second, shutdown_rx).await.unwrap();
         assert_eq!(
             calls.load(Ordering::SeqCst),
             calls_before_revocation,
@@ -1832,7 +1848,8 @@ mod tests {
         authority.replace(None).await;
         daemon
             .process_request(revoked.clone(), shutdown_rx.clone())
-            .await;
+            .await
+            .unwrap();
         assert_eq!(
             calls.load(Ordering::SeqCst),
             0,
@@ -1860,7 +1877,10 @@ mod tests {
             "replacement",
         )
         .await;
-        daemon.process_request(replacement, shutdown_rx).await;
+        daemon
+            .process_request(replacement, shutdown_rx)
+            .await
+            .unwrap();
         assert!(
             calls.load(Ordering::SeqCst) > 0,
             "exact replacement did not reach provider"

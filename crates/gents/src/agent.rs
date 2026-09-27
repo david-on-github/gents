@@ -106,7 +106,7 @@ where
     )?
     .with_tool_surface_runtime_policy(tool_surface.root_execution_guard().cloned(), None);
     let (_shutdown_tx, shutdown_rx) = watch::channel(false);
-    daemon.process_request(request, shutdown_rx).await;
+    daemon.process_request(request, shutdown_rx).await?;
     Ok(())
 }
 

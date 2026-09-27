@@ -13,6 +13,316 @@ struct NonTerminalProvider {
 #[derive(Clone)]
 struct LeaseLossProvider;
 
+#[derive(Clone)]
+struct BufferedReasoningShutdownProvider {
+    processed_two: Arc<tokio::sync::Notify>,
+}
+
+#[allow(refining_impl_trait)]
+impl CompletionModel for BufferedReasoningShutdownProvider {
+    type Response = ();
+    type StreamingResponse = ();
+    type Client = ();
+
+    fn make(_: &(), _: impl Into<String>) -> Self {
+        Self {
+            processed_two: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn completion(
+        &self,
+        _: CompletionRequest,
+    ) -> Result<CompletionResponse<()>, CompletionError> {
+        Err(CompletionError::ProviderError("stream only".into()))
+    }
+
+    async fn stream(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<StreamingCompletionResponse<()>, CompletionError> {
+        crate::test_support::capture_scripted_provider_request(&request, "shutdown-reasoning")
+            .await?;
+        let processed_two = self.processed_two.clone();
+        let events: rig::streaming::StreamingResult<()> =
+            Box::pin(stream::unfold(0usize, move |index| {
+                let processed_two = processed_two.clone();
+                async move {
+                    match index {
+                        0 | 1 => Some((
+                            Ok(RawStreamingChoice::ReasoningDelta {
+                                id: None,
+                                reasoning: if index == 0 { "first" } else { " second" }.into(),
+                            }),
+                            index + 1,
+                        )),
+                        _ => {
+                            processed_two.notify_one();
+                            std::future::pending().await
+                        }
+                    }
+                }
+            }));
+        Ok(StreamingCompletionResponse::stream(events))
+    }
+}
+
+async fn graceful_shutdown_reasoning_case(fail_drain: bool) {
+    use crate::session::canonical_rows::{decode_output_segment_row, AGENT_OUTPUT_SEGMENT_FIELDS};
+    use gents_protocol::output::reconstruction::{reconstruct_stream, ObservedSegment};
+    use gents_protocol::output::{OutputOutcome, PayloadRef, SourceClose, StreamPayload};
+
+    let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
+    crate::ensure_runtime_schemas(&node).await.unwrap();
+    let mut behavior = test_behavior();
+    {
+        let behavior = Arc::get_mut(&mut behavior).unwrap();
+        behavior.stream_batch_ms = 300_000;
+        behavior.deadline_duration = Duration::from_secs(120);
+        behavior.stream_liveness_timeout = Duration::from_secs(120);
+        behavior.provider_idle_timeout = Duration::from_secs(120);
+    }
+    let agent_did = behavior.agent_did().to_owned();
+    let identity = behavior.principal_identity().clone();
+    let model = BufferedReasoningShutdownProvider {
+        processed_two: Arc::new(tokio::sync::Notify::new()),
+    };
+    let prompt = LayeredPromptBuilder::for_behavior(
+        &behavior.system_prompt,
+        &behavior.behavior_id,
+        &[],
+        false,
+        &[],
+    );
+    let mut daemon = BehaviorDaemon::new(
+        node.clone(),
+        behavior.clone(),
+        None,
+        Arc::new(model.clone()),
+        prompt.preamble().to_owned(),
+        Arc::new(Vec::new()),
+        prompt,
+        FailurePolicy::default(),
+        Some(crate::rendered_request::defra_rendered_request_capture_factory(node.clone())),
+        BackgroundToolRegistry::default(),
+        BackgroundExecutionRegistry::default(),
+        Arc::new(StartupBarrier::ready_for_test()),
+        crate::runtime_status::RuntimeStatusHandle::new(node.clone(), agent_did.clone()),
+        1,
+        crate::request_admission::AgentRequestAdmissionVerifier::new(
+            node.clone(),
+            identity,
+            crate::agent::p2p_reconcile::enrollment_authority_channel().1,
+        ),
+    )
+    .unwrap();
+    let request = create_routed_request(&node, &behavior, &agent_did).await;
+    let doc_id = request.doc_id.clone();
+    let session = gents_protocol::session::AgentSession {
+        session_id: request.session_id.clone(),
+        agent_did: agent_did.clone(),
+        requester_did: request.requester_did.clone(),
+        behavior_id: behavior.behavior_id.clone(),
+        created_at: request.created_at.clone(),
+        closed_at: None,
+        title: Some(gents_protocol::session::SessionTitle {
+            text: "shutdown reasoning regression".into(),
+            source: gents_protocol::session::SessionTitleSource::Task,
+        }),
+        tags: vec![],
+        provenance: None,
+        observation: None,
+    };
+    let input =
+        gents_protocol::graphql::graphql_input_literal(&serde_json::to_value(session).unwrap())
+            .unwrap();
+    let seeded = node
+        .execute(&format!(
+            "mutation {{ create_AgentSession(input: {input}) {{_docID}} }}"
+        ))
+        .await;
+    assert!(!seeded.has_errors(), "{:?}", seeded.errors);
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let process = daemon.process_request(request, shutdown_rx);
+    tokio::pin!(process);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::select! {
+            _ = model.processed_two.notified() => {},
+            _ = &mut process => panic!("request exited before both reasoning chunks were processed"),
+        }
+    }).await.expect("both provider chunks must be processed");
+    let escaped = crate::graphql::escape_graphql_string(&doc_id);
+    let query = format!(
+        r#"{{ AgentOutputSegment(filter: {{ request_doc_id: {{ _eq: "{escaped}" }} }}) {{ {AGENT_OUTPUT_SEGMENT_FIELDS} }} }}"#
+    );
+    let before = node.execute(&query).await;
+    assert!(!before.has_errors(), "{:?}", before.errors);
+    assert!(
+        before.data.as_ref().unwrap().to_string().contains("first"),
+        "first chunk must be durable before shutdown"
+    );
+    assert!(
+        !before
+            .data
+            .as_ref()
+            .unwrap()
+            .to_string()
+            .contains(" second"),
+        "second received chunk must still be buffered before shutdown"
+    );
+
+    if fail_drain {
+        let (result, injected_writes) =
+            crate::config_client::ConfigApplyTxn::with_successful_mutation_failure_at(
+                Some(1),
+                async {
+                    shutdown_tx.send_replace(true);
+                    tokio::time::timeout(Duration::from_secs(10), &mut process)
+                        .await
+                        .expect("failed drain must stop promptly")
+                },
+            )
+            .await;
+        assert_eq!(
+            injected_writes, 1,
+            "injected fault must reach the real canonical drain write"
+        );
+        let error = result.expect_err("failed drain must be reported to the daemon caller");
+        assert!(
+            error.is::<super::ShutdownDrainFailure>(),
+            "unexpected failure: {error:#}"
+        );
+        let persisted = node.execute(&format!(r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{escaped}" }} }}) {{ lifecycle_state terminal_output }} }}"#)).await;
+        assert!(!persisted.has_errors(), "{:?}", persisted.errors);
+        let request = &persisted.data.as_ref().unwrap()["AgentRequest"][0];
+        assert_eq!(
+            request["lifecycle_state"], "processing",
+            "uncertain drain must leave durable lease for recovery"
+        );
+        assert!(
+            request["terminal_output"].is_null(),
+            "failed drain must not claim saved terminal output"
+        );
+        let after = node.execute(&query).await;
+        assert!(!after.has_errors(), "{:?}", after.errors);
+        let mut before_rows = before.data.as_ref().unwrap()["AgentOutputSegment"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let mut after_rows = after.data.as_ref().unwrap()["AgentOutputSegment"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let by_doc_id = |left: &serde_json::Value, right: &serde_json::Value| {
+            left["_docID"].as_str().cmp(&right["_docID"].as_str())
+        };
+        before_rows.sort_by(by_doc_id);
+        after_rows.sort_by(by_doc_id);
+        assert_eq!(
+            after_rows, before_rows,
+            "failed transaction must leave exact canonical segment facts unchanged"
+        );
+        let closed_ids = |rows: &[serde_json::Value]| {
+            rows.iter()
+                .filter(|row| {
+                    matches!(
+                        decode_output_segment_row(row).unwrap().segment.close,
+                        Some(SourceClose::Closed { .. })
+                    )
+                })
+                .map(|row| row["_docID"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            closed_ids(&after_rows),
+            closed_ids(&before_rows),
+            "failed drain must not add a claimed source close"
+        );
+        node.shutdown().await;
+        return;
+    }
+
+    shutdown_tx.send_replace(true);
+    tokio::time::timeout(Duration::from_secs(10), &mut process)
+        .await
+        .expect("graceful shutdown must finish")
+        .expect("received reasoning drain must succeed");
+    let after = node.execute(&query).await;
+    assert!(!after.has_errors(), "{:?}", after.errors);
+    let rows = after.data.as_ref().unwrap()["AgentOutputSegment"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| decode_output_segment_row(row).unwrap())
+        .collect::<Vec<_>>();
+    let closes = rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.segment.close,
+                Some(SourceClose::Closed {
+                    outcome: OutputOutcome::Partial,
+                    ..
+                })
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        closes.len(),
+        1,
+        "shutdown must close the exact received prefix once"
+    );
+    let facts = rows
+        .iter()
+        .map(|row| ObservedSegment {
+            doc_id: &row.doc_id,
+            segment: &row.segment,
+        })
+        .collect::<Vec<_>>();
+    let Some(SourceClose::Closed { stream_bytes, .. }) = &closes[0].segment.close else {
+        unreachable!()
+    };
+    let reconstructed = (0..stream_bytes.len())
+        .map(|stream| {
+            reconstruct_stream(
+                &facts,
+                &[],
+                &[],
+                &PayloadRef {
+                    close_doc_id: closes[0].doc_id.clone(),
+                    stream: u32::try_from(stream).unwrap(),
+                },
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        reconstructed.len(),
+        2,
+        "exact received part count: {reconstructed:?}"
+    );
+    for (part, text) in [(0, "first"), (1, " second")] {
+        let content = reconstructed[part]
+            .as_ref()
+            .expect("closed reasoning stream reconstructs");
+        assert_eq!(content.declaration.payload, StreamPayload::Reasoning);
+        assert_eq!(content.declaration.block_index, 0);
+        assert_eq!(content.declaration.part_index, u32::try_from(part).unwrap());
+        assert_eq!(content.text, text);
+    }
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn graceful_shutdown_closes_all_received_buffered_reasoning() {
+    graceful_shutdown_reasoning_case(false).await;
+}
+
+#[tokio::test]
+async fn failed_graceful_shutdown_drain_reports_error_without_terminal_claim() {
+    graceful_shutdown_reasoning_case(true).await;
+}
+
 #[allow(refining_impl_trait)]
 impl CompletionModel for LeaseLossProvider {
     type Response = ();
@@ -167,7 +477,7 @@ async fn lease_poll_ownership_loss_does_not_fail_a_running_tool() {
         let escaped = crate::graphql::escape_graphql_string(&request_doc_id);
         let replaced = node.execute(&format!(r#"mutation {{ update_AgentRequest(filter:{{_docID:{{_eq:"{escaped}"}}}},input:{{execution_generation:"replacement-generation"}}){{_docID}} }}"#)).await;
         assert!(!replaced.has_errors(), "{:?}", replaced.errors);
-        (&mut process).await;
+        (&mut process).await.expect("lease replacement handling completes");
     }).await.expect("lease poll must observe replacement");
     let response = node.execute("{ AgentToolCall(filter:{tool_name:{_eq:\"lease_block\"}}){lifecycle_state tool_failure_class cancel_cause} }").await;
     let row = &response.data.as_ref().unwrap()["AgentToolCall"][0];
@@ -415,7 +725,7 @@ async fn eight_nonterminal_requests_converge_on_same_daemon(empty_forever: bool)
                 };
                 tokio::pin!(maintenance);
                 tokio::select! {
-                    _ = &mut process => {}
+                    result = &mut process => result.expect("nonterminal request handling completes"),
                     _ = &mut maintenance => unreachable!("maintenance is continuous"),
                 }
             }
@@ -676,7 +986,8 @@ async fn daemon_interrupt_completion_preserves_wake_published_after_latch() {
 
     tokio::time::timeout(Duration::from_secs(10), &mut process)
         .await
-        .expect("interrupted daemon request should terminalize");
+        .expect("interrupted daemon request should terminalize")
+        .expect("interrupted request handling completes");
     let wake_id = crate::graphql::escape_graphql_string(wake_id);
     let result = access
         .execute(&format!(
@@ -786,7 +1097,8 @@ async fn nonempty_stream_outlives_multiple_short_leases_with_default_batching() 
         daemon.process_request(request, shutdown_rx),
     )
     .await
-    .expect("active stream completes across multiple lease durations");
+    .expect("active stream completes across multiple lease durations")
+    .expect("active request handling completes");
 
     let request_id = crate::graphql::escape_graphql_string(&request_id);
     let result = node
@@ -914,7 +1226,8 @@ async fn deadline_closes_received_openai_reasoning_without_another_provider_call
         daemon.process_request(request, shutdown_rx),
     )
     .await
-    .expect("request deadline must stop the nonterminal provider");
+    .expect("request deadline must stop the nonterminal provider")
+    .expect("deadline request handling completes");
 
     let escaped = crate::graphql::escape_graphql_string(&doc_id);
     let response = node

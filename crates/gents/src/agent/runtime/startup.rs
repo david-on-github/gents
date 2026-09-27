@@ -38,6 +38,33 @@ enum BackgroundTaskResult {
     DirectoryProjection(Result<()>),
 }
 
+impl BackgroundTaskResult {
+    fn into_result(self) -> Result<()> {
+        match self {
+            Self::Router(result) => result.context("router task"),
+            Self::ExecutorStatus(result) => result.context("executor status task"),
+            Self::Reconcile(result) => result.context("generation supervisor task"),
+            Self::Control(result) => result.context("control watcher task"),
+            Self::SubagentCompletion(result) => result.context("subagent completion task"),
+            Self::GraphRunReconcile(result) => result.context("graph run reconcile task"),
+            Self::CrossDeploymentCancelMirror(result) => {
+                result.context("cross-deployment cancellation task")
+            }
+            Self::PairingReconcile(result) => result.context("pairing reconcile task"),
+            Self::EnrollmentReconcile(result) => result.context("enrollment reconcile task"),
+            Self::RegistryHeartbeat(result) => result.context("registry heartbeat task"),
+            Self::EndpointHeartbeat(result) => result.context("endpoint heartbeat task"),
+            Self::SessionHydrationReconcile(result) => {
+                result.context("session hydration reconcile task")
+            }
+            Self::PersonaRequestReconcile(result) => {
+                result.context("persona request reconcile task")
+            }
+            Self::DirectoryProjection(result) => result.context("directory projection task"),
+        }
+    }
+}
+
 #[cfg(test)]
 pub(super) type TestSlotRunner = Arc<
     dyn Fn(
@@ -361,9 +388,13 @@ async fn finish_run_agent(
         }
     }
 
-    match body_result {
-        Err(error) => Err(error),
-        Ok(()) => teardown_error.map_or(Ok(()), Err),
+    match (body_result, teardown_error) {
+        (Err(error), Some(teardown_error)) => Err(error.context(format!(
+            "runtime status teardown also failed: {teardown_error:#}"
+        ))),
+        (Err(error), None) => Err(error),
+        (Ok(()), Some(error)) => Err(error),
+        (Ok(()), None) => Ok(()),
     }
 }
 
@@ -519,8 +550,13 @@ async fn run_agent_owned(
         // executors that can outlive the readiness owner.
         runtime_shutdown_tx.send_replace(true);
         cancel.cancel();
-        generation_supervisor.shutdown_slots().await;
-        return Err(error).context("durably publish startup behavior readiness source");
+        let shutdown_result = generation_supervisor.shutdown_slots().await;
+        return match shutdown_result {
+            Ok(()) => Err(error).context("durably publish startup behavior readiness source"),
+            Err(shutdown_error) => Err(error).context(format!(
+                "durably publish startup behavior readiness source; behavior slot shutdown also failed: {shutdown_error:#}"
+            )),
+        };
     }
     let (active_snapshot_tx, active_snapshot_rx) = watch::channel(initial_active_snapshot.clone());
     let (reconcile_tx, reconcile_rx) = mpsc::channel(8);
@@ -998,20 +1034,7 @@ async fn run_agent_owned(
         Some(error) = fatal_error_rx.recv() => Err(error),
         _ = external_shutdown.changed() => Ok(()),
         Some(joined) = background_tasks.join_next() => match joined {
-            Ok(BackgroundTaskResult::Router(result)) => result,
-            Ok(BackgroundTaskResult::ExecutorStatus(result)) => result,
-            Ok(BackgroundTaskResult::Reconcile(result)) => result,
-            Ok(BackgroundTaskResult::Control(result)) => result,
-            Ok(BackgroundTaskResult::SubagentCompletion(result)) => result,
-            Ok(BackgroundTaskResult::GraphRunReconcile(result)) => result,
-            Ok(BackgroundTaskResult::CrossDeploymentCancelMirror(result)) => result,
-            Ok(BackgroundTaskResult::PairingReconcile(result)) => result,
-            Ok(BackgroundTaskResult::EnrollmentReconcile(result)) => result,
-            Ok(BackgroundTaskResult::RegistryHeartbeat(result)) => result,
-            Ok(BackgroundTaskResult::EndpointHeartbeat(result)) => result,
-            Ok(BackgroundTaskResult::SessionHydrationReconcile(result)) => result,
-            Ok(BackgroundTaskResult::PersonaRequestReconcile(result)) => result,
-            Ok(BackgroundTaskResult::DirectoryProjection(result)) => result,
+            Ok(task) => task.into_result(),
             Err(error) => Err(anyhow!("background task join failed: {error}")),
         },
         else => Ok(()),
@@ -1026,20 +1049,43 @@ async fn run_agent_owned(
     runtime_shutdown_tx.send_replace(true);
     cancel.cancel();
     while let Some(joined) = background_tasks.join_next().await {
-        if let Err(error) = joined {
-            if !error.is_cancelled() {
-                tracing::error!(error = %error, "background task exited during shutdown");
+        let task_result = match joined {
+            Ok(task) => task.into_result(),
+            Err(error) => Err(anyhow!(
+                "background task join failed during shutdown: {error}"
+            )),
+        };
+        if let Err(error) = task_result {
+            tracing::error!(error = %error, "background task exited during shutdown");
+            if teardown_error.is_none() {
+                teardown_error = Some(error);
             }
         }
     }
 
-    let _ = readiness_handle.await;
-    let _ = trigger_engine_handle.await;
-    let _ = callback_engine_handle.await;
-    let _ = health_checker.await;
-    let _ = backend_prober.await;
+    for (name, joined) in [
+        ("readiness", readiness_handle.await),
+        ("trigger engine", trigger_engine_handle.await),
+        ("callback engine", callback_engine_handle.await),
+        ("health checker", health_checker.await),
+        ("backend prober", backend_prober.await),
+    ] {
+        if let Err(error) = joined {
+            tracing::error!(name, error = %error, "owned runtime task join failed during shutdown");
+            if teardown_error.is_none() {
+                teardown_error = Some(anyhow!("{name} task join failed during shutdown: {error}"));
+            }
+        }
+    }
     if let Some(handle) = runtime_snapshot_observer_handle {
-        let _ = handle.await;
+        if let Err(error) = handle.await {
+            tracing::error!(error = %error, "runtime snapshot observer join failed during shutdown");
+            if teardown_error.is_none() {
+                teardown_error = Some(anyhow!(
+                    "runtime snapshot observer join failed during shutdown: {error}"
+                ));
+            }
+        }
     }
     lsp_pool.shutdown().await;
 
@@ -1050,9 +1096,13 @@ async fn run_agent_owned(
         }
     }
 
-    match result {
-        Err(error) => Err(error),
-        Ok(()) => teardown_error.map_or(Ok(()), Err),
+    match (result, teardown_error) {
+        (Err(error), Some(teardown_error)) => {
+            Err(error.context(format!("runtime teardown also failed: {teardown_error:#}")))
+        }
+        (Err(error), None) => Err(error),
+        (Ok(()), Some(error)) => Err(error),
+        (Ok(()), None) => Ok(()),
     }
 }
 
