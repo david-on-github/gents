@@ -396,10 +396,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    /// Seed three registry rows that share one `service_id`, then mark the row
-    /// with the lowest public document id offline and the highest online. The
-    /// ordering is what makes the read observable: an ordered read collapses to
-    /// the lowest document id, which is the offline row.
+    /// DefraDB's ordered read collapses to the lowest public document id, so the
+    /// offline row has to hold the lowest id and the online row the highest for
+    /// an ordered read to hide the online row.
     async fn registry_with_an_offline_twin() -> (ConfigAccess, String) {
         let node = Arc::new(
             gents::defra_node::EmbeddedNode::builder()
@@ -410,6 +409,7 @@ mod tests {
         gents::ensure_runtime_schemas(node.as_ref()).await.unwrap();
         let access = ConfigAccess::Local(node);
         for host in ["twin-a", "twin-b", "twin-c"] {
+            let host = escape_graphql_string(host);
             access
                 .write(
                     "test.mcp.seed",
@@ -443,6 +443,8 @@ mod tests {
             (rows.first().unwrap().0.clone(), "offline"),
             (rows.last().unwrap().0.clone(), "online"),
         ] {
+            let doc_id = escape_graphql_string(&doc_id);
+            let status = escape_graphql_string(status);
             access
                 .write(
                     "test.mcp.status",
