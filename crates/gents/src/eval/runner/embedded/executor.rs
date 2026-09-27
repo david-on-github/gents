@@ -883,8 +883,44 @@ fn provider_reason(
         .find_map(provider_reason_from_failure)
 }
 
-async fn trigger_failure(_node: &EmbeddedNode, _agent_did: &str) -> Option<OutcomeKind> {
-    None
+/// A trigger in the trial home whose last fire errored fails a stage that
+/// otherwise completed.
+///
+/// The pack under evaluation owns its triggers and the task templates they
+/// render, so the subject can cause the error and it counts against it as
+/// [`OutcomeKind::Runtime`]. A status that could not be read leaves the pass
+/// unproven, which is the harness failing: [`OutcomeKind::Infrastructure`].
+async fn trigger_failure(node: &EmbeddedNode, agent_did: &str) -> Option<OutcomeKind> {
+    let agent_did = escape_graphql_string(agent_did);
+    let query = format!(
+        r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{agent_did}" }}, last_status: {{ _eq: "error" }} }}) {{ trigger_id last_error }} }}"#
+    );
+    let errored =
+        match graphql_with_transaction_retry(node, &query, "eval trial trigger status").await {
+            Ok(response) => response
+                .data
+                .as_ref()
+                .and_then(|data| data.get("Trigger"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    "eval trial trigger status could not be read"
+                );
+                return Some(OutcomeKind::Infrastructure);
+            }
+        };
+    if errored.is_empty() {
+        return None;
+    }
+    let triggers = Value::Array(errored);
+    tracing::warn!(
+        %triggers,
+        "an eval trial trigger errored; the stage fails"
+    );
+    Some(OutcomeKind::Runtime)
 }
 
 async fn runtime_exited(runtime: &RunningRuntime) {
