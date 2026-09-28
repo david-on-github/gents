@@ -91,5 +91,10 @@ pub enum ConcurrencyMode {
 }
 
 impl ConcurrencyMode {
-    pub const ALL: [Self; 4] = [Self::Parallel, Self::Serial, Self::QueuedSerial, Self::LatestOnly];
+    pub const ALL: [Self; 4] = [
+        Self::Parallel,
+        Self::Serial,
+        Self::QueuedSerial,
+        Self::LatestOnly,
+    ];
 }
