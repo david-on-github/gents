@@ -333,6 +333,7 @@ mod tests {
 
     /// A failed stage yields one row per check but names its failure once, on
     /// the first acceptance row, since the proposer reads only acceptance rows.
+    /// A stage with no acceptance row names it nowhere.
     #[test]
     fn a_failed_stage_names_its_failure_on_one_acceptance_row_only() {
         let ev = ScriptedExecutor::failed_evidence("did:x", "s1", OutcomeKind::Deadline, None);
@@ -355,6 +356,8 @@ mod tests {
         assert_eq!(with_feedback(&case), [true, false]);
         case.stages[0].checks[0].tier = EvalTier::Development;
         assert_eq!(with_feedback(&case), [false, true]);
+        case.stages[0].checks[1].tier = EvalTier::Development;
+        assert_eq!(with_feedback(&case), [false, false]);
     }
 
     #[test]
