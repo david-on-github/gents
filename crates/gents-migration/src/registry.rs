@@ -440,7 +440,7 @@ pub static DEFAULT_BASELINE: &[BaselineCollection<'static>] = &[
     baseline_entry!(
         gents_protocol::schemas::GOAL_NAME,
         gents_protocol::schemas::GOAL,
-        "bafyreigaw3kgbmzlevxjaxotn6qrplceu3heil54ywstzrfwahfj66jzgy"
+        "bafyreib7xrvv4razwfdgso4ef5xhqqk2s53c37oszc75ireafycm7bwk3y"
     ),
     baseline_entry!(
         gents_protocol::schemas::GOAL_CREATION_CLAIM_NAME,
