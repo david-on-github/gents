@@ -1667,7 +1667,12 @@ def caseCoverage : List CoverageEntry :=
       "event_delivery_cases"
       "EventDeliveryTransitionCases"
       "conformance::event_delivery_transition_cases_match_contract"
-      "Observes five Watcher rescan/next-request cases, including real cooldown seeding, and two Watcher release cases driven by a real same-second overtaking head. Eight substrate bookkeeping rows remain unobserved; subscription loss/delivery, queue multiset state, and empty-rescan silence need owner observations rather than a copied World.")
+      "Observes five Watcher rescan/next-request cases, including real cooldown seeding. Native watcher unit consumers observe the two release cases. Eight substrate bookkeeping rows remain unobserved; subscription loss/delivery, queue multiset state, and empty-rescan silence need owner observations rather than a copied World.")
+      "event-delivery" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "event_delivery_cases"
+      "EventDeliveryTransitionCases"
+      "watcher::tests::generated_release_cases_preserve_native_session_order")
       "event-delivery" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "event_delivery_cases"
