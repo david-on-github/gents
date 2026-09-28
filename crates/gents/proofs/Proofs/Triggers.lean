@@ -7,3 +7,4 @@ import Proofs.Triggers.LatestOnly
 import Proofs.Triggers.Lineage
 import Proofs.Triggers.Groups
 import Proofs.Triggers.Durable
+import Proofs.Triggers.Refinement

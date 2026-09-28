@@ -556,6 +556,31 @@ def caseCoverage : List CoverageEntry :=
       "ProcessTransitions"
       "runtime_status::tests::generated_process_transition_cases_match_runtime_status_policy")
       "process-lifecycle" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "trigger_delivery"
+      "Triggers.Durable"
+      "trigger_engine::tests::durable_contract::generated_fire_transactions_are_atomic_and_owner_scoped")
+      "triggers" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "trigger_delivery"
+      "Triggers.Queue"
+      "trigger_engine::tests::durable_contract::durable_delivery_predicates_match_executable_lean_owners")
+      "triggers" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "trigger_delivery"
+      "EventDelivery.Durable"
+      "trigger_engine::tests::durable_contract::generated_arrival_checkpoints_preserve_committed_delivery_across_crashes")
+      "event-delivery" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "trigger_delivery"
+      "Triggers.Durable.Outcomes"
+      "trigger_engine::tests::durable_contract::generated_terminal_outcomes_recover_once_without_chaining")
+      "durable-goals" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "graph_session_continuation_cases"
+      "GraphPipeline.WorkspaceLineage.SessionContinuation"
+      "graph_pipeline::session_continuation_contract_tests")
+      "triggers" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "trigger_cases"
       "TriggerDispatch"
