@@ -241,10 +241,11 @@ impl TrialExecutor for EmbeddedExecutor {
     /// whether a request was interrupted on its stage's deadline, so nothing
     /// read back here is classified as a deadline.
     ///
-    /// The hint is refused unless it is relative, has no `..`, and both the
-    /// trial directory and its home resolve, symlinks followed, under the
-    /// resolved `runs_dir`. That is checked once, before the home is opened;
-    /// a link swapped in after the check is not caught.
+    /// The hint is refused unless it is relative, has no `..`, and each of the
+    /// trial directory, its home and its workspace that exists resolves,
+    /// symlinks followed, under the resolved `runs_dir`. That is checked once,
+    /// before the home is opened; a link swapped in after the check is not
+    /// caught.
     async fn recollect(&self, at: &TrialLocator, captures: &[Capture]) -> Option<TrialEvidence> {
         let hint = at.home_hint.as_deref()?;
         let trial_dir = self.runs_dir.join(hint);
