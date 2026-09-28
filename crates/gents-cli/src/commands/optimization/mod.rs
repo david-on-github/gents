@@ -374,32 +374,29 @@ async fn run(
             Box::new(proposer)
         }
     };
-    let outcome = follow(
-        ctx,
-        &job_id,
-        !args.json,
-        out,
-        run_job(
-            &ctx.access,
-            &request,
-            deps.executor,
-            proposer.as_ref(),
-            deps.registry,
-            &policy,
-            deps.cancel.clone(),
-        ),
-    )
-    .await
-    .with_context(|| {
-        format!("job {job_id} stopped before it finished; run the same command with --job-id {job_id} to resume it")
-    })?;
+    let resume = format!(
+        "job {job_id} stopped before it finished; run the same command with --job-id {job_id} to resume it"
+    );
+    let running = run_job(
+        &ctx.access,
+        &request,
+        deps.executor,
+        proposer.as_ref(),
+        deps.registry,
+        &policy,
+        deps.cancel.clone(),
+    );
+    let outcome = match follow(ctx, &job_id, !args.json, out, running).await {
+        Ok(outcome) => outcome,
+        // Only a job that was created can be resumed.
+        Err(error) => match load_job(&ctx.access, &ctx.owner, &job_id).await {
+            Ok(Some(_)) => return Err(error.context(resume)),
+            _ => return Err(error),
+        },
+    };
     // A job left running is not a success: the view still renders, then the
     // command fails with the resume note, so a script never reads it as done.
-    let stopped = (outcome.state == JobState::Running).then(|| {
-        format!(
-            "job {job_id} stopped before it finished; run the same command with --job-id {job_id} to resume it"
-        )
-    });
+    let stopped = (outcome.state == JobState::Running).then_some(resume);
     let view = show_job(&ctx.access, &ctx.owner, &job_id).await?;
     if args.json {
         write_json(out, &view)?;
