@@ -95,8 +95,12 @@ pub fn render_template(template: &str, scope: &TemplateScope) -> Result<String, 
 fn template_context(scope: &TemplateScope) -> serde_json::Value {
     let mut ctx = serde_json::Map::new();
     ctx.insert("event".to_string(), scope.event.clone());
-    if let Some(session) = &scope.session { ctx.insert("session".into(), session.clone()); }
-    if let Some(request) = &scope.request { ctx.insert("request".into(), request.clone()); }
+    if let Some(session) = &scope.session {
+        ctx.insert("session".into(), session.clone());
+    }
+    if let Some(request) = &scope.request {
+        ctx.insert("request".into(), request.clone());
+    }
     if let Some(doc) = scope.doc.clone() {
         ctx.insert("doc".to_string(), doc);
     }
@@ -974,7 +978,10 @@ fn utf8_char_len(first: u8) -> usize {
 }
 
 fn is_tracked_root(ident: &str) -> bool {
-    matches!(ident, "event" | "doc" | "args" | "group" | "node" | "ctx" | "session" | "request")
+    matches!(
+        ident,
+        "event" | "doc" | "args" | "group" | "node" | "ctx" | "session" | "request"
+    )
 }
 
 fn is_ident_start(c: u8) -> bool {

@@ -575,7 +575,8 @@ impl Tool for SessionHistoryTool {
         let action = validate_action(args.action.as_deref())?;
         let output = match action {
             SessionHistoryAction::List => {
-                let mut snapshot = load_session_history_snapshot(&self.node, &self.agent_did, args.limit).await?;
+                let mut snapshot =
+                    load_session_history_snapshot(&self.node, &self.agent_did, args.limit).await?;
                 let current = crate::tool_call_lifecycle::runtime::current_tool_runtime_context();
                 for row in &mut snapshot.sessions {
                     row.is_current = current.as_ref().is_some_and(|context| {
@@ -585,13 +586,16 @@ impl Tool for SessionHistoryTool {
                             .zip(context.session_id.as_deref())
                             .is_some_and(|(owner, session)| {
                                 is_current_session(
-                                    owner, session, &snapshot.agent_did, &row.session_id,
+                                    owner,
+                                    session,
+                                    &snapshot.agent_did,
+                                    &row.session_id,
                                 )
                             })
                     });
                 }
                 serde_json::to_value(snapshot)
-            },
+            }
             SessionHistoryAction::Get => {
                 let session_id = args
                     .session_id
@@ -2108,7 +2112,9 @@ mod tests {
                     identity.did(),
                 ),
             );
-            crate::sign_agent_request_create(identity, &mut request).await.unwrap();
+            crate::sign_agent_request_create(identity, &mut request)
+                .await
+                .unwrap();
             ConfigAccess::write_local(
                 &node,
                 "test.sessions.current.request",
@@ -2121,7 +2127,11 @@ mod tests {
         let list = || async {
             let output = Tool::call(
                 &tool,
-                SessionHistoryParams { action: Some("list".into()), limit: Some(10), session_id: None },
+                SessionHistoryParams {
+                    action: Some("list".into()),
+                    limit: Some(10),
+                    session_id: None,
+                },
             )
             .await
             .unwrap();
@@ -2132,8 +2142,12 @@ mod tests {
                 row.behavior_id.as_deref() == Some("shared-behavior")
                     && row.latest_request_id.as_deref() != Some("foreign-latest-request")
             }));
-            snapshot.sessions.into_iter().filter(|row| row.is_current)
-                .map(|row| row.session_id).collect::<Vec<_>>()
+            snapshot
+                .sessions
+                .into_iter()
+                .filter(|row| row.is_current)
+                .map(|row| row.session_id)
+                .collect::<Vec<_>>()
         };
         let scoped_list = |agent_did: String, session_id: &str| {
             scope_tool_request_identity(
@@ -2157,7 +2171,9 @@ mod tests {
         );
         assert_eq!(a, vec!["session-a"]);
         assert_eq!(b, vec!["session-b"]);
-        assert!(scoped_list(other.did().to_owned(), "session-a").await.is_empty());
+        assert!(scoped_list(other.did().to_owned(), "session-a")
+            .await
+            .is_empty());
         assert!(list().await.is_empty());
     }
 
