@@ -3,7 +3,9 @@ use crate::config_client::ConfigApplyTxn;
 use crate::graphql::escape_graphql_string;
 use anyhow::{ensure, Result};
 use gents_protocol::trigger_delivery::{FireIdentity, TriggerFire};
-pub(crate) use recovery::{recover_outcomes, recover_outcomes_in_txn};
+pub(crate) use recovery::recover_outcomes;
+#[cfg(test)]
+pub(crate) use recovery::recover_outcomes_in_txn;
 
 #[derive(Clone)]
 pub(crate) struct PreparedFire {
@@ -99,6 +101,7 @@ fn assignment_replaced(fire: &TriggerFire, binding: Option<&GoalOutcomeBinding>)
         })
 }
 
+#[cfg(test)]
 pub(crate) async fn stage_fire_request(
     txn: &ConfigApplyTxn<'_>,
     fire: &TriggerFire,
