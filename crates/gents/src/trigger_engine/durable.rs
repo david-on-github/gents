@@ -92,10 +92,18 @@ pub(crate) async fn stage_fire_request(
     Ok(true)
 }
 
+pub(crate) fn outcome_source_allowed(source_collection: &str, emit_outcome: bool) -> bool {
+    source_collection != "FireOutcome" || !emit_outcome
+}
+
 pub(crate) async fn stage_fire_receipt(
     txn: &ConfigApplyTxn<'_>,
     fire: &TriggerFire,
 ) -> Result<bool> {
+    ensure!(
+        outcome_source_allowed(&fire.identity.source_collection, fire.emit_outcome),
+        "a Task sourced from FireOutcome cannot emit another FireOutcome"
+    );
     ensure!(
         fire.fire_key == fire_key(&fire.identity),
         "noncanonical fire identity"

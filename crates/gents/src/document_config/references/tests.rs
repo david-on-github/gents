@@ -149,6 +149,16 @@ fn trigger_scope_checks_use_bound_task_and_source_for_both_templates() {
         .validate()
     };
     validate(base.clone()).unwrap();
+    let mut outcome = base.clone();
+    outcome["triggers"][0]["source"] = json!({"kind":"event","event_source_id":"event"});
+    outcome["event_sources"][0]["source_collection"] = json!("FireOutcome");
+    validate(outcome.clone()).unwrap();
+    outcome["tasks"][0]["emit_outcome"] = json!(true);
+    let error = validate(outcome.clone()).unwrap_err();
+    assert!(error.to_string().contains("sources FireOutcome"));
+    outcome["event_sources"][0]["source_collection"] = json!("Records");
+    validate(outcome).unwrap();
+
     for field in ["prompt_template", "goal_objective_template"] {
         for template in ["{{ doc.name }}", "{{ args.name }}", "{{ group.documents }}"] {
             let mut invalid = base.clone();

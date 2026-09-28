@@ -17,6 +17,15 @@ use crate::graphql::{escape_graphql_string, graphql_with_transaction_retry};
 
 pub const SESSION_HISTORY_TOOL_NAME: &str = "sessions";
 
+pub(crate) fn is_current_session(
+    caller_owner: &str,
+    caller_session: &str,
+    listed_owner: &str,
+    listed_session: &str,
+) -> bool {
+    caller_owner == listed_owner && caller_session == listed_session
+}
+
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 1000;
 const REQUEST_SCAN_LIMIT: usize = 5000;
@@ -567,11 +576,19 @@ impl Tool for SessionHistoryTool {
         let output = match action {
             SessionHistoryAction::List => {
                 let mut snapshot = load_session_history_snapshot(&self.node, &self.agent_did, args.limit).await?;
-                let current = crate::tool_call_lifecycle::runtime::current_tool_runtime_context()
-                    .filter(|context| context.agent_did.as_deref() == Some(snapshot.agent_did.as_str()))
-                    .and_then(|context| context.session_id);
+                let current = crate::tool_call_lifecycle::runtime::current_tool_runtime_context();
                 for row in &mut snapshot.sessions {
-                    row.is_current = current.as_deref() == Some(row.session_id.as_str());
+                    row.is_current = current.as_ref().is_some_and(|context| {
+                        context
+                            .agent_did
+                            .as_deref()
+                            .zip(context.session_id.as_deref())
+                            .is_some_and(|(owner, session)| {
+                                is_current_session(
+                                    owner, session, &snapshot.agent_did, &row.session_id,
+                                )
+                            })
+                    });
                 }
                 serde_json::to_value(snapshot)
             },
