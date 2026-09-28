@@ -7,7 +7,6 @@ pub(super) struct PendingCheckpoint {
     trigger_id: String,
     collection: String,
     position: String,
-    source_doc_id: String,
     result: tokio::sync::oneshot::Receiver<super::super::FireResult>,
 }
 
@@ -28,34 +27,20 @@ impl EventSource {
             let advanced =
                 ConfigAccess::transact_local(&self.node, None, "trigger.advance_arrival", |txn| {
                     Box::pin(async {
-                        if matches!(
-                            result,
-                            Ok(super::super::FireResult::Fired { .. }
-                                | super::super::FireResult::Duplicate { .. })
-                        ) {
-                            crate::config_client::event_source_cursor::acknowledge_fire(
-                                txn,
-                                &pending.owner,
-                                &pending.trigger_id,
-                                &pending.collection,
-                                &pending.source_doc_id,
-                                &pending.position,
-                            )
-                            .await
-                        } else {
-                            crate::config_client::event_source_cursor::exclude_arrival(
-                                txn,
-                                &pending.owner,
-                                &pending.trigger_id,
-                                &pending.collection,
-                                &pending.position,
-                            )
-                            .await
-                        }
+                        crate::config_client::event_source_cursor::checkpoint_prefix(
+                            txn,
+                            &pending.owner,
+                            &pending.trigger_id,
+                            &pending.collection,
+                            &pending.position,
+                            matches!(&result, Ok(super::super::FireResult::Skipped { reason })
+                                if reason == super::super::SERIAL_BUSY),
+                        )
+                        .await
                     })
                 })
                 .await;
-            self.durable_ready = advanced.is_ok();
+            self.durable_ready = advanced.as_ref().copied().unwrap_or(false);
             if let Err(error) = advanced {
                 tracing::warn!(%error, trigger_id = %pending.trigger_id, "arrival checkpoint remains pending");
             }
@@ -145,6 +130,9 @@ impl EventSource {
                 )
                 .await;
             let Some(mut intent) = build.intents.pop() else {
+                if build.correlation_pending {
+                    self.commit_delivery_seen_state(&trigger.source_collection, doc_id, &build);
+                }
                 anyhow::bail!("source document {doc_id} could not be rendered into a fire")
             };
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -158,7 +146,6 @@ impl EventSource {
                 trigger_id: trigger.trigger_id.clone(),
                 collection: trigger.source_collection.clone(),
                 position: position.into(),
-                source_doc_id: doc_id.into(),
                 result: rx,
             });
             return Ok(Some(intent));

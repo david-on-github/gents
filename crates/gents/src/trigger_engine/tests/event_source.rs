@@ -2073,6 +2073,9 @@ async fn event_source_fans_out_one_event_across_multiple_matching_triggers() {
         .await
         .expect("next_fire timed out on the first fan-out intent")
         .expect("next_fire returned None instead of emitting the first intent");
+    (first.on_result)(FireResult::Skipped {
+        reason: "fixture observes intents without admission".into(),
+    });
     let second = tokio::time::timeout(Duration::from_secs(2), source.next_fire())
         .await
         .expect("next_fire timed out on the second fan-out intent; fan-out dropped it?")

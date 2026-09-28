@@ -182,6 +182,9 @@ pub struct EventSource {
     // correlation-incomplete sibling. This prevents a ready sibling from
     // firing again when a follow-up update supplies the missing correlation.
     partially_seen_triggers: HashMap<SourceDocumentKey, HashSet<String>>,
+    /// Startup reconstructs incomplete correlations/live graph rows that predate
+    /// the registration cursor; these retain the existing deferred-delivery owner.
+    startup_deferred_documents: HashSet<SourceDocumentKey>,
     pub(super) deferrals: super::deferred_delivery::DeferralWatch,
     pending_intents: Mutex<VecDeque<FireIntent>>,
     group_timers: Arc<Mutex<HashMap<GroupTrackingKey, GroupTimer>>>,
@@ -333,6 +336,7 @@ impl EventSource {
             durable_after_trigger: None,
             seen_docs: HashMap::new(),
             partially_seen_triggers: HashMap::new(),
+            startup_deferred_documents: HashSet::new(),
             deferrals: Default::default(),
             pending_intents: Mutex::new(VecDeque::new()),
             group_timers: Arc::new(Mutex::new(HashMap::new())),
@@ -436,6 +440,38 @@ impl EventSource {
             );
         }
 
+        for trigger in snapshot.active_event_triggers().values() {
+            if trigger.event_kind != "created"
+                || trigger.fire_mode != crate::runtime_snapshot::EventTriggerFireMode::PerDocument
+            {
+                continue;
+            }
+            let Ok(delivery) = Self::delivery(snapshot, trigger) else {
+                continue;
+            };
+            let owner = delivery.owner();
+            if let Err(error) = crate::config_client::ConfigAccess::transact_local(
+                &self.node,
+                None,
+                "trigger.seed_arrival_cursor",
+                |txn| {
+                    Box::pin(async move {
+                        crate::config_client::event_source_cursor::load_or_seed_for_source(
+                            txn,
+                            owner,
+                            &trigger.trigger_id,
+                            &trigger.source_collection,
+                        )
+                        .await
+                        .map(|_| ())
+                    })
+                },
+            )
+            .await
+            {
+                tracing::warn!(%error, trigger_id = %trigger.trigger_id, "arrival registration remains pending");
+            }
+        }
         self.desired_collections = desired;
         self.durable_ready = true;
         self.subscription_seed_failures
@@ -693,6 +729,10 @@ impl EventSource {
             }
         }
         for (doc_id, pending_trigger_ids) in &deferred_by_doc {
+            self.startup_deferred_documents.insert(SourceDocumentKey {
+                source_collection: collection.to_owned(),
+                source_doc_id: doc_id.clone(),
+            });
             doc_ids.remove(doc_id);
             self.mark_triggers_seen(
                 collection,
@@ -756,6 +796,10 @@ impl EventSource {
     }
 
     fn mark_seen(&mut self, collection: &str, doc_id: &str) {
+        self.startup_deferred_documents.remove(&SourceDocumentKey {
+            source_collection: collection.to_owned(),
+            source_doc_id: doc_id.to_owned(),
+        });
         self.seen_docs
             .entry(collection.to_string())
             .or_default()
@@ -1809,6 +1853,29 @@ impl EventSource {
         if let Some(intent) = self.reconcile_due_and_rotating_groups().await {
             return Some(intent);
         }
+        let snapshot = self.snapshot_rx.borrow().clone();
+        let mut deferred = self
+            .startup_deferred_documents
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        deferred.sort_by(|a, b| {
+            (&a.source_collection, &a.source_doc_id).cmp(&(&b.source_collection, &b.source_doc_id))
+        });
+        for doc in deferred {
+            let build = self
+                .build_intents_for_all_matching(
+                    snapshot.as_ref(),
+                    &doc.source_collection,
+                    &doc.source_doc_id,
+                    "created",
+                )
+                .await;
+            self.commit_delivery_seen_state(&doc.source_collection, &doc.source_doc_id, &build);
+            if let Some(intent) = self.take_first_and_queue_rest(build.intents) {
+                return Some(intent);
+            }
+        }
         self.durable_ready = true;
         self.next_durable_fire().await
     }
@@ -1986,7 +2053,15 @@ impl TriggerSource for EventSource {
                         event_kind,
                     )
                     .await;
-                build.intents.retain(|intent| intent.group_vars.is_some());
+                let startup_deferred =
+                    self.startup_deferred_documents
+                        .contains(&SourceDocumentKey {
+                            source_collection: collection_name.clone(),
+                            source_doc_id: doc_id.clone(),
+                        });
+                build
+                    .intents
+                    .retain(|intent| startup_deferred || intent.group_vars.is_some());
                 self.commit_delivery_seen_state(&collection_name, &doc_id, &build);
                 if build.intents.is_empty() {
                     continue;

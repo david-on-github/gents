@@ -129,10 +129,14 @@ async fn persisted_disable_blocks_stale_admission_and_exclusion_but_not_committe
         attempt: None,
         created_at: "2026-01-01T00:00:00Z".into(),
     };
+    let trigger_record = access.execute("{Trigger{_docID}}").await?;
+    let trigger_doc_id = trigger_record["data"]["Trigger"][0]["_docID"]
+        .as_str()
+        .unwrap();
     let create = crate::lifecycle::build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title(
         PIN_FIXED_DID, "behavior", "work", crate::lifecycle::ExecutionOrigin::Scheduled,
         crate::lifecycle::TriggerLineage {trigger_id:Some("trigger".into()), trigger_kind:Some("event".into()), source_doc_id:Some(doc_id.clone()), correlation:None, trigger_context:None},
-        None, None, &fire.request_id, &fire.session_id, Some(&key), None, None,
+        None, None, &fire.request_id, &fire.session_id, Some(&key), None, Some(trigger_doc_id),
     ).await?;
     publish(&access, vec![trigger(false)]).await?;
     assert!(
@@ -199,6 +203,26 @@ async fn source_only_replacement_seeds_disabled_consumers_before_later_arrivals(
     publish(&access, vec![source("WorkA")]).await?;
     assert_eq!(cursor(&access, "WorkA").await?, "0");
     assert_eq!(cursor(&access, "WorkB").await?, "1");
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn source_registered_before_collection_retains_its_first_arrival() -> Result<()> {
+    let (node, access) = fixture(false).await?;
+    publish(&access, vec![source("FutureWork")]).await?;
+    assert_eq!(cursor(&access, "FutureWork").await?, "0");
+    access
+        .add_schema("type FutureWork { label: String @immutable }")
+        .await?;
+    let first = create_source(&access, "FutureWork", "first").await?;
+    publish(&access, vec![trigger(true)]).await?;
+    assert_eq!(cursor(&access, "FutureWork").await?, "0");
+    let page = access.execute("{_documentArrivals(collection:\"FutureWork\",after:\"0\",limit:128){entries{docID cursor}}}").await?;
+    assert_eq!(
+        page["data"]["_documentArrivals"]["entries"],
+        json!([{"docID":first,"cursor":"1"}])
+    );
     node.shutdown().await;
     Ok(())
 }
