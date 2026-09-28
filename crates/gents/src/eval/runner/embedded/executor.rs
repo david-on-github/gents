@@ -1917,6 +1917,18 @@ mod tests {
         );
     }
 
+    /// Rows are read as [`crate::document_config::TriggerObservation`]s: a
+    /// row that is not one is a status that could not be read.
+    #[test]
+    fn a_trigger_row_that_is_not_a_trigger_observation_is_not_a_clean_read() {
+        assert_eq!(
+            errored_triggers(Some(
+                &json!({"Trigger": [{"trigger_id": "t", "last_status": 5}]})
+            )),
+            None
+        );
+    }
+
     /// An error a trigger recorded before the stage started belongs to an
     /// earlier stage, not to this one.
     #[tokio::test]
