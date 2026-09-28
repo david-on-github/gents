@@ -27,7 +27,7 @@ use crate::config_client::{
     apply_desired_state_plan, DesiredStateApplyDocument, DesiredStateApplyPlan,
 };
 use crate::defra_node::EmbeddedNode;
-use crate::document_config::{InferenceSampling, PackConfig};
+use crate::document_config::{InferenceSampling, PackConfig, TriggerObservation};
 use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome, RunningRuntime};
 use crate::eval::runner::embedded::observe::{
     await_terminal, classify_request_outcome, collect_request_evidence, poll_request,
@@ -931,7 +931,7 @@ async fn trigger_failure(
     let agent_did = escape_graphql_string(agent_did);
     let since = escape_graphql_string(since);
     let query = format!(
-        r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{agent_did}" }}, last_status: {{ _eq: "error" }}, last_attempt_at: {{ _geq: "{since}" }} }}) {{ trigger_id last_error }} }}"#
+        r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{agent_did}" }}, last_status: {{ _eq: "error" }}, last_attempt_at: {{ _geq: "{since}" }} }}) {{ trigger_id last_attempt_at last_status last_error }} }}"#
     );
     let errored =
         match graphql_with_transaction_retry(node, &query, "eval trial trigger status").await {
@@ -959,9 +959,8 @@ async fn trigger_failure(
     if errored.is_empty() {
         return None;
     }
-    let triggers = Value::Array(errored);
     tracing::warn!(
-        %triggers,
+        triggers = ?errored,
         trial_id = %trial_id,
         stage_id = %stage_id,
         "an eval trial trigger errored; the stage fails"
@@ -970,9 +969,9 @@ async fn trigger_failure(
 }
 
 /// The `Trigger` rows of a status read, or `None` when the response holds no
-/// such list: a read that returned nothing to read is not "no errors".
-fn errored_triggers(data: Option<&Value>) -> Option<Vec<Value>> {
-    data?.get("Trigger")?.as_array().cloned()
+/// list of them: a read that returned nothing to read is not "no errors".
+fn errored_triggers(data: Option<&Value>) -> Option<Vec<TriggerObservation>> {
+    serde_json::from_value(data?.get("Trigger")?.clone()).ok()
 }
 
 async fn runtime_exited(runtime: &RunningRuntime) {
