@@ -19,10 +19,8 @@ use crate::config_client::{ConfigAccess, ConfigApplyTxn, IdempotentTransactionRe
 use crate::graphql::{escape_graphql_string, response_has_documents};
 use crate::session;
 use crate::session::canonical_rows::{
-    decode_output_segment_row, output_segment_create_variables,
-    transcript_message_create_variables, OutputSegmentRow, TranscriptMessageRow,
-    AGENT_OUTPUT_SEGMENT_FIELDS, CREATE_AGENT_MESSAGE_MUTATION,
-    CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
+    output_segment_create_variables, transcript_message_create_variables, OutputSegmentRow,
+    TranscriptMessageRow, CREATE_AGENT_MESSAGE_MUTATION, CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,12 +48,10 @@ pub(in crate::lifecycle) async fn request_segments(
     session_id: &str,
     requester: Option<&str>,
 ) -> Result<Vec<OutputSegmentRow>> {
-    let request = escape_graphql_string(request_doc_id);
-    let scope = crate::session::session_scope_filter(agent, session_id, requester);
     let value = txn
-        .execute_local_response(&format!(
-            "{{ AgentOutputSegment(filter: {{ {scope}, request_doc_id: {{ _eq: \"{request}\" }} }}) {{ {AGENT_OUTPUT_SEGMENT_FIELDS} }} }}"
-        ))
+        .execute_local_response(
+            &crate::session::canonical_rows::request_output_segments_query(request_doc_id),
+        )
         .await?;
     let rows = value
         .data
@@ -63,7 +59,12 @@ pub(in crate::lifecycle) async fn request_segments(
         .and_then(|data| data.get("AgentOutputSegment"))
         .and_then(serde_json::Value::as_array)
         .context("AgentOutputSegment query omitted rows")?;
-    rows.iter().map(decode_output_segment_row).collect()
+    crate::session::canonical_rows::decode_scoped_request_output_segments(
+        rows,
+        agent,
+        Some(session_id),
+        requester,
+    )
 }
 
 async fn validate_selection(
@@ -265,6 +266,7 @@ pub(crate) async fn recover_expired_generation_with_facts(
                     .count();
                 let agent = row.agent_did.as_deref().context("missing request agent")?;
                 let mut reader = session::TxnCanonicalReader::new(txn, agent, row.requester_did.as_deref());
+                reader.observe_headers(&headers);
                 validate_selection(&mut reader, &headers, &row, row.terminal_output.as_ref().expect("checked"))
                     .await?;
                 if let Some(choice) = &selection_choice {
@@ -395,10 +397,14 @@ pub(crate) async fn recover_expired_generation_with_facts(
                     &segments,
                 )?;
             }
+            let read = existing_headers.len();
             let mut headers = existing_headers;
             headers.extend(published.iter().cloned());
             // Every recovery write to canonical output precedes this reader.
+            // Only headers read back from the store are observed; published
+            // ones are resolved by lookup.
             let mut reader = session::TxnCanonicalReader::new(txn, agent, row.requester_did.as_deref());
+            reader.observe_headers(&headers[..read]);
             for header in &published {
                 reader.load_message(&header.doc_id).await?;
             }

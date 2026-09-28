@@ -83,6 +83,45 @@ pub fn decode_transcript_message_row(row: &serde_json::Value) -> Result<Transcri
     Ok(TranscriptMessageRow { doc_id, message })
 }
 
+/// Read of every `AgentOutputSegment` of one physical request, filtered by
+/// the request alone; apply the principal scope with
+/// [`decode_scoped_request_output_segments`].
+///
+/// DefraDB plans a query over one single-field index, choosing the first
+/// declared among equally scored equality filters, and treats `_docID` as a
+/// residual filter. `agent_did` precedes `request_doc_id` on this
+/// collection, so a filter that also names the principal reads every segment
+/// the principal ever wrote. Appends and terminalization read here under the
+/// process-wide write gate, where that cost would grow with all past output.
+pub fn request_output_segments_query(request_doc_id: &str) -> String {
+    format!(
+        r#"{{ AgentOutputSegment(filter: {{ request_doc_id: {{ _eq: "{}" }} }}) {{ {AGENT_OUTPUT_SEGMENT_FIELDS} }} }}"#,
+        gents_protocol::graphql::escape_graphql_string(request_doc_id)
+    )
+}
+
+/// Decode the rows of [`request_output_segments_query`] that lie in one
+/// exact principal scope, and in `session_id` when given. Rows outside the
+/// scope are dropped undecoded, exactly as a scoped store filter would.
+pub fn decode_scoped_request_output_segments(
+    rows: &[serde_json::Value],
+    agent_did: &str,
+    session_id: Option<&str>,
+    requester_did: Option<&str>,
+) -> Result<Vec<OutputSegmentRow>> {
+    fn text<'a>(row: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+        row.get(field).and_then(serde_json::Value::as_str)
+    }
+    rows.iter()
+        .filter(|row| {
+            text(row, "agent_did") == Some(agent_did)
+                && text(row, "requester_did") == requester_did
+                && session_id.is_none_or(|session| text(row, "session_id") == Some(session))
+        })
+        .map(decode_output_segment_row)
+        .collect()
+}
+
 /// Create mutation for one canonical `AgentOutputSegment` row. The document
 /// travels as a typed GraphQL variable, never as rendered GraphQL text: JSON
 /// keys (including arbitrary `additional_params` object keys) and JSON empty
