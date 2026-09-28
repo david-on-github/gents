@@ -143,3 +143,40 @@ async fn generated_fire_transactions_are_atomic_and_owner_scoped() {
         assert!(post.outcomes.is_empty());
     }
 }
+
+#[tokio::test]
+async fn generated_terminal_outcomes_recover_once_without_chaining() {
+    for case in contract()["outcomes"].as_array().unwrap() {
+        let node = defra_node::EmbeddedNode::builder().build().await.unwrap();
+        ensure_runtime_schemas(&node).await.unwrap();
+        let pre: State = decode(&case["pre"]);
+        let request = &pre.requests[0];
+        let fire = receipt(&request.fire, 0);
+        let publish = || crate::config_client::ConfigAccess::transact_local(&node, None,
+            "test.terminal_outcome", |txn| Box::pin(async {
+                durable::stage_outcome(txn, &fire, &request.goal_status, request.terminal,
+                    if request.fire.goal_backed { &request.goal_status } else { "completed" },
+                    "contract terminal", "2030-01-01T00:01:00Z").await
+            }));
+        if !pre.outcomes.is_empty() { publish().await.unwrap(); }
+        let rollback: anyhow::Result<()> = crate::config_client::ConfigAccess::transact_local(
+            &node, None, "test.outcome_precommit_crash", |txn| Box::pin(async {
+                durable::stage_outcome(txn, &fire, &request.goal_status, request.terminal,
+                    "completed", "contract terminal", "2030-01-01T00:01:00Z").await?;
+                anyhow::bail!("injected crash before outcome commit")
+            })).await;
+        assert!(rollback.is_err());
+        publish().await.unwrap();
+        publish().await.unwrap();
+        let response = crate::graphql::graphql_with_transaction_retry(&node,
+            "{ FireOutcome { handoff_id source_handoff_id } }", "test.outcomes").await.unwrap();
+        let post: State = decode(&case["post"]);
+        let data = response.data.unwrap();
+        let outcomes = data["FireOutcome"].as_array().unwrap();
+        assert_eq!(outcomes.len(), post.outcomes.len(), "{}", case["name"]);
+        for outcome in outcomes {
+            assert_eq!(outcome["handoff_id"], format!("outcome:{}", fire.fire_key));
+            assert_eq!(outcome["source_handoff_id"], fire.source_handoff_id.as_deref().unwrap());
+        }
+    }
+}
