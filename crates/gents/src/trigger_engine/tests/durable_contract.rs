@@ -261,7 +261,7 @@ async fn persisted_outcome_requests(
 ) -> Vec<gents_protocol::row::AgentRequestRow> {
     let response = access
         .execute(&format!(
-            "{{AgentRequest {{{}}}}}",
+            "{{AgentRequest {{{} lifecycle_state}}}}",
             crate::watcher::AGENT_REQUEST_FIELDS
         ))
         .await
@@ -420,7 +420,9 @@ async fn generated_terminal_outcome_action_traces_use_native_owners() {
                     .unwrap();
                 assert_eq!(
                     row.lifecycle_state.is_some_and(|state| state.is_terminal()),
-                    expected_request.terminal
+                    expected_request.terminal,
+                    "{} step {index}: request {} terminal state",
+                    trace["name"], row.request_id
                 );
                 assert_eq!(
                     row.lifecycle_state.is_some_and(|state| matches!(
@@ -428,7 +430,9 @@ async fn generated_terminal_outcome_action_traces_use_native_owners() {
                         gents_protocol::request_lifecycle::RequestLifecycleState::Claimed
                             | gents_protocol::request_lifecycle::RequestLifecycleState::Processing
                     )),
-                    expected_request.running
+                    expected_request.running,
+                    "{} step {index}: request {} running state",
+                    trace["name"], row.request_id
                 );
                 let receipts = response["data"]["TriggerFire"].as_array().unwrap();
                 let receipt = receipts
@@ -439,7 +443,9 @@ async fn generated_terminal_outcome_action_traces_use_native_owners() {
                     receipt["goal_assignment_applied"]
                         .as_bool()
                         .unwrap_or(false),
-                    expected_request.goal_assignment_applied
+                    expected_request.goal_assignment_applied,
+                    "{} step {index}: request {} Goal assignment",
+                    trace["name"], row.request_id
                 );
             }
             let goals = response["data"]["Goal"].as_array().unwrap();
