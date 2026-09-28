@@ -702,6 +702,14 @@ mod tests {
             "{task}"
         );
         assert!(task.contains("every {{ variable }}"), "{task}");
+        assert!(
+            task.contains("use no {{ variable }} the current template does not already use"),
+            "{task}"
+        );
+        assert!(
+            task.contains("node.node_did, node.behavior_id, ctx.now"),
+            "{task}"
+        );
     }
 
     #[tokio::test]
