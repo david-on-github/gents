@@ -39,6 +39,14 @@ impl TargetField {
 
     /// Where the field sits in a raw `pack_config.json`: the array, the
     /// document id key and the field.
+    /// The request naming this field of the document `id`.
+    pub fn job_target(&self, id: &str) -> JobTarget {
+        match self {
+            Self::AgentContextSystemPrompt => JobTarget::Context,
+            Self::TaskPromptTemplate => JobTarget::Task(id.to_owned()),
+        }
+    }
+
     pub fn pack_slot(&self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::AgentContextSystemPrompt => ("contexts", "context_id", "system_prompt"),
@@ -57,10 +65,7 @@ pub struct Target {
 impl Target {
     /// The request that names this target.
     pub fn job_target(&self) -> JobTarget {
-        match self.field {
-            TargetField::AgentContextSystemPrompt => JobTarget::Context,
-            TargetField::TaskPromptTemplate => JobTarget::Task(self.id.clone()),
-        }
+        self.field.job_target(&self.id)
     }
 }
 

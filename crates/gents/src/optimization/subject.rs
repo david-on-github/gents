@@ -46,15 +46,6 @@ pub struct MaterializedPack {
     pub prompt_asset: Option<String>,
 }
 
-impl MaterializedPack {
-    fn job_target(&self) -> JobTarget {
-        match self.target {
-            TargetField::AgentContextSystemPrompt => JobTarget::Context,
-            TargetField::TaskPromptTemplate => JobTarget::Task(self.target_id.clone()),
-        }
-    }
-}
-
 /// Read the pack at `dir` as the subject of `behavior_id`, optimizing the
 /// behavior's context or, for a task target, that task.
 pub fn materialize_pack(
@@ -244,7 +235,12 @@ pub fn materialize_candidate(
         }
     }
     write_pack_files(dir, &files)?;
-    materialize_pack(dir, owner, &baseline.behavior_id, &baseline.job_target())
+    materialize_pack(
+        dir,
+        owner,
+        &baseline.behavior_id,
+        &baseline.target.job_target(&baseline.target_id),
+    )
 }
 
 #[cfg(test)]
