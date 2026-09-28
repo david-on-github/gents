@@ -242,19 +242,30 @@ impl TrialExecutor for EmbeddedExecutor {
     /// read back here is classified as a deadline.
     async fn recollect(&self, at: &TrialLocator, captures: &[Capture]) -> Option<TrialEvidence> {
         let hint = at.home_hint.as_deref()?;
-        // Read back from the database: it stays a path inside `runs_dir`.
+        let trial_dir = self.runs_dir.join(hint);
+        let dir = trial_dir.join("home");
+        // Read back from the database, so it is checked the way `collect_files`
+        // checks a glob: lexically, then by where the trial directory and its
+        // home resolve, since a symlink under `runs_dir` can lead out of it.
+        let resolved_runs = self.runs_dir.canonicalize().ok();
+        let inside = |path: &Path| {
+            resolved_runs.as_ref().is_some_and(|runs| {
+                path.canonicalize()
+                    .is_ok_and(|resolved| resolved.starts_with(runs))
+            })
+        };
         if !Path::new(hint)
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
+            || !inside(&trial_dir)
+            || !inside(&dir)
         {
             tracing::warn!(
                 home_hint = hint,
-                "eval trial home hint leaves the runs directory"
+                "eval trial home hint does not resolve inside the runs directory"
             );
             return None;
         }
-        let trial_dir = self.runs_dir.join(hint);
-        let dir = trial_dir.join("home");
         let home =
             match opened(move || async move { EmbeddedHome::open_retained(&dir).await }).await {
                 Ok(home) => home,
