@@ -397,6 +397,82 @@ fn snapshot_with_event_triggers(
     Arc::new(resolved.activate(generation, HashMap::new()))
 }
 
+async fn persist_event_bindings(
+    node: &Arc<defra_node::EmbeddedNode>,
+    snapshot: &ActiveRuntimeSnapshot,
+) {
+    let access = crate::config_client::ConfigAccess::Local(node.clone());
+    let owner = &snapshot.principal.as_ref().unwrap().agent_did;
+    for trigger in snapshot.active_event_triggers().values() {
+        access.transact("test.event_binding", |txn| Box::pin(async move {
+            txn.execute_with_variables(
+                "mutation($input:EventSourceMutationInputArg!){create_EventSource(input:$input){_docID}}",
+                &serde_json::json!({"input":{"agent_did":owner,"event_source_id":trigger.trigger_id,
+                    "source_collection":trigger.source_collection,"event_kind":"created",
+                    "filter":trigger.filter,"correlation_field":trigger.correlation_field}}),
+            ).await?;
+            txn.execute_with_variables(
+                "mutation($input:TriggerMutationInputArg!){create_Trigger(input:$input){_docID}}",
+                &serde_json::json!({"input":{"agent_did":owner,"trigger_id":trigger.trigger_id,
+                    "task_id":trigger.task_id,"enabled":true,"concurrency":trigger.concurrency,
+                    "source":{"kind":"event","event_source_id":trigger.trigger_id}}}),
+            ).await?;
+            Ok(())
+        })).await.unwrap();
+    }
+}
+
+async fn admit_observed_event(
+    node: &Arc<defra_node::EmbeddedNode>,
+    intent: &FireIntent,
+) -> FireResult {
+    use gents_protocol::trigger_delivery::{FireIdentity, TriggerFire};
+    let identity = FireIdentity {
+        owner_did: stub_principal().agent_did.clone(),
+        trigger_id: intent.trigger_id.clone().unwrap(),
+        source_collection: intent.event_vars["source_collection"]
+            .as_str()
+            .unwrap()
+            .into(),
+        source_doc_id: intent.event_vars["source_doc_id"].as_str().unwrap().into(),
+    };
+    let fire = TriggerFire {
+        fire_key: identity.fire_key(),
+        request_id: identity.request_id(),
+        session_id: identity.session_id(),
+        identity,
+        task_id: intent.task.task_id.clone(),
+        goal_id: None,
+        goal_objective: None,
+        goal_token_budget: None,
+        goal_assignment_applied: false,
+        emit_outcome: false,
+        queued_serial: false,
+        source_handoff_id: None,
+        reply_session_id: None,
+        shard_id: None,
+        attempt: None,
+        created_at: "2030-01-01T00:00:00Z".into(),
+    };
+    let mutation = format!("mutation {{create_AgentRequest(input: {{request_id: \"{}\", agent_did: \"{}\", session_id: \"{}\", behavior_id: \"general\", content: \"fixture delivery\", purpose: \"normal\", lifecycle_state: \"pending\", created_at: \"2030-01-01T00:00:00Z\"}}) {{_docID}}}}",
+        escape_graphql_string(&fire.request_id), escape_graphql_string(&fire.identity.owner_did), escape_graphql_string(&fire.session_id));
+    crate::config_client::ConfigAccess::Local(node.clone())
+        .transact("test.event_admission", |txn| {
+            let fire = &fire;
+            let mutation = &mutation;
+            Box::pin(async move {
+                super::super::durable::stage_fire_request(txn, fire, mutation)
+                    .await
+                    .map(|_| ())
+            })
+        })
+        .await
+        .unwrap();
+    FireResult::Fired {
+        request_id: fire.request_id,
+    }
+}
+
 /// Reconciling against a fresh snapshot whose `active_event_triggers`
 /// reference a single source collection should populate that collection in
 /// the filter set. Publishing a replacement snapshot that swaps the source
@@ -611,6 +687,7 @@ async fn a_callback_result_fires_its_bindings_event_source_once() {
         1,
         HashMap::from([("trigger-after-callback".to_string(), trigger)]),
     );
+    persist_event_bindings(&node, snapshot.as_ref()).await;
     let (_tx, rx) = watch::channel(snapshot.clone());
     let mut source = EventSource::new(rx, node.clone(), CancellationToken::new());
     source.reconcile_subscriptions(snapshot.as_ref()).await;
@@ -648,6 +725,8 @@ async fn a_callback_result_fires_its_bindings_event_source_once() {
     let doc_vars = intent.doc_vars.as_ref().expect("hydrated result");
     assert_eq!(doc_vars["invocation_id"].as_str(), Some("inv-wanted"));
 
+    let result = admit_observed_event(&node, &intent).await;
+    (intent.on_result)(result);
     let extra = tokio::time::timeout(Duration::from_millis(500), source.next_fire()).await;
     assert!(
         extra.is_err(),
@@ -935,6 +1014,7 @@ async fn generated_sibling_delivery_case_preserves_pending_correlation() {
             (pending.trigger_id.clone(), pending),
         ]),
     );
+    persist_event_bindings(&node, snapshot.as_ref()).await;
     let (_tx, rx) = watch::channel(snapshot.clone());
     let mut source = EventSource::new(rx, node.clone(), CancellationToken::new());
     source.reconcile_subscriptions(snapshot.as_ref()).await;
@@ -972,6 +1052,9 @@ async fn generated_sibling_delivery_case_preserves_pending_correlation() {
         case.post.handled,
         "observed ready delivery"
     );
+
+    let result = admit_observed_event(&node, &first).await;
+    (first.on_result)(result);
 
     let mutation = format!(
         r#"mutation {{
@@ -1305,6 +1388,7 @@ async fn event_source_filter_probe_gates_fire_on_operator_filter() {
         1,
         HashMap::from([("trigger-filtered".to_string(), trigger)]),
     );
+    persist_event_bindings(&node, snapshot.as_ref()).await;
     let (_tx, rx) = watch::channel(snapshot.clone());
 
     let cancel = CancellationToken::new();
@@ -2046,6 +2130,7 @@ async fn event_source_fans_out_one_event_across_multiple_matching_triggers() {
             ("trigger-beta".to_string(), trigger_beta),
         ]),
     );
+    persist_event_bindings(&node, snapshot.as_ref()).await;
     let (_tx, rx) = watch::channel(snapshot.clone());
     let cancel = CancellationToken::new();
     let mut source = EventSource::new(rx, node.clone(), cancel.clone());
@@ -2073,9 +2158,8 @@ async fn event_source_fans_out_one_event_across_multiple_matching_triggers() {
         .await
         .expect("next_fire timed out on the first fan-out intent")
         .expect("next_fire returned None instead of emitting the first intent");
-    (first.on_result)(FireResult::Skipped {
-        reason: "fixture observes intents without admission".into(),
-    });
+    let result = admit_observed_event(&node, &first).await;
+    (first.on_result)(result);
     let second = tokio::time::timeout(Duration::from_secs(2), source.next_fire())
         .await
         .expect("next_fire timed out on the second fan-out intent; fan-out dropped it?")
