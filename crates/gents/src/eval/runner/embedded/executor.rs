@@ -249,21 +249,28 @@ impl TrialExecutor for EmbeddedExecutor {
         let hint = at.home_hint.as_deref()?;
         let trial_dir = self.runs_dir.join(hint);
         let dir = trial_dir.join("home");
+        let workspace = workspace_dir(&trial_dir);
         // Read back from the database, so it is checked the way `collect_files`
-        // checks a glob: lexically, then by where the trial directory and its
-        // home resolve, since a symlink under `runs_dir` can lead out of it.
-        let resolved_runs = self.runs_dir.canonicalize().ok();
-        let inside = |path: &Path| {
-            resolved_runs.as_ref().is_some_and(|runs| {
-                path.canonicalize()
-                    .is_ok_and(|resolved| resolved.starts_with(runs))
-            })
+        // checks a glob: lexically, then by where the trial directory, its home
+        // and its workspace resolve, since a symlink under `runs_dir` can lead
+        // out of it. A path that is not there resolves nowhere: a missing home
+        // is reported as unreadable when it is opened, and a missing workspace
+        // only leaves the file captures empty.
+        let resolved_runs = self.runs_dir.canonicalize();
+        let outside = |path: &Path| match path.canonicalize() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            resolved => !resolved.is_ok_and(|resolved| {
+                resolved_runs
+                    .as_ref()
+                    .is_ok_and(|runs| resolved.starts_with(runs))
+            }),
         };
         if !Path::new(hint)
             .components()
             .all(|component| matches!(component, Component::Normal(_)))
-            || !inside(&trial_dir)
-            || !inside(&dir)
+            || outside(&trial_dir)
+            || outside(&dir)
+            || outside(&workspace)
         {
             tracing::warn!(
                 home_hint = hint,
@@ -296,7 +303,6 @@ impl TrialExecutor for EmbeddedExecutor {
             }
         };
 
-        let workspace = workspace_dir(&trial_dir);
         let mut stages = Vec::new();
         for (index, request) in requests.into_iter().enumerate() {
             let evidence = collect_request_evidence(&home.node, &request.request_id)
