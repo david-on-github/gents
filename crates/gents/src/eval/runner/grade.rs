@@ -322,6 +322,32 @@ mod tests {
         assert!(feedback.contains("failure_kind deadline"), "{feedback}");
     }
 
+    /// A failed stage yields one row per check but names its failure once, on
+    /// the first acceptance row, since the proposer reads only acceptance rows.
+    #[test]
+    fn a_failed_stage_names_its_failure_on_one_acceptance_row_only() {
+        let ev = ScriptedExecutor::failed_evidence("did:x", "s1", OutcomeKind::Deadline, None);
+        let mut case = case(&[(
+            "s1",
+            &[
+                ("captured_rows_count", json!({"name":"items","min":1})),
+                ("captured_rows_count", json!({"name":"other","min":1})),
+            ],
+        )]);
+        let with_feedback = |case: &EvalCase| -> Vec<bool> {
+            grade(case, &ev, &CheckRegistry::builtin())
+                .iter()
+                .map(|row| {
+                    assert_eq!(row.raw["reason_code"], "stage_failed");
+                    row.feedback.is_some()
+                })
+                .collect()
+        };
+        assert_eq!(with_feedback(&case), [true, false]);
+        case.stages[0].checks[0].tier = EvalTier::Development;
+        assert_eq!(with_feedback(&case), [false, true]);
+    }
+
     #[test]
     fn a_provider_failure_without_a_reason_is_downgraded_to_unknown() {
         let ev = ScriptedExecutor::failed_evidence("did:x", "s1", OutcomeKind::Provider, None);
