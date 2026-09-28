@@ -1456,6 +1456,13 @@ pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
             function: "event_delivery_transition_cases_match_contract",
         },
         ConformanceConsumer::RustTest {
+            id: "watcher::tests::generated_release_cases_preserve_native_session_order",
+            package: "gents",
+            source_path: "crates/gents/src/watcher/tests.rs",
+            module_path: "watcher::tests",
+            function: "generated_release_cases_preserve_native_session_order",
+        },
+        ConformanceConsumer::RustTest {
             id: "trigger_engine::tests::event_source::generated_sibling_delivery_case_preserves_pending_correlation",
             package: "gents",
             source_path: "crates/gents/src/trigger_engine/tests/event_source.rs",
