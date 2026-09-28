@@ -387,6 +387,7 @@ async fn terminalize_execution_with_time(
                 validate_title_sources_decided(request_doc_id, &records)?;
             }
             let mut reader = session::TxnCanonicalReader::new(txn, agent, row.requester_did.as_deref());
+            reader.observe_headers(&headers);
             let eligible = |header: &&session::canonical_rows::TranscriptMessageRow| {
                 header.message.role == MessageRole::Assistant &&
                 matches!(header.message.publication, MessagePublication::RequestExecution { .. }

@@ -8,6 +8,7 @@ import {
   resolveRuntimeImage,
   parseMemoryObservation,
   formatDockerCommandFailure,
+  runtimeExitedError,
 } from "./host-environment.mjs";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -147,6 +148,56 @@ test(
     }
   },
 );
+
+test(
+  "a runtime that died before stop is reported with retained memory evidence",
+  { skip: process.env.GENTS_HOST_FIXTURE_TEST !== "1", timeout: 180_000 },
+  async () => {
+    const directory = await mkdtemp(join(tmpdir(), "gents-exited-archive-"));
+    let host;
+    try {
+      host = await HostEnvironment.start({
+        runtime: true,
+        runtimeImage: await resolveRuntimeImage(),
+        endpoint: "http://127.0.0.1:8000/v1",
+      });
+      await host.provision({
+        endpoint: "http://127.0.0.1:8000/v1",
+        model: "fixture-no-inference",
+        maxConcurrent: 1,
+        maxQueueDepth: 100,
+      });
+      await host.exec(["sh", "-c", "kill -KILL \"$(cat /runtime/server.pid)\""]);
+      const archive = join(directory, "runtime");
+      await assert.rejects(host.archiveRuntime(archive), (error) => {
+        assert.equal(error.runtimeExited, true);
+        assert.match(error.message, /^Runtime exited before it was stopped: no OOM kill recorded/);
+        return true;
+      });
+      const memory = JSON.parse(await readFile(join(archive, "memory.json"), "utf8"));
+      assert.equal(memory.events.oom_kill, 0);
+      await assert.rejects(host.exec(["test", "-e", "/runtime/server.pid"]));
+    } finally {
+      await host?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  },
+);
+
+test("a runtime exit names the memory limit only when the cgroup recorded an OOM kill", () => {
+  const memory = (oom_kill) => ({
+    peak_bytes: 536870912,
+    limit_bytes: 536870912,
+    events: { oom: oom_kill, oom_kill },
+  });
+  const killed = runtimeExitedError(memory(1));
+  assert.equal(killed.runtimeExited, true);
+  assert.equal(
+    killed.message,
+    "Runtime exited before it was stopped: killed by the container memory limit (oom_kill=1 peak_bytes=536870912 limit_bytes=536870912)",
+  );
+  assert.match(runtimeExitedError(memory(0)).message, /: no OOM kill recorded \(oom_kill=0 /);
+});
 
 test("memory evidence preserves limit pressure and OOM counters without coercion", () => {
   const raw = "1024\n2048\n4096\nlow 0\nhigh 0\nmax 2\noom 1\noom_kill 1\n";

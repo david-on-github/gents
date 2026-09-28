@@ -19,10 +19,9 @@ use crate::config_client::{ConfigAccess, ConfigApplyTxn, IdempotentTransactionRe
 use crate::graphql::escape_graphql_string;
 use crate::lifecycle::execution_policy::{authorize_output_append, LeaseObservation};
 use crate::session::canonical_rows::{
-    decode_output_segment_row, decode_transcript_message_row, output_segment_create_variables,
+    decode_transcript_message_row, output_segment_create_variables,
     transcript_message_create_variables, OutputSegmentRow, AGENT_MESSAGE_FIELDS,
-    AGENT_OUTPUT_SEGMENT_FIELDS, CREATE_AGENT_MESSAGE_MUTATION,
-    CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
+    CREATE_AGENT_MESSAGE_MUTATION, CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
 };
 
 pub(crate) struct ProviderPublicationPlan {
@@ -1150,19 +1149,12 @@ async fn load_source_in_txn(
     txn: &ConfigApplyTxn<'_>,
     prepared: &OutputSegment,
 ) -> Result<Vec<OutputSegmentRow>> {
-    let id = escape_graphql_string(&prepared.request_doc_id);
-    let scope = crate::session::session_scope_filter(
-        &prepared.agent_did,
-        &prepared.session_id,
-        prepared.requester_did.as_deref(),
-    );
     let response = txn
-        .execute_local_response(&format!(
-            r#"{{ AgentOutputSegment(
-        filter: {{ {scope}, request_doc_id: {{ _eq: "{id}" }} }}) {{
-        {AGENT_OUTPUT_SEGMENT_FIELDS}
-    }} }}"#
-        ))
+        .execute_local_response(
+            &crate::session::canonical_rows::request_output_segments_query(
+                &prepared.request_doc_id,
+            ),
+        )
         .await?;
     let rows = response
         .data
@@ -1170,12 +1162,15 @@ async fn load_source_in_txn(
         .and_then(|data| data.get("AgentOutputSegment"))
         .and_then(serde_json::Value::as_array)
         .context("source query omitted rows")?;
-    rows.iter()
-        .map(decode_output_segment_row)
-        .collect::<Result<Vec<_>>>()
-        .map(|rows| {
-            rows.into_iter()
-                .filter(|row| row.segment.source == prepared.source)
-                .collect()
-        })
+    crate::session::canonical_rows::decode_scoped_request_output_segments(
+        rows,
+        &prepared.agent_did,
+        Some(&prepared.session_id),
+        prepared.requester_did.as_deref(),
+    )
+    .map(|rows| {
+        rows.into_iter()
+            .filter(|row| row.segment.source == prepared.source)
+            .collect()
+    })
 }
