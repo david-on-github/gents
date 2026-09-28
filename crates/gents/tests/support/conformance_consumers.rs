@@ -56,6 +56,48 @@ impl ConformanceConsumer {
 pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
     &[
         ConformanceConsumer::RustTest {
+            id: "trigger_engine::tests::durable_contract::generated_fire_transactions_are_atomic_and_owner_scoped",
+            package: "gents",
+            source_path: "crates/gents/src/trigger_engine/tests/durable_contract.rs",
+            module_path: "trigger_engine::tests::durable_contract",
+            function: "generated_fire_transactions_are_atomic_and_owner_scoped",
+        },
+        ConformanceConsumer::RustTest {
+            id: "trigger_engine::tests::durable_contract::durable_delivery_predicates_match_executable_lean_owners",
+            package: "gents",
+            source_path: "crates/gents/src/trigger_engine/tests/durable_contract.rs",
+            module_path: "trigger_engine::tests::durable_contract",
+            function: "durable_delivery_predicates_match_executable_lean_owners",
+        },
+        ConformanceConsumer::RustTest {
+            id: "trigger_engine::tests::durable_contract::generated_arrival_checkpoints_preserve_committed_delivery_across_crashes",
+            package: "gents",
+            source_path: "crates/gents/src/trigger_engine/tests/durable_contract.rs",
+            module_path: "trigger_engine::tests::durable_contract",
+            function: "generated_arrival_checkpoints_preserve_committed_delivery_across_crashes",
+        },
+        ConformanceConsumer::RustTest {
+            id: "trigger_engine::tests::durable_contract::generated_terminal_outcome_action_traces_use_native_owners",
+            package: "gents",
+            source_path: "crates/gents/src/trigger_engine/tests/durable_contract.rs",
+            module_path: "trigger_engine::tests::durable_contract",
+            function: "generated_terminal_outcome_action_traces_use_native_owners",
+        },
+        ConformanceConsumer::RustTest {
+            id: "graph_pipeline::session_continuation_contract_tests::session_selection_matches_executable_graph_owner",
+            package: "gents",
+            source_path: "crates/gents/src/graph_pipeline/session_continuation_contract_tests.rs",
+            module_path: "graph_pipeline::session_continuation_contract_tests",
+            function: "session_selection_matches_executable_graph_owner",
+        },
+        ConformanceConsumer::RustTest {
+            id: "graph_pipeline::session_continuation_contract_tests::applied_assignment_heads_match_executable_graph_owner",
+            package: "gents",
+            source_path: "crates/gents/src/graph_pipeline/session_continuation_contract_tests.rs",
+            module_path: "graph_pipeline::session_continuation_contract_tests",
+            function: "applied_assignment_heads_match_executable_graph_owner",
+        },
+        ConformanceConsumer::RustTest {
             id: "conformance::prompt_assembly::generated_protected_replay_compaction_cases_bind_native_split_and_checkpoint",
             package: "gents",
             source_path: "crates/gents/tests/conformance/prompt_assembly.rs",
