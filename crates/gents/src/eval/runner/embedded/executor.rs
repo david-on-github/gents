@@ -30,8 +30,8 @@ use crate::defra_node::EmbeddedNode;
 use crate::document_config::{InferenceSampling, PackConfig};
 use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome, RunningRuntime};
 use crate::eval::runner::embedded::observe::{
-    await_terminal, classify_request_outcome, collect_request_evidence, RequestEvidence,
-    TerminalObservation,
+    await_terminal, classify_request_outcome, collect_request_evidence, poll_request,
+    RequestEvidence, TerminalObservation,
 };
 use crate::eval::runner::executor::{
     Capture, CaptureResult, FileRef, InferenceBinding, Isolation, StageEvidence, StageSpec,
@@ -764,6 +764,7 @@ async fn submit_and_observe(
         return ObservedStage::unsubmitted();
     }
 
+    let watch_started = std::time::Instant::now();
     let stopped;
     let observed = tokio::select! {
         observed = await_terminal(
@@ -782,23 +783,23 @@ async fn submit_and_observe(
         }
         // Nothing is left to settle the request, so its row would only be
         // watched until the stage deadline and read as a deadline. One last
-        // read first: the request may have settled within the same poll.
+        // read first, unbounded: the request may have settled within the same
+        // poll, and a slow read must not turn that into a dead runtime.
         () = runtime_exited(runtime) => {
-            match tokio::time::timeout(
-                POLL,
-                await_terminal(&home.node, &request_id, Duration::MAX, Duration::ZERO, POLL),
-            )
-            .await
-            {
-                Ok(Ok(observed)) => {
-                    stopped = false;
-                    Ok(observed)
-                }
-                _ => {
-                    stopped = true;
-                    Err(anyhow!("the trial runtime exited before the request settled"))
-                }
-            }
+            let row = poll_request(&home.node, &request_id).await.ok().flatten();
+            let settled = row.and_then(|row| {
+                let terminal_state = RequestLifecycleState::parse(row.lifecycle_state.as_deref()?)
+                    .ok()
+                    .filter(|state| state.is_terminal())?;
+                Some(TerminalObservation {
+                    terminal_state,
+                    session_id: row.session_id,
+                    interrupted_on_deadline: false,
+                    elapsed: watch_started.elapsed(),
+                })
+            });
+            stopped = settled.is_none();
+            settled.ok_or_else(|| anyhow!("the trial runtime exited before the request settled"))
         }
     };
     let observed = match observed {
