@@ -90,8 +90,10 @@ pub fn materialize_pack(
     };
     let target = target.field();
 
-    reject_shared_sidecars(&pack.files)?;
     let prompt_asset = sidecar_prompt_asset(&pack.manifest, &pack.files, target, &target_id)?;
+    if let Some(asset) = &prompt_asset {
+        reject_shared_sidecar(&pack.files, asset)?;
+    }
 
     Ok(MaterializedPack {
         dir: dir.to_path_buf(),
@@ -121,31 +123,26 @@ fn raw_target<'a>(
         .map(|document| &mut document[field])
 }
 
-/// A sidecar read by more than one config field would change every document
-/// that reads it in a trial, while promotion writes only the target.
-fn reject_shared_sidecars(files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
-    fn count<'a>(value: &'a Value, seen: &mut BTreeMap<&'a str, usize>) {
+/// A target sidecar another config field also reads would change that
+/// document too in a trial, while promotion writes only the target.
+fn reject_shared_sidecar(files: &BTreeMap<String, Vec<u8>>, asset: &str) -> Result<()> {
+    fn uses(value: &Value, asset: &str) -> usize {
         match value {
-            Value::String(text) if text.starts_with("./") => *seen.entry(text).or_default() += 1,
-            Value::Array(items) => items.iter().for_each(|item| count(item, seen)),
-            Value::Object(fields) => fields.values().for_each(|field| count(field, seen)),
-            _ => {}
+            Value::String(text) => {
+                usize::from(text.starts_with("./") && text.trim_start_matches("./") == asset)
+            }
+            Value::Array(items) => items.iter().map(|item| uses(item, asset)).sum(),
+            Value::Object(fields) => fields.values().map(|field| uses(field, asset)).sum(),
+            _ => 0,
         }
     }
     let Some(bytes) = files.get(CONFIG_ASSET) else {
         return Ok(());
     };
     let raw: Value = serde_json::from_slice(bytes).context("parsing pack_config.json")?;
-    let mut seen = BTreeMap::new();
-    count(&raw, &mut seen);
-    let shared: Vec<&str> = seen
-        .into_iter()
-        .filter(|(_, uses)| *uses > 1)
-        .map(|(path, _)| path)
-        .collect();
     anyhow::ensure!(
-        shared.is_empty(),
-        "{CONFIG_ASSET} reads {shared:?} from more than one field; a candidate could not change one document alone"
+        uses(&raw, asset) <= 1,
+        "{CONFIG_ASSET} reads the target's sidecar {asset:?} from more than one field; a candidate could not change one document alone"
     );
     Ok(())
 }
