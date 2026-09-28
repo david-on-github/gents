@@ -728,6 +728,54 @@ mod tests {
         );
     }
 
+    /// The pack install writes documents, so a job the request or policy
+    /// refuses never reaches the proposer (here, the served-home check
+    /// before the install).
+    #[tokio::test]
+    async fn a_refused_job_is_refused_before_the_proposer_is_built() {
+        let fixture = Fixture::new().await;
+        let pack = fixture.pack_arg();
+        std::fs::create_dir_all(&fixture.ctx.home_dir).unwrap();
+        let policy = fixture.ctx.home_dir.join("policy.json");
+        std::fs::write(
+            &policy,
+            serde_json::to_vec(&gents::optimization::PolicyV2::uncalibrated()).unwrap(),
+        )
+        .unwrap();
+        let policy = policy.display().to_string();
+        for (flag, value, refusal) in [
+            (
+                "--job-id",
+                "a/b",
+                r#"job_id "a/b" must be one ordinary path component"#,
+            ),
+            (
+                "--policy",
+                policy.as_str(),
+                "policy max_rounds 3 does not match the budget's max_rounds 2; the Bonferroni divisor must be the number of candidates the job may try",
+            ),
+        ] {
+            let error = optimization(
+                &fixture,
+                &[
+                    "run",
+                    DEFINITION,
+                    "--subject",
+                    pack.as_str(),
+                    "--proposer",
+                    "behavior:prompt_proposer",
+                    "--rounds",
+                    "2",
+                    flag,
+                    value,
+                ],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(format!("{error:#}"), refusal);
+        }
+    }
+
     #[tokio::test]
     async fn a_scripted_job_runs_to_ready_to_promote_and_show_recomputes_its_decisions() {
         let fixture = Fixture::new().await;
