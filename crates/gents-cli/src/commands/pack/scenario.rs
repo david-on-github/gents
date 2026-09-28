@@ -3261,10 +3261,21 @@ pub(crate) async fn run(args: PackRunArgs) -> Result<()> {
         .and_then(Value::as_str)
         .context("init did not return inference_profile_id")?
         .to_string();
+    let default_behavior_id = init
+        .get("default_behavior_id")
+        .and_then(Value::as_str)
+        .filter(|id| !id.trim().is_empty())
+        .context("init did not return default_behavior_id")?;
     // Scenario homes are initialized with exactly one profile. Bind every
     // declared role explicitly so the scenario remains deterministic without
     // weakening the ordinary multi-slot install contract.
-    let staged_pack = stage_scenario_pack(&pack, &distribution, &agent_did, &inference_profile_id)?;
+    let staged_pack = stage_scenario_pack(
+        &pack,
+        &distribution,
+        &agent_did,
+        &inference_profile_id,
+        default_behavior_id,
+    )?;
 
     let port = args.http_port;
     let graphql = format!("http://127.0.0.1:{port}/api/v0/graphql");
@@ -3637,6 +3648,7 @@ fn stage_scenario_pack(
     distribution: &gents::pack::PackManifest,
     agent_did: &str,
     inference_profile_id: &str,
+    initialized_default_behavior_id: &str,
 ) -> Result<tempfile::TempDir> {
     let (mut authored, mut report) = crate::desired_state::load_manifest_root(pack);
     if authored.is_none() {
@@ -3650,6 +3662,10 @@ fn stage_scenario_pack(
     );
     let mut authored = authored.expect("checked scenario pack configuration");
     super::super::config::binding::rebind_manifest_to_agent(&mut authored, agent_did, true)?;
+    authored
+        .agent_principal
+        .default_behavior_id
+        .get_or_insert_with(|| initialized_default_behavior_id.to_owned());
     let bindings = distribution
         .metadata
         .inference_slots
@@ -3729,11 +3745,16 @@ mod tests {
             &distribution,
             "did:key:scenario-owner",
             "default-profile",
+            "did:key:scenario-owner:default",
         )
         .unwrap();
         let (config, report) = crate::desired_state::load_manifest_root(staged.path());
         assert!(report.errors.is_empty(), "{:?}", report.errors);
         let config = config.unwrap();
+        assert_eq!(
+            config.agent_principal.default_behavior_id.as_deref(),
+            Some("did:key:scenario-owner:default"),
+        );
         assert!(config
             .agent_behaviors
             .iter()
@@ -3744,6 +3765,104 @@ mod tests {
             .all(|behavior| behavior.tags.contains(&"gents:pack:pipeline".to_owned())));
         assert!(config.inference_profiles.is_empty());
         assert!(config.inference_backends.is_empty());
+    }
+
+    #[test]
+    fn scenario_staging_retains_an_authored_default_behavior() {
+        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
+        let distribution = read_distribution_manifest(&pack).unwrap();
+        let authored_pack = tempfile::tempdir().unwrap();
+        for asset in &distribution.metadata.assets {
+            let destination = authored_pack.path().join(asset);
+            std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+            std::fs::copy(pack.join(asset), destination).unwrap();
+        }
+        let config_path = authored_pack.path().join("pack_config.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["agent_principal"]["default_behavior_id"] = json!("exp-stage1");
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+
+        let staged = stage_scenario_pack(
+            authored_pack.path(),
+            &distribution,
+            "did:key:scenario-owner",
+            "default-profile",
+            "did:key:scenario-owner:default",
+        )
+        .unwrap();
+        let (staged_config, report) = crate::desired_state::load_manifest_root(staged.path());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            staged_config
+                .unwrap()
+                .agent_principal
+                .default_behavior_id
+                .as_deref(),
+            Some("exp-stage1"),
+        );
+    }
+
+    #[tokio::test]
+    async fn security_scan_staging_installs_its_declared_schemas() {
+        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/security_scan");
+        let distribution = read_distribution_manifest(&pack).unwrap();
+        let schema_assets = distribution
+            .metadata
+            .assets
+            .iter()
+            .filter(|asset| asset.starts_with("schemas/") && asset.ends_with(".graphql"))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            distribution
+                .schemas
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            schema_assets
+        );
+
+        let staged = stage_scenario_pack(
+            &pack,
+            &distribution,
+            "did:key:scenario-owner",
+            "default-profile",
+            "did:key:scenario-owner:default",
+        )
+        .unwrap();
+        for schema in &distribution.schemas {
+            assert_eq!(
+                std::fs::read(staged.path().join(schema)).unwrap(),
+                std::fs::read(pack.join(schema)).unwrap(),
+                "staged schema {schema}"
+            );
+        }
+
+        let node = std::sync::Arc::new(
+            gents::defra_node::EmbeddedNode::builder()
+                .build()
+                .await
+                .unwrap(),
+        );
+        gents::ensure_runtime_schemas(&node).await.unwrap();
+        let access = ConfigAccess::Local(node.clone());
+        let phase = crate::commands::schema::apply_pack_schemas_if_present(&access, staged.path())
+            .await
+            .unwrap()
+            .expect("staged pack must have schemas");
+        assert_eq!(phase.schema_files.len(), schema_assets.len());
+
+        let (config, report) = crate::desired_state::load_manifest_root(staged.path());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let errors = crate::desired_state::validate::validate_manifest_against_live(
+            &config.unwrap(),
+            &access,
+        )
+        .await
+        .unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        node.shutdown().await;
     }
 
     #[test]

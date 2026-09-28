@@ -32,6 +32,16 @@
     "tasks/scan_revalidate_task/prompt.md"
   ],
   "dependencies": [],
+  "schemas": [
+    "schemas/candidate_finding.graphql",
+    "schemas/finding.graphql",
+    "schemas/finding_verdict.graphql",
+    "schemas/investigation_batch.graphql",
+    "schemas/investigation_result.graphql",
+    "schemas/revalidation_summary.graphql",
+    "schemas/scan_job.graphql",
+    "schemas/scan_report.graphql"
+  ],
   "config": "pack_config.json",
   "inference_slots": [
     {
