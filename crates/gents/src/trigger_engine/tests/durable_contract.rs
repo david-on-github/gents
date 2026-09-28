@@ -486,12 +486,7 @@ async fn create_arrival_source(
         )
         .await
         .unwrap();
-    let value = &response["data"]["create_Work"];
-    let document = value
-        .as_array()
-        .and_then(|rows| rows.first())
-        .unwrap_or(value);
-    document["_docID"].as_str().unwrap().to_owned()
+    crate::graphql::created_doc_id(&response, "Work").unwrap()
 }
 
 async fn saved_arrival_cursor(access: &crate::config_client::ConfigAccess) -> String {
