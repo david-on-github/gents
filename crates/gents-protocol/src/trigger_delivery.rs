@@ -58,11 +58,12 @@ pub struct FireOutcome {
 }
 
 /// Position in DefraDB's receiving-node document-arrival journal. Each trigger
-/// checkpoints independently; the cursor advances only after admission commits
+/// checkpoints independently in a non-branchable runtime document; the cursor advances only after admission commits
 /// or a document is conclusively excluded by the configured filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventSourceCursor {
+    pub cursor_key: String,
     pub owner_did: String,
     pub trigger_id: String,
     pub source_collection: String,
