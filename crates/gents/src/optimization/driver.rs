@@ -2167,6 +2167,13 @@ mod tests {
         task_origin.target.field = TargetField::TaskPromptTemplate;
         task_origin.target.id = "plan".into();
         check_resume(&retargeted, &policy, &task_origin).unwrap();
+
+        let mut other_task = request();
+        other_task.target = JobTarget::Task("other".into());
+        let error = check_resume(&other_task, &policy, &task_origin).unwrap_err();
+        assert!(job_refused(&error).unwrap().0.contains("target"));
+        let error = check_resume(&request(), &policy, &task_origin).unwrap_err();
+        assert!(job_refused(&error).unwrap().0.contains("target"));
     }
 
     /// C1 (constraint 15): the capture list is frozen with the job, so a
