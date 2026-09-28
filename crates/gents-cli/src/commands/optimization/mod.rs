@@ -593,7 +593,9 @@ mod tests {
         accepted_job, delete_definition, optimization, optimization_command, optimization_with,
         proposer_file,
     };
-    use super::{execute, proposer_behavior_id, subject_preamble, TargetArg};
+    use super::{
+        ensure_tool_less, execute, pack_config, proposer_behavior_id, subject_preamble, TargetArg,
+    };
     use crate::cli::Cli;
     use crate::commands::eval::testing::{deps, eval, executor, Fixture, DEFINITION};
     use crate::commands::eval::UNCALIBRATED_BANNER;
@@ -710,6 +712,57 @@ mod tests {
             "{error:#}"
         );
         assert!(message.contains("\"lsp\""), "{message}");
+    }
+
+    /// What the resolved surface alone would miss: CLI tools a server started
+    /// with `--cli-tool` adds, a subagent target outside the pack, and skills.
+    #[test]
+    fn cli_tools_a_target_outside_the_pack_or_skills_are_refused() {
+        use serde_json::json;
+        const OWNER: &str = "did:key:z6MkproposerOwner";
+        let pack = gents::pack::resolve_pack("prompt_proposer").unwrap();
+        let base = pack_config(&pack, OWNER).unwrap();
+        ensure_tool_less(&base, OWNER, "prompt-proposer").unwrap();
+
+        let mut cli = base.clone();
+        cli.tools[0]
+            .host
+            .as_mut()
+            .unwrap()
+            .cli
+            .push(serde_json::from_value(json!({"name": "rg"})).unwrap());
+        let mut subagent = base.clone();
+        subagent.tools[0].subagents = Some(
+            serde_json::from_value(json!({"spawn_enabled": true, "target_ids": ["helper"]}))
+                .unwrap(),
+        );
+        subagent.subagent_targets.push(
+            serde_json::from_value(json!({
+                "target_id": "helper",
+                "agent_did": OWNER,
+                "target_agent_did": OWNER,
+                "behavior_id": "home-default",
+                "name": "helper",
+            }))
+            .unwrap(),
+        );
+        let mut skills = base.clone();
+        skills.contexts[0].skill_ids = vec!["review".to_owned()];
+        for (config, offending) in [
+            (cli, "\"rg\""),
+            (subagent, "\"spawn_subagent\""),
+            (skills, "has skills [\"review\"]"),
+        ] {
+            let error = ensure_tool_less(&config, OWNER, "prompt-proposer")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("proposer behavior prompt-proposer has ")
+                    && error.contains(offending)
+                    && error.ends_with("; a proposer must be tool-less"),
+                "{error}"
+            );
+        }
     }
 
     /// `prompt_proposer` passes the tool-less check and reaches the next one.
