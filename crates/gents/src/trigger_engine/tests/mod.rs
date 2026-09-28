@@ -1,3 +1,5 @@
+mod durable_contract;
+
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;

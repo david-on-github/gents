@@ -51,6 +51,7 @@ import Proofs.Conformance.Deviations
 import Proofs.Conformance.CoverageLedger
 import Proofs.Identity.Conformance
 import Proofs.Conformance.EventDelivery
+import Proofs.Conformance.TriggerDelivery
 import Proofs.Conformance.GraphPipeline
 import Proofs.Conformance.GoalOperatorResume
 import Proofs.Conformance.GoalClaimedPublication
@@ -478,6 +479,7 @@ def snapshotJson : String :=
         (Proofs.BackendHealth.transitionCases.map backendHealthCaseJson) ++ ","
     ++ "\"follow_up_hooks\":"
       ++ followUpHooksJson ++ ","
+    ++ "\"trigger_delivery\":" ++ Conformance.TriggerDelivery.casesJson ++ ","
     ++ "\"event_group_capture_case_count\":" ++ toString Conformance.EventDelivery.eventGroupCaptureCaseCount ++ ","
     ++ "\"event_group_capture_cases\":" ++ Conformance.EventDelivery.eventGroupCaptureCasesJson ++ ","
     ++ "\"event_group_clock_case_count\":" ++ toString Conformance.EventDelivery.eventGroupClockCaseCount ++ ","
