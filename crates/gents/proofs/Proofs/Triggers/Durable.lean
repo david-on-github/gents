@@ -36,6 +36,7 @@ structure Request where
   running : Bool := false
   terminal : Bool := false
   goalStatus : Goals.Status := .active
+  goalWrapupCompleted : Bool := false
   deriving DecidableEq, Repr
 
 /-- Pending serial fires are ordinary persisted requests. The request claim
@@ -121,14 +122,15 @@ theorem admission_crash_after_commit (state : State) (fire : Fire) :
     admitTransaction (admitTransaction state fire true) fire true =
       admitTransaction state fire true := admit_idempotent state fire
 
-/-- A stopped Goal assignment must notify its owner even when infrastructure
-failure pauses it or provider usage limits stop it. Active Goals never emit an
-outcome at an ordinary request boundary. Resuming is a separate Task fire. -/
-def goalEnded (status : Goals.Status) : Bool := status != .active
+/-- Temporary pauses and provider usage limits preserve the assignment's final
+outcome. The caller is notified when the Goal completes, blocks, or exhausts its
+budget; ordinary request boundaries and resumable stops cannot consume it. -/
+def goalEnded (status : Goals.Status) (wrapupCompleted : Bool) : Bool :=
+  status == .complete || status == .blocked || (status == .budgetLimited && wrapupCompleted)
 
 def outcomeDue (request : Request) : Bool :=
   request.fire.emitOutcome &&
-    (if request.fire.goalBacked then goalEnded request.goalStatus else request.terminal)
+    (if request.fire.goalBacked then goalEnded request.goalStatus request.goalWrapupCompleted else request.terminal)
 
 def publishOutcome (state : State) (request : Request) : State :=
   if outcomeDue request && !(decide (request.fire.identity ∈ state.outcomes)) then
