@@ -330,32 +330,28 @@
       "display_name": "Partition repository review",
       "behavior_id": "review-recon",
       "prompt_template": "./tasks/review_recon_task/prompt.md",
-      "goal_objective_template": "Dispatch all four host-evidenced review lenses for run {{ event.correlation }}, persist the complete area ledger, then complete this Goal.",
-      "goal_token_budget": 250000
+      "goal_objective_template": "Dispatch all four host-evidenced review lenses for run {{ event.correlation }}, persist the complete area ledger, then complete this Goal."
     },
     {
       "task_id": "review-scan-task",
       "display_name": "Scan one review area",
       "behavior_id": "review-scan",
       "prompt_template": "./tasks/review_scan_task/prompt.md",
-      "goal_objective_template": "Finish the {{ doc.lens }} review for area {{ doc.area_id }} in run {{ event.correlation }}. Persist at most three supported candidates, or none when no defects are supported, and the mandatory scan-result sentinel for this exact area; then complete this Goal.",
-      "goal_token_budget": 500000
+      "goal_objective_template": "Finish the {{ doc.lens }} review for area {{ doc.area_id }} in run {{ event.correlation }}. Persist at most three supported candidates, or none when no defects are supported, and the mandatory scan-result sentinel for this exact area; then complete this Goal."
     },
     {
       "task_id": "review-verify-task",
       "display_name": "Verify completed review candidates",
       "behavior_id": "review-verify",
       "prompt_template": "./tasks/review_verify_task/prompt.md",
-      "goal_objective_template": "Close verification for run {{ group.correlation_value }} across its {{ group.count }} completed scans. Persist one supported verdict per candidate, promote only confirmed findings, and publish the balanced verification summary, including zero candidates; then complete this Goal.",
-      "goal_token_budget": 1000000
+      "goal_objective_template": "Close verification for run {{ group.correlation_value }} across its {{ group.count }} completed scans. Persist one supported verdict per candidate, promote only confirmed findings, and publish the balanced verification summary, including zero candidates; then complete this Goal."
     },
     {
       "task_id": "review-triage-task",
       "display_name": "Write the merge report",
       "behavior_id": "review-triage",
       "prompt_template": "./tasks/review_triage_task/prompt.md",
-      "goal_objective_template": "Publish the final triage report for run {{ event.correlation }} matching its closed verification ledger ({{ doc.candidate_count }} candidates, {{ doc.confirmed_count }} confirmed, {{ doc.refuted_count }} refuted), then complete this Goal.",
-      "goal_token_budget": 150000
+      "goal_objective_template": "Publish the final triage report for run {{ event.correlation }} matching its closed verification ledger ({{ doc.candidate_count }} candidates, {{ doc.confirmed_count }} confirmed, {{ doc.refuted_count }} refuted), then complete this Goal."
     }
   ],
   "graphs": [

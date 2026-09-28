@@ -4297,7 +4297,7 @@ mod tests {
         assert!(task["goal_objective_template"]
             .as_str()
             .is_some_and(|value| !value.trim().is_empty()));
-        assert_eq!(task["goal_token_budget"], 50_000);
+        assert!(task["goal_token_budget"].is_null());
 
         let tools = canonical_document(&manifest, "tools", "tools_id", "exp-tools-stage1");
         assert_eq!(tools["built_ins"]["enable_goal_tools"], true);

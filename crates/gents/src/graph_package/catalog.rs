@@ -480,16 +480,29 @@ mod tests {
     }
 
     #[test]
-    fn code_review_tasks_have_bounded_goals_without_creation_authority() {
+    fn bundled_tasks_leave_goal_budgets_unset() {
+        for package_name in BUNDLED_GRAPH_PACKAGE_NAMES {
+            let package = fixture_package(package_name).unwrap();
+            for task in &package.config.tasks {
+                assert!(
+                    task.goal_token_budget.is_none(),
+                    "{package_name}/{} must leave Goal budgets opt-in",
+                    task.task_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn code_review_tasks_have_unlimited_goals_without_creation_authority() {
         let package = fixture_package("code_review").unwrap();
         assert_eq!(package.config.graph_capabilities.len(), 4);
         for capability in &package.config.graph_capabilities {
             let task = task(&package, capability);
             let objective = task.goal_objective_template.as_deref().unwrap();
-            let budget = task.goal_token_budget.unwrap();
             assert!(!objective.trim().is_empty());
-            assert!(budget > 0);
-            crate::goal::validate_task_goal_declaration(Some(objective), Some(budget)).unwrap();
+            assert!(task.goal_token_budget.is_none());
+            crate::goal::validate_task_goal_declaration(Some(objective), None).unwrap();
             let builtins = tools(&package, capability).built_ins.as_ref().unwrap();
             assert!(builtins.enable_goal_tools.unwrap_or(false));
             assert!(!builtins.enable_goal_creation.unwrap_or(false));
@@ -946,7 +959,7 @@ mod tests {
                 .goal_objective_template
                 .as_deref()
                 .is_some_and(|objective| !objective.trim().is_empty()));
-            assert!(task.goal_token_budget.is_some_and(|budget| budget > 0));
+            assert!(task.goal_token_budget.is_none());
             let builtins = tools(&package, capability).built_ins.as_ref().unwrap();
             assert!(builtins.enable_goal_tools.unwrap_or(false));
             assert!(!builtins.enable_goal_creation.unwrap_or(false));
