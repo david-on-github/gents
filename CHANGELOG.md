@@ -8,6 +8,14 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- DefraDB moves to defradb.rs `main` at `6d9aa9d9`, which includes the
+  durable document-arrival journal behind #2041 (defradb.rs#1853). Collection
+  identities now commit to `@immutable`, `@branchable` and any governance root,
+  so collection versions differ from earlier builds: update the desktop and
+  every paired runtime together, and start from a fresh home. DefraDB no longer
+  serves the browser `/sync` endpoint; browsers sync as Iroh peers. BLS
+  identities (now `bls_aug_v1`) are still refused as runtime identities.
+
 - Durable trigger delivery (#2041) adds non-branchable `TriggerFire`,
   `EventSourceCursor`, and `FireOutcome` collections and updates the canonical
   schema baseline. v0.20 still requires a fresh home; this does not provide an
