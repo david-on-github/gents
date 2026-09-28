@@ -402,8 +402,9 @@ async fn persist_event_bindings(
     snapshot: &ActiveRuntimeSnapshot,
 ) {
     let access = crate::config_client::ConfigAccess::Local(node.clone());
-    let owner = &snapshot.principal.as_ref().unwrap().agent_did;
     for trigger in snapshot.active_event_triggers().values() {
+        let behavior = snapshot.behavior(&trigger.task.behavior_id).unwrap();
+        let owner = behavior.agent_did();
         access.transact("test.event_binding", |txn| Box::pin(async move {
             txn.execute_with_variables(
                 "mutation($input:EventSourceMutationInputArg!){create_EventSource(input:$input){_docID}}",
@@ -428,7 +429,7 @@ async fn admit_observed_event(
 ) -> FireResult {
     use gents_protocol::trigger_delivery::{FireIdentity, TriggerFire};
     let identity = FireIdentity {
-        owner_did: stub_principal().agent_did.clone(),
+        owner_did: event_test_behavior().agent_did().to_owned(),
         trigger_id: intent.trigger_id.clone().unwrap(),
         source_collection: intent.event_vars["source_collection"]
             .as_str()
