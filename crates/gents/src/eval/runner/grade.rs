@@ -55,7 +55,13 @@ pub fn grade(
             .stages
             .iter()
             .find(|candidate| candidate.stage_id == stage.stage_id);
-        for check in &stage.checks {
+        // The proposer reads acceptance rows only: a failure is named there, once.
+        let feedback_row = stage
+            .checks
+            .iter()
+            .position(|check| check.tier == EvalTier::Acceptance)
+            .unwrap_or(0);
+        for (index, check) in stage.checks.iter().enumerate() {
             rows.push(match observed {
                 None if observed_nothing => synthetic(
                     stage,
@@ -74,7 +80,7 @@ pub fn grade(
                     "skipped_prerequisite",
                 ),
                 Some(observed) => match observed.failure_kind {
-                    Some(kind) => failed(stage, check, kind, observed),
+                    Some(kind) => failed(stage, check, kind, observed, index == feedback_row),
                     None => checked(stage, check, observed, registry),
                 },
             });
@@ -87,8 +93,9 @@ pub fn grade(
 /// evidence of anything: it is recorded as [`OutcomeKind::Unknown`], which is
 /// how the "no provider outcome without a reason" constraint is enforced.
 ///
-/// A `stage_failed` row carries [`failure_feedback`]: no check ran, so it is
-/// the only place the proposer learns why the stage failed.
+/// The `stage_failed` row with `names_failure` carries [`failure_feedback`]: no
+/// check ran, so it is the only place the proposer learns why the stage failed.
+/// The caller sets it on one row per stage so the proposer reads it once.
 ///
 /// A `failure_kind` that does not classify as a failure is malformed evidence:
 /// an executor that reports one is claiming a stage both failed and passed.
@@ -100,6 +107,7 @@ fn failed(
     check: &EvalCheckRef,
     kind: OutcomeKind,
     observed: &StageEvidence,
+    names_failure: bool,
 ) -> VerdictRow {
     let provider_reason = observed.provider_reason;
     if classify(kind, provider_reason) == EvidenceClass::Pass {
@@ -124,7 +132,7 @@ fn failed(
     }
     let score_bp = (classify(kind, provider_reason) == EvidenceClass::Fail).then_some(0);
     VerdictRow {
-        feedback: Some(failure_feedback(observed)),
+        feedback: names_failure.then(|| failure_feedback(observed)),
         ..synthetic(
             stage,
             check,
@@ -169,7 +177,8 @@ fn checked(
 }
 
 /// A row no check produced: its version is `"0"`. Only a `stage_failed` row
-/// carries feedback, attached by [`failed`].
+/// carries feedback, attached by [`failed`] to the first acceptance row of its
+/// stage.
 fn synthetic(
     stage: &EvalStage,
     check: &EvalCheckRef,
