@@ -1652,6 +1652,34 @@ mod tests {
         assert!(executor.recollect(&locator("inside"), &[]).await.is_some());
     }
 
+    /// A hint made only of normal components still leaves the runs directory
+    /// through a symlink, whether the trial directory or its home is the link.
+    #[tokio::test]
+    async fn recollect_refuses_a_home_hint_that_resolves_outside_the_runs_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs_dir = dir.path().join("runs");
+        let outside = dir.path().join("outside");
+        close(
+            EmbeddedHome::create_retained(&outside.join("home"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        std::fs::create_dir_all(runs_dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(&outside, runs_dir.join("linked")).unwrap();
+        std::os::unix::fs::symlink(outside.join("home"), runs_dir.join("real").join("home"))
+            .unwrap();
+        let executor = EmbeddedExecutor::new(DocumentRuntimeOptions::default(), runs_dir);
+        for hint in ["linked", "real"] {
+            let locator = TrialLocator {
+                trial_agent_did: "did:key:zAny".to_string(),
+                session_id: "s-1".to_string(),
+                home_hint: Some(hint.to_string()),
+            };
+            assert!(executor.recollect(&locator, &[]).await.is_none(), "{hint}");
+        }
+    }
+
     /// A provisioned home that will never run a trial has to be reclaimable, or
     /// its node runs on for the rest of the process.
     /// The loop calls `discard` from a `Send` context, so the provisioning
