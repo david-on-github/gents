@@ -105,6 +105,7 @@ impl Fixture {
             1,
             false,
             "2021-01-01T00:00:00Z",
+            self.parent.subagent_depth,
         )
         .unwrap();
         if conflicting {
@@ -213,6 +214,7 @@ impl Fixture {
                 seq,
                 wrapup,
                 child.created_at.as_deref().unwrap(),
+                self.parent.subagent_depth,
             )
             .unwrap();
             let actual: GoalBackedRequestFingerprint =

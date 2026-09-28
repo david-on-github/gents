@@ -21,13 +21,6 @@ pub async fn enqueue_local_steering_request(
     enqueue_steering_request(node, &parent, content, input).await
 }
 
-/// Re-admits a steering append inside the transaction that writes it, so the
-/// admission and the append observe one serialized state.
-#[async_trait::async_trait]
-pub(crate) trait SteeringAdmission: Send + Sync {
-    async fn admit(&self, txn: &ConfigApplyTxn<'_>) -> Result<()>;
-}
-
 /// Atomically persist the signed steering request. Its admission content is
 /// displayed while queued and is published to the transcript only when owned
 /// execution starts.
@@ -37,62 +30,55 @@ pub(crate) async fn enqueue_steering_request(
     content: &str,
     input: RequestInput,
 ) -> Result<EnqueuedAgentRequest> {
-    enqueue_admitted_steering_request(node, parent, content, input, None).await
-}
-
-pub(crate) async fn enqueue_admitted_steering_request(
-    node: &EmbeddedNode,
-    parent: &AgentRequest,
-    content: &str,
-    input: RequestInput,
-    admission: Option<&dyn SteeringAdmission>,
-) -> Result<EnqueuedAgentRequest> {
     let queue = input
         .queue
         .as_ref()
         .context("atomic steering enqueue requires queue input")?;
     anyhow::ensure!(
-        queue.source == QueueSource::Steering
+        matches!(queue.source, QueueSource::Steering | QueueSource::User)
             && queue.policy == QueuePolicy::Append
             && queue.key.is_none(),
-        "atomic steering enqueue requires an unkeyed append"
+        "atomic steering enqueue requires an unkeyed user or steering append"
     );
     anyhow::ensure!(
         queue.background_completion_wake_version.is_none(),
         "steering enqueue must not carry the background wake marker"
     );
-
     let behavior_id = parent_behavior_id(parent)?;
     let request_id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let request_mutation = session_request_create_mutation(
-        parent,
-        &behavior_id,
-        content,
-        ExecutionOrigin::Interactive,
-        input,
-        &request_id,
-        &now,
-        None,
-    )
-    .await?;
-    let request_id = &request_id;
-    let request_mutation = &request_mutation;
-
-    let enqueued = crate::config_client::ConfigAccess::transact_local(
+    let (behavior_id, content, input, request_id, now) =
+        (&behavior_id, content, &input, &request_id, &now);
+    crate::config_client::ConfigAccess::transact_local(
         node,
         None,
         "lifecycle.enqueue_steering",
         move |txn| {
             Box::pin(async move {
-                if let Some(admission) = admission {
-                    admission.admit(txn).await?;
-                }
-                steering_transaction_attempt(txn, parent, request_id, request_mutation).await
+                // Lean `CausalHop.continuation_preserves_hop`: user steering
+                // copies the session's current hop, read under the write gate
+                // so a higher append committed first is never missed.
+                let hop = crate::session::load_session_current_hop_in_txn(
+                    txn,
+                    &parent.agent_did,
+                    &parent.session_id,
+                )
+                .await?;
+                let mutation = session_request_create_mutation_at_hop(
+                    parent,
+                    hop,
+                    behavior_id,
+                    content,
+                    ExecutionOrigin::Interactive,
+                    input.clone(),
+                    request_id,
+                    now,
+                    None,
+                )
+                .await?;
+                steering_transaction_attempt(txn, parent, request_id, &mutation).await
             })
         },
     )
-    .await?;
-
-    Ok(enqueued)
+    .await
 }

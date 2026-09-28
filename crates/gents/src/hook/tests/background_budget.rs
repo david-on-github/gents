@@ -108,7 +108,6 @@ async fn generated_background_budget_uses_accepted_dispatch() {
         let child = receipt["tool_call_id"].as_str().unwrap().to_owned();
         let row = fetch_tool_call_row(&node, &session, &child).await;
         assert_eq!(row["await_mode"], witness.kind_field("await_mode"));
-        assert_eq!(row["cancel_policy"], witness.kind_field("cancel_policy"));
         assert_background_rows(&node, &request_id, index + 1, "running").await;
         children.push(child);
     }
@@ -448,6 +447,7 @@ async fn background_completion_summary_honors_the_configured_output_budget() {
         "completed",
         &"x".repeat(100),
         None,
+        crate::lifecycle::RequestHopCause::Continuation,
     )
     .await
     .expect("redrive after a budget change replays the published notice");

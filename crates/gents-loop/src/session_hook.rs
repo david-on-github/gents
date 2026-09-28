@@ -23,13 +23,7 @@ use crate::{HookAction, ToolCallHookAction};
 /// Canonical publication hooks supplied by the native session owner. The
 /// concrete admission and accepted-call types remain outside the guest loop.
 #[async_trait]
-pub trait CanonicalSessionHook<Accepted: Send, Plan: Send>: SessionHook {
-    async fn preplan_spawn_admissions(
-        &self,
-        message: &Message,
-        internal_call_ids: &[String],
-    ) -> anyhow::Result<Vec<Plan>>;
-
+pub trait CanonicalSessionHook<Accepted: Send>: SessionHook {
     async fn adopt_accepted_tool_calls(&self, calls: Vec<(String, Accepted)>)
         -> anyhow::Result<()>;
 }

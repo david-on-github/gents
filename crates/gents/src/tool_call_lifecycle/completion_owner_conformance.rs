@@ -67,7 +67,9 @@ async fn admitted_parent(case: &LeanR6BackgroundingCase, branch: &str) -> Publis
         start_running: true,
         // The failed historical wake must be the actual latest request fact;
         // the redrive owner deliberately ignores a hand-edited session cache.
-        request_created_at: (branch == "redrive").then(|| "2026-07-14T00:00:00Z".to_owned()),
+        request_created_at: branch
+            .ends_with("redrive")
+            .then(|| "2026-07-14T00:00:00Z".to_owned()),
         ..Default::default()
     })
     .await
@@ -154,7 +156,7 @@ async fn drive_notification(case: &LeanR6BackgroundingCase) {
     let before = load_canonical_goal(node, did, &session).await.unwrap();
     assert!(admission
         .tool
-        .bridge_complete("durable native output".into())
+        .complete_owned("durable native output", None)
         .await
         .unwrap());
     let pending = rows(node, &format!(r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}) {{ _docID status lifecycle_state request_doc_id }} }}"#,
@@ -446,14 +448,12 @@ pub(crate) struct SelectedBackgroundWake {
     notifications: Vec<(Value, String)>,
 }
 
-/// Compose the existing signed subagent-completion owners through watcher
-/// selection, leaving the actual wake claim to the caller.
+/// Compose the signed session-message owners through watcher selection,
+/// leaving the actual wake claim to the caller: an `agent_new` row settles
+/// from its caused request's terminal after a later assistant call.
 pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     use super::admission_fixture::{
-        complete_child, publish_accepted_on_claimed_request, published_admission_with_owner,
-    };
-    use crate::background_completion::{
-        project_background_subagent_completion, BackgroundCompletionOutcome,
+        complete_child, publish_accepted_on_claimed_request, published_session_message_with_owner,
     };
     use crate::lifecycle::{RequestTerminalOutcome, TerminalizeResult};
     use crate::watcher::{DefraWatcher, Watcher};
@@ -474,72 +474,45 @@ pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     assert_eq!(case.queue_source.as_deref(), Some("background_completion"));
     assert_eq!(case.queue_key.as_deref(), Some("background_completion:900"));
 
-    let child = "completion-order-child";
-    let (mut admission, mut owner) = published_admission_with_owner(PublishedAdmissionOptions {
+    let (message, mut owner) = published_session_message_with_owner(PublishedAdmissionOptions {
         name: "completion-order".into(),
         real_identity: true,
         await_mode: AwaitMode::Background,
-        spawn_plan: Some(crate::streaming::SpawnAdmissionPlan {
-            tool_call_id: "completion-order-spawn".into(),
-            child_request_id: child.into(),
-            spawn_target_did: "fixture-overrides-with-owner".into(),
-            spawn_behavior_id: "general".into(),
-            delegated_workspace: None,
-            await_mode: AwaitMode::Background,
-        }),
         ..Default::default()
     })
     .await
     .unwrap();
+    let admission = message.admission;
     let node = &admission.node;
     let did = &admission.agent_did;
     let session = admission.tool.session_id.clone();
     crate::test_support::install_test_behavior(node, did, "general").await;
-    admission
-        .tool
-        .publish_background_receipt("child started")
-        .await
-        .unwrap();
-    super::create_subagent_request_with_request_id(
-        node,
-        child.into(),
-        owner.request().request_id.clone(),
-        owner.request().doc_id.clone(),
-        admission.tool.tool_call_id().into(),
-        admission.tool.doc_id().unwrap().into(),
-        0,
-        did.clone(),
-        "general".into(),
-        "child work".into(),
-        Some(chrono::Utc::now() + chrono::Duration::minutes(4)),
-    )
-    .await
-    .unwrap();
 
     let mut wait = publish_accepted_on_claimed_request(
         node.clone(),
         &mut owner,
         did,
         1,
-        "wait_subagent",
-        "completion-order-wait",
-        json!({"child_request_id": child}),
-        None,
+        crate::toolset::LIST_PROCESSES_TOOL_NAME,
+        "completion-order-list",
+        json!({}),
         AwaitMode::Foreground,
-        super::CancelPolicy::Cascade,
         true,
     )
     .await
     .unwrap();
     let wait_header = wait.accepted_header_doc_id().unwrap().to_owned();
-    complete_child(node, child, did, "durable native output").await;
-    let projected = project_background_subagent_completion(node.clone(), child, did)
+    complete_child(
+        node,
+        &message.caused_request_id,
+        did,
+        "durable native output",
+    )
+    .await;
+    let settled = crate::background_completion::settle_running_session_message_rows(node, did)
         .await
         .unwrap();
-    assert!(
-        matches!(projected, BackgroundCompletionOutcome::Projected { .. }),
-        "{projected:?}"
-    );
+    assert_eq!(settled, 1, "the caused request's terminal settles its row");
 
     let notifications = notification_texts(&admission).await;
     assert_eq!(notifications.len(), 1);
@@ -553,9 +526,9 @@ pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
             .await
             .unwrap();
     assert!(matches!(wait_native, Message::Assistant { ref content, .. }
-        if content.iter().any(|part| matches!(part, AssistantContent::ToolCall(call) if call.function.name == "wait_subagent"))));
+        if content.iter().any(|part| matches!(part, AssistantContent::ToolCall(call) if call.function.name == crate::toolset::LIST_PROCESSES_TOOL_NAME))));
     assert!(wait_record.sequence < notification_record.sequence);
-    assert!(notifications[0].1.contains("<subagent-notification"));
+    assert!(notifications[0].1.contains("<tool-completion"));
     assert!(notifications[0].1.contains("durable native output"));
 
     let requests = rows(
@@ -587,13 +560,15 @@ pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     );
     let queue = wake.input.as_ref().unwrap().queue.as_ref().unwrap();
     assert_eq!(queue.policy, QueuePolicy::Coalesce);
+    // The caused request ran at hop 1, so its wake climbs to hop 2.
+    assert_eq!(wake.subagent_depth, Some(2));
     assert_eq!(
         queue.key.as_deref(),
         Some(format!("background_completion:{session}").as_str())
     );
     assert_eq!(queue.background_completion_wake_version, Some(1));
 
-    wait.complete("child completed").await.unwrap();
+    wait.complete("listed").await.unwrap();
     assert_eq!(
         owner
             .terminalize_owned(
@@ -669,5 +644,95 @@ async fn generated_r6_notification_precedes_continuation_claim() {
     );
     drop(continuation);
     node.shutdown().await;
+    std::fs::remove_dir_all(admission.path).unwrap();
+}
+
+/// Lean `CausalHop.continuation_preserves_admission` over
+/// `CausalHop.sessionCurrentHop`: a recovery retry of a wake the hop bound
+/// refused copies the session's current hop, so it is refused too.
+#[tokio::test]
+async fn a_retried_over_bound_wake_is_refused_again() {
+    let case = lean_r6_backgrounding_case("failed_background_wake_with_budget_redrives");
+    let admission = admitted_parent(case, "over-bound-redrive").await;
+    let node = &admission.node;
+    let did = admission.agent_did.as_str();
+    let session = admission.tool.session_id.as_str();
+    let parent_doc = admission.tool.request_doc_id().unwrap();
+    let parent = rows(
+        node,
+        &format!(
+            r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}) {{ request_id }} }}"#,
+            escape_graphql_string(parent_doc)
+        ),
+        "AgentRequest",
+    )
+    .await[0]["request_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // The principal's effective bound, and the hop a completion caused at it
+    // is written with (Lean `CausalHop.nextHop`).
+    let bound = crate::document_config::load_agent_principal(node, did)
+        .await
+        .unwrap()
+        .and_then(|principal| principal.max_request_hop)
+        .unwrap_or(crate::document_config::DEFAULT_MAX_REQUEST_HOP);
+    let over_bound = crate::lifecycle::next_request_hop(
+        crate::lifecycle::RequestHopCause::CrossSession { cause_hop: bound },
+        0,
+    );
+    assert!(!crate::lifecycle::request_hop_within_bound(
+        bound, over_bound
+    ));
+    let refused_wake = "refused-over-bound-wake";
+    let input = RequestInput {
+        queue: Some(RequestQueue {
+            source: QueueSource::BackgroundCompletion,
+            policy: QueuePolicy::Coalesce,
+            key: Some(format!("background_completion:{session}")),
+            queued_after_request_id: Some(parent.clone()),
+            interrupted_request_id: None,
+            background_completion_wake_version: Some(1),
+        }),
+        ..Default::default()
+    };
+    let input =
+        gents_protocol::graphql::graphql_input_literal(&serde_json::to_value(input).unwrap())
+            .unwrap();
+    let deadline = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let response = node.execute(&format!(r#"mutation {{ create_AgentRequest(input: {{
+        request_id: "{refused_wake}", purpose: "normal", agent_did: "{}", requester_did: "{}", behavior_id: "general",
+        session_id: "{}", content: "background input", input: {input},
+        execution_origin: "scheduled", lifecycle_state: "failed",
+        failure_reason: "AgentRequest causal hop exceeds the target principal's max_request_hop",
+        terminalized_at: "2026-07-15T00:00:00Z", created_at: "2026-07-15T00:00:00Z", retry_count: 0, max_retries: 3,
+        retry_root_request: "{refused_wake}", terminal_redrive_attempts: 0,
+        subagent_depth: {}, deadline: "{}",
+        caused_by_parent_request_id: "{}", caused_by_parent_request_doc_id: "{}"
+    }}) {{ _docID }} }}"#,
+        escape_graphql_string(did), escape_graphql_string(did), escape_graphql_string(session),
+        over_bound, escape_graphql_string(&deadline), escape_graphql_string(&parent),
+        escape_graphql_string(parent_doc))).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let source = rows(node, &format!(r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{refused_wake}" }} }}) {{ _docID request_id lifecycle_state created_at }} }}"#), "AgentRequest").await;
+    seed_session_head(node, session, &source[0]).await;
+
+    let report = crate::RequestLifecycle::redrive_failed_background_wakeups(node, did)
+        .await
+        .unwrap();
+    assert_eq!(report.redriven, 1, "{report:?}");
+    let successor = rows(
+        node,
+        &format!(
+            r#"{{ AgentRequest(filter: {{ retry_parent_request: {{ _eq: "{refused_wake}" }} }}) {{ subagent_depth }} }}"#
+        ),
+        "AgentRequest",
+    )
+    .await;
+    assert_eq!(successor.len(), 1);
+    let hop = successor[0]["subagent_depth"].as_u64().unwrap() as u32;
+    assert_eq!(hop, over_bound);
+    assert!(!crate::lifecycle::request_hop_within_bound(bound, hop));
+    admission.node.shutdown().await;
     std::fs::remove_dir_all(admission.path).unwrap();
 }

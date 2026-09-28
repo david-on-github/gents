@@ -985,13 +985,10 @@ pub(super) fn verify_no_auxiliary_authority(tools: &gents::document_config::Tool
         "monitor must not select remote tools"
     );
     ensure!(
-        tools
-            .subagents
-            .as_ref()
-            .is_none_or(|subagents| subagents.target_ids.is_empty()
-                && subagents.spawn_enabled != Some(true)
-                && subagents.steering_enabled != Some(true)),
-        "monitor must not gain delegated execution authority"
+        tools.subagents.as_ref().is_none_or(
+            |subagents| subagents.target_ids.is_empty() && subagents.enabled != Some(true)
+        ),
+        "monitor must not gain agent_new/agent_message authority"
     );
     ensure!(
         tools
@@ -1051,7 +1048,7 @@ fn bash_access_does_not_grant_auxiliary_monitor_tools() {
         ("integrations", serde_json::json!({"lsp":{}})),
         (
             "subagents",
-            serde_json::json!({"target_ids":["repair"],"spawn_enabled":true}),
+            serde_json::json!({"target_ids":["repair"],"enabled":true}),
         ),
         (
             "remote",

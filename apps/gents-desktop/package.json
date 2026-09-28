@@ -1,7 +1,7 @@
 {
   "name": "@source-inc/gents-desktop-app",
   "private": true,
-  "version": "0.19.0",
+  "version": "0.20.0",
   "license": "Apache-2.0",
   "type": "module",
   "scripts": {
@@ -39,7 +39,6 @@
     "test:live:subagent": "node ./tests/run-live-test.mjs --suite subagent",
     "test:live:replication": "node ./tests/run-live-test.mjs --suite replication",
     "test:live:sad-path": "node ./tests/run-live-test.mjs --suite sad-path",
-    "test:live:cascade": "node ./tests/run-live-test.mjs --suite cascade",
     "test:live:e2e-acceptance": "node ./tests/run-live-test.mjs --suite e2e-acceptance",
     "preview": "vite preview",
     "tauri": "tauri"
@@ -60,14 +59,14 @@
     "@gents/shell": "file:../../third_party/gents-design/gents-shell-0.0.0.tgz",
     "@gents/tokens": "file:../../third_party/gents-design/gents-tokens-0.0.0.tgz",
     "@gents/ui": "file:../../third_party/gents-design/gents-ui-0.0.0.tgz",
-    "@source-inc/gents-desktop-client": "0.19.0",
-    "@source-inc/gents-desktop-chat": "0.19.0",
-    "@source-inc/gents-desktop-fleet": "0.19.0",
-    "@source-inc/gents-desktop-tokens": "0.19.0",
-    "@source-inc/gents-desktop-ui": "0.19.0"
+    "@source-inc/gents-desktop-client": "0.20.0",
+    "@source-inc/gents-desktop-chat": "0.20.0",
+    "@source-inc/gents-desktop-fleet": "0.20.0",
+    "@source-inc/gents-desktop-tokens": "0.20.0",
+    "@source-inc/gents-desktop-ui": "0.20.0"
   },
   "devDependencies": {
-    "@source-inc/gents-desktop-operations": "0.19.0",
+    "@source-inc/gents-desktop-operations": "0.20.0",
     "@antithesishq/bombadil": "^0.6.0",
     "@playwright/test": "^1.61.0",
     "@tauri-apps/cli": "2.10.1",

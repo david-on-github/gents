@@ -59,10 +59,10 @@ structure Surface where
   memory : Bool
   sessionHistory : Bool
   contextBudget : Bool
-  spawn : Bool
-  steering : Bool
-  background : Bool
-  crossPrincipal : Bool
+  /-- The agents tool group (`SubagentTools.enabled`): `agent_new` over the
+  `subagentTargets` allowlist, `agent_message`, `agent_interrupt` and
+  `agent_list`. -/
+  sessionMessages : Bool
   skills : Bool
   lsp : Bool
   cliTools : EndpointScope ToolId (Finset String)

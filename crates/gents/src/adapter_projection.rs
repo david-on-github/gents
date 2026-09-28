@@ -1481,20 +1481,6 @@ fn openai_codex_projection_schema() -> Value {
                                 "started_at": optional_string_schema(),
                                 "completed_at": optional_string_schema()
                             }
-                        },
-                        {
-                            "type": "object",
-                            "additionalProperties": false,
-                            "required": ["type", "id", "status"],
-                            "properties": {
-                                "type": { "const": "response" },
-                                "id": string_schema(),
-                                "status": optional_string_schema(),
-                                "output": optional_string_schema(),
-                                "reasoning": optional_string_schema(),
-                                "error": optional_string_schema(),
-                                "timestamp": optional_string_schema()
-                            }
                         }
                     ]
                 }
@@ -1700,7 +1686,7 @@ fn training_sample_kind_schema(kind: AdapterProjectionKind) -> Value {
             json!({ "enum": ["prompt", "message", "tool_call"] })
         }
         AdapterProjectionKind::OpenAiCodexRunTrace => {
-            json!({ "enum": ["prompt", "message", "tool_call", "response"] })
+            json!({ "enum": ["prompt", "message", "tool_call"] })
         }
         AdapterProjectionKind::LangGraphStateHistory => {
             json!({ "enum": ["state_snapshot", "state_node", "state_transition", "task"] })
@@ -2023,16 +2009,7 @@ fn build_openai_codex_run_trace(
             .lifecycle_state
             .map(|s| s.as_str().to_string()),
         items,
-        child_run_ids: if timeline.descendant_edges.is_empty() {
-            timeline.child_request_ids.clone()
-        } else {
-            timeline
-                .descendant_edges
-                .iter()
-                .filter(|edge| edge.is_direct() && edge.readable())
-                .map(|edge| edge.child_request_id.clone())
-                .collect()
-        },
+        child_run_ids: timeline.child_request_ids.clone(),
     }
 }
 
@@ -2056,16 +2033,7 @@ fn build_langgraph_state_history(
         ),
         (
             "child_request_ids".to_string(),
-            json!(if timeline.descendant_edges.is_empty() {
-                timeline.child_request_ids.clone()
-            } else {
-                timeline
-                    .descendant_edges
-                    .iter()
-                    .filter(|edge| edge.readable())
-                    .map(|edge| edge.child_request_id.clone())
-                    .collect::<Vec<_>>()
-            }),
+            json!(timeline.child_request_ids.clone()),
         ),
     ]);
 
@@ -2231,48 +2199,6 @@ fn build_langgraph_state_history(
         }
     }
 
-    for descendant in timeline
-        .descendant_edges
-        .iter()
-        .filter(|edge| edge.readable())
-    {
-        let node_id = format!("request:{}", descendant.child_request_id);
-        if seen_nodes.insert(node_id.clone()) {
-            nodes.push(LangGraphNode {
-                id: node_id.clone(),
-                kind: "request".to_string(),
-                request_id: Some(descendant.child_request_id.clone()),
-                agent_did: descendant.principal_did.clone(),
-                behavior_id: descendant.behavior_id.clone(),
-                parent_request_id: Some(descendant.immediate_parent_request_id.clone()),
-                parent_tool_call_id: Some(descendant.immediate_parent_tool_call_id.clone()),
-                status: Some(descendant.lifecycle_state.clone()),
-                content: None,
-                reasoning: None,
-            });
-        }
-        let lineage_edge = LangGraphEdge {
-            from: format!("request:{}", descendant.immediate_parent_request_id),
-            to: node_id,
-            kind: "child_request".to_string(),
-        };
-        if !edges.contains(&lineage_edge) {
-            edges.push(lineage_edge);
-        }
-        if !tasks
-            .iter()
-            .any(|task| task.id == descendant.immediate_parent_tool_call_id)
-        {
-            tasks.push(LangGraphTask {
-                id: descendant.immediate_parent_tool_call_id.clone(),
-                request_id: Some(descendant.immediate_parent_request_id.clone()),
-                name: "spawn_subagent".to_string(),
-                status: descendant.lifecycle_state.clone(),
-                child_request_id: Some(descendant.child_request_id.clone()),
-            });
-        }
-    }
-
     if let Some(output) = root_final_output(timeline) {
         values.insert(
             "final_output".to_string(),
@@ -2313,31 +2239,6 @@ fn build_multi_agent_task(
     let mut delegations = Vec::new();
     let mut tool_events = Vec::new();
 
-    for edge in timeline
-        .descendant_edges
-        .iter()
-        .filter(|edge| edge.readable())
-    {
-        push_participant(
-            &mut participants,
-            edge.principal_did.clone(),
-            edge.behavior_id.clone(),
-            "delegate",
-        );
-        delegations.push(MultiAgentDelegation {
-            parent_request_id: edge.immediate_parent_request_id.clone(),
-            child_request_id: edge.child_request_id.clone(),
-            parent_tool_call_id: Some(edge.immediate_parent_tool_call_id.clone()),
-            agent_did: edge.principal_did.clone(),
-            behavior_id: edge.behavior_id.clone(),
-            status: Some(edge.lifecycle_state.clone()),
-            // Descendant transcripts are deliberately not injected into
-            // projections. The durable result remains addressable by the
-            // canonical edge's terminal_result_ref.
-            input: None,
-        });
-    }
-
     for event in &timeline.events {
         match event {
             RunTimelineEvent::Request(request) => {
@@ -2351,7 +2252,7 @@ fn build_multi_agent_task(
                         "delegate"
                     },
                 );
-                if timeline.descendant_edges.is_empty() {
+                {
                     if let Some(parent_request_id) = request.parent_request_id.as_deref() {
                         delegations.push(MultiAgentDelegation {
                             parent_request_id: parent_request_id.to_string(),

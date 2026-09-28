@@ -8,6 +8,31 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- Sub-agents are ordinary sessions, and 0.20.0 requires a fresh home (#1937).
+  `spawn_subagent`, `wait_subagent`, `read_subagent`, `list_subagents` and
+  `cancel_subagent` are replaced by the agents tool group
+  (`Tools.subagents.enabled`):
+  - `agent_new {agent, prompt | task, title?}` starts an agent from the
+    `SubagentTarget` allowlist on a task in the background;
+  - `agent_message {session_id, message | task, interrupt?}` sends a message
+    to an agent session you can reach; with `interrupt`, it first stops that
+    session's current turn;
+  - `agent_interrupt {session_id}` stops a session's current turn;
+  - `agent_list {}` lists the agents you can start and the sessions you can
+    reach.
+  `agent_new` and `agent_message` return a receipt immediately; the call stays
+  a running background tool until the request it caused ends, then the result
+  arrives as a message in the calling conversation. Kill it with
+  `cancel_process`. In 0.20 only the session that started another session may
+  interrupt it. There is no foreground wait, workspace inheritance, cancel
+  cascade or subagent bridge. The caused request records its caller in
+  `caused_by_parent_*`, and `AgentPrincipal.max_request_hop` (default 8)
+  bounds every agent-to-agent chain, including loops. A target on another
+  principal is admitted there as a Peer request. `Tools.subagents` is now
+  `{target_ids, enabled}`; the spawn, background, cross-principal and wait
+  settings are rejected. `AgentToolCall` loses its child, cascade and
+  cancel-policy fields. Existing stores are not migrated; update desktop and
+  runtimes together.
 - Tools document timeouts now take effect, and the ones that could not are
   gone (#1768). `host.bash` `timeout_secs` and `max_timeout_secs` set the
   foreground default and maximum, clamped to the host's

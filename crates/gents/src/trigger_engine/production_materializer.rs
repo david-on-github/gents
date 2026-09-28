@@ -341,6 +341,7 @@ impl MaterializerHandle for ProductionMaterializer {
                         Some(&request_id),
                         requester_did,
                         trigger_doc_id.as_deref(),
+                        None,
                     )
                     .await?;
                 (enqueued, conversation_title)

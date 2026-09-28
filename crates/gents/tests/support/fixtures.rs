@@ -1,97 +1,11 @@
-use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use gents::__test_internals::run_subagent_source_for_test;
 use gents::defra_node::EmbeddedNode;
 use gents::{
-    ensure_agent_principal, ActiveRuntimeSnapshot, AgentIdentity, BackendProviderKind,
-    BehaviorToolConfig, KeyIdentity, ResolvedBehavior, RuntimePrincipal,
+    ensure_agent_principal, BackendProviderKind, BehaviorToolConfig, KeyIdentity, ResolvedBehavior,
+    RuntimePrincipal,
 };
-use tokio::sync::watch;
-use tokio_util::sync::CancellationToken;
-
-pub struct SubagentSourceGuard {
-    cancel: CancellationToken,
-    handle: Option<tokio::task::JoinHandle<()>>,
-    _snapshot_tx: watch::Sender<Arc<ActiveRuntimeSnapshot>>,
-}
-
-impl Drop for SubagentSourceGuard {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-        if let Some(handle) = &self.handle {
-            handle.abort();
-        }
-    }
-}
-
-pub fn spawn_subagent_source(
-    node: Arc<EmbeddedNode>,
-    agent_did: &str,
-    parent_behavior_id: &str,
-    child_behavior_id: &str,
-) -> SubagentSourceGuard {
-    spawn_subagent_source_with_authorized_peers(
-        node,
-        agent_did,
-        parent_behavior_id,
-        child_behavior_id,
-        HashSet::new(),
-    )
-}
-
-pub fn spawn_subagent_source_with_authorized_peers(
-    node: Arc<EmbeddedNode>,
-    agent_did: &str,
-    parent_behavior_id: &str,
-    child_behavior_id: &str,
-    authorized_peer_dids: HashSet<String>,
-) -> SubagentSourceGuard {
-    let identity: Arc<dyn AgentIdentity> = Arc::new(test_identity("subagent-source-principal"));
-    let principal = test_principal_for(identity, parent_behavior_id);
-    let mut child = test_behavior_for_principal(child_behavior_id, principal.clone());
-    child.principal = Arc::new(RuntimePrincipal {
-        agent_did: agent_did.to_string(),
-        identity: principal.identity.clone(),
-        default_behavior_id: parent_behavior_id.to_string(),
-        display_name: None,
-        enabled: true,
-    });
-    let mut behaviors = HashMap::new();
-    behaviors.insert(child_behavior_id.to_string(), Arc::new(child));
-    let snapshot = ActiveRuntimeSnapshot {
-        generation: 1,
-        principal: None,
-        local_did: agent_did.to_string(),
-        default_behavior_id: parent_behavior_id.to_string(),
-        behaviors,
-        tool_surfaces: HashMap::new(),
-        backend_admission_configs: HashMap::new(),
-        unavailable_behaviors: HashMap::new(),
-        active_schedules: HashMap::new(),
-        unavailable_schedules: HashSet::new(),
-        active_event_triggers: HashMap::new(),
-        unavailable_event_triggers: HashSet::new(),
-        active_tasks: HashMap::new(),
-        dispatchers: HashMap::new(),
-        behavior_executor_capacities: HashMap::new(),
-        behavior_executor_queue_capacities: HashMap::new(),
-    };
-    let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(snapshot));
-    let cancel = CancellationToken::new();
-    let handle = tokio::spawn(run_subagent_source_for_test(
-        node,
-        snapshot_rx,
-        authorized_peer_dids,
-        cancel.clone(),
-    ));
-    SubagentSourceGuard {
-        cancel,
-        handle: Some(handle),
-        _snapshot_tx: snapshot_tx,
-    }
-}
 
 pub fn test_identity(name: &str) -> KeyIdentity {
     let path = std::env::temp_dir().join(format!("{name}-{}.key", uuid::Uuid::new_v4()));
@@ -167,7 +81,8 @@ pub fn test_behavior_for_principal(
     }
 }
 
-/// Publish the canonical document chain that grants one behavior subagent tools.
+/// Publish the canonical document chain that grants one behavior the
+/// session-message tools over `targets`.
 ///
 /// Publish the complete behavior-owned tool graph used by integration tests.
 /// Targets are standalone documents, `Tools` selects them, `AgentContext`
@@ -178,36 +93,7 @@ pub async fn configure_subagent_behavior(
     behavior_id: &str,
     tools_id: &str,
     targets: Vec<gents::SubagentTargetDocument>,
-    spawn_enabled: bool,
-    background_enabled: bool,
-    allow_cross_principal: Option<bool>,
-) {
-    configure_subagent_behavior_with_spawn_timeout(
-        node,
-        agent_did,
-        behavior_id,
-        tools_id,
-        targets,
-        spawn_enabled,
-        background_enabled,
-        allow_cross_principal,
-        None,
-    )
-    .await;
-}
-
-/// As [`configure_subagent_behavior`], also setting the unclaimed-spawn bound.
-#[allow(clippy::too_many_arguments)]
-pub async fn configure_subagent_behavior_with_spawn_timeout(
-    node: &EmbeddedNode,
-    agent_did: &str,
-    behavior_id: &str,
-    tools_id: &str,
-    targets: Vec<gents::SubagentTargetDocument>,
-    spawn_enabled: bool,
-    background_enabled: bool,
-    allow_cross_principal: Option<bool>,
-    spawn_timeout_secs: Option<i64>,
+    enabled: bool,
 ) {
     use gents::config_client::{
         read_desired_state_record_in_txn as read, DesiredStateApplyDocument, DesiredStateApplyPlan,
@@ -308,12 +194,7 @@ pub async fn configure_subagent_behavior_with_spawn_timeout(
                     .iter()
                     .map(|target| target.target_id.clone())
                     .collect(),
-                spawn_enabled: Some(spawn_enabled),
-                steering_enabled: Some(true),
-                background_enabled: Some(background_enabled),
-                allow_cross_principal,
-                cross_principal_spawn_timeout_secs: spawn_timeout_secs,
-                ..Default::default()
+                enabled: Some(enabled),
             });
             behavior.context_id = Some(context_id);
 

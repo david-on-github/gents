@@ -168,6 +168,7 @@ impl Fixture<'_> {
                     i64::try_from(model.sequence).unwrap(),
                     false,
                     &now,
+                    parent.subagent_depth,
                 )
                 .unwrap()
             } else {

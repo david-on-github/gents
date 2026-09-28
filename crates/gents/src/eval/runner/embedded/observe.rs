@@ -631,7 +631,7 @@ mod tests {
         use crate::tool_call_lifecycle::admission_fixture::{
             claimed_signed_request, publish_accepted_on_claimed_request,
         };
-        use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, FailureClass};
+        use crate::tool_call_lifecycle::{AwaitMode, FailureClass};
         use gents_protocol::message::{AssistantContent, Message, Text};
         use gents_protocol::output::TerminalOutput;
 
@@ -653,9 +653,7 @@ mod tests {
             "fs_read",
             "call-1",
             serde_json::json!({"path": "x"}),
-            None,
             AwaitMode::Foreground,
-            CancelPolicy::Cascade,
             true,
         )
         .await

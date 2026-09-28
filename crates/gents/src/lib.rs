@@ -37,7 +37,6 @@ pub mod config_client;
 pub mod configuration_discovery;
 pub mod defra_query;
 pub mod defra_write;
-pub mod descendant_graph;
 pub mod document_config;
 pub mod error;
 pub mod eth;
@@ -299,9 +298,10 @@ pub mod schedule_cron;
 pub mod schema;
 pub mod self_config;
 pub mod session;
+pub mod session_message;
+pub mod session_origin;
 pub mod skills;
 pub mod streaming;
-pub mod subagent_tree;
 pub mod template;
 pub mod tool_call_lifecycle;
 pub mod tool_control;
@@ -313,6 +313,7 @@ pub mod truncation;
 pub mod watcher;
 pub mod workspace;
 
+pub use background_tools::load_caused_request_terminal;
 pub use callback::reject_secret_bearing_callback_fields;
 pub use collection::{Collection, DESIRED_STATE_APPLY_ORDER};
 pub use eth::{
@@ -352,9 +353,6 @@ pub use background_completion_diagnostics::{
     load_background_completion_diagnostics, BackgroundCompletionDiagnostics,
     BackgroundCompletionEpochDiagnostic,
 };
-pub use background_tools::subagent_control::{
-    cancel_session_subagent, CancelSubagentOutcome, SubagentCancellation,
-};
 pub use compaction::CompactionStrategy;
 pub use config::{
     ReasoningEffort, ResolvedBehavior, SamplingConfig, DEFAULT_COMPACTION_THRESHOLD,
@@ -364,13 +362,6 @@ pub use config::{
 };
 pub use config_client::ConfigAccess;
 pub use defra_node;
-pub use descendant_graph::{
-    resolve_descendant_edge, resolve_descendant_graph, resolve_descendant_root_request_id,
-    resolve_session_descendant_edge, resolve_session_descendant_graph,
-    DescendantAuthorizationState, DescendantControlAuthority, DescendantEdge,
-    DescendantGraphAccess, DescendantMaterializationState, DescendantPage, DescendantQuery,
-    DescendantScope, MAX_DESCENDANT_PAGE_LIMIT,
-};
 #[cfg(test)]
 pub(crate) use document_config::upsert_agent_principal;
 pub use document_config::{
@@ -411,9 +402,10 @@ pub use interrupt::{
 pub use lifecycle::{
     background_wake_next_retry_at, background_wake_retry_delay,
     build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title,
-    build_signed_request, enqueue_local_steering_request, task_session_title,
-    write_manual_agent_request, write_manual_agent_request_with_conversation_title,
-    BackgroundWakeRedriveReport, EnqueuedAgentRequest, ParentLink, RecoveryReport, RequestIdentity,
+    build_signed_request, enqueue_local_steering_request, next_request_hop,
+    request_hop_within_bound, task_session_title, write_manual_agent_request,
+    write_manual_agent_request_with_conversation_title, BackgroundWakeRedriveReport,
+    EnqueuedAgentRequest, ParentLink, RecoveryReport, RequestHopCause, RequestIdentity,
     RequestLifecycle, RequestSigner, RequestSpec, RetryLink, TerminalRedriveReport,
     TerminalRepairReport, TERMINAL_REDRIVE_BATCH_LIMIT, TERMINAL_REDRIVE_CAP,
 };
@@ -472,7 +464,6 @@ pub use toolset::{
 };
 pub use trigger_engine::event_source::EventSource;
 pub use trigger_engine::goal_source::GoalSource;
-pub use trigger_engine::subagent_source::SubagentSource;
 pub use trigger_engine::subscription_source::UpdateSubscriptionSource;
 pub use trigger_engine::{FireIntent, FireResult, TriggerKind, TriggerSource};
 pub use truncation::{TruncationLimits, TruncationMode};
@@ -481,35 +472,9 @@ pub use watcher::{AgentRequest, DefraWatcher, Watcher};
 #[doc(hidden)]
 pub mod __test_internals {
     pub use crate::agent::principal_assembly::BehaviorBuildError;
-    pub use crate::background_tools::r4c_args::{
-        ListSubagentsArgs, ListSubagentsEntry, ListSubagentsResponse, ReadSubagentArgs,
-        ReadSubagentResponse,
-    };
-    pub use crate::background_tools::{
-        handle_list_subagents, handle_read_subagent, load_steer_subagent_target, ChildEdge,
-        SteerSubagentTarget, AWAITING_CHILD_MATERIALIZATION,
-    };
     pub use crate::lifecycle::activate_workspace_bound_request;
     pub use crate::lifecycle::materialize::EnqueuedAgentRequest;
     pub use crate::lifecycle::queue::{reconcile_coalesced_pending_request, QueueSource};
-    pub use crate::trigger_engine::run_subagent_source_for_test;
-
-    /// Drive one scan through the same owner as the runtime's cancel-mirror loop.
-    pub async fn scan_cross_deployment_cancel_intents(
-        node: std::sync::Arc<defra_node::EmbeddedNode>,
-        snapshot: std::sync::Arc<crate::ActiveRuntimeSnapshot>,
-        peer_admission: std::sync::Arc<dyn crate::agent::p2p_reconcile::PeerAdmissionAuthority>,
-    ) -> anyhow::Result<()> {
-        let (_snapshot_tx, snapshot_rx) = tokio::sync::watch::channel(snapshot);
-        crate::trigger_engine::cross_deployment_cancel_mirror::CrossDeploymentCancelMirror::new(
-            node,
-            snapshot_rx,
-            peer_admission,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .scan_pending_intents()
-        .await
-    }
 }
 
 #[cfg(test)]

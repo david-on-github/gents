@@ -22,8 +22,10 @@ use tokio::net::TcpListener;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio::task::JoinHandle;
 
+mod agent_projection;
 mod background;
 mod bound_behavior;
+mod caused_threads;
 mod child_stream;
 mod command_projection;
 mod compaction_projection;
@@ -36,7 +38,6 @@ mod progress;
 mod projection_state;
 mod protocol;
 mod store;
-mod subagent_projection;
 mod thread_projection;
 mod thread_routes;
 mod trace;

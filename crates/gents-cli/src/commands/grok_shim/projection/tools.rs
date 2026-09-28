@@ -12,7 +12,7 @@
 //!
 //! - suppressed tool families (`todo`, `bg-plumbing`, `goal`,
 //!   `scheduler`, `workflow`) are never rendered as scrollback blocks;
-//! - `task`/`Task`/`spawn_subagent` are deliberately **not**
+//! - `task`/`Task` are deliberately **not**
 //!   suppressed: they emit an ordinary standard ACP `tool_call` plus a
 //!   same-id terminal `tool_call_update` (title = the durable tool name,
 //!   kind `other`), and the pager handles title recognition, waiting, and
@@ -197,7 +197,7 @@ pub(super) struct ToolCallRow {
     #[serde(default)]
     tool_failure_class: Option<String>,
     /// Persisted await mode of the call, when the runtime recorded one.
-    /// The exact value `background` marks a background subagent spawn
+    /// The exact value `background` marks a background call
     /// (`subagentBackground: true` in the projected meta envelope);
     /// anything else — including `None` — is foreground.
     #[serde(default)]
@@ -381,7 +381,7 @@ impl AvailableCommandsUpdate {
 // ---------------------------------------------------------------------------
 
 /// The tool families the pager never renders as scrollback blocks. The
-/// `task` family (`task`/`Task`/`spawn_subagent`) is deliberately
+/// `task` family (`task`/`Task`) is deliberately
 /// **not** suppressed: those rows emit an ordinary standard ACP
 /// `tool_call` plus a same-id terminal `tool_call_update`, and the pager
 /// handles title recognition, waiting, and suppression on its side.
@@ -397,11 +397,14 @@ pub(super) fn suppressed_tool_family(tool_name: &str) -> Option<&'static str> {
 }
 
 /// True when the durable tool name belongs to the `task` family the pager
-/// recognizes for subagent spawns: `task`/`Task`/`spawn_subagent`.
+/// recognizes for subagent spawns: `task`/`Task` and `agent_new`.
 /// Every such row projects an object `meta` carrying an explicit
 /// `subagentBackground` boolean sibling.
 pub(super) fn is_task_family(tool_name: &str) -> bool {
-    matches!(tool_name, "task" | "Task" | "spawn_subagent")
+    matches!(
+        tool_name,
+        "task" | "Task" | gents::toolset::AGENT_NEW_TOOL_NAME
+    )
 }
 
 /// True when canonical tool meta recognizes the call as an active agent
@@ -595,7 +598,11 @@ pub(super) fn project_tool_rows(
         let kind = ToolCallKind::from_tool_name(tool_name);
         let title = tool_title(row, &kind, presentations);
         let content = tool_content(result_text);
-        let mut raw_input = raw_input_value(args, meta.as_ref());
+        let mut raw_input = if tool_name == gents::toolset::AGENT_MESSAGE_TOOL_NAME {
+            agent_message_raw_input(args)
+        } else {
+            raw_input_value(args, meta.as_ref())
+        };
         let background = background::project(row, &tool_call_id, result_text, args);
         if background.is_some() {
             if let Some(input) = raw_input.as_mut().and_then(Value::as_object_mut) {
@@ -798,6 +805,7 @@ fn tool_title(
         )
         .as_ref(),
     ) || tool_name == SEND_SUBAGENT_MESSAGE_TITLE
+        || tool_name == gents::toolset::AGENT_MESSAGE_TOOL_NAME
     {
         return SEND_SUBAGENT_MESSAGE_TITLE.to_string();
     }
@@ -842,6 +850,20 @@ fn tool_content(result_text: &str) -> Vec<Value> {
         "type": "content",
         "content": {"type": "text", "text": trimmed},
     })]
+}
+
+/// `agent_message` keeps the pager's active-agent-message input shape:
+/// the target session as `subagent_id` and the message as `text`.
+fn agent_message_raw_input(args: &str) -> Option<Value> {
+    let object = serde_json::from_str::<Value>(args.trim()).ok()?;
+    let mut shaped = Map::new();
+    if let Some(session_id) = object.get("session_id") {
+        shaped.insert("subagent_id".to_string(), session_id.clone());
+    }
+    if let Some(message) = object.get("message") {
+        shaped.insert("text".to_string(), message.clone());
+    }
+    Some(Value::Object(shaped))
 }
 
 /// The structured `rawInput` for a tool call. JSON args are passed through
@@ -891,7 +913,7 @@ fn raw_output_value(result_text: &str) -> Option<Value> {
 /// row's persisted `await_mode` (the exact value `background` => true;
 /// anything else, including absent, => false).
 ///
-/// Task-family rows (`task`/`Task`/`spawn_subagent`) always carry
+/// Task-family rows (`task`/`Task`) always carry
 /// an object `meta` with the explicit `subagentBackground` boolean — false
 /// is never omitted, so the pager reads a definite value for every
 /// recognized spawn. When canonical meta exists it is preserved verbatim
@@ -1322,12 +1344,12 @@ mod tests {
 
     #[test]
     fn task_family_rows_render_ordinary_tool_calls_and_terminal_updates() {
-        // The `task` family is deliberately NOT suppressed: `task`, `Task`,
-        // and `spawn_subagent` rows emit an ordinary standard ACP
+        // The `task` family is deliberately NOT suppressed: `task` and `Task`
+        // rows emit an ordinary standard ACP
         // `tool_call` plus a same-id terminal `tool_call_update` (title =
         // the durable tool name, kind `other`); the pager handles title
         // recognition, waiting, and suppression on its side.
-        for name in ["task", "Task", "spawn_subagent"] {
+        for name in ["task", "Task", "agent_new"] {
             let row = tool_row(name, Some("completed"));
             let presentations =
                 args_result("doc-task", r#"{"description":"scout the repo"}"#, None);
@@ -1354,7 +1376,7 @@ mod tests {
         // explicit `subagentBackground` boolean: absent, `foreground`, and
         // unknown persisted await modes are all explicit false; only the
         // exact value `background` is true. False is never omitted.
-        for name in ["task", "Task", "spawn_subagent"] {
+        for name in ["task", "Task", "agent_new"] {
             for (await_mode, expected) in [
                 (None, false),
                 (Some("foreground"), false),
@@ -1403,15 +1425,15 @@ mod tests {
         });
         for (await_mode, expected) in [(Some("foreground"), false), (Some("background"), true)] {
             let presentations = args_result(
-                "doc-spawn_subagent",
+                "doc-Task",
                 &format!(r#"{{"description":"scout the repo","{TOOL_META_KEY}":{tool_meta}}}"#),
                 None,
             );
-            let mut row = tool_row("spawn_subagent", Some("running"));
+            let mut row = tool_row("Task", Some("running"));
             row.await_mode = await_mode.map(ToOwned::to_owned);
             let projection = project_tool_rows(&[row], &presentations);
             let ToolUpdate::ToolCall(call) = &projection.updates[0] else {
-                panic!("spawn_subagent must render a tool_call");
+                panic!("Task must render a tool_call");
             };
             let meta = call.meta.as_ref().expect("canonical meta row carries meta");
             assert_eq!(
@@ -1429,16 +1451,12 @@ mod tests {
     fn background_await_mode_merges_subagent_background_true_into_meta() {
         // The exact persisted value `background` => `subagentBackground:
         // true` in the meta envelope; anything else stays foreground.
-        let presentations = args_result(
-            "doc-spawn_subagent",
-            r#"{"description":"scout the repo"}"#,
-            None,
-        );
-        let mut row = tool_row("spawn_subagent", Some("running"));
+        let presentations = args_result("doc-Task", r#"{"description":"scout the repo"}"#, None);
+        let mut row = tool_row("Task", Some("running"));
         row.await_mode = Some("background".to_string());
         let projection = project_tool_rows(&[row], &presentations);
         let ToolUpdate::ToolCall(call) = &projection.updates[0] else {
-            panic!("spawn_subagent must render a tool_call");
+            panic!("Task must render a tool_call");
         };
         let meta = call.meta.as_ref().expect("background row carries meta");
         assert_eq!(meta["subagentBackground"], true);
@@ -1447,11 +1465,11 @@ mod tests {
 
         // A non-`background` await mode is foreground: explicit false, never
         // an omitted key.
-        let mut foreground = tool_row("spawn_subagent", Some("running"));
+        let mut foreground = tool_row("Task", Some("running"));
         foreground.await_mode = Some("foreground".to_string());
         let projection = project_tool_rows(&[foreground], &presentations);
         let ToolUpdate::ToolCall(call) = &projection.updates[0] else {
-            panic!("foreground spawn_subagent must render a tool_call");
+            panic!("foreground Task must render a tool_call");
         };
         let meta = call
             .meta
@@ -1506,6 +1524,25 @@ mod tests {
                 .and_then(|input| input.get("subagent_id"))
                 .and_then(Value::as_str),
             Some("sub-1")
+        );
+    }
+
+    #[test]
+    fn agent_message_projects_as_an_active_agent_message() {
+        let presentations = args_result(
+            "doc-agent_message",
+            r#"{"session_id":"child","message":"continue","interrupt":false}"#,
+            None,
+        );
+        let row = tool_row("agent_message", Some("running"));
+        let projection = project_tool_rows(&[row], &presentations);
+        let ToolUpdate::ToolCall(call) = &projection.updates[0] else {
+            panic!("first update should be a tool_call");
+        };
+        assert!(call.is_active_agent_message());
+        assert_eq!(
+            call.raw_input,
+            Some(json!({"subagent_id": "child", "text": "continue"}))
         );
     }
 
@@ -2294,7 +2331,6 @@ mod tests {
             "running",
             arguments,
             result,
-            None,
             spawned_by,
             Some(message_sequence),
             Some(created_at),
@@ -2403,7 +2439,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no tool_call registration for {tool_call_id}"))
     }
 
-    /// The embedded-node task/spawn regression: seed `task`/`spawn_subagent`
+    /// The embedded-node task regression: seed `task`/`Task`
     /// `AgentToolCall` rows through DefraDB with persisted
     /// foreground/background/unknown/absent `await_mode` (one carrying the
     /// canonical `x.ai/tool` args envelope), run the full production
@@ -2477,7 +2513,7 @@ mod tests {
             session_id,
             "call-spawn-unknown",
             "call-spawn-unknown",
-            "spawn_subagent",
+            "task",
             4,
             "2026-08-31T23:00:04Z",
             r#"{"description":"unknown mode scout"}"#,

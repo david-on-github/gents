@@ -15,8 +15,7 @@ pub(crate) struct RequestTraceAttrs {
     pub(crate) execution_origin: String,
     pub(crate) deadline_at: String,
     pub(crate) has_deadline: bool,
-    pub(crate) subagent_depth: u32,
-    pub(crate) is_subagent: bool,
+    pub(crate) request_hop: u32,
     pub(crate) parent_request_id: String,
     pub(crate) parent_tool_call_id: String,
     pub(crate) selected_skill_count: usize,
@@ -37,12 +36,7 @@ impl RequestTraceAttrs {
                 .deadline
                 .as_deref()
                 .is_some_and(|value| !value.trim().is_empty()),
-            subagent_depth: request.subagent_depth,
-            is_subagent: request.purpose
-                == gents_protocol::request_admission::RequestPurpose::Normal
-                && (request.subagent_depth > 0
-                    || request.caused_by_parent_request_id.is_some()
-                    || request.caused_by_parent_tool_call_id.is_some()),
+            request_hop: request.subagent_depth,
             parent_request_id: clean_optional(request.caused_by_parent_request_id.as_deref()),
             parent_tool_call_id: clean_optional(request.caused_by_parent_tool_call_id.as_deref()),
             selected_skill_count: request.input.selected_skill_ids.len(),
@@ -147,7 +141,6 @@ mod tests {
         assert_eq!(attrs.session_id, "session-1");
         assert_eq!(attrs.selected_skill_count, 2);
         assert!(attrs.workspace_cwd_set);
-        assert!(attrs.is_subagent);
         assert_eq!(attrs.parent_request_id, "parent-req");
         assert_eq!(attrs.parent_tool_call_id, "parent-tool");
     }

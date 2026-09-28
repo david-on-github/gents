@@ -4,34 +4,17 @@ use std::path::Path;
 use gents_codex_protocol as codex;
 use serde_json::Value;
 
+use super::agent_projection::agent_projection;
 use super::progress::{
     gents_exec_metadata, observed_tool_status, tool_duration_ms, GentsToolCallProgress,
 };
 use super::projection_state::ProjectionStatus;
 pub(super) use super::projection_state::ToolProjectionStatus;
-use super::subagent_projection::{collab_projection, is_subagent_control_tool};
 
-#[cfg(test)]
 pub(super) fn tool_projection_status(tool: &GentsToolCallProgress) -> ToolProjectionStatus {
-    tool_projection_status_with_settled(tool, false, false)
-}
-
-pub(super) fn tool_projection_status_with_settled(
-    tool: &GentsToolCallProgress,
-    projection_settled: bool,
-    link_settle_expired: bool,
-) -> ToolProjectionStatus {
     let status = observed_tool_status(tool);
-    if is_subagent_control_tool(&tool.tool_name) {
-        if let Some(projection) = collab_projection(tool) {
-            ToolProjectionStatus::Collab(projection)
-        } else if status == ProjectionStatus::Failed
-            || (projection_settled && link_settle_expired && status == ProjectionStatus::Completed)
-        {
-            ToolProjectionStatus::Mcp(status)
-        } else {
-            ToolProjectionStatus::DeferredCollab
-        }
+    if let Some(projection) = agent_projection(tool) {
+        ToolProjectionStatus::Agent(projection)
     } else if is_gents_file_change_tool(tool) {
         if file_update_change(tool).is_none() {
             ToolProjectionStatus::DeferredFileChange
@@ -132,10 +115,16 @@ pub(super) fn update_running_background_tools(
         {
             running.insert(tool.tool_call_key.clone());
         }
+        // A started or messaged agent session runs past the turn; the
+        // after-turn watcher completes its item.
+        ToolProjectionStatus::Agent(projection)
+            if projection.status == ProjectionStatus::InProgress =>
+        {
+            running.insert(tool.tool_call_key.clone());
+        }
         ToolProjectionStatus::Mcp(_)
+        | ToolProjectionStatus::Agent(_)
         | ToolProjectionStatus::Command(_)
-        | ToolProjectionStatus::Collab(_)
-        | ToolProjectionStatus::DeferredCollab
         | ToolProjectionStatus::DeferredFileChange
         | ToolProjectionStatus::FileChange(_) => {
             running.remove(&tool.tool_call_key);
@@ -299,9 +288,6 @@ pub(super) fn command_execution_item(
 }
 
 fn command_execution_display(tool: &GentsToolCallProgress) -> String {
-    if let Some(child_request_id) = tool.child_request_id.as_deref() {
-        return format!("spawn_subagent {child_request_id}");
-    }
     if let Some(command) = shell_command_from_tool_args(&tool.args) {
         return command;
     }
@@ -441,26 +427,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn settled_unresolved_subagent_control_falls_back_to_visible_mcp() {
-        let tool = test_tool(
-            "spawn_subagent",
-            "completed",
-            r#"{"name":"reviewer","prompt":"inspect"}"#,
-        )
-        .with_result(r#"{"child_request_id":"child-request"}"#);
+    fn running_agent_items_stay_tracked_for_the_after_turn_watcher() {
+        let mut running = BTreeSet::new();
+        let started = test_tool(
+            gents::toolset::AGENT_NEW_TOOL_NAME,
+            "running",
+            r#"{"agent":"worker","prompt":"inspect"}"#,
+        );
+        update_running_background_tools(&mut running, &started, &tool_projection_status(&started));
+        assert!(running.contains(&started.tool_call_key));
 
-        assert_eq!(
-            tool_projection_status(&tool),
-            ToolProjectionStatus::DeferredCollab
+        let completed = test_tool(
+            gents::toolset::AGENT_NEW_TOOL_NAME,
+            "completed",
+            r#"{"agent":"worker","prompt":"inspect"}"#,
+        )
+        .with_result(r#"{"session_id":"child"}"#);
+        update_running_background_tools(
+            &mut running,
+            &completed,
+            &tool_projection_status(&completed),
         );
-        assert_eq!(
-            tool_projection_status_with_settled(&tool, true, false),
-            ToolProjectionStatus::DeferredCollab
-        );
-        assert_eq!(
-            tool_projection_status_with_settled(&tool, true, true),
-            ToolProjectionStatus::Mcp(ProjectionStatus::Completed)
-        );
+        assert!(running.is_empty());
     }
 
     #[test]
@@ -779,10 +767,8 @@ mod tests {
             tool_name: tool_name.to_string(),
             lifecycle_state: Some(status.to_string()),
             await_mode: None,
-            child_request_id: None,
             args: args.to_string(),
             result: String::new(),
-            subagent_link: None,
             ..Default::default()
         }
     }

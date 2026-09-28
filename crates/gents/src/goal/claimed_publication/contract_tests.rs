@@ -10,7 +10,7 @@ use serde_json::json;
 
 use crate::lifecycle::{ClaimOutcome, RequestTerminalOutcome, TerminalizeResult};
 use crate::tool_call_lifecycle::admission_fixture::publish_accepted_on_claimed_request;
-use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, SpawnedBackgroundToolAdmission};
+use crate::tool_call_lifecycle::{AwaitMode, SpawnedBackgroundToolAdmission};
 
 // Reuse the existing real-DB Goal fixture and independent signed-field checks.
 #[path = "../operator_resume/support.rs"]
@@ -35,13 +35,6 @@ struct PublicationCase {
 
 async fn run_generated_running_wait() {
     let contracts: PublicationContracts = gents_lean_contract::load_contract_snapshot().unwrap();
-    let resumed = contracts
-        .goal_claimed_publication_cases
-        .iter()
-        .find(|case| case.name == "completed_waited_tool_resumes")
-        .expect("generated completed wait case")
-        .expected
-        .clone();
     let case = contracts
         .goal_claimed_publication_cases
         .into_iter()
@@ -68,9 +61,7 @@ async fn run_generated_running_wait() {
         "spawn_process",
         "goal-spawn",
         json!({"tool_name":"bash","args":{"command":"sleep 1"}}),
-        None,
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         true,
     )
     .await
@@ -96,9 +87,7 @@ async fn run_generated_running_wait() {
         "wait_process",
         "goal-wait",
         json!({"tool_call_id":handle,"timeout_secs":1}),
-        None,
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
         true,
     )
     .await
@@ -145,10 +134,10 @@ async fn run_generated_running_wait() {
     .unwrap();
     assert!(result.is_none(), "generated intentional wait must defer");
     assert_eq!(fixture.observe().await, case.expected);
-    // claimed_wait_then_completion_reuses_claim: the deferred claim publishes
-    // once its waited target settles, without another Goal claim.
+    // Lean `BackgroundState.resultOwed`: an ended target whose completion
+    // delivery is still owed keeps the claim deferred.
     background.complete("finished").await.unwrap();
-    let receipt = publish_claimed_continuation(
+    assert!(publish_claimed_continuation(
         &fixture.node,
         &observed,
         PARENT,
@@ -157,10 +146,58 @@ async fn run_generated_running_wait() {
     )
     .await
     .unwrap()
-    .expect("settled wait target must release the deferred claim");
-    assert!(receipt.created);
-    assert_eq!(fixture.observe().await, resumed);
+    .is_none());
+    assert_eq!(fixture.observe().await, case.expected);
+    // Recovery delivers the owed completion: its wake is the session's latest
+    // request, so the old-parent claim never publishes and the Goal continues
+    // from that wake.
+    let report =
+        crate::tool_call_lifecycle::ToolCallLifecycle::reconcile_background_completion_side_effects(
+            &fixture.node,
+            fixture.identity.did(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.side_effects_converged, 1);
+    assert!(publish_claimed_continuation(
+        &fixture.node,
+        &observed,
+        PARENT,
+        "Original signed continuation",
+        false,
+    )
+    .await
+    .unwrap()
+    .is_none());
+    let after = load_canonical_goal(&fixture.node, fixture.identity.did(), SESSION)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (
+            after.continuation_sequence(),
+            after.last_continued_from_request_id
+        ),
+        (
+            observed.continuation_sequence(),
+            observed.last_continued_from_request_id.clone()
+        ),
+        "the old-parent claim publishes nothing once the wake is the latest request"
+    );
     fixture.node.shutdown().await;
+}
+
+/// A terminal target whose completion obligation is already discharged, as
+/// the `completed_waited_tool_resumes` observation reads it: no delivery is
+/// owed and no newer request is in the session.
+async fn discharge_completion_obligation(node: &crate::defra_node::EmbeddedNode, doc_id: &str) {
+    let response = node
+        .execute(&format!(
+            r#"mutation {{ update_AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, input: {{ status: "completed" }}) {{ _docID }} }}"#,
+            crate::graphql::escape_graphql_string(doc_id)
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
 }
 
 /// Later scans of the same abandoned claim, bound as follow-ups of the
@@ -198,7 +235,7 @@ async fn run_generated_wait_observations() {
     let mut abandoned_follow_ups = 0;
     assert_eq!(
         cases.len(),
-        22,
+        25,
         "every new generated wait case is owner-bound"
     );
     for case in cases {
@@ -232,9 +269,7 @@ async fn run_generated_wait_observations() {
                 "wait_process",
                 "older-goal-wait",
                 json!({"tool_call_id":unrelated_handle,"timeout_secs":1}),
-                None,
                 AwaitMode::Foreground,
-                CancelPolicy::Cascade,
                 true,
             )
             .await
@@ -297,9 +332,7 @@ async fn run_generated_wait_observations() {
                 "spawn_process",
                 "goal-spawn",
                 json!({"tool_name":"bash","args":{"command":"sleep 1"}}),
-                None,
                 AwaitMode::Foreground,
-                CancelPolicy::Cascade,
                 true,
             )
             .await
@@ -333,9 +366,30 @@ async fn run_generated_wait_observations() {
                 "running" => {
                     target.start_running().await.unwrap();
                 }
+                "completion_pending" => {
+                    target.start_running().await.unwrap();
+                    // Every terminal winner of a started background target
+                    // owes its completion delivery.
+                    if case.name.starts_with("failed_") {
+                        target
+                            .fail("failed", crate::tool_call_lifecycle::FailureClass::External)
+                            .await
+                            .unwrap();
+                    } else if case.name.starts_with("cancelled_") {
+                        target
+                            .cancel_during_run(
+                                crate::tool_call_lifecycle::CancelCause::UserCancelled,
+                            )
+                            .await
+                            .unwrap();
+                    } else {
+                        target.complete("finished").await.unwrap();
+                    }
+                }
                 "terminal" => {
                     target.start_running().await.unwrap();
                     target.complete("finished").await.unwrap();
+                    discharge_completion_obligation(&fixture.node, target.doc_id().unwrap()).await;
                 }
                 state => panic!("unmapped generated background state {state}"),
             }
@@ -350,9 +404,7 @@ async fn run_generated_wait_observations() {
                 "bash",
                 &handle,
                 json!({"command":"sleep 1"}),
-                None,
                 AwaitMode::Foreground,
-                CancelPolicy::Cascade,
                 false,
             )
             .await
@@ -389,9 +441,7 @@ async fn run_generated_wait_observations() {
                 } else {
                     json!({"tool_call_id":handle,"timeout_secs":1})
                 },
-                None,
                 AwaitMode::Foreground,
-                CancelPolicy::Cascade,
                 observed_wait["replied"] != false,
             )
             .await
@@ -566,7 +616,7 @@ async fn run_generated_wait_observations() {
         let result = if case.observation["storage_failed"] == true {
             // Fail the waited-target read inside the publication transaction.
             ConfigApplyTxn::with_read_storage_failure(
-                "await_mode child_request_id spawned_by_tool_call_doc_id",
+                "await_mode spawned_by_tool_call_doc_id",
                 publication,
             )
             .await
@@ -866,5 +916,68 @@ async fn queued_claimed_publication_observes_pause_before_creating_child() {
     let mut expected = before;
     expected["status"] = json!("paused");
     assert_eq!(fixture.observe().await, expected);
+    fixture.node.shutdown().await;
+}
+
+/// A replay of a claimed publication checks the published continuation
+/// against its own signed hop. A request written later in the same second
+/// (with a request id that sorts first and a higher hop) cannot turn the
+/// replay into a conflict.
+#[tokio::test]
+async fn claimed_publication_replay_keeps_its_hop_across_a_same_second_write() {
+    let before = json!({"status":"active","blocked_audits":2,"wrapup_requested":false,
+        "wrapup_completed":false,"sequence":1,"last_continued_from":10,"latest_request":10,
+        "children":[],"tokens_used":37,"token_budget":1000});
+    let fixture = Fixture::new(&before).await;
+    let observed = load_canonical_goal(&fixture.node, fixture.identity.did(), SESSION)
+        .await
+        .unwrap()
+        .unwrap();
+    let first = publish_claimed_continuation(
+        &fixture.node,
+        &observed,
+        PARENT,
+        "Original signed continuation",
+        false,
+    )
+    .await
+    .unwrap()
+    .expect("first publication creates the continuation");
+    assert!(first.created);
+    let child = request_rows(&fixture.node)
+        .await
+        .into_iter()
+        .find(|row| row.request_id == first.request_id)
+        .unwrap();
+    execute(
+        &fixture.node,
+        &format!(
+            r#"mutation {{ create_AgentRequest(input: {{
+            request_id: "background-completion-same-second", purpose: "normal",
+            agent_did: "{}", requester_did: "{}", behavior_id: "contract-behavior",
+            session_id: "{SESSION}", content: "later work", execution_origin: "scheduled",
+            lifecycle_state: "completed", failure_reason: "", created_at: "{}",
+            retry_count: 0, max_retries: 3, retry_root_request: "background-completion-same-second",
+            subagent_depth: {}
+        }}) {{ _docID }} }}"#,
+            escape_graphql_string(fixture.identity.did()),
+            escape_graphql_string(fixture.identity.did()),
+            escape_graphql_string(child.created_at.as_deref().unwrap()),
+            child.subagent_depth.unwrap_or(0) + 5,
+        ),
+    )
+    .await;
+    let replay = publish_claimed_continuation(
+        &fixture.node,
+        &observed,
+        PARENT,
+        "Original signed continuation",
+        false,
+    )
+    .await
+    .unwrap()
+    .expect("replay recovers the published continuation");
+    assert!(!replay.created);
+    assert_eq!(replay.request_id, first.request_id);
     fixture.node.shutdown().await;
 }

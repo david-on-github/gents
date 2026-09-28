@@ -1968,7 +1968,7 @@ fn explain_init_package_document_matrix_resolves_expected_surfaces() {
                 "call_tool",
                 "read_file",
                 "spawn_process",
-                "spawn_subagent",
+                "agent_new",
             ],
             expected_warnings: vec!["host_ceiling_not_global", "defra_query_empty_scope_all"],
             host_ceiling_warning: true,
@@ -2021,7 +2021,7 @@ fn explain_init_package_document_matrix_resolves_expected_surfaces() {
                 "discover_tools",
                 "call_tool",
                 "bash",
-                "spawn_subagent",
+                "agent_new",
                 "defra_query",
             ],
             expected_warnings: vec![],
@@ -2079,14 +2079,13 @@ fn explain_init_package_document_matrix_resolves_expected_surfaces() {
 #[test]
 fn explain_complex_document_combination_filters_subagents_and_groups_surface() {
     let own_agent_did = "did:test:local";
-    let mut selection = tools_document(serde_json::json!({
+    let selection = tools_document(serde_json::json!({
         "agent_did":own_agent_did,
         "host":{"files":{"mode":"ReadOnly"},"bash":{"mode":"ReadOnly","background_enabled":true}},
         "remote":{"services":[
             {"mcp_service_id":"registry","tool_names":["read"]},
             {"mcp_service_id":"observability","tool_names":["query"]}]},
-        "subagents":{"target_ids":["worker","inactive","remote"],"spawn_enabled":true,
-            "steering_enabled":true,"background_enabled":true,"cross_principal_spawn_timeout_secs":120},
+        "subagents":{"target_ids":["worker","inactive","remote"],"enabled":true},
         "built_ins":{"enable_memory":true,"enable_context_budget":true},
         "datastore":{"enable_defra_query":true,"defra_query_collections":["AgentRequest","AgentResponse"]}
     }));
@@ -2140,7 +2139,10 @@ fn explain_complex_document_combination_filters_subagents_and_groups_surface() {
     );
     assert_eq!(
         resolve_subagent_target_descriptions(&surface),
-        vec![("worker".to_string(), "local worker".to_string())]
+        vec![
+            ("worker".to_string(), "local worker".to_string()),
+            ("remote".to_string(), "remote worker".to_string())
+        ]
     );
     let explanation = ToolSurfaceExplanation::from_resolved(&config, &surface);
 
@@ -2149,8 +2151,10 @@ fn explain_complex_document_combination_filters_subagents_and_groups_surface() {
         "bash",
         "call_tool",
         "spawn_process",
-        "spawn_subagent",
-        "steer_subagent",
+        "agent_new",
+        "agent_message",
+        "agent_interrupt",
+        "agent_list",
         "defra_query",
     ] {
         assert!(
@@ -2166,7 +2170,7 @@ fn explain_complex_document_combination_filters_subagents_and_groups_surface() {
     assert!(explanation_category_contains(
         &explanation.included,
         "subagent",
-        "spawn_subagent"
+        "agent_new"
     ));
     assert!(explanation_category_contains(
         &explanation.included,
@@ -2197,32 +2201,6 @@ fn explain_complex_document_combination_filters_subagents_and_groups_surface() {
             "memory_requested_compiled_out"
         ));
     }
-
-    selection.subagents.as_mut().unwrap().allow_cross_principal = Some(true);
-    let mut subagents = SubagentToolConfig::from_document(&selection).unwrap();
-    subagents.targets = targets;
-    let mut resolved = ResolvedToolSelection::from_document(&selection).unwrap();
-    resolved.backgroundable_tool_names = vec!["bash".into()];
-    let config = BehaviorToolConfig::from_selection_with_subagent_tools(
-        "complex-cross-principal",
-        resolved,
-        &ceiling,
-        subagents,
-        Vec::new(),
-    )
-    .unwrap();
-    let surface = config.resolve_with_available_subagent_targets_for_mcp_presence(
-        true,
-        own_agent_did,
-        &active_behavior_ids,
-    );
-    assert_eq!(
-        resolve_subagent_target_descriptions(&surface),
-        vec![
-            ("worker".to_string(), "local worker".to_string()),
-            ("remote".to_string(), "remote worker".to_string())
-        ]
-    );
 }
 
 #[test]

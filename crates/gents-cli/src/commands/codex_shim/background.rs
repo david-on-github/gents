@@ -12,8 +12,10 @@ use serde_json::Value;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
+use super::agent_projection::agent_tool_item;
 use super::command_projection::{
-    codex_command_status, command_execution_item, command_output_payload,
+    codex_command_status, command_execution_item, command_output_payload, tool_projection_status,
+    ToolProjectionStatus,
 };
 use super::progress::{
     decode_gents_tool_call_progress, gents_tool_progress_query, observed_tool_status,
@@ -204,6 +206,19 @@ async fn send_background_tool_completion(
     status: codex::CommandExecutionStatus,
     cwd: &Path,
 ) -> Result<()> {
+    if let ToolProjectionStatus::Agent(projection) = tool_projection_status(tool) {
+        return send_notification(
+            outbound,
+            state,
+            codex::ServerNotification::ItemCompleted(codex::ItemCompletedNotification {
+                item: agent_tool_item(thread_id, tool, &projection),
+                thread_id: thread_id.to_string(),
+                turn_id: turn_id.to_string(),
+                completed_at_ms: tool_completed_at_ms(tool).unwrap_or_else(now_millis),
+            }),
+        )
+        .await;
+    }
     if let Some(delta) = command_output_payload(tool) {
         send_notification(
             outbound,
@@ -256,7 +271,6 @@ pub(super) async fn cancel_projected_background_tool_key(
     let outcome = gents::cancel_background_tool_call(
         state.node.clone(),
         &state.background_execution_registry,
-        state.agent_did.as_ref(),
         session_id,
         tool_call_id,
     )

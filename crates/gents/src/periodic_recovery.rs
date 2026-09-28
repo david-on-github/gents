@@ -12,11 +12,10 @@ use crate::admission::{InferenceCall, InferenceCallRecoveryReport};
 use crate::lifecycle::{RequestLifecycle, TerminalRepairReport};
 use crate::llm::tool::BoxFuture;
 use crate::tool_call_lifecycle::{
-    BackgroundCompletionSideEffectReport, OrphanedBackgroundToolReport, SubagentLivenessReport,
-    TerminalParentToolReport, ToolCallLifecycle,
+    BackgroundCompletionSideEffectReport, OrphanedBackgroundToolReport, TerminalParentToolReport,
+    ToolCallLifecycle,
 };
 
-const SUBAGENT_LIVENESS_SWEEP_IDS: &[&str] = &["subagent_liveness_terminalize_expired_children"];
 const REQUEST_TERMINAL_REPAIR_SWEEP_IDS: &[&str] = &["request_lifecycle_recover_all_requests"];
 const TERMINAL_PARENT_TOOL_SWEEP_IDS: &[&str] =
     &["tool_call_lifecycle_reconcile_terminal_parent_owned_tools"];
@@ -25,6 +24,7 @@ const ORPHANED_BACKGROUND_TOOL_SWEEP_IDS: &[&str] =
 const BACKGROUND_COMPLETION_SIDE_EFFECT_SWEEP_IDS: &[&str] =
     &["tool_call_lifecycle_reconcile_background_completion_side_effects"];
 const INFERENCE_CALL_SWEEP_IDS: &[&str] = &["inference_call_recover_all_stale_calls"];
+const SESSION_MESSAGE_SWEEP_IDS: &[&str] = &["tool_call_lifecycle_recover_session_message_rows"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeriodicRecoverySweepMetadata {
@@ -36,22 +36,23 @@ pub struct PeriodicRecoverySweepMetadata {
 #[derive(Debug, PartialEq, Eq)]
 pub enum PeriodicRecoverySweepOutcome {
     RequestTerminalRepair(TerminalRepairReport),
-    SubagentLiveness(SubagentLivenessReport),
     TerminalParentTools(TerminalParentToolReport),
     OrphanedBackgroundTools(OrphanedBackgroundToolReport),
     BackgroundCompletionSideEffects(BackgroundCompletionSideEffectReport),
     InferenceCalls(InferenceCallRecoveryReport),
+    /// Session-message rows settled from their caused requests.
+    SessionMessageRows(usize),
 }
 
 impl PeriodicRecoverySweepOutcome {
     pub fn is_noop(&self) -> bool {
         match self {
             Self::RequestTerminalRepair(report) => report.is_noop(),
-            Self::SubagentLiveness(report) => report.is_noop(),
             Self::TerminalParentTools(report) => report.is_noop(),
             Self::OrphanedBackgroundTools(report) => report.is_noop(),
             Self::BackgroundCompletionSideEffects(report) => report.is_noop(),
             Self::InferenceCalls(report) => report.calls_recovered == 0,
+            Self::SessionMessageRows(settled) => *settled == 0,
         }
     }
 }
@@ -85,10 +86,6 @@ const PERIODIC_RECOVERY_SWEEP_METADATA: &[PeriodicRecoverySweepMetadata] = &[
         rust_function: "RequestLifecycle::repair_terminal_requests",
     },
     PeriodicRecoverySweepMetadata {
-        sweep_ids: SUBAGENT_LIVENESS_SWEEP_IDS,
-        rust_function: "ToolCallLifecycle::reconcile_subagent_liveness",
-    },
-    PeriodicRecoverySweepMetadata {
         sweep_ids: TERMINAL_PARENT_TOOL_SWEEP_IDS,
         rust_function: "ToolCallLifecycle::reconcile_terminal_parent_owned_tools",
     },
@@ -106,6 +103,10 @@ const PERIODIC_RECOVERY_SWEEP_METADATA: &[PeriodicRecoverySweepMetadata] = &[
         sweep_ids: INFERENCE_CALL_SWEEP_IDS,
         rust_function: "InferenceCall::recover_all",
     },
+    PeriodicRecoverySweepMetadata {
+        sweep_ids: SESSION_MESSAGE_SWEEP_IDS,
+        rust_function: "background_completion::settle_running_session_message_rows",
+    },
 ];
 
 const PERIODIC_RECOVERY_SWEEP_EXECUTORS: &[PeriodicRecoverySweepExecutor] = &[
@@ -115,23 +116,23 @@ const PERIODIC_RECOVERY_SWEEP_EXECUTORS: &[PeriodicRecoverySweepExecutor] = &[
     },
     PeriodicRecoverySweepExecutor {
         metadata_index: 1,
-        run: reconcile_subagent_liveness,
-    },
-    PeriodicRecoverySweepExecutor {
-        metadata_index: 2,
         run: reconcile_terminal_parent_owned_tools,
     },
     PeriodicRecoverySweepExecutor {
-        metadata_index: 3,
+        metadata_index: 2,
         run: reconcile_orphaned_background_tools,
     },
     PeriodicRecoverySweepExecutor {
-        metadata_index: 4,
+        metadata_index: 3,
         run: reconcile_background_completion_side_effects,
     },
     PeriodicRecoverySweepExecutor {
-        metadata_index: 5,
+        metadata_index: 4,
         run: recover_inference_calls,
+    },
+    PeriodicRecoverySweepExecutor {
+        metadata_index: 5,
+        run: settle_session_message_rows,
     },
 ];
 
@@ -160,18 +161,6 @@ pub async fn run_periodic_recovery_sweeps(
         }
     }
     Ok(runs)
-}
-
-fn reconcile_subagent_liveness<'a>(
-    node: &'a std::sync::Arc<EmbeddedNode>,
-    agent_did: &'a str,
-    _background_executions: &'a crate::hook::BackgroundExecutionRegistry,
-) -> BoxFuture<'a, Result<PeriodicRecoverySweepOutcome>> {
-    Box::pin(async move {
-        ToolCallLifecycle::reconcile_subagent_liveness(node, agent_did)
-            .await
-            .map(PeriodicRecoverySweepOutcome::SubagentLiveness)
-    })
 }
 
 fn reconcile_terminal_parent_owned_tools<'a>(
@@ -235,5 +224,17 @@ fn recover_inference_calls<'a>(
         InferenceCall::recover_all(node, agent_did)
             .await
             .map(PeriodicRecoverySweepOutcome::InferenceCalls)
+    })
+}
+
+fn settle_session_message_rows<'a>(
+    node: &'a std::sync::Arc<EmbeddedNode>,
+    agent_did: &'a str,
+    _background_executions: &'a crate::hook::BackgroundExecutionRegistry,
+) -> BoxFuture<'a, Result<PeriodicRecoverySweepOutcome>> {
+    Box::pin(async move {
+        crate::background_completion::settle_running_session_message_rows(node, agent_did)
+            .await
+            .map(PeriodicRecoverySweepOutcome::SessionMessageRows)
     })
 }

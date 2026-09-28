@@ -26,6 +26,8 @@ pub(crate) use atomic_inputs::next_append_sequence_in_transaction;
 #[cfg(test)]
 pub(crate) use atomic_inputs::persist_background_completion_with_message;
 pub(crate) use atomic_inputs::persist_background_completion_with_message_canonical;
+#[cfg(test)]
+pub(crate) use atomic_inputs::persist_background_completion_with_message_waking;
 use atomic_inputs::steering_transaction_attempt;
 #[cfg(test)]
 use atomic_inputs::transaction_created_doc_id;
@@ -35,12 +37,9 @@ use coalescing::{
     parent_behavior_id, queue_row_to_enqueued_request, row_matches_coalesced_source_and_key,
 };
 pub(crate) use draining::drain_automated_wakeups_in_txn;
-pub(crate) use draining::drain_automated_wakeups_returning_ids;
-pub(crate) use draining::drain_subagent_owned_queue;
 pub use enqueue::enqueue_local_steering_request;
-pub(crate) use enqueue::{
-    enqueue_admitted_steering_request, enqueue_steering_request, SteeringAdmission,
-};
+#[cfg(test)]
+pub(crate) use enqueue::enqueue_steering_request;
 pub use gents_protocol::request_input::{
     GoalContinuationInput, QueuePolicy, QueueSource, RequestInput, RequestQueue,
 };
@@ -48,12 +47,13 @@ pub(crate) use goal_continuation::{
     goal_continuation_behavior, goal_continuation_identity, prepare_goal_continuation,
 };
 pub(crate) use input::{
-    background_wake_queue, is_automated_wakeup, row_is_automated_wakeup,
-    row_is_subagent_owned_queue, row_queue,
+    background_wake_queue, is_automated_wakeup, row_is_automated_wakeup, row_queue,
 };
 #[cfg(test)]
 use input::{queue_is_automated_wakeup, BACKGROUND_COMPLETION_WAKE_VERSION};
+#[cfg(test)]
 use mutation::session_request_create_mutation;
+use mutation::session_request_create_mutation_at_hop;
 
 #[derive(Debug)]
 pub(crate) struct EnqueuedBackgroundCompletionInput {

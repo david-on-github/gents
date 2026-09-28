@@ -131,10 +131,19 @@ def machineCollections : List String :=
   conversationCollections ++
     ["MailboxItem", "SessionHydrationRequest", "AgentDirectoryEntry"]
 
-/-- Subagent legs stay minimal requester-scoped transcript carriers; host-local
-artifacts and configuration never ride them. -/
+/-- A remote `agent_new` is an ordinary Peer AgentRequest authored on the
+caller node with `agent_did = target` and `requester_did = caller`. The
+coordinator leg (caller → host) therefore carries only that request, selected
+by the target's `agent_did`; no tool-call row is needed to name the host. -/
+def subagentCoordinatorCollections : List String :=
+  ["AgentRequest"]
+
+/-- The host leg (host → caller) returns the caused request, its session and
+its transcript, selected by the caller's `requester_did`, so the result reaches
+the originating session. The host's AgentToolCall rows are host-local execution
+records and stay on the host, as do results, compaction and configuration. -/
 def subagentHostCollections : List String :=
-  ["AgentRequest", "AgentOutputSegment", "AgentMessage", "AgentToolCall"]
+  ["AgentRequest", "AgentSession", "AgentOutputSegment", "AgentMessage"]
 
 /-- The eager client index retains its existing requester scope. -/
 def clientIndexCollections : List String :=
@@ -155,13 +164,13 @@ def machineRules : List CollectionRule :=
     , { collection := "AgentDirectoryEntry", field := "source_did", source := .homeDid } ]
 
 def subagentCoordinatorRules : List CollectionRule :=
-  [ { collection := "AgentToolCall", field := "spawn_target_did", source := .peerDid } ]
+  [ { collection := "AgentRequest", field := "agent_did", source := .peerDid } ]
 
 def subagentHostRules : List CollectionRule :=
   [ { collection := "AgentRequest",    field := "requester_did", source := .peerDid }
+  , { collection := "AgentSession",    field := "requester_did", source := .peerDid }
   , { collection := "AgentOutputSegment", field := "requester_did", source := .peerDid }
-  , { collection := "AgentMessage",    field := "requester_did", source := .peerDid }
-  , { collection := "AgentToolCall",   field := "requester_did", source := .peerDid } ]
+  , { collection := "AgentMessage",    field := "requester_did", source := .peerDid } ]
 
 def clientIndexRules : List CollectionRule :=
   [ { collection := "AgentSession", field := "requester_did", source := .peerDid }
@@ -199,7 +208,7 @@ def backupTemplate : Template :=
 
 def subagentCoordinatorTemplate : Template :=
   { id := "subagent-coordinator"
-  , collections := ["AgentToolCall"].toFinset
+  , collections := subagentCoordinatorCollections.toFinset
   , scope := .perCollection subagentCoordinatorRules
   , delivery := .push }
 

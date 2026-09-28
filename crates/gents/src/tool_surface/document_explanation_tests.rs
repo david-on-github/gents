@@ -8,7 +8,7 @@ use std::{collections::HashSet, sync::Arc};
 #[test]
 fn document_explanation_resolves_target_owner_separately_from_destination() {
     let tools = serde_json::from_value(json!({"tools_id":"tools","agent_did":"owner",
-        "subagents":{"spawn_enabled":true,"allow_cross_principal":true,"target_ids":["target"]}}))
+        "subagents":{"enabled":true,"target_ids":["target"]}}))
     .unwrap();
     let target = serde_json::from_value(json!({"target_id":"target","agent_did":"owner",
         "target_agent_did":"remote","behavior_id":"worker","name":"worker"}))
@@ -30,9 +30,7 @@ fn document_explanation_resolves_target_owner_separately_from_destination() {
         "owner",
         &HashSet::new(),
     );
-    assert!(explanation
-        .tool_names
-        .contains(&"spawn_subagent".to_owned()));
+    assert!(explanation.tool_names.contains(&"agent_new".to_owned()));
     assert!(build(&[]).is_err());
     let mut foreign = target.clone();
     foreign.agent_did = "foreign".to_owned();

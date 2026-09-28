@@ -33,7 +33,7 @@ def main():
         prompt = task_prompt
         if args.child:
             prompt = (
-                "Spawn exactly one control-worker subagent with await_mode background and this task: "
+                "Call agent_new exactly once with agent control-worker and this prompt: "
                 + json.dumps(task_prompt)
                 + ". Then finish immediately without polling, waiting, or using other tools. "
                 "Briefly acknowledge later completion notifications without tools.")

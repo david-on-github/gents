@@ -1,12 +1,11 @@
-//! Background subagent completion projection.
+//! Background completion delivery.
 //!
-//! R4b keeps background spawns non-blocking by leaving the parent bridge row
-//! running until the child request reaches a terminal state. This module owns
-//! the observer path that projects that terminal state into the parent
-//! `AgentToolCall`, appends a compact transcript notification, and enqueues the
-//! coalesced same-session wake-up request when no Goal owns continuation.
+//! Every background row ends with one user-role completion notification in
+//! its session plus a coalesced wake. A native process row terminalizes in its
+//! executor; an `agent_new`/`agent_message` row terminalizes here, when the
+//! observer sees the request it caused reach a durable terminal.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,14 +17,9 @@ use gents_protocol::row::AgentRequestRow;
 use serde::Deserialize;
 use tokio_util::sync::CancellationToken;
 
-use crate::background_tools::{
-    child_request_completed, child_terminal_reason, child_terminal_status,
-    load_authorized_child_edge, load_child_final_response, load_child_terminal_row,
-    load_parent_subagent_context, project_child_terminal, ChildEdge,
-};
 use crate::graphql::escape_graphql_string;
 use crate::lifecycle::queue::{QueuePolicy, QueueSource, RequestQueue};
-use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
+use crate::tool_call_lifecycle::{FailureClass, ToolCallLifecycle};
 
 const AGENT_REQUEST_COLLECTION: &str = "AgentRequest";
 pub const BACKGROUND_COMPLETION_WAKE_PROMPT: &str =
@@ -33,7 +27,10 @@ pub const BACKGROUND_COMPLETION_WAKE_PROMPT: &str =
 const BACKGROUND_COMPLETION_NOTIFICATION_MESSAGE_PREFIX: &str =
     "background-completion-notification:";
 
-fn background_completion_notification_message_key(stable_id: &str, kind: &str) -> String {
+pub(crate) fn background_completion_notification_message_key(
+    stable_id: &str,
+    kind: &str,
+) -> String {
     format!("{BACKGROUND_COMPLETION_NOTIFICATION_MESSAGE_PREFIX}{stable_id}:{kind}")
 }
 
@@ -41,83 +38,17 @@ pub fn is_background_completion_notification_message_key(message_key: &str) -> b
     message_key.starts_with(BACKGROUND_COMPLETION_NOTIFICATION_MESSAGE_PREFIX)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BackgroundCompletionOutcome {
-    Projected {
-        child_request_id: String,
-        parent_request_id: String,
-        parent_tool_call_id: String,
-        parent_session_id: String,
-        notification_sequence: u32,
-        wake_request_id: Option<String>,
-    },
-    NotTerminal,
-    NotBackground,
-    MissingFinalResponse,
-    AlreadyProjected,
-    NotLocalOwner,
-    Unlinked,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UnclaimedSpawnReconcileOutcome {
-    Failed {
-        parent_tool_call_id: String,
-        parent_request_id: String,
-    },
-    Linked {
-        parent_tool_call_id: String,
-        parent_request_id: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CancelAckOutcome {
-    Acked {
-        parent_tool_call_id: String,
-    },
-    Stuck {
-        parent_tool_call_id: String,
-        since: DateTime<Utc>,
-    },
-    Pending {
-        parent_tool_call_id: String,
-    },
-}
-
-pub const STUCK_CANCEL_THRESHOLD_SECS: i64 = 5 * 60;
-
 mod datetime_fields;
 mod notification_delivery;
 mod observer;
-mod projection;
-mod queries;
-mod reconciliation;
 mod rendering;
+mod session_message;
 mod side_effects;
 
 pub(crate) use notification_delivery::append_background_tool_completion;
 pub(crate) use observer::run_background_completion_observer;
-pub(crate) use projection::ensure_background_subagent_completion_side_effects;
-pub use projection::project_background_subagent_completion;
-pub(crate) use reconciliation::AgentToolCallDateTimeRow;
-pub use reconciliation::{observe_cancel_cascade_ack, reconcile_unclaimed_cross_deployment_spawns};
-pub(crate) use reconciliation::{settle_unclaimed_spawn, UnclaimedSpawnSettlement};
+pub(crate) use session_message::{settle_running_session_message_rows, settle_session_message_row};
 
-use datetime_fields::{
-    agent_tool_call_datetime_update_fragment, clear_cancel_pending_ack, set_stuck_since,
-};
-use notification_delivery::SideEffects;
-use queries::{load_child_linkage, load_request_id_by_doc_id, load_terminal_child_request_ids};
-use reconciliation::request_is_locally_owned;
-#[cfg(test)]
-use rendering::first_row;
-use rendering::{
-    compact_summary, non_empty, subagent_notification_presentation, tool_completion_presentation,
-};
-use side_effects::{
-    bridge_state_is_terminal, ensure_projection_side_effects, existing_tool_completion_notification,
-};
-
-#[cfg(test)]
-mod tests;
+use datetime_fields::agent_tool_call_datetime_update_fragment;
+use rendering::tool_completion_presentation;
+use side_effects::existing_tool_completion_notification;

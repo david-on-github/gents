@@ -1,7 +1,6 @@
 import type { DesktopTransport } from "../transport.js";
 import type { BackendHealth } from "../types/backendHealth.js";
 import type {
-  CascadeCancelPreview,
   ChatSendResult,
   CodexLoginResult,
   DesktopClientSnapshot,
@@ -17,7 +16,7 @@ import type {
   NetworkStatusView,
   RequestResendResult,
   RequestTimelineView,
-  SubagentTreeView,
+  SessionProvenanceView,
   TaskRunResult,
   ToolServiceTestResult,
   ToolSurfaceExplanationView,
@@ -31,6 +30,8 @@ import type { ProviderAccountView } from "../generated/ProviderAccountView.js";
 import type { InferenceSetupCatalog } from "../generated/InferenceSetupCatalog.js";
 import type { InferenceDiscoveryResult } from "../generated/InferenceDiscoveryResult.js";
 import type { InferenceModelRecommendation } from "../generated/InferenceModelRecommendation.js";
+import type { GrokLoginResult } from "../generated/GrokLoginResult.js";
+import type { ClaudeLoginResult } from "../generated/ClaudeLoginResult.js";
 
 export function createDesktopApiAdapter(
   transport: DesktopTransport,
@@ -263,17 +264,12 @@ export function createDesktopApiAdapter(
       }),
     cancelCodexLogin: () => invokeDesktop<void>("desktop_codex_login_cancel"),
     grokLogin: (agentDid, provider) =>
-      invokeDesktop<import("../generated/GrokLoginResult.js").GrokLoginResult>(
-        "desktop_grok_login",
-        {
-          request: { agentDid, provider: provider ?? null },
-        },
-      ),
+      invokeDesktop<GrokLoginResult>("desktop_grok_login", {
+        request: { agentDid, provider: provider ?? null },
+      }),
     cancelGrokLogin: () => invokeDesktop<void>("desktop_grok_login_cancel"),
     claudeLogin: (agentDid, provider) =>
-      invokeDesktop<
-        import("../generated/ClaudeLoginResult.js").ClaudeLoginResult
-      >("desktop_claude_login", {
+      invokeDesktop<ClaudeLoginResult>("desktop_claude_login", {
         request: { agentDid, provider: provider ?? null },
       }),
     cancelClaudeLogin: () => invokeDesktop<void>("desktop_claude_login_cancel"),
@@ -319,8 +315,8 @@ export function createDesktopApiAdapter(
       }),
     runTask: (request) =>
       invokeDesktop<TaskRunResult>("desktop_task_run", { request }),
-    listSubagentTree: (request) =>
-      invokeDesktop<SubagentTreeView>("desktop_list_subagent_tree", {
+    sessionProvenance: (request) =>
+      invokeDesktop<SessionProvenanceView>("desktop_session_provenance", {
         request,
       }),
     listBackendsWithHealth: () =>
@@ -335,10 +331,6 @@ export function createDesktopApiAdapter(
       }),
     fetchOperationsSnapshot: (request) =>
       invokeDesktop<DesktopOperationsSnapshot>("desktop_operations_snapshot", {
-        request,
-      }),
-    previewInterruptCascade: (request) =>
-      invokeDesktop<CascadeCancelPreview>("desktop_preview_interrupt_cascade", {
         request,
       }),
     interruptRequest: (request) =>

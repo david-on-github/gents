@@ -354,7 +354,7 @@ mod tests {
         use crate::identity::KeyIdentity;
         use crate::lifecycle::{ClaimOutcome, RequestLifecycle};
         use crate::streaming::DefraStreamWriter;
-        use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy};
+        use crate::tool_call_lifecycle::AwaitMode;
         use gents_protocol::request_admission::{AgentRequestAdmissionRecord, AgentRequestCreate};
 
         let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
@@ -474,7 +474,6 @@ mod tests {
                 .claimed_deadline_at()
                 .expect("claimed request deadline"),
             AwaitMode::Foreground,
-            CancelPolicy::Cascade,
         )
         .unwrap();
         tool.start_running().await.unwrap();
@@ -589,7 +588,6 @@ mod tests {
                 .claimed_deadline_at()
                 .expect("claimed request deadline"),
             crate::tool_call_lifecycle::AwaitMode::Foreground,
-            crate::tool_call_lifecycle::CancelPolicy::Cascade,
         )
         .unwrap();
         tool.start_running().await.unwrap();

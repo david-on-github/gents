@@ -396,8 +396,6 @@ pub struct ToolCallSnapshot {
     pub message_sequence: u32,
     pub tool_name: String,
     pub tool_call_id: String,
-    #[serde(default)]
-    pub child_request_id: Option<String>,
     /// Retired compatibility status is nullable on canonically accepted rows.
     /// Assertions must use `lifecycle_state` as the authoritative owner.
     #[serde(default)]
@@ -528,7 +526,7 @@ async fn fetch_tool_call_snapshots(node: &EmbeddedNode, filter: &str) -> Vec<Too
                 filter: {{ {filter} }},
                 order: {{ message_sequence: ASC }}
             ) {{
-                _docID agent_did requester_did tool_call_key request_id session_id message_sequence tool_name tool_call_id child_request_id
+                _docID agent_did requester_did tool_call_key request_id session_id message_sequence tool_name tool_call_id
                 status lifecycle_state started_at deadline_at completed_at
                 selected_service_id selected_tool_name tool_failure_class
                 denial_reason denied_argv denied_command denied_argument denied_subcommand

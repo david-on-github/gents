@@ -351,7 +351,7 @@ pub struct RemoteServiceTools {
     pub max_wait_timeout_secs: Option<i64>,
 }
 
-/// Child-agent targets and lifecycle controls.
+/// Session-message targets: the allowlist agent_new/agent_message address.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -364,29 +364,13 @@ pub struct SubagentTools {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(feature = "typescript", ts(as = "Option<Vec<String>>", optional = nullable))]
     pub target_ids: Vec<String>,
+    /// Exposes agent_new/agent_message over the allowlisted targets. Every
+    /// started session is a background tool row; there is no foreground wait,
+    /// workspace inheritance, cascade or cross-principal switch. A target on
+    /// another principal is admitted there as a Peer request under its ACP.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
-    pub spawn_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
-    pub steering_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
-    pub background_enabled: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    /// Absent uses foreground; explicit values are foreground or background.
-    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
-    pub default_await_mode: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
-    pub allow_cross_principal: Option<bool>,
-    /// Time for a peer to claim a remote spawn, not its execution lifetime.
-    /// Current default 60s. `wait_subagent` has no timer of its own: it
-    /// returns when the child finishes or the caller's request deadline passes.
-    /// Child execution lifetime remains owned by its request/inference settings.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
-    pub cross_principal_spawn_timeout_secs: Option<i64>,
+    pub enabled: Option<bool>,
 }
 
 /// Agent runtime capabilities independent of host access or external integrations.
@@ -764,22 +748,6 @@ impl Tools {
                 subagents.target_ids.iter().map(String::as_str),
                 false,
             );
-            positive(
-                &mut errors,
-                "subagents.cross_principal_spawn_timeout_secs",
-                subagents.cross_principal_spawn_timeout_secs,
-            );
-            match subagents.default_await_mode.as_deref() {
-                None | Some("foreground") => {}
-                Some("background") if subagents.background_enabled.unwrap_or(false) => {}
-                Some("background") => errors.push(
-                    "subagents.default_await_mode background requires background_enabled"
-                        .to_owned(),
-                ),
-                Some(_) => errors.push(
-                    "subagents.default_await_mode must be foreground or background".to_owned(),
-                ),
-            }
         }
         if let Some(datastore) = &self.datastore {
             names(
@@ -1113,7 +1081,6 @@ mod tests {
                     "max_wait_timeout_secs",
                 ],
             ),
-            ("subagents", vec!["cross_principal_spawn_timeout_secs"]),
             ("integrations.lsp", vec!["timeout_secs", "max_timeout_secs"]),
         ];
         for (path, fields) in cases {
@@ -1186,15 +1153,29 @@ mod tests {
             json!({"remote":{"services":[{"mcp_service_id":"remote","tool_names":["*"]}]}}),
             json!({"subagents":{"target_ids":["target","target"]}}),
             json!({"subagents":{"target_ids":[" "]}}),
-            json!({"subagents":{"default_await_mode":"background"}}),
-            json!({"subagents":{"default_await_mode":"unknown"}}),
             json!({"self_config":{"self_config_categories":["unknown"]}}),
             json!({"self_config":{"self_config_categories":["tools","tools"]}}),
             json!({"host":{"bash":{"allowed_argv_prefixes":[[]]}}}),
         ] {
             assert!(document(value).validate().is_err());
         }
-        assert!(document(json!({"subagents":{"target_ids":["existing-target"],"default_await_mode":"background","background_enabled":true}})).validate().is_ok());
+        assert!(
+            document(json!({"subagents":{"target_ids":["existing-target"],"enabled":true}}))
+                .validate()
+                .is_ok()
+        );
+        for retired in [
+            "spawn_enabled",
+            "background_enabled",
+            "steering_enabled",
+            "default_await_mode",
+            "allow_cross_principal",
+            "cross_principal_spawn_timeout_secs",
+        ] {
+            let mut value = json!({"subagents":{"target_ids":["existing-target"]},"tools_id":"tools","agent_did":"owner"});
+            value["subagents"][retired] = json!(true);
+            assert!(serde_json::from_value::<Tools>(value).is_err(), "{retired}");
+        }
         assert!(
             document(json!({"host":{"bash":{"allowed_argv_prefixes":[["printf", ""]]}}}))
                 .validate()

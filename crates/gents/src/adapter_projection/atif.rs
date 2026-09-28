@@ -656,10 +656,6 @@ fn tool_payload(
                     optional_string_value(tool.await_mode.as_deref()),
                 ),
                 (
-                    "cancel_policy",
-                    optional_string_value(tool.cancel_policy.as_deref()),
-                ),
-                (
                     "cancel_cause",
                     redact_option(tool.cancel_cause.as_deref(), context).map(Value::String),
                 ),

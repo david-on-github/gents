@@ -1,44 +1,48 @@
-/* What a person can do to a running worker from its parent: stop it. That
-   is the desktop's interrupt, previewed as a cascade first, the way Stop
-   is. Opening the worker is the row's own arrow, so the row carries one
-   control and no menu. */
+/* What a person can do to a subagent from the session that started it:
+   stop the one request a row's call caused, the modeled single-request
+   interrupt; the row settles when that request reaches a terminal state.
+   Nothing else stops with it, and nothing this session is doing stops.
+   Telling a subagent something is sending its session a message, so it is
+   done there; opening it is the row's arrow. A native background process
+   has no desktop stop (#1969). */
 import { createContext, useContext } from "react";
 import { Square } from "lucide-react";
+import type { CausedRequestView } from "@source-inc/gents-desktop-client";
 import { Button } from "@gents/ui/components/button";
 import { Hint } from "./Hint";
+import { isLive } from "@/lib/live";
 
 export type WorkerActions = {
-  /* the parent's request, the one a worker action is recorded under */
-  parentRequestId: string | null;
-  /* the child's current request, so the cascade preview and interrupt hit the right one */
-  cancel: (requestId: string) => void;
+  /* interrupt the request a session-message row's call caused */
+  interrupt: (request: CausedRequestView) => void;
 };
 
 export const WorkerActionsContext = createContext<WorkerActions | null>(null);
 
-export function WorkerStop({
-  name,
-  /* the request the child is on now, which may be later than the spawn's */
-  currentRequestId,
-  running,
-}: {
-  name: string;
-  currentRequestId: string | null;
-  running: boolean;
-}) {
-  const actions = useContext(WorkerActionsContext);
-  /* nothing to stop once it has settled: the row keeps its arrow alone */
-  if (!actions || !running || !currentRequestId) return null;
+function StopButton({ name, onStop }: { name: string; onStop: () => void }) {
   return (
     <Hint label={`Stop ${name}`}>
       <Button
         variant="quiet"
         size="icon-xs"
         aria-label={`Stop ${name}`}
-        onClick={() => actions.cancel(currentRequestId)}
+        onClick={onStop}
       >
         <Square className="size-3.5 fill-current" />
       </Button>
     </Hint>
   );
+}
+
+/* Stop on a session-message row, while the request its call caused runs. */
+export function RequestStop({
+  name,
+  request,
+}: {
+  name: string;
+  request: CausedRequestView | null;
+}) {
+  const actions = useContext(WorkerActionsContext);
+  if (!actions || !request || !isLive(request.lifecycleState)) return null;
+  return <StopButton name={name} onStop={() => actions.interrupt(request)} />;
 }

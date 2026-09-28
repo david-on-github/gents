@@ -86,7 +86,6 @@ fn base_admission_observation(
         signer_matches_target: false,
         signer_matches_issuer: false,
         requester_matches_issuer: false,
-        requester_matches_bridge_author: false,
         current_approval: false,
         exact_generation: false,
         authorization_fresh: false,
@@ -96,11 +95,9 @@ fn base_admission_observation(
         source_binding_current: false,
         trigger_config_document_binding_current: false,
         source_document_binding_current: false,
-        source_tool_call_binding_current: false,
         target_policy_allows: false,
-        bridge_author_binding_current: false,
-        bridge_author_authorization_fresh: false,
-        target_cross_principal_policy_allows: false,
+        peer_authority_allows: false,
+        hop_within_bound: false,
     }
 }
 
@@ -128,6 +125,8 @@ fn admission_denial_reason(observation: &AgentRequestAdmissionObservation) -> &'
         "AgentRequest admission branch fields are invalid"
     } else if !observation.signature_valid {
         "AgentRequest admission signature is invalid"
+    } else if !observation.hop_within_bound {
+        "AgentRequest causal hop exceeds the target principal's max_request_hop"
     } else {
         "fresh AgentRequest admission evidence was denied"
     }
@@ -181,6 +180,7 @@ pub(crate) async fn verify_fresh_local_self_request(
     observation.signer_matches_requester =
         row.requester_did.as_deref() == Some(admission.signer_did.as_str());
     observation.requester_matches_target = row.requester_did.as_deref() == row.agent_did.as_deref();
+    observation.hop_within_bound = request_hop_admitted(node, &row).await?;
     require_admitted_observation(observation, None)?;
     verify_request_input(node, &row, &admission).await?;
     row_into_agent_request(row, &request.doc_id).map_err(AgentRequestAdmissionError::denied)
@@ -347,10 +347,12 @@ impl AgentRequestAdmissionVerifier {
         observation.branch_fields_exact = admission.validate_canonical_fields().is_ok()
             && admission.validate_branch_fields().is_ok();
         observation.pending_deadline_absent = row.deadline.is_none();
+        observation.hop_within_bound = request_hop_admitted(self.node.as_ref(), &row).await?;
         if !observation.signature_valid
             || !observation.signed_fields_match
             || !observation.branch_fields_exact
             || !observation.pending_deadline_absent
+            || !observation.hop_within_bound
         {
             require_admitted_observation(observation, None)?;
             unreachable!("negative common admission evidence cannot be admitted");
@@ -365,6 +367,28 @@ impl AgentRequestAdmissionVerifier {
                     row.requester_did.as_deref() == Some(admission.signer_did.as_str());
                 observation.requester_matches_target =
                     row.requester_did.as_deref() == row.agent_did.as_deref();
+            }
+            AgentRequestAdmissionKind::Peer => {
+                observation.signer_matches_requester =
+                    row.requester_did.as_deref() == Some(admission.signer_did.as_str());
+                observation.requester_matches_target =
+                    row.requester_did.as_deref() == row.agent_did.as_deref();
+                if observation.signer_matches_requester && !observation.requester_matches_target {
+                    observation.peer_authority_allows = self
+                        .peer_admission
+                        .fresh_member_authorized_for_agent(
+                            &admission.signer_did,
+                            required_row_string(row.agent_did.as_deref(), "agent_did")?,
+                        )
+                        .await
+                        .context("reload peer requester admission")
+                        .map_err(AgentRequestAdmissionError::unavailable)?;
+                    if !observation.peer_authority_allows {
+                        denied = Some(anyhow::anyhow!(
+                            "peer requester is not authorized for the target principal"
+                        ));
+                    }
+                }
             }
             AgentRequestAdmissionKind::Enrollment => {
                 let requester = row
@@ -435,23 +459,13 @@ impl AgentRequestAdmissionVerifier {
                     issuer.is_some() && source.is_some() && admission.runtime_source_kind.is_some();
                 observation.signer_matches_issuer = issuer == Some(&admission.signer_did);
                 observation.requester_matches_issuer = row.requester_did.as_deref() == issuer;
-                observation.requester_matches_bridge_author = admission
-                    .runtime_bridge_author_did
-                    .as_deref()
-                    .filter(|did| !did.trim().is_empty())
-                    .is_some_and(|did| row.requester_did.as_deref() == Some(did));
                 observation.signer_matches_target =
                     row.agent_did.as_deref() == Some(admission.signer_did.as_str());
                 observation.requester_matches_target =
                     row.requester_did.as_deref() == row.agent_did.as_deref();
                 observation.target_runtime_attestation_valid = issuer == row.agent_did.as_deref();
-                let requester_matches_source = if observation.runtime_source_kind
-                    == RuntimeInternalSourceKind::CrossPrincipalChild
-                {
-                    observation.requester_matches_bridge_author
-                } else {
-                    observation.requester_matches_issuer && observation.requester_matches_target
-                };
+                let requester_matches_source =
+                    observation.requester_matches_issuer && observation.requester_matches_target;
                 if !observation.runtime_evidence_present
                     || !observation.signer_matches_issuer
                     || !observation.signer_matches_target
@@ -464,14 +478,12 @@ impl AgentRequestAdmissionVerifier {
                 if let (Some(source), Some(source_kind)) = (source, admission.runtime_source_kind) {
                     match verify_runtime_source_binding(
                         self.node.clone(),
-                        self.peer_admission.as_ref(),
                         &row,
                         row.purpose
                             .context("AgentRequest is missing purpose")
                             .map_err(AgentRequestAdmissionError::denied)?,
                         source,
                         source_kind,
-                        admission.runtime_bridge_author_did.as_deref(),
                         target_behavior_id,
                     )
                     .await
@@ -479,17 +491,6 @@ impl AgentRequestAdmissionVerifier {
                         Ok(()) => {
                             observation.source_binding_current = true;
                             match source_kind {
-                                RuntimeInternalSourceKind::LocalChild => {
-                                    observation.source_document_binding_current = true;
-                                    observation.source_tool_call_binding_current = true;
-                                    observation.target_policy_allows = true;
-                                }
-                                RuntimeInternalSourceKind::CrossPrincipalChild => {
-                                    observation.source_tool_call_binding_current = true;
-                                    observation.bridge_author_binding_current = true;
-                                    observation.bridge_author_authorization_fresh = true;
-                                    observation.target_cross_principal_policy_allows = true;
-                                }
                                 RuntimeInternalSourceKind::LocalControl => {
                                     observation.source_document_binding_current = true;
                                 }
@@ -602,8 +603,15 @@ async fn verify_request_input(
     let runtime_control = admission.kind == AgentRequestAdmissionKind::RuntimeInternal
         && admission.runtime_source_kind == Some(RuntimeInternalSourceKind::LocalControl);
     if let Some(queue) = &input.queue {
+        // A steering append is also a session-message delivery: it carries
+        // the caller's full request and tool call edge (Lean
+        // `DurableLineage.sessionMessageWrite`). Other runtime queue sources
+        // stay local-control only.
+        let session_message_steering = queue.source == QueueSource::Steering
+            && row.caused_by_parent_request_doc_id.is_some()
+            && row.caused_by_parent_tool_call_doc_id.is_some();
         deny_if(
-            queue.source == QueueSource::User || runtime_control,
+            queue.source == QueueSource::User || runtime_control || session_message_steering,
             "runtime queue source requires authenticated local-control issuance",
         )?;
     }
@@ -637,6 +645,37 @@ async fn verify_request_input(
     Ok(())
 }
 
+/// Lean `CausalHop.admitHop`: the signed hop (`subagent_depth`) is within
+/// the target principal's `max_request_hop`. The check reads only the signed
+/// row and the target's own configuration; it never walks lineage.
+async fn request_hop_admitted(node: &EmbeddedNode, row: &AgentRequestRow) -> AdmissionResult<bool> {
+    let hop = row.subagent_depth.unwrap_or(0);
+    let Ok(hop) = u32::try_from(hop) else {
+        return Ok(false);
+    };
+    if hop == 0 {
+        return Ok(true);
+    }
+    let target = required_row_string(row.agent_did.as_deref(), "agent_did")?;
+    let max_request_hop = max_request_hop(node, target)
+        .await
+        .map_err(AgentRequestAdmissionError::unavailable)?;
+    Ok(crate::lifecycle::request_hop_within_bound(
+        max_request_hop,
+        hop,
+    ))
+}
+
+/// The target principal's `max_request_hop`, defaulted when unset.
+pub(crate) async fn max_request_hop(node: &EmbeddedNode, agent_did: &str) -> anyhow::Result<u32> {
+    Ok(
+        crate::document_config::load_agent_principal(node, agent_did)
+            .await?
+            .and_then(|principal| principal.max_request_hop)
+            .unwrap_or(crate::document_config::DEFAULT_MAX_REQUEST_HOP),
+    )
+}
+
 fn request_workspace(row: &AgentRequestRow) -> crate::lifecycle::WorkspaceLineage {
     crate::lifecycle::WorkspaceLineage {
         workspace_id: row.workspace_id.clone(),
@@ -646,112 +685,18 @@ fn request_workspace(row: &AgentRequestRow) -> crate::lifecycle::WorkspaceLineag
     }
 }
 
-fn verify_delegated_workspace(
-    child: &AgentRequestRow,
-    source: Option<&gents_protocol::output::DelegatedWorkspace>,
-) -> AdmissionResult<()> {
-    let source = match source {
-        Some(source) => crate::lifecycle::WorkspaceLineage {
-            workspace_id: Some(source.workspace_id.clone()),
-            workspace_owner_agent_did: Some(source.workspace_owner_agent_did.clone()),
-            workspace_authority: Some(source.workspace_authority.clone()),
-            workspace_seal_hash: source.workspace_seal_hash.clone(),
-        },
-        None => crate::lifecycle::WorkspaceLineage::default(),
-    };
-    request_workspace(child)
-        .validate_source(&source, true)
-        .map_err(AgentRequestAdmissionError::denied)
-}
-
 async fn verify_runtime_source_binding(
     node: Arc<EmbeddedNode>,
-    peer_admission: &dyn PeerAdmissionAuthority,
     row: &AgentRequestRow,
     purpose: RequestPurpose,
     source: &str,
     source_kind: RuntimeInternalSourceKind,
-    bridge_author_did: Option<&str>,
     target_behavior_id: &str,
 ) -> AdmissionResult<()> {
     match source_kind {
-        RuntimeInternalSourceKind::LocalChild => {
-            deny_if(
-                bridge_author_did.is_none()
-                    && row.caused_by_parent_request_id.as_deref() == Some(source),
-                "local-child runtime source branch is mixed or incoherent",
-            )?;
-            let parent_doc_id =
-                row.caused_by_parent_request_doc_id
-                    .as_deref()
-                    .ok_or_else(|| {
-                        AgentRequestAdmissionError::denied(anyhow::anyhow!(
-                            "runtime-internal parent request document binding is absent"
-                        ))
-                    })?;
-            let parent = load_exact_parent_request(node.as_ref(), parent_doc_id).await?;
-            deny_if(
-                parent.request_id == source && parent.agent_did == row.agent_did,
-                "runtime-internal parent document does not match local source request",
-            )?;
-            let tool_call_id = row
-                .caused_by_parent_tool_call_id
-                .as_deref()
-                .ok_or_else(|| {
-                    AgentRequestAdmissionError::denied(anyhow::anyhow!(
-                        "local-child runtime source has no tool-call binding"
-                    ))
-                })?;
-            let tool_doc_id = row
-                .caused_by_parent_tool_call_doc_id
-                .as_deref()
-                .ok_or_else(|| {
-                    AgentRequestAdmissionError::denied(anyhow::anyhow!(
-                        "runtime-internal parent tool-call document binding is absent"
-                    ))
-                })?;
-            let target_name = verify_exact_parent_tool_call(
-                node.clone(),
-                tool_doc_id,
-                tool_call_id,
-                parent_doc_id,
-                source,
-                required_row_string(parent.session_id.as_deref(), "session_id")?,
-                parent.requester_did.as_deref(),
-                required_row_string(parent.agent_did.as_deref(), "agent_did")?,
-                required_row_string(row.agent_did.as_deref(), "agent_did")?,
-                row,
-            )
-            .await?;
-            verify_exact_parent_subagent_policy(
-                node.as_ref(),
-                parent.behavior_id.as_deref(),
-                &target_name,
-                target_behavior_id,
-                required_row_string(row.agent_did.as_deref(), "agent_did")?,
-            )
-            .await
-        }
-        RuntimeInternalSourceKind::CrossPrincipalChild => {
-            let bridge_author_did = bridge_author_did.ok_or_else(|| {
-                AgentRequestAdmissionError::denied(anyhow::anyhow!(
-                    "cross-principal child has no bridge author"
-                ))
-            })?;
-            verify_cross_principal_child_source(
-                node.as_ref(),
-                peer_admission,
-                row,
-                source,
-                bridge_author_did,
-                target_behavior_id,
-            )
-            .await
-        }
         RuntimeInternalSourceKind::LocalControl => {
             deny_if(
-                bridge_author_did.is_none()
-                    && row.caused_by_parent_request_id.as_deref() == Some(source)
+                row.caused_by_parent_request_id.as_deref() == Some(source)
                     && row.caused_by_parent_tool_call_id.is_none()
                     && row.caused_by_parent_tool_call_doc_id.is_none(),
                 "local-control runtime source branch is mixed or incoherent",
@@ -782,8 +727,7 @@ async fn verify_runtime_source_binding(
         }
         RuntimeInternalSourceKind::AutomatedTrigger => {
             deny_if(
-                bridge_author_did.is_none()
-                    && row.caused_by_trigger_id.as_deref() == Some(source)
+                row.caused_by_trigger_id.as_deref() == Some(source)
                     && matches!(
                         row.caused_by_trigger_kind.as_deref(),
                         Some("event" | "schedule")
@@ -815,100 +759,8 @@ async fn load_exact_parent_request(
     Ok(row)
 }
 
-async fn verify_cross_principal_child_source(
-    node: &EmbeddedNode,
-    peer_admission: &dyn PeerAdmissionAuthority,
-    row: &AgentRequestRow,
-    source: &str,
-    bridge_author_did: &str,
-    target_behavior_id: &str,
-) -> AdmissionResult<()> {
-    deny_if(
-        row.caused_by_parent_request_id.as_deref() == Some(source),
-        "cross-principal child logical parent does not match signed source",
-    )?;
-    let parent_doc_id = row
-        .caused_by_parent_request_doc_id
-        .as_deref()
-        .ok_or_else(|| {
-            AgentRequestAdmissionError::denied(anyhow::anyhow!(
-                "cross-principal child has no opaque parent document binding"
-            ))
-        })?;
-    let tool_call_id = row
-        .caused_by_parent_tool_call_id
-        .as_deref()
-        .ok_or_else(|| {
-            AgentRequestAdmissionError::denied(anyhow::anyhow!(
-                "cross-principal child has no parent tool-call binding"
-            ))
-        })?;
-    let tool_doc_id = row
-        .caused_by_parent_tool_call_doc_id
-        .as_deref()
-        .ok_or_else(|| {
-            AgentRequestAdmissionError::denied(anyhow::anyhow!(
-                "cross-principal child has no physical tool-call binding"
-            ))
-        })?;
-
-    #[derive(Deserialize)]
-    struct BridgeRow {
-        tool_call_id: Option<String>,
-        request_id: Option<String>,
-        request_doc_id: Option<String>,
-        agent_did: Option<String>,
-        spawn_target_did: Option<String>,
-        spawn_behavior_id: Option<String>,
-        child_request_id: Option<String>,
-        delegated_workspace: Option<gents_protocol::output::DelegatedWorkspace>,
-    }
-    let response = graphql_with_transaction_retry(node, &format!(
-            r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{
-                tool_call_id request_id request_doc_id agent_did spawn_target_did spawn_behavior_id child_request_id delegated_workspace
-            }} }}"#,
-            escape_graphql_string(tool_doc_id),
-        ), "reload cross-principal source bridge").await.map_err(AgentRequestAdmissionError::unavailable)?;
-    let bridge: BridgeRow = crate::graphql::first_row(&response, "AgentToolCall")
-        .map_err(AgentRequestAdmissionError::denied)?
-        .ok_or_else(|| {
-            AgentRequestAdmissionError::denied(anyhow::anyhow!(
-                "cross-principal source bridge is missing"
-            ))
-        })?;
-    deny_if(
-        bridge.tool_call_id.as_deref() == Some(tool_call_id)
-            && bridge.request_id.as_deref() == Some(source)
-            && bridge.request_doc_id.as_deref() == Some(parent_doc_id)
-            && bridge.agent_did.as_deref() == Some(bridge_author_did)
-            && bridge.spawn_target_did.as_deref() == row.agent_did.as_deref()
-            && bridge.spawn_behavior_id.as_deref() == Some(target_behavior_id)
-            && bridge.child_request_id.as_deref() == Some(row.request_id.as_str()),
-        "cross-principal source bridge does not exactly own this child",
-    )?;
-    let authorized = peer_admission
-        .fresh_member_authorized_for_agent(
-            bridge_author_did,
-            required_row_string(row.agent_did.as_deref(), "agent_did")?,
-        )
-        .await
-        .context("reload cross-principal bridge author admission")
-        .map_err(AgentRequestAdmissionError::unavailable)?;
-    deny_if(
-        authorized,
-        "cross-principal bridge author is no longer authorized for the target",
-    )?;
-    verify_delegated_workspace(row, bridge.delegated_workspace.as_ref())?;
-    verify_target_cross_principal_policy(
-        node,
-        required_row_string(row.agent_did.as_deref(), "agent_did")?,
-        target_behavior_id,
-    )
-    .await
-}
-
 /// Read the existing canonical configuration owner in one scoped snapshot.
-async fn load_request_context(
+pub(crate) async fn load_request_context(
     node: &EmbeddedNode,
     agent_did: &str,
     behavior_id: &str,
@@ -983,145 +835,6 @@ async fn load_request_context(
             Ok(error) => error,
             Err(error) => AgentRequestAdmissionError::unavailable(error),
         },
-    )
-}
-
-async fn verify_target_cross_principal_policy(
-    node: &EmbeddedNode,
-    target_agent_did: &str,
-    target_behavior_id: &str,
-) -> AdmissionResult<()> {
-    let (_, tools, _) = load_request_context(node, target_agent_did, target_behavior_id).await?;
-    deny_if(
-        tools
-            .and_then(|tools| tools.subagents)
-            .and_then(|subagents| subagents.allow_cross_principal)
-            == Some(true),
-        "target behavior no longer allows cross-principal children",
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn verify_exact_parent_tool_call(
-    node: Arc<EmbeddedNode>,
-    tool_doc_id: &str,
-    tool_call_id: &str,
-    parent_doc_id: &str,
-    parent_request_id: &str,
-    parent_session_id: &str,
-    parent_requester_did: Option<&str>,
-    parent_agent_did: &str,
-    target_agent_did: &str,
-    child: &AgentRequestRow,
-) -> AdmissionResult<String> {
-    #[derive(Deserialize)]
-    struct ToolRow {
-        tool_call_id: Option<String>,
-        request_id: Option<String>,
-        request_doc_id: Option<String>,
-        agent_did: Option<String>,
-        spawn_target_did: Option<String>,
-        spawn_behavior_id: Option<String>,
-        delegated_workspace: Option<gents_protocol::output::DelegatedWorkspace>,
-        delegated_input: Option<gents_protocol::output::DelegatedToolInput>,
-    }
-    let response = graphql_with_transaction_retry(&node, &format!(
-            r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{
-            tool_call_id request_id request_doc_id agent_did spawn_target_did spawn_behavior_id delegated_workspace delegated_input
-        }} }}"#,
-            escape_graphql_string(tool_doc_id),
-        ), "reload runtime source tool call").await.map_err(AgentRequestAdmissionError::unavailable)?;
-    let tool: ToolRow = crate::graphql::first_row(&response, "AgentToolCall")
-        .map_err(AgentRequestAdmissionError::denied)?
-        .ok_or_else(|| {
-            AgentRequestAdmissionError::denied(anyhow::anyhow!(
-                "runtime source tool-call document is missing"
-            ))
-        })?;
-    deny_if(
-        tool.tool_call_id.as_deref() == Some(tool_call_id)
-            && tool.request_id.as_deref() == Some(parent_request_id)
-            && tool.request_doc_id.as_deref() == Some(parent_doc_id)
-            && tool.agent_did.as_deref() == Some(parent_agent_did)
-            && tool.spawn_target_did.as_deref() == Some(target_agent_did)
-            && tool.spawn_behavior_id.as_deref() == child.behavior_id.as_deref(),
-        "runtime source tool-call document does not exactly own this child",
-    )?;
-    // Lean `CanonicalOutput.local_call_has_no_delegated_input`: a local call's
-    // arguments come only from its accepted publication.
-    deny_if(
-        tool.delegated_input.is_none(),
-        "local-child runtime source tool call carries delegated input",
-    )?;
-    verify_delegated_workspace(child, tool.delegated_workspace.as_ref())?;
-    #[derive(Deserialize)]
-    struct SpawnTargetArgs {
-        #[serde(default)]
-        name: Option<String>,
-    }
-    let access = crate::config_client::ConfigAccess::Local(node.clone());
-    let matching = crate::run_timeline_fetch::load_accepted_tool_arguments(
-        &access,
-        parent_agent_did,
-        parent_session_id,
-        parent_requester_did,
-        tool_doc_id,
-    )
-    .await
-    .context("load canonical runtime source tool-call arguments")
-    .map_err(AgentRequestAdmissionError::unavailable)?;
-    deny_if(
-        matching.len() == 1,
-        "canonical runtime source tool-call binding is missing or ambiguous",
-    )?;
-    let args_json = matching[0].as_str();
-    deny_if(
-        !args_json.trim().is_empty(),
-        "canonical runtime source tool-call has no arguments",
-    )?;
-    let args: SpawnTargetArgs = serde_json::from_str(args_json)
-        .context("parse canonical runtime source tool-call arguments")
-        .map_err(AgentRequestAdmissionError::denied)?;
-    let target_name = args.name.ok_or_else(|| {
-        AgentRequestAdmissionError::denied(anyhow::anyhow!(
-            "canonical runtime source subagent args have no target name"
-        ))
-    })?;
-    deny_if(
-        target_name == target_name.trim() && !target_name.is_empty(),
-        "canonical runtime source tool-call target name is malformed",
-    )?;
-    Ok(target_name)
-}
-
-async fn verify_exact_parent_subagent_policy(
-    node: &EmbeddedNode,
-    parent_behavior_id: Option<&str>,
-    target_name: &str,
-    target_behavior_id: &str,
-    target_agent_did: &str,
-) -> AdmissionResult<()> {
-    let parent_behavior_id = required_row_string(parent_behavior_id, "parent behavior_id")?;
-    let (_, tools, targets) =
-        load_request_context(node, target_agent_did, parent_behavior_id).await?;
-    deny_if(
-        tools
-            .and_then(|tools| tools.subagents)
-            .and_then(|subagents| subagents.spawn_enabled)
-            == Some(true),
-        "exact parent subagent policy is disabled",
-    )?;
-    deny_if(
-        targets
-            .iter()
-            .filter(|target| {
-                target.name == target_name
-                    && target.behavior_id == target_behavior_id
-                    && target.target_agent_did == target_agent_did
-            })
-            .count()
-            == 1,
-        "parent no longer exactly authorizes the runtime-internal target",
     )
 }
 
@@ -1277,7 +990,6 @@ fn row_admission(row: &AgentRequestRow) -> Result<AgentRequestAdmissionRecord> {
         row.runtime_issuer_did.as_deref(),
         row.runtime_source_request_id.as_deref(),
         row.runtime_source_kind.as_deref(),
-        row.runtime_bridge_author_did.as_deref(),
     )
     .map_err(anyhow::Error::msg)
 }
@@ -1374,7 +1086,7 @@ _docID lifecycle_state request_id purpose agent_did requester_did behavior_id se
                 admission_signer_did admission_signature enrollment_request_id
                 enrollment_request_digest enrollment_admin_did enrollment_authorization_sequence
                 enrollment_authorization_expires_at runtime_issuer_did runtime_source_request_id
-                runtime_source_kind runtime_bridge_author_did
+                runtime_source_kind
 "#;
 
 async fn load_signed_request(
@@ -1632,70 +1344,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_child_source_rejects_delegated_input_on_local_tool_row() {
-        let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
-        ensure_runtime_schemas(node.as_ref()).await.unwrap();
-        let (agent, session, parent, parent_doc) = (
-            "did:key:local-owner",
-            "local-session",
-            "local-parent",
-            "local-parent-doc",
-        );
-        let create_tool = |key: &str, delegated: bool| {
-            let mut input = serde_json::json!({
-                "tool_call_key": key, "tool_call_id": key, "request_id": parent,
-                "request_doc_id": parent_doc, "session_id": session, "agent_did": agent,
-                "requester_did": agent, "message_sequence": 1, "tool_name": "spawn_subagent",
-                "lifecycle_state": "running", "spawn_target_did": agent,
-                "spawn_behavior_id": "behavior-1",
-            });
-            if delegated {
-                input["delegated_input"] = serde_json::json!({
-                    "source": {"close_doc_id": "coordinator-close", "stream": 0},
-                    "arguments": "{\"name\":\"child\",\"prompt\":\"forged\"}",
-                    "parent_subagent_depth": 0
-                });
-            }
-            format!(
-                "mutation {{ create_AgentToolCall(input: {}) {{ _docID }} }}",
-                gents_protocol::graphql::graphql_input_literal(&input).unwrap()
-            )
-        };
-        let created = node.execute(&create_tool("local-delegated", true)).await;
-        assert!(!created.has_errors(), "{:?}", created.errors);
-        let tool_doc = crate::graphql::single_mutation_document(&created, "create_AgentToolCall")
-            .unwrap()
-            .and_then(|row| row["_docID"].as_str())
-            .expect("created tool document")
-            .to_owned();
-        let child: gents_protocol::row::AgentRequestRow =
-            serde_json::from_value(serde_json::json!({
-                "request_id": "child", "agent_did": agent, "behavior_id": "behavior-1"
-            }))
-            .unwrap();
-        let error = super::verify_exact_parent_tool_call(
-            node.clone(),
-            &tool_doc,
-            "local-delegated",
-            parent_doc,
-            parent,
-            session,
-            Some(agent),
-            agent,
-            agent,
-            &child,
-        )
-        .await
-        .expect_err("a local tool row cannot supply delegated arguments");
-        assert!(error.is_denied(), "{error:#}");
-        assert!(
-            error.to_string().contains("carries delegated input"),
-            "{error:#}"
-        );
-        node.shutdown().await;
-    }
-
-    #[tokio::test]
     async fn final_verifier_returns_the_exact_fresh_signed_snapshot() {
         let temp = tempfile::tempdir().unwrap();
         let identity: Arc<dyn AgentIdentity> =
@@ -1888,54 +1536,5 @@ mod tests {
         )
         .await
         .is_err());
-    }
-
-    #[tokio::test]
-    async fn exact_subagent_policy_distinguishes_transport_retry_from_policy_denial() {
-        let unavailable_node = defra_node::EmbeddedNode::builder().build().await.unwrap();
-        let unavailable = super::verify_exact_parent_subagent_policy(
-            &unavailable_node,
-            Some("parent-behavior"),
-            "researcher",
-            "research",
-            "did:key:target",
-        )
-        .await
-        .unwrap_err();
-        assert!(!unavailable.is_denied(), "schema/query failure must retry");
-
-        let node = defra_node::EmbeddedNode::builder().build().await.unwrap();
-        ensure_runtime_schemas(&node).await.unwrap();
-        let denied = super::verify_exact_parent_subagent_policy(
-            &node,
-            Some("parent-behavior"),
-            "researcher",
-            "research",
-            "did:key:target",
-        )
-        .await
-        .unwrap_err();
-        assert!(denied.is_denied(), "missing policy must terminally deny");
-
-        let response = node.execute(r#"mutation {
-            create_SubagentTarget(input: {target_id:"research",agent_did:"did:key:target",target_agent_did:"did:key:target",behavior_id:"research",name:"researcher"}) {_docID}
-            create_Tools(input: {tools_id:"parent-tools",agent_did:"did:key:target",subagents:{spawn_enabled:true,target_ids:["research"]}}) {_docID}
-            create_AgentContext(input: {context_id:"parent-context",agent_did:"did:key:target",tools_id:"parent-tools"}) {_docID}
-            create_AgentBehavior(input: {behavior_id:"parent-behavior",agent_did:"did:key:target",context_id:"parent-context",inference_profile_id:"inference",enabled:true}) {_docID}
-        }"#).await;
-        assert!(
-            !response.has_errors(),
-            "seed exact policy: {:?}",
-            response.errors
-        );
-        super::verify_exact_parent_subagent_policy(
-            &node,
-            Some("parent-behavior"),
-            "researcher",
-            "research",
-            "did:key:target",
-        )
-        .await
-        .unwrap();
     }
 }

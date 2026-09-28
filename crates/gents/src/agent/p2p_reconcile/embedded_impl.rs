@@ -724,16 +724,19 @@ mod tests {
         .expect("valid canonical daemon fixture")
     }
 
-    async fn seed_cross_deployment_bridge(
+    /// Accept one `agent_new` call on the coordinator addressed to the
+    /// host principal and materialize its Peer request through the
+    /// session-message owner. Returns the caused request id.
+    async fn seed_peer_session_message(
         node: &Arc<EmbeddedNode>,
         lifecycle: &crate::lifecycle::RequestLifecycle,
         writer: &crate::streaming::DefraStreamWriter,
         host_did: &str,
         tool_call_id: &str,
-        child_request_id: &str,
+        prompt: &str,
         turn: usize,
     ) -> String {
-        use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+        use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
         use gents_protocol::message::{AssistantContent, Message, ToolCall, ToolFunction};
         writer
             .start_provider_attempt(
@@ -749,51 +752,59 @@ mod tests {
                 id: tool_call_id.into(),
                 call_id: Some(tool_call_id.into()),
                 function: ToolFunction::new(
-                    "spawn_subagent".into(),
-                    serde_json::json!({
-                        "name": "remote-target",
-                        "behavior_id": "behavior-1",
-                        "prompt": "delegated work"
-                    }),
+                    crate::toolset::AGENT_NEW_TOOL_NAME.into(),
+                    serde_json::json!({ "agent": "remote-target", "prompt": prompt }),
                 ),
                 signature: None,
                 additional_params: None,
             })],
         };
         let publication = writer
-            .publish_native_turn_with_spawn_admissions(
-                lifecycle,
-                turn,
-                0,
-                &message,
-                &[crate::streaming::SpawnAdmissionPlan {
-                    tool_call_id: tool_call_id.into(),
-                    child_request_id: child_request_id.into(),
-                    spawn_target_did: host_did.into(),
-                    spawn_behavior_id: "behavior-1".into(),
-                    delegated_workspace: None,
-                    await_mode: AwaitMode::Background,
-                }],
-            )
+            .publish_native_turn(lifecycle, turn, 0, &message)
             .await
-            .expect("accept remote bridge intent");
+            .expect("accept remote agent_new intent");
         let accepted = publication.accepted_tools.into_iter().next().unwrap();
-        let doc_id = accepted.tool_call_doc_id.clone();
-        let mut bridge = ToolCallLifecycle::from_accepted(
+        let mut row = ToolCallLifecycle::from_accepted(
             node.clone(),
             lifecycle.request().agent_did.clone(),
             lifecycle.request().requester_did.clone(),
             accepted,
             lifecycle.claimed_deadline_at().unwrap(),
             AwaitMode::Background,
-            CancelPolicy::Cascade,
         )
-        .expect("adopt accepted bridge");
-        bridge
-            .start_running()
+        .expect("adopt accepted agent_new");
+        let cause = crate::lifecycle::SessionMessageCause {
+            caller_agent_did: lifecycle.request().agent_did.clone(),
+            caller_request_id: lifecycle.request().request_id.clone(),
+            caller_request_doc_id: lifecycle.request().doc_id.clone(),
+            caller_hop: lifecycle.request().subagent_depth,
+            tool_call_id: row.tool_call_id().to_owned(),
+            tool_call_doc_id: row.doc_id().unwrap().to_owned(),
+            correlation: None,
+        };
+        let target = crate::lifecycle::SessionMessageTarget {
+            agent_did: host_did.to_owned(),
+            behavior_id: "behavior-1".to_owned(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+        };
+        let plan = crate::session_message::plan(
+            node,
+            &cause,
+            &target,
+            crate::session_message::RenderedBody {
+                content: prompt.to_owned(),
+                goal: None,
+            },
+            None,
+            false,
+        )
+        .await
+        .expect("plan peer session message")
+        .expect("peer session message admitted by the caller");
+        crate::session_message::commit(node, &cause, &mut row, plan, false)
             .await
-            .expect("dispatch remote bridge");
-        doc_id
+            .expect("materialize the caller-signed Peer request")
+            .request_id
     }
 
     async fn wait_for_peer_info(admin: &EmbeddedRemoteP2pAdmin) -> Vec<String> {
@@ -884,9 +895,9 @@ mod tests {
         exec(node, &mutation, "seed AgentRequest").await;
     }
 
-    async fn seed_agent_tool_call(node: &EmbeddedNode, tool_call_id: &str, spawn_target_did: &str) {
+    async fn seed_agent_tool_call(node: &EmbeddedNode, tool_call_id: &str, requester_did: &str) {
         let tool_call_id = escape_graphql_string(tool_call_id);
-        let spawn_target_did = escape_graphql_string(spawn_target_did);
+        let requester_did = escape_graphql_string(requester_did);
         let tool_call_key = escape_graphql_string(&format!("issue-604-session:{tool_call_id}"));
         let mutation = format!(
             r#"mutation {{
@@ -895,18 +906,13 @@ mod tests {
                     request_id: "parent-match",
                     session_id: "issue-604-session",
                     agent_did: "did:key:coord",
+                    requester_did: "{requester_did}",
                     message_sequence: 1,
-                    tool_name: "spawn_subagent",
+                    tool_name: "agent_new",
                     tool_call_id: "{tool_call_id}",
-                    args: "{{}}",
-                    result: "",
-                    status: "called",
                     lifecycle_state: "running",
                     started_at: "2026-07-06T00:00:00Z",
-                    await_mode: "background",
-                    cancel_policy: "cascade",
-                    child_request_id: "child-{tool_call_id}",
-                    spawn_target_did: "{spawn_target_did}"
+                    await_mode: "background"
                 }}) {{ _docID }}
             }}"#
         );
@@ -1278,7 +1284,7 @@ mod tests {
         );
         filters.insert(
             "AgentToolCall".to_string(),
-            equality_filter("spawn_target_did", "did:key:host"),
+            equality_filter("requester_did", "did:key:host"),
         );
         sender_admin
             .add_replicator(&receiver_addresses, &collections, &filters)
@@ -1306,8 +1312,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cross_deployment_child_final_admission_uses_only_targeted_bridge_and_fresh_authority()
-    {
+    async fn peer_request_final_admission_uses_the_requester_signature_and_fresh_authority() {
         let identity_temp = tempfile::tempdir().expect("identity tempdir");
         let coordinator_identity: Arc<dyn AgentIdentity> = Arc::new(
             KeyIdentity::load_or_create(identity_temp.path().join("coordinator.key"), None)
@@ -1348,7 +1353,7 @@ mod tests {
             "seed parent: {:?}",
             parent_response.errors
         );
-        let parent_doc_id = parent_response
+        let _parent_doc_id = parent_response
             .data
             .as_ref()
             .and_then(|data| {
@@ -1391,45 +1396,31 @@ mod tests {
             .begin_owned_execution(&parent_writer)
             .await
             .unwrap();
-        let bridge_doc_id = seed_cross_deployment_bridge(
+        let fresh_request_id = seed_peer_session_message(
             &coordinator,
             &parent_lifecycle,
             &parent_writer,
             &host_did,
-            "bridge-1",
-            "remote-child-1",
+            "message-1",
+            "delegated work",
             0,
         )
         .await;
-        let revoked_bridge_doc_id = seed_cross_deployment_bridge(
+        let revoked_request_id = seed_peer_session_message(
             &coordinator,
             &parent_lifecycle,
             &parent_writer,
             &host_did,
-            "bridge-2",
-            "remote-child-2",
+            "message-2",
+            "delegated work after revocation",
             1,
         )
         .await;
-        let immutable_update = coordinator
-            .execute(&format!(
-                r#"mutation {{ update_AgentToolCall(
-                    filter: {{ _docID: {{ _eq: "{}" }} }},
-                    input: {{ request_id: "retargeted-parent" }}
-                ) {{ _docID }} }}"#,
-                escape_graphql_string(&bridge_doc_id),
-            ))
-            .await;
-        assert!(
-            immutable_update.has_errors(),
-            "bridge parent request identity must be immutable"
-        );
 
-        // The receiving principal's explicit context selects cross-principal
-        // admission through canonical Tools, not a parallel behavior flag.
+        // The receiving principal's own behavior configures the request; the
+        // Peer branch reads only the requester's ACP authority, not a flag.
         let tools: crate::document_config::Tools = serde_json::from_value(serde_json::json!({
-            "tools_id":"host-tools","agent_did":host_did,
-            "subagents":{"allow_cross_principal":true}
+            "tools_id":"host-tools","agent_did":host_did
         }))
         .unwrap();
         let context: crate::document_config::AgentContext =
@@ -1513,48 +1504,20 @@ mod tests {
         coordinator_admin
             .add_replicator(&host_addresses, &collections, &filters)
             .await
-            .expect("install targeted coordinator bridge route");
-        wait_for_value(&host, "AgentToolCall", "tool_call_id", "bridge-1").await;
-        wait_for_value(&host, "AgentToolCall", "tool_call_id", "bridge-2").await;
+            .expect("install addressed-request coordinator route");
+        wait_for_value(&host, "AgentRequest", "request_id", &fresh_request_id).await;
+        wait_for_value(&host, "AgentRequest", "request_id", &revoked_request_id).await;
+        assert_eq!(
+            collection_values(&host, "AgentRequest", "request_id").await,
+            BTreeSet::from([fresh_request_id.clone(), revoked_request_id.clone()]),
+            "only requests addressed to the host replicate; the caller's own request stays home"
+        );
         assert!(
-            collection_values(&host, "AgentRequest", "request_id")
+            collection_values(&host, "AgentToolCall", "tool_call_id")
                 .await
                 .is_empty(),
-            "coordinator parent request must not replicate to the host"
+            "the caller's tool rows never replicate to the host"
         );
-
-        crate::tool_call_lifecycle::create_subagent_request_with_trusted_parent_request_id(
-            &host,
-            "remote-child-1".to_string(),
-            parent_request_id.to_string(),
-            parent_doc_id.clone(),
-            "bridge-1".to_string(),
-            bridge_doc_id,
-            0,
-            host_did.clone(),
-            "behavior-1".to_string(),
-            "delegated work".to_string(),
-            None,
-            coordinator_did.clone(),
-        )
-        .await
-        .expect("materialize fresh target-signed cross-deployment child");
-        crate::tool_call_lifecycle::create_subagent_request_with_trusted_parent_request_id(
-            &host,
-            "remote-child-2".to_string(),
-            parent_request_id.to_string(),
-            parent_doc_id,
-            "bridge-2".to_string(),
-            revoked_bridge_doc_id,
-            0,
-            host_did.clone(),
-            "behavior-1".to_string(),
-            "delegated work after revocation".to_string(),
-            None,
-            coordinator_did.clone(),
-        )
-        .await
-        .expect("materialize pending target-signed cross-deployment child");
 
         let behavior = test_behavior(host_identity.clone());
         let fresh_calls = Arc::new(AtomicUsize::new(0));
@@ -1565,17 +1528,20 @@ mod tests {
             fresh_calls.clone(),
         );
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let fresh = load_admission_request_by_id(&host, "remote-child-1").await;
+        let fresh = load_admission_request_by_id(&host, &fresh_request_id).await;
         fresh_daemon
             .process_request(fresh, shutdown_rx.clone())
             .await
             .unwrap();
-        let fresh_state = host.execute(
-            r#"{ AgentRequest(filter: { request_id: { _eq: "remote-child-1" } }) { lifecycle_state failure_reason error_message terminal_output } }"#,
-        ).await;
+        let fresh_state = host
+            .execute(&format!(
+                r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{}" }} }}) {{ lifecycle_state failure_reason error_message terminal_output }} }}"#,
+                escape_graphql_string(&fresh_request_id),
+            ))
+            .await;
         assert!(
             fresh_calls.load(Ordering::SeqCst) > 0,
-            "fresh cross-deployment child did not reach the provider: {fresh_state:?}"
+            "fresh Peer request did not reach the provider: {fresh_state:?}"
         );
 
         GraphqlEnrollmentStore::new(host.clone(), host_identity.clone())
@@ -1585,7 +1551,7 @@ mod tests {
         let revoked_calls = Arc::new(AtomicUsize::new(0));
         let mut revoked_daemon =
             behavior_daemon(host.clone(), behavior, authority, revoked_calls.clone());
-        let revoked = load_admission_request_by_id(&host, "remote-child-2").await;
+        let revoked = load_admission_request_by_id(&host, &revoked_request_id).await;
         revoked_daemon
             .process_request(revoked, shutdown_rx)
             .await
@@ -1593,14 +1559,15 @@ mod tests {
         assert_eq!(
             revoked_calls.load(Ordering::SeqCst),
             0,
-            "revoked pending cross-deployment child reached the provider"
+            "revoked pending Peer request reached the provider"
         );
         let rejected = host
-            .execute(
-                r#"{ AgentRequest(filter: { request_id: { _eq: "remote-child-2" } }, limit: 1) {
+            .execute(&format!(
+                r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{}" }} }}, limit: 1) {{
                     lifecycle_state claimed_at
-                } }"#,
-            )
+                }} }}"#,
+                escape_graphql_string(&revoked_request_id),
+            ))
             .await;
         let rejected = rejected
             .data
@@ -1798,10 +1765,13 @@ mod tests {
             "foreign-requester artifact leaked to the receiver"
         );
 
+        // The caused session returns with its request so the caller can open
+        // it; sessions the requester did not cause stay on the host.
+        wait_for_value(&receiver, "AgentSession", "session_id", &match_session_id).await;
         assert_eq!(
             collection_values(&receiver, "AgentSession", "session_id").await,
-            BTreeSet::new(),
-            "host-local session ownership must not cross the return leg"
+            BTreeSet::from([match_session_id.clone()]),
+            "only the requester's caused session crosses the return leg"
         );
 
         sender.shutdown().await;

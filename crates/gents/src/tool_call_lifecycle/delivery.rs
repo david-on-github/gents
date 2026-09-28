@@ -33,11 +33,7 @@ pub(super) struct TerminalFields<'a> {
     pub state: ToolCallState,
     pub failure: Option<FailureClass>,
     pub cancel: Option<CancelCause>,
-    pub remote_cancel_intent_at: Option<DateTime<Utc>>,
     pub completion_reason: Option<&'a str>,
-    /// Lean `SpawnClaimFence.enabled .expire`: the write applies only while
-    /// the row still carries an unclaimed deadline at or before this instant.
-    pub unclaimed_expired_by: Option<DateTime<Utc>>,
 }
 
 /// Physical scope for the one canonical output source owned by an executing
@@ -290,7 +286,7 @@ impl ToolCallLifecycle {
                         request_doc_id: {{ _eq: "{request}" }}, session_id: {{ _eq: "{session}" }},
                         agent_did: {{ _eq: "{agent}" }}, tool_call_id: {{ _eq: "{}" }},
                         tool_name: {{ _eq: "{}" }}, message_sequence: {{ _eq: {message_sequence} }},
-                        await_mode: {{ _eq: "background" }}, child_request_id: {{ _eq: null }},
+                        await_mode: {{ _eq: "background" }},
                         lifecycle_state: {{ _eq: "pending" }}{requester_filter}
                     }}, input: {{ lifecycle_state: "running", started_at: "{}" }}) {{ _docID }} }}"#,
                         escape_graphql_string(&tool_call_id), escape_graphql_string(&tool_name),
@@ -418,7 +414,7 @@ impl ToolCallLifecycle {
                         spawned_by_tool_call_doc_id: {{ _eq: "{parent}" }}, request_doc_id: {{ _eq: "{request}" }},
                         session_id: {{ _eq: "{session}" }}, agent_did: {{ _eq: "{agent}" }}{requester_filter}
                     }}, limit: 2) {{ _docID tool_call_key tool_call_id tool_name message_sequence
-                        lifecycle_state await_mode cancel_policy child_request_id spawned_by_tool_call_doc_id deadline_at
+                        lifecycle_state await_mode spawned_by_tool_call_doc_id deadline_at
                         selected_service_id selected_tool_name }} }}"#)).await?;
                     let rows = existing["data"]["AgentToolCall"].as_array()
                         .context("spawned admission lookup omitted rows")?;
@@ -434,8 +430,6 @@ impl ToolCallLifecycle {
                                 && child["tool_name"].as_str() == Some(tool_name.as_str())
                                 && child["message_sequence"].as_u64() == Some(u64::from(message_sequence))
                                 && child["await_mode"].as_str() == Some("background")
-                                && child["cancel_policy"].as_str() == Some("cascade")
-                                && child["child_request_id"].is_null()
                                 && child["selected_service_id"].as_str()
                                     == selected.as_ref().map(|(service, _)| service.as_str())
                                 && child["selected_tool_name"].as_str()
@@ -511,7 +505,7 @@ impl ToolCallLifecycle {
                         session_id: "{session}", agent_did: "{agent}", {}
                         message_sequence: {message_sequence}, tool_name: "{}", tool_call_id: "{}",
                         lifecycle_state: "pending", status: "pending", deadline_at: "{deadline}",
-                        await_mode: "background", cancel_policy: "cascade", child_request_id: null,
+                        await_mode: "background",
                         {selected_fields} spawned_by_tool_call_doc_id: "{parent}"
                     }}) {{ _docID }} }}"#,
                         escape_graphql_string(&stable_key), escape_graphql_string(request_id),
@@ -553,6 +547,48 @@ impl ToolCallLifecycle {
         })
     }
 
+    /// The accepted identity a pending-to-running dispatch compares against.
+    pub(crate) fn dispatch_start(&self) -> Result<DispatchStart> {
+        Ok(DispatchStart {
+            header: self
+                .accepted_header_doc_id
+                .clone()
+                .context("dispatch requires an accepted tool header binding")?,
+            request: self
+                .request_doc_id
+                .clone()
+                .context("dispatch requires an accepted request binding")?,
+            generation: self
+                .execution_generation
+                .clone()
+                .context("dispatch requires the accepted execution generation")?,
+            arguments: self
+                .arguments
+                .clone()
+                .context("dispatch requires an accepted argument reference")?,
+            agent: self.agent_did.clone(),
+            requester: self.requester_did.clone(),
+            session: self.session_id.clone(),
+            doc_id: self
+                .doc_id
+                .clone()
+                .context("dispatch requires a physical tool row")?,
+            id: self.tool_call_id.clone(),
+            call_id: self.call_id.clone(),
+            message_sequence: self.message_sequence,
+            name: self.tool_name.clone(),
+            selected_tool_fields: self.selected_tool_fields_fragment(),
+            await_mode: self.await_mode.as_str(),
+        })
+    }
+
+    /// Record a pending-to-running compare that committed in a caller's
+    /// transaction through [`start_running_in_txn`].
+    pub(crate) fn mark_started(&mut self, started_at: DateTime<Utc>) {
+        self.state = ToolCallState::Running;
+        self.started_at = Some(started_at);
+    }
+
     /// One dispatch-admission fence: immutable accepted header binding,
     /// physical tool row, and the current request lease are observed with the
     /// pending-to-running compare under the same mutation gate.
@@ -560,236 +596,58 @@ impl ToolCallLifecycle {
         &mut self,
         fixture_now: Option<DateTime<Utc>>,
     ) -> Result<()> {
-        let header = self
-            .accepted_header_doc_id
-            .clone()
-            .context("dispatch requires an accepted tool header binding")?;
-        let request = self
-            .request_doc_id
-            .clone()
-            .context("dispatch requires an accepted request binding")?;
-        let generation = self
-            .execution_generation
-            .clone()
-            .context("dispatch requires the accepted execution generation")?;
-        let arguments = self
-            .arguments
-            .clone()
-            .context("dispatch requires an accepted argument reference")?;
-        let agent = self.agent_did.clone();
-        let requester = self.requester_did.clone();
-        let session = self.session_id.clone();
-        let doc_id = self
-            .doc_id
-            .clone()
-            .context("dispatch requires a physical tool row")?;
-        let id = self.tool_call_id.clone();
-        let call_id = self.call_id.clone();
-        let message_sequence = self.message_sequence;
-        let name = self.tool_name.clone();
-        let selected_tool_fields = self.selected_tool_fields_fragment();
-        let await_mode = self.await_mode.as_str();
-        let cancel_policy = self.cancel_policy.as_str();
-        let expected_child_identity = match (
-            self.child_request_id.as_deref(),
-            self.spawn_target_did.as_deref(),
-            self.spawn_behavior_id.as_deref(),
-        ) {
-            (Some(child_request_id), Some(spawn_target_did), Some(spawn_behavior_id)) => Some((
-                child_request_id.to_owned(),
-                spawn_target_did.to_owned(),
-                spawn_behavior_id.to_owned(),
-            )),
-            (None, None, None) => None,
-            _ => anyhow::bail!("subagent bridge dispatch has an incomplete child identity"),
-        };
-        let unclaimed_deadline_field = self
-            .unclaimed_deadline_at
-            .map(|deadline| {
-                format!(
-                    "unclaimed_deadline_at: \"{}\"",
-                    deadline.to_rfc3339_opts(SecondsFormat::Nanos, true)
-                )
-            })
-            .unwrap_or_else(|| "unclaimed_deadline_at: null".to_string());
+        let start = self.dispatch_start()?;
         let started_at = ConfigAccess::transact_local_idempotent(
             &self.node,
             None,
             IdempotentTransactionRetry::Standard,
             "tool_call.start_running_canonical",
             move |txn| {
-                let header = header.clone();
-                let request = request.clone();
-                let generation = generation.clone();
-                let arguments = arguments.clone();
-                let agent = agent.clone();
-                let requester = requester.clone();
-                let session = session.clone();
-                let doc_id = doc_id.clone();
-                let id = id.clone();
-                let call_id = call_id.clone();
-                let name = name.clone();
-                let selected_tool_fields = selected_tool_fields.clone();
-                let expected_child_identity = expected_child_identity.clone();
-                let unclaimed_deadline_field = unclaimed_deadline_field.clone();
-                Box::pin(async move {
-                    // This is sampled only after the transaction has acquired
-                    // the mutation gate. A queued dispatcher must not use an
-                    // earlier timestamp to run past a lease that expired while
-                    // it waited.
-                    let now = fixture_now.unwrap_or_else(Utc::now);
-                    let started_at = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
-                    let (message, _) = crate::session::load_canonical_message_in_txn(
-                        txn,
-                        &header,
-                        &agent,
-                        requester.as_deref(),
-                    )
-                    .await?;
-                    anyhow::ensure!(
-                        message.session_id == session
-                            && message.request_doc_id.as_deref() == Some(request.as_str())
-                            && message.role == MessageRole::Assistant
-                            && message.outcome == OutputOutcome::Complete
-                            && message.sequence == message_sequence
-                            && matches!(message.publication, MessagePublication::RequestExecution {
-                                execution_generation: ref accepted_generation
-                            } if accepted_generation == &generation)
-                            && message.blocks.iter().any(|block| matches!(block,
-                                MessageBlock::ToolCall { tool_call_doc_id, id: block_id,
-                                    call_id: block_call_id, name: block_name,
-                                    arguments: block_arguments, .. }
-                                if tool_call_doc_id == &doc_id && block_id == &id
-                                    && block_call_id == &call_id && block_name == &name
-                                    && block_arguments == &arguments)),
-                        "accepted header does not bind this exact dispatch"
-                    );
-                    let request_id = escape_graphql_string(&request);
-                    let request_row = txn
-                        .execute(&format!(
-                            r#"{{ AgentRequest(filter: {{
-                        _docID: {{ _eq: "{request_id}" }}, agent_did: {{ _eq: "{}" }},
-                        session_id: {{ _eq: "{}" }}
-                    }}, limit: 2) {{
-                        _docID requester_did lifecycle_state execution_generation
-                        execution_lease_expires_at interrupt_requested_at
-                    }} }}"#,
-                            escape_graphql_string(&agent),
-                            escape_graphql_string(&session)
-                        ))
-                        .await?;
-                    let rows = request_row["data"]["AgentRequest"]
-                        .as_array()
-                        .context("dispatch request lookup omitted rows")?;
-                    anyhow::ensure!(rows.len() == 1, "dispatch request is missing or ambiguous");
-                    let row = &rows[0];
-                    if row["requester_did"].as_str() != requester.as_deref()
-                        || row["lifecycle_state"].as_str() != Some("processing")
-                        || row["execution_generation"].as_str() != Some(generation.as_str())
-                        || !row["interrupt_requested_at"].is_null()
-                    {
-                        return Err(ToolDispatchRejection::LostRequestOwnership.into());
-                    }
-                    let expiry = row["execution_lease_expires_at"]
-                        .as_str()
-                        .context("dispatch request lease deadline missing")?;
-                    let expiry = DateTime::parse_from_rfc3339(expiry)?.with_timezone(&Utc);
-                    anyhow::ensure!(expiry > now, "dispatch request lease has expired");
-
-                    let requester_filter = requester
-                        .as_deref()
-                        .map(|value| {
-                            format!(
-                                r#", requester_did: {{ _eq: "{}" }}"#,
-                                escape_graphql_string(value)
-                            )
-                        })
-                        .unwrap_or_else(|| ", requester_did: { _eq: null }".to_owned());
-                    let physical = txn
-                        .execute(&format!(
-                            r#"{{ AgentToolCall(filter: {{
-                        _docID: {{ _eq: "{}" }}, request_doc_id: {{ _eq: "{request_id}" }},
-                        session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }}{requester_filter}
-                    }}, limit: 2) {{ child_request_id spawn_target_did spawn_behavior_id }} }}"#,
-                            escape_graphql_string(&doc_id),
-                            escape_graphql_string(&session),
-                            escape_graphql_string(&agent)
-                        ))
-                        .await?;
-                    let physical_rows = physical["data"]["AgentToolCall"]
-                        .as_array()
-                        .context("dispatch physical tool lookup omitted rows")?;
-                    anyhow::ensure!(
-                        physical_rows.len() == 1,
-                        "dispatch physical tool is missing or ambiguous"
-                    );
-                    let persisted_child = (
-                        physical_rows[0]["child_request_id"].as_str(),
-                        physical_rows[0]["spawn_target_did"].as_str(),
-                        physical_rows[0]["spawn_behavior_id"].as_str(),
-                    );
-                    let expected_child = expected_child_identity
-                        .as_ref()
-                        .map(|(child, target, behavior)| {
-                            (
-                                Some(child.as_str()),
-                                Some(target.as_str()),
-                                Some(behavior.as_str()),
-                            )
-                        })
-                        .unwrap_or((None, None, None));
-                    anyhow::ensure!(
-                        persisted_child == expected_child,
-                        "dispatch immutable bridge identity differs from accepted genesis"
-                    );
-                    let update = txn
-                        .execute(&format!(
-                            r#"mutation {{ update_AgentToolCall(filter: {{
-                        _docID: {{ _eq: "{}" }}, request_doc_id: {{ _eq: "{request_id}" }},
-                        session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }},
-                        tool_call_id: {{ _eq: "{}" }}, tool_name: {{ _eq: "{}" }},
-                        message_sequence: {{ _eq: {message_sequence} }},
-                        lifecycle_state: {{ _eq: "pending" }}{requester_filter}
-                    }}, input: {{ lifecycle_state: "running", started_at: "{started_at}",
-                        await_mode: "{await_mode}", cancel_policy: "{cancel_policy}",
-                        {unclaimed_deadline_field}, {selected_tool_fields}
-                    }}) {{ _docID }} }}"#,
-                            escape_graphql_string(&doc_id),
-                            escape_graphql_string(&session),
-                            escape_graphql_string(&agent),
-                            escape_graphql_string(&id),
-                            escape_graphql_string(&name)
-                        ))
-                        .await?;
-                    Ok(update["data"]["update_AgentToolCall"]
-                        .as_array()
-                        .is_some_and(|rows| !rows.is_empty())
-                        .then_some(now))
-                })
+                let start = start.clone();
+                Box::pin(async move { start_running_in_txn(txn, &start, fixture_now).await })
             },
         )
         .await?;
         let started_at = started_at
             .context("accepted tool lifecycle binding was altered or is no longer pending")?;
-        self.state = ToolCallState::Running;
-        self.started_at = Some(started_at);
+        self.mark_started(started_at);
         Ok(())
     }
 
-    /// Publish the one immediate native receipt for a background subagent
-    /// bridge without terminalizing the bridge or closing its ToolCall source.
-    /// The receipt has its own immutable authored source, owned by the
-    /// physical bridge document; verified child completion is responsible for
-    /// the later ToolCall-source closure and ordinary notification.
+    /// Publish the one immediate native receipt for a background
+    /// `agent_new`/`agent_message` row without terminalizing it or
+    /// closing its ToolCall source. The receipt has its own immutable
+    /// authored source, owned by the physical row; the caused request's
+    /// terminal later closes the ToolCall source and appends the notification.
+    #[cfg(test)]
     pub(crate) async fn publish_background_receipt(&mut self, text: &str) -> Result<bool> {
+        let binding = self.background_receipt_binding()?;
+        let receipt = text.to_owned();
+        ConfigAccess::transact_local_idempotent(
+            &self.node,
+            None,
+            IdempotentTransactionRetry::Standard,
+            "tool_call.publish_background_receipt",
+            move |txn| {
+                let binding = binding.clone();
+                let receipt = receipt.clone();
+                Box::pin(
+                    async move { publish_background_receipt_in_txn(txn, &binding, &receipt).await },
+                )
+            },
+        )
+        .await
+    }
+
+    /// The exact accepted invocation a background receipt answers.
+    pub(crate) fn background_receipt_binding(&self) -> Result<BackgroundReceiptBinding> {
         anyhow::ensure!(
-            (self.state == ToolCallState::Running || self.state.is_terminal())
-                && self.await_mode == super::AwaitMode::Background
-                && self.is_subagent_bridge()
+            self.await_mode == super::AwaitMode::Background
+                && self.is_session_message()
                 && !self.is_spawned_background(),
-            "background receipt requires an accepted background bridge"
+            "background receipt requires an accepted background session-message row"
         );
-        let binding = BackgroundReceiptBinding {
+        Ok(BackgroundReceiptBinding {
             tool_doc_id: self
                 .doc_id
                 .clone()
@@ -817,53 +675,7 @@ impl ToolCallLifecycle {
             call_id: self.call_id.clone(),
             tool_name: self.tool_name.clone(),
             message_sequence: self.message_sequence,
-        };
-        let receipt = text.to_owned();
-        ConfigAccess::transact_local_idempotent(
-            &self.node,
-            None,
-            IdempotentTransactionRetry::Standard,
-            "tool_call.publish_background_receipt",
-            move |txn| {
-                let binding = binding.clone();
-                let receipt = receipt.clone();
-                Box::pin(
-                    async move { publish_background_receipt_in_txn(txn, &binding, &receipt).await },
-                )
-            },
-        )
-        .await
-    }
-
-    /// Keep a running subagent bridge as background work: an awaited bridge
-    /// is flipped to background and the bridge's one invocation receipt is
-    /// published unless an invocation reply already exists. Returns whether
-    /// the bridge is running in background afterwards.
-    pub(crate) async fn retain_in_background(&mut self, receipt: &str) -> Result<bool> {
-        if self.state == ToolCallState::Running && self.await_mode == super::AwaitMode::Foreground {
-            self.background().await?;
-        }
-        if self.state != ToolCallState::Running || self.await_mode != super::AwaitMode::Background {
-            return Ok(false);
-        }
-        let doc_id = self
-            .doc_id
-            .clone()
-            .context("retained bridge has no physical document")?;
-        // A bridge may already carry its immutable invocation reply; it must
-        // never be rewritten with a different presentation.
-        let existing = super::query::load_tool_call_presentation(
-            &ConfigAccess::Local(self.node.clone()),
-            &doc_id,
-            &self.agent_did,
-            &self.session_id,
-            self.requester_did.as_deref(),
-        )
-        .await?;
-        if existing.result.is_none() {
-            self.publish_background_receipt(receipt).await?;
-        }
-        Ok(true)
+        })
     }
 
     /// Atomically close a direct tool's sole native-output stream, terminalize
@@ -878,10 +690,11 @@ impl ToolCallLifecycle {
         operation: &'static str,
     ) -> Result<bool> {
         // A never-dispatched failure still owes its sole invocation reply.
-        // Only a detached, running bridge has already delivered a receipt.
+        // Only a running background session-message row has already
+        // delivered its receipt.
         let publish_native_result = !(expected != ToolCallState::Pending
             && self.await_mode == super::AwaitMode::Background
-            && self.is_subagent_bridge()
+            && self.is_session_message()
             && !self.is_spawned_background());
         self.terminalize_with_options(
             expected,
@@ -896,10 +709,10 @@ impl ToolCallLifecycle {
         .await
     }
 
-    /// Bridge terminalization shares the canonical delivery transaction but
-    /// may lose its Running compare to a different terminal owner (for
+    /// Session-message settlement shares the canonical delivery transaction
+    /// but may lose its Running compare to a different terminal owner (for
     /// example cancellation or recovery). Native tool completion remains
-    /// strict; only bridge projections adopt that already-durable winner.
+    /// strict; only this settlement adopts that already-durable winner.
     pub(super) async fn terminalize_bridge_with_delivery(
         &mut self,
         expected: ToolCallState,
@@ -909,7 +722,7 @@ impl ToolCallLifecycle {
     ) -> Result<bool> {
         let publish_native_result = !(expected != ToolCallState::Pending
             && self.await_mode == super::AwaitMode::Background
-            && self.is_subagent_bridge()
+            && self.is_session_message()
             && !self.is_spawned_background());
         self.terminalize_with_options(
             expected,
@@ -1668,14 +1481,6 @@ async fn terminalize_transaction(
         }),
         created_at: now.to_rfc3339_opts(SecondsFormat::Nanos, true),
     };
-    let segment_response = txn
-        .execute_with_variables(
-            CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
-            &output_segment_create_variables(&segment)?,
-        )
-        .await?;
-    let close_doc_id = created_doc_id(&segment_response, "AgentOutputSegment")?;
-
     let completed_at = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
     // A call settled from Pending never started; it records neither a start
     // nor a latency.
@@ -1698,21 +1503,7 @@ async fn terminalize_transaction(
         .cancel
         .map(|value| format!(r#", cancel_cause: "{}""#, value.as_str()))
         .unwrap_or_default();
-    let remote_handoff = fields
-        .remote_cancel_intent_at
-        .map(|at| {
-            let at = escape_graphql_string(&at.to_rfc3339_opts(SecondsFormat::Nanos, true));
-            format!(r#", cancel_cascade_intent_at: "{at}", cancel_pending_remote_ack: true"#)
-        })
-        .unwrap_or_default();
     let state = fields.state.as_str();
-    let unclaimed_filter = fields
-        .unclaimed_expired_by
-        .map(|by| {
-            let by = escape_graphql_string(&by.to_rfc3339_opts(SecondsFormat::Nanos, true));
-            format!(r#", unclaimed_deadline_at: {{ _le: "{by}" }}"#)
-        })
-        .unwrap_or_default();
     let spawned_filter = spawned_by_tool_call_doc_id
         .map(|parent| {
             format!(
@@ -1726,18 +1517,26 @@ async fn terminalize_transaction(
         session_id: {{ _eq: "{session}" }}, agent_did: {{ _eq: "{agent}" }},
         tool_call_id: {{ _eq: "{tool_id}" }}, tool_name: {{ _eq: "{name}" }},
         message_sequence: {{ _eq: {message_sequence} }},
-        lifecycle_state: {{ _eq: "{expected}" }}{requester_filter}{spawned_filter}{unclaimed_filter} }}, input: {{
+        lifecycle_state: {{ _eq: "{expected}" }}{requester_filter}{spawned_filter} }}, input: {{
         status: "{}", lifecycle_state: "{state}", started_at: {started_at},
-        deadline_at: "{deadline_at}", completed_at: "{completed_at}", latency_ms: {latency_ms}{failure}{cancel}{remote_handoff}
+        deadline_at: "{deadline_at}", completed_at: "{completed_at}", latency_ms: {latency_ms}{failure}{cancel}
     }}) {{ _docID }} }}"#, escape_graphql_string(terminal_status))).await?;
     if !lifecycle["data"]["update_AgentToolCall"]
         .as_array()
         .is_some_and(|rows| !rows.is_empty())
     {
-        // Transaction rollback discards the created closure: a loser cannot
-        // leave an unpaired output fact or consume a delivery sequence.
+        // The compare precedes every write, so a loser commits nothing: no
+        // closure without its terminal, and no delivery sequence consumed.
         return Ok(false);
     }
+
+    let segment_response = txn
+        .execute_with_variables(
+            CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
+            &output_segment_create_variables(&segment)?,
+        )
+        .await?;
+    let close_doc_id = created_doc_id(&segment_response, "AgentOutputSegment")?;
 
     // A spawned process is not a provider invocation.  Its terminal output
     // is closed above under its own physical source, while its later
@@ -2877,7 +2676,14 @@ mod spawned_background_tests {
         .await
         .unwrap()
         .expect("rehydrated background bridge");
-        assert!(bridge.bridge_complete(final_bytes.into()).await.unwrap());
+        assert!(bridge
+            .settle_session_message(
+                &crate::tool_call_lifecycle::CausedRequestTerminal::Completed {
+                    output: final_bytes.into()
+                }
+            )
+            .await
+            .unwrap());
         assert_eq!(bridge.state, ToolCallState::Completed);
 
         // The terminal bridge source is the durable final-output authority.
@@ -2892,6 +2698,7 @@ mod spawned_background_tests {
             "completed",
             final_bytes,
             None,
+            crate::lifecycle::RequestHopCause::Continuation,
         )
         .await
         .unwrap();
@@ -3005,18 +2812,32 @@ mod spawned_background_tests {
         };
         let mut first = load().await.unwrap().expect("first admitted bridge");
         let mut second = load().await.unwrap().expect("second admitted bridge");
+        let one_result = crate::tool_call_lifecycle::CausedRequestTerminal::Completed {
+            output: "one result".into(),
+        };
         let (left, right) = tokio::join!(
-            first.bridge_complete("one result".into()),
-            second.bridge_complete("one result".into())
+            first.settle_session_message(&one_result),
+            second.settle_session_message(&one_result)
         );
         let left = left.unwrap();
         let right = right.unwrap();
         assert_ne!(left, right, "exactly one projector must commit");
 
         let mut replay = load().await.unwrap().expect("terminal admitted bridge");
-        assert!(!replay.bridge_complete("one result".into()).await.unwrap());
+        assert!(!replay
+            .settle_session_message(
+                &crate::tool_call_lifecycle::CausedRequestTerminal::Completed {
+                    output: "one result".into()
+                }
+            )
+            .await
+            .unwrap());
         assert!(replay
-            .bridge_complete("different result".into())
+            .settle_session_message(
+                &crate::tool_call_lifecycle::CausedRequestTerminal::Completed {
+                    output: "different result".into()
+                }
+            )
             .await
             .is_err());
 
@@ -3268,4 +3089,149 @@ pub(crate) async fn publish_background_receipt_in_txn(
     )
     .await?;
     Ok(true)
+}
+
+#[derive(Clone)]
+pub(crate) struct DispatchStart {
+    header: String,
+    request: String,
+    generation: String,
+    arguments: gents_protocol::output::PayloadRef,
+    agent: String,
+    requester: Option<String>,
+    session: String,
+    doc_id: String,
+    id: String,
+    call_id: Option<String>,
+    message_sequence: u32,
+    name: String,
+    selected_tool_fields: String,
+    await_mode: &'static str,
+}
+
+/// The pending-to-running compare of [`ToolCallLifecycle::start_running`],
+/// inside a caller's transaction, so a caller can make Running imply the
+/// other writes of that transaction. `None` when the row was altered or is no
+/// longer pending.
+pub(crate) async fn start_running_in_txn(
+    txn: &ConfigApplyTxn<'_>,
+    start: &DispatchStart,
+    fixture_now: Option<DateTime<Utc>>,
+) -> Result<Option<DateTime<Utc>>> {
+    // This is sampled only after the transaction has acquired
+    // the mutation gate. A queued dispatcher must not use an
+    // earlier timestamp to run past a lease that expired while
+    // it waited.
+    let now = fixture_now.unwrap_or_else(Utc::now);
+    let started_at = now.to_rfc3339_opts(SecondsFormat::Nanos, true);
+    let (message, _) = crate::session::load_canonical_message_in_txn(
+        txn,
+        &start.header,
+        &start.agent,
+        start.requester.as_deref(),
+    )
+    .await?;
+    anyhow::ensure!(
+        message.session_id == start.session
+            && message.request_doc_id.as_deref() == Some(start.request.as_str())
+            && message.role == MessageRole::Assistant
+            && message.outcome == OutputOutcome::Complete
+            && message.sequence == start.message_sequence
+            && matches!(message.publication, MessagePublication::RequestExecution {
+                    execution_generation: ref accepted_generation
+                } if accepted_generation == &start.generation)
+            && message.blocks.iter().any(|block| matches!(block,
+                    MessageBlock::ToolCall { tool_call_doc_id, id: block_id,
+                        call_id: block_call_id, name: block_name,
+                        arguments: block_arguments, .. }
+                    if tool_call_doc_id == &start.doc_id && block_id == &start.id
+                        && block_call_id == &start.call_id && block_name == &start.name
+                        && block_arguments == &start.arguments)),
+        "accepted header does not bind this exact dispatch"
+    );
+    let request_id = escape_graphql_string(&start.request);
+    let request_row = txn
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{
+            _docID: {{ _eq: "{request_id}" }}, agent_did: {{ _eq: "{}" }},
+            session_id: {{ _eq: "{}" }}
+        }}, limit: 2) {{
+            _docID requester_did lifecycle_state execution_generation
+            execution_lease_expires_at interrupt_requested_at
+        }} }}"#,
+            escape_graphql_string(&start.agent),
+            escape_graphql_string(&start.session)
+        ))
+        .await?;
+    let rows = request_row["data"]["AgentRequest"]
+        .as_array()
+        .context("dispatch request lookup omitted rows")?;
+    anyhow::ensure!(rows.len() == 1, "dispatch request is missing or ambiguous");
+    let row = &rows[0];
+    if row["requester_did"].as_str() != start.requester.as_deref()
+        || row["lifecycle_state"].as_str() != Some("processing")
+        || row["execution_generation"].as_str() != Some(start.generation.as_str())
+        || !row["interrupt_requested_at"].is_null()
+    {
+        return Err(ToolDispatchRejection::LostRequestOwnership.into());
+    }
+    let expiry = row["execution_lease_expires_at"]
+        .as_str()
+        .context("dispatch request lease deadline missing")?;
+    let expiry = DateTime::parse_from_rfc3339(expiry)?.with_timezone(&Utc);
+    anyhow::ensure!(expiry > now, "dispatch request lease has expired");
+
+    let requester_filter = start
+        .requester
+        .as_deref()
+        .map(|value| {
+            format!(
+                r#", requester_did: {{ _eq: "{}" }}"#,
+                escape_graphql_string(value)
+            )
+        })
+        .unwrap_or_else(|| ", requester_did: { _eq: null }".to_owned());
+    let physical = txn
+        .execute(&format!(
+            r#"{{ AgentToolCall(filter: {{
+            _docID: {{ _eq: "{}" }}, request_doc_id: {{ _eq: "{request_id}" }},
+            session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }}{requester_filter}
+        }}, limit: 2) {{ _docID }} }}"#,
+            escape_graphql_string(&start.doc_id),
+            escape_graphql_string(&start.session),
+            escape_graphql_string(&start.agent)
+        ))
+        .await?;
+    let physical_rows = physical["data"]["AgentToolCall"]
+        .as_array()
+        .context("dispatch physical tool lookup omitted rows")?;
+    anyhow::ensure!(
+        physical_rows.len() == 1,
+        "dispatch physical tool is missing or ambiguous"
+    );
+    let update = txn
+        .execute(&format!(
+            r#"mutation {{ update_AgentToolCall(filter: {{
+            _docID: {{ _eq: "{}" }}, request_doc_id: {{ _eq: "{request_id}" }},
+            session_id: {{ _eq: "{}" }}, agent_did: {{ _eq: "{}" }},
+            tool_call_id: {{ _eq: "{}" }}, tool_name: {{ _eq: "{}" }},
+            message_sequence: {{ _eq: {} }},
+            lifecycle_state: {{ _eq: "pending" }}{requester_filter}
+        }}, input: {{ lifecycle_state: "running", started_at: "{started_at}",
+            await_mode: "{}", {}
+        }}) {{ _docID }} }}"#,
+            escape_graphql_string(&start.doc_id),
+            escape_graphql_string(&start.session),
+            escape_graphql_string(&start.agent),
+            escape_graphql_string(&start.id),
+            escape_graphql_string(&start.name),
+            start.message_sequence,
+            start.await_mode,
+            start.selected_tool_fields,
+        ))
+        .await?;
+    Ok(update["data"]["update_AgentToolCall"]
+        .as_array()
+        .is_some_and(|rows| !rows.is_empty())
+        .then_some(now))
 }

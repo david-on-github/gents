@@ -1,54 +1,11 @@
 use super::*;
 
-pub(super) async fn clear_cancel_pending_ack(node: &EmbeddedNode, doc_id: &str) -> Result<()> {
-    let escaped = escape_graphql_string(doc_id);
-    let datetime_fields =
-        agent_tool_call_datetime_update_fragment(node, doc_id, &["stuck_since"]).await?;
-    let mutation = format!(
-        r#"mutation {{
-            update_AgentToolCall(
-                filter: {{ _docID: {{ _eq: "{escaped}" }} }},
-                input: {{
-                    cancel_pending_remote_ack: false,
-                    stuck_since: null
-                    {datetime_fields}
-                }}
-            ) {{ _docID }}
-        }}"#
-    );
-    crate::config_client::ConfigAccess::write_local_response(
-        node,
-        "background_completion.clear_cancel_pending_ack",
-        &mutation,
-    )
-    .await?;
-    Ok(())
-}
-
-pub(super) async fn set_stuck_since(
-    node: &EmbeddedNode,
-    doc_id: &str,
-    when: DateTime<Utc>,
-) -> Result<()> {
-    let escaped = escape_graphql_string(doc_id);
-    let when = escape_graphql_string(&when.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
-    let datetime_fields =
-        agent_tool_call_datetime_update_fragment(node, doc_id, &["stuck_since"]).await?;
-    let mutation = format!(
-        r#"mutation {{
-            update_AgentToolCall(
-                filter: {{ _docID: {{ _eq: "{escaped}" }} }},
-                input: {{ stuck_since: "{when}"{datetime_fields} }}
-            ) {{ _docID }}
-        }}"#
-    );
-    crate::config_client::ConfigAccess::write_local_response(
-        node,
-        "background_completion.set_stuck_since",
-        &mutation,
-    )
-    .await?;
-    Ok(())
+#[derive(Debug, Deserialize, Default)]
+pub(crate) struct AgentToolCallDateTimeRow {
+    pub(crate) started_at: Option<String>,
+    pub(crate) deadline_at: Option<String>,
+    pub(crate) completed_at: Option<String>,
+    pub(crate) stuck_since: Option<String>,
 }
 
 pub(super) async fn agent_tool_call_datetime_update_fragment(
@@ -63,8 +20,6 @@ pub(super) async fn agent_tool_call_datetime_update_fragment(
                 started_at
                 deadline_at
                 completed_at
-                unclaimed_deadline_at
-                cancel_cascade_intent_at
                 stuck_since
             }}
         }}"#
@@ -93,18 +48,6 @@ pub(super) async fn agent_tool_call_datetime_update_fragment(
         "completed_at",
         row.completed_at.as_deref(),
     );
-    push_datetime_field(
-        &mut fields,
-        omit,
-        "unclaimed_deadline_at",
-        row.unclaimed_deadline_at.as_deref(),
-    );
-    push_datetime_field(
-        &mut fields,
-        omit,
-        "cancel_cascade_intent_at",
-        row.cancel_cascade_intent_at.as_deref(),
-    );
     push_datetime_field(&mut fields, omit, "stuck_since", row.stuck_since.as_deref());
 
     if fields.is_empty() {
@@ -127,7 +70,7 @@ pub(crate) fn push_datetime_field(
         return;
     };
     // Re-supplied DateTime fields must round-trip exactly: `started_at` is
-    // part of the descendant edge order, so truncating it moves the edge.
+    // part of the background listing order, so truncating it reorders rows.
     let value = DateTime::parse_from_rfc3339(value)
         .map(|dt| dt.with_timezone(&Utc))
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))

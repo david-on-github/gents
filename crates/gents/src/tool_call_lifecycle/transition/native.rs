@@ -47,6 +47,14 @@ impl ToolCallLifecycle {
                 "start_running cannot re-dispatch an already-running physical tool; recover its registered executor instead"
             );
         }
+        // A row a recovery or interrupt already ended is a lost dispatch, not
+        // an illegal transition: the caller observes the rejection and stops.
+        if self.state.is_terminal() {
+            return Err(
+                crate::tool_call_lifecycle::delivery::ToolDispatchRejection::LostRequestOwnership
+                    .into(),
+            );
+        }
         self.ensure_state(&[ToolCallState::Pending], "start_running")?;
         if self.is_spawned_background() {
             return self.start_running_spawned_with_time(fixture_now).await;
@@ -102,16 +110,11 @@ impl ToolCallLifecycle {
         fixture_now: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<bool> {
         self.ensure_state(&[ToolCallState::Running], "complete")?;
-        if self.is_bridge() {
-            return Err(IllegalToolCallTransition::NativeCompleteOnSubagentTool.into());
-        }
         let fields = TerminalFields {
             state: ToolCallState::Completed,
             failure: None,
             cancel: None,
-            remote_cancel_intent_at: None,
             completion_reason: None,
-            unclaimed_expired_by: None,
         };
         let updated = if let Some(now) = fixture_now {
             self.terminalize_raw_with_presentation_at(
@@ -149,9 +152,6 @@ impl ToolCallLifecycle {
         presentation: Option<gents_protocol::output::PayloadPresentation>,
     ) -> Result<bool> {
         self.ensure_state(&[ToolCallState::Running], "complete")?;
-        if self.is_bridge() {
-            return Err(IllegalToolCallTransition::NativeCompleteOnSubagentTool.into());
-        }
 
         if !self
             .terminalize_with_presentation(
@@ -160,9 +160,7 @@ impl ToolCallLifecycle {
                     state: ToolCallState::Completed,
                     failure: None,
                     cancel: None,
-                    remote_cancel_intent_at: None,
                     completion_reason: None,
-                    unclaimed_expired_by: None,
                 },
                 result,
                 presentation,
@@ -201,9 +199,6 @@ impl ToolCallLifecycle {
         presentation: gents_protocol::output::PayloadPresentation,
     ) -> Result<bool> {
         self.ensure_state(&[ToolCallState::Running], "fail")?;
-        if self.is_bridge() {
-            return Err(IllegalToolCallTransition::NativeFailOnSubagentTool.into());
-        }
         let updated = self
             .terminalize_raw_with_presentation(
                 ToolCallState::Running,
@@ -211,9 +206,7 @@ impl ToolCallLifecycle {
                     state: ToolCallState::Failed,
                     failure: Some(failure),
                     cancel: None,
-                    remote_cancel_intent_at: None,
                     completion_reason: None,
-                    unclaimed_expired_by: None,
                 },
                 raw,
                 rendered,
@@ -270,9 +263,6 @@ impl ToolCallLifecycle {
         completion_reason: Option<&str>,
     ) -> Result<bool> {
         self.ensure_state(&[ToolCallState::Running], "fail")?;
-        if self.is_bridge() {
-            return Err(IllegalToolCallTransition::NativeFailOnSubagentTool.into());
-        }
 
         if !self
             .terminalize_with_presentation(
@@ -281,9 +271,7 @@ impl ToolCallLifecycle {
                     state: ToolCallState::Failed,
                     failure: Some(failure),
                     cancel: None,
-                    remote_cancel_intent_at: None,
                     completion_reason,
-                    unclaimed_expired_by: None,
                 },
                 result,
                 presentation,
@@ -323,21 +311,24 @@ impl ToolCallLifecycle {
         self.ensure_state(&[ToolCallState::Pending], "spawn_failed")?;
 
         let _ = command_denial;
-        let _ = self
+        let failed = self
             .terminalize_with_delivery(
                 ToolCallState::Pending,
                 super::super::delivery::TerminalFields {
                     state: ToolCallState::Failed,
                     failure: Some(failure),
                     cancel: None,
-                    remote_cancel_intent_at: None,
                     completion_reason: None,
-                    unclaimed_expired_by: None,
                 },
                 reason,
                 "tool_call.spawn_failed_delivery",
             )
             .await?;
+        anyhow::ensure!(
+            failed,
+            "spawn_failed lost its pending compare for tool_call_id={}",
+            self.tool_call_id
+        );
         Ok(())
     }
 
@@ -349,61 +340,27 @@ impl ToolCallLifecycle {
     /// interrupt, recovery sweep, or the tool itself — terminalized first),
     /// preserving that terminal's state and recorded cause.
     pub async fn timeout(&mut self) -> Result<bool> {
-        self.timeout_inner(None).await
-    }
-
-    pub(crate) async fn timeout_with_presentation(
-        &mut self,
-        rendered: &str,
-        presentation: gents_protocol::output::PayloadPresentation,
-    ) -> Result<bool> {
-        self.timeout_inner(Some((rendered, presentation))).await
-    }
-
-    async fn timeout_inner(
-        &mut self,
-        presented: Option<(&str, gents_protocol::output::PayloadPresentation)>,
-    ) -> Result<bool> {
         self.ensure_state(&[ToolCallState::Running], "timeout")?;
         let message = format!(
             "tool call deadline exceeded at {}",
             self.deadline_at.to_rfc3339()
         );
-        // Lean `SpawnClaimFence.deadline`: whichever deadline settles a spawn
-        // bridge first, an unobserved child is fenced in this same write.
-        let remote_cancel_intent_at = self.unobserved_child_fence().await?;
         let fields = super::super::delivery::TerminalFields {
             state: ToolCallState::TimedOut,
             failure: Some(FailureClass::External),
             cancel: Some(CancelCause::Deadline),
-            remote_cancel_intent_at,
             completion_reason: None,
-            unclaimed_expired_by: None,
         };
-        let updated = match presented {
-            Some((rendered, presentation)) => {
-                self.terminalize_raw_with_presentation(
-                    ToolCallState::Running,
-                    fields,
-                    &message,
-                    rendered,
-                    presentation,
-                    "tool_call.timeout_delivery",
-                )
-                .await?
-            }
-            None => {
-                self.terminalize_raw_with_presentation(
-                    ToolCallState::Running,
-                    fields,
-                    &message,
-                    &message,
-                    gents_protocol::output::PayloadPresentation::Full,
-                    "tool_call.timeout_delivery",
-                )
-                .await?
-            }
-        };
+        let updated = self
+            .terminalize_raw_with_presentation(
+                ToolCallState::Running,
+                fields,
+                &message,
+                &message,
+                gents_protocol::output::PayloadPresentation::Full,
+                "tool_call.timeout_delivery",
+            )
+            .await?;
         if !updated {
             // Another actor terminalized first — adopt the durable terminal.
             self.sync_after_lost_running_compare("timeout").await?;
@@ -424,9 +381,7 @@ impl ToolCallLifecycle {
                     state: ToolCallState::Cancelled,
                     failure: None,
                     cancel: Some(cause),
-                    remote_cancel_intent_at: None,
                     completion_reason: None,
-                    unclaimed_expired_by: None,
                 },
                 "tool call cancelled before dispatch",
                 "tool_call.cancel_before_dispatch_delivery",

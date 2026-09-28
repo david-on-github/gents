@@ -348,11 +348,7 @@ impl BehaviorToolConfig {
             required_mcp_service_ids,
             subagent_tools: SubagentToolConfig {
                 targets: effective_subagent_targets,
-                spawn_enabled: static_policy.spawn,
-                steering_enabled: static_policy.steering,
-                background_enabled: static_policy.background,
-                default_await_mode: subagent_tools.default_await_mode,
-                allow_cross_deployment: static_policy.cross_deployment,
+                enabled: static_policy.session_messages,
             },
             background_tools: BackgroundToolConfig {
                 allowlist: background_allowlist,
@@ -633,11 +629,10 @@ impl BehaviorToolConfig {
         }
     }
 
-    /// Resolve the tool surface, dropping local-DID subagent targets whose
-    /// behavior is not in the active local set. Remote-DID targets survive only
-    /// when cross-deployment delegation is enabled (`allow_cross_deployment`);
-    /// when it is false (the default, #377) remote-DID targets are filtered out
-    /// so the model is never told about targets a runtime spawn would reject.
+    /// Resolve the tool surface, dropping local-DID session targets whose
+    /// behavior is not in the active local set. A target on another principal
+    /// stays listed: it is admitted there as a Peer request under that
+    /// principal's ACP.
     pub(crate) async fn resolve_with_available_subagent_targets(
         &self,
         node: &EmbeddedNode,
@@ -645,14 +640,9 @@ impl BehaviorToolConfig {
         active_behavior_ids: &HashSet<String>,
     ) -> Result<ToolSurface> {
         let mut subagent_tools = self.subagent_tools.clone();
-        let allow_cross_deployment = subagent_tools.allow_cross_deployment;
         subagent_tools.targets.retain(|target| {
-            if target.target_agent_did == own_agent_did {
-                active_behavior_ids.contains(&target.behavior_id)
-            } else {
-                // Remote-DID target: only surface when cross-deployment is enabled.
-                allow_cross_deployment
-            }
+            target.target_agent_did != own_agent_did
+                || active_behavior_ids.contains(&target.behavior_id)
         });
         self.resolve_with_subagent_tools(node, own_agent_did, subagent_tools)
             .await
@@ -666,13 +656,9 @@ impl BehaviorToolConfig {
         active_behavior_ids: &HashSet<String>,
     ) -> ToolSurface {
         let mut subagent_tools = self.subagent_tools.clone();
-        let allow_cross_deployment = subagent_tools.allow_cross_deployment;
         subagent_tools.targets.retain(|target| {
-            if target.target_agent_did == own_agent_did {
-                active_behavior_ids.contains(&target.behavior_id)
-            } else {
-                allow_cross_deployment
-            }
+            target.target_agent_did != own_agent_did
+                || active_behavior_ids.contains(&target.behavior_id)
         });
         self.resolve_with_subagent_tools_for_mcp_presence(mcp_services_online, subagent_tools)
     }

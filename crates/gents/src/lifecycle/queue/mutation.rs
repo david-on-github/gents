@@ -5,8 +5,38 @@ use crate::lifecycle::materialize::{
 };
 use crate::lifecycle::TriggerLineage;
 
+#[cfg(test)]
 pub(super) async fn session_request_create_mutation(
     parent: &AgentRequest,
+    behavior_id: &str,
+    content: &str,
+    execution_origin: ExecutionOrigin,
+    input: RequestInput,
+    request_id: &str,
+    created_at: &str,
+    retry_key: Option<&str>,
+) -> Result<String> {
+    session_request_create_mutation_at_hop(
+        parent,
+        parent.subagent_depth,
+        behavior_id,
+        content,
+        execution_origin,
+        input,
+        request_id,
+        created_at,
+        retry_key,
+    )
+    .await
+}
+
+/// A control continuation of `parent` written at `hop` (Lean
+/// `CausalHop.nextHop`): the session's current hop for a same-session
+/// continuation, higher for a wake caused by another session.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn session_request_create_mutation_at_hop(
+    parent: &AgentRequest,
+    hop: u32,
     behavior_id: &str,
     content: &str,
     execution_origin: ExecutionOrigin,
@@ -41,7 +71,7 @@ pub(super) async fn session_request_create_mutation(
             ..Default::default()
         },
         subagent: Some(ParentLink {
-            depth: parent.subagent_depth,
+            depth: hop,
             parent_request_id: parent.request_id.clone(),
             parent_request_doc_id: parent.doc_id.clone(),
             ..Default::default()

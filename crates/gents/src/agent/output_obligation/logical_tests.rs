@@ -2,7 +2,7 @@ use super::*;
 use crate::identity::{AgentIdentity, KeyIdentity};
 use crate::lifecycle::{ClaimOutcome, RequestLifecycle, RequestTerminalOutcome, TerminalizeResult};
 use crate::streaming::DefraStreamWriter;
-use crate::tool_call_lifecycle::{AwaitMode, CancelPolicy, ToolCallLifecycle};
+use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
 use gents_protocol::request_admission::{AgentRequestAdmissionRecord, AgentRequestCreate};
 use gents_protocol::row::AgentRequestRow;
 use serde_json::{json, Value};
@@ -145,7 +145,6 @@ async fn terminalize_accepted_tool(
         accepted,
         deadline,
         AwaitMode::Foreground,
-        CancelPolicy::Cascade,
     )
     .unwrap();
     tool.start_running().await.unwrap();
@@ -221,7 +220,6 @@ async fn non_deadline_request_terminalization_does_not_timeout_running_wait() {
             accepted,
             lifecycle.claimed_deadline_at().expect("claimed deadline"),
             AwaitMode::Foreground,
-            CancelPolicy::Cascade,
         )
         .unwrap();
         tool.start_running().await.unwrap();
@@ -250,7 +248,7 @@ async fn non_deadline_request_terminalization_does_not_timeout_running_wait() {
         let response = execute(
             &node,
             &format!(
-                r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ lifecycle_state cancel_cause tool_failure_class stuck_since cancel_cascade_intent_at }} }}"#,
+                r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ lifecycle_state cancel_cause tool_failure_class stuck_since }} }}"#,
                 escape_graphql_string(&tool_call_doc_id),
             ),
         )
@@ -260,7 +258,6 @@ async fn non_deadline_request_terminalization_does_not_timeout_running_wait() {
         assert!(observed["cancel_cause"].is_null());
         assert!(observed["tool_failure_class"].is_null());
         assert!(observed["stuck_since"].is_string());
-        assert!(observed["cancel_cascade_intent_at"].is_null());
     }
 }
 
@@ -318,6 +315,7 @@ async fn generated_logical_output_obligation_cases_drive_signed_requests_and_dur
             1,
             false,
             "2026-09-05T00:00:01Z",
+            root_request.subagent_depth,
         )
         .unwrap();
         if !case["authenticated_child"].as_bool().unwrap() {
@@ -652,7 +650,6 @@ async fn same_tool_calls_with_conflicting_declared_counts_reject_the_gate() {
             accepted,
             deadline,
             AwaitMode::Foreground,
-            CancelPolicy::Cascade,
         )
         .unwrap();
         tool.start_running().await.unwrap();

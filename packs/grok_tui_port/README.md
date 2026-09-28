@@ -211,10 +211,11 @@ and unknown extras. An inline fixture self-test calls these same real
 validators before the live envelopes are trusted. Client request/result
 methods (`x.ai/subagent/get`, `x.ai/subagent/cancel`,
 `x.ai/subagent/list_running`) keep their separately audited camelCase DTO
-shapes. The worker target `port-live-worker` is
-no-shell/no-file/no-subagent; its parent target `port-live-tools` is
-foreground-only (`subagent_default_await_mode: "foreground"`,
-`subagent_background_enabled: false`).
+shapes; cancel interrupts the started session's current turn and is allowed
+only for sessions this connection's session started. The worker target `port-live-worker` is
+no-shell/no-file/no-subagent; its parent target `port-live-tools` starts it
+with `agent_new`, and the worker's result returns to the parent session
+as a completion notification.
 
 `--edge all` runs the same checks on one multi-turn session. Keep one separate
 stock `grok --leader --leader-socket <path>` PTY smoke in the final gate.

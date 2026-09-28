@@ -63,6 +63,8 @@ pub(crate) struct CanonicalReplayScope<'a> {
 pub(crate) struct CanonicalAssistantCandidate {
     pub(crate) header_doc_id: String,
     pub(crate) request_doc_id: String,
+    /// Read only by tests that pin the candidate's transcript position.
+    #[cfg(test)]
     pub(crate) sequence: u32,
     pub(crate) message: gents_protocol::message::Message,
     pub(crate) coordinate: CanonicalProviderCoordinate,
@@ -267,6 +269,7 @@ pub async fn load_canonical_message_from_node(
     .await
 }
 
+#[cfg(test)]
 /// Reconstruct one exact payload reference inside an authorized physical
 /// request. Callers must first obtain the reference from its canonical owner;
 /// this reader never searches by logical labels or chooses a latest stream.
@@ -860,6 +863,7 @@ pub(crate) async fn load_canonical_assistant_candidates_with(
         candidates.push(CanonicalAssistantCandidate {
             header_doc_id: reconstructed.origin.doc_id,
             request_doc_id: request_doc_id.to_owned(),
+            #[cfg(test)]
             sequence: row.message.sequence,
             message: reconstructed.message,
             coordinate,

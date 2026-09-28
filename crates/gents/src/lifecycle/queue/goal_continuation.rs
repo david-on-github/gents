@@ -37,6 +37,8 @@ pub(crate) fn goal_continuation_identity(
 }
 
 /// Prepare the existing continuation DTO without reads, signing, or publication.
+/// `hop` is the session's current hop (Lean `CausalHop` session current hop),
+/// which the transaction owner reads alongside the rest of the session.
 /// Transaction owners resolve behavior and time before staging this request.
 /// Original issuance facts are signed typed input; goal/parent identities stay
 /// on the signed request lineage (trigger edge and parent linkage).
@@ -48,6 +50,7 @@ pub(crate) fn prepare_goal_continuation(
     continuation_sequence: i64,
     wrapup: bool,
     created_at: &str,
+    hop: u32,
 ) -> Result<gents_protocol::request_admission::AgentRequestCreate> {
     let continuation =
         goal_continuation_identity(goal_id, &parent.request_id, continuation_sequence)?;
@@ -97,7 +100,7 @@ pub(crate) fn prepare_goal_continuation(
             workspace_seal_hash: parent.workspace_seal_hash.clone(),
         }),
         subagent: Some(ParentLink {
-            depth: parent.subagent_depth,
+            depth: hop,
             parent_request_id: parent.request_id.clone(),
             parent_request_doc_id: parent.doc_id.clone(),
             ..Default::default()

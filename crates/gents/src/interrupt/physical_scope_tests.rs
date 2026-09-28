@@ -13,52 +13,18 @@ async fn insert(node: &EmbeddedNode, collection: &str, value: Value) -> String {
 }
 
 #[tokio::test]
-async fn physical_cancel_and_cascade_root_preserve_exact_scope() {
-    use crate::descendant_graph::{
-        resolve_descendant_graph, resolve_descendant_graph_by_doc_id, DescendantGraphAccess,
-        DescendantQuery, RootRequester,
-    };
+async fn physical_interrupt_preserves_exact_scope_and_never_reaches_caused_requests() {
     let node = Arc::new(EmbeddedNode::builder().build().await.unwrap());
     crate::ensure_runtime_schemas(&node).await.unwrap();
     let parent = insert(&node, "AgentRequest", json!({"request_id":"parent","purpose":"normal","agent_did":"owner","requester_did":null,"session_id":"same-session","behavior_id":"configured","lifecycle_state":"processing"})).await;
     let foreign = insert(&node, "AgentRequest", json!({"request_id":"parent","purpose":"normal","agent_did":"foreign","requester_did":null,"session_id":"same-session","behavior_id":"configured","lifecycle_state":"processing"})).await;
-    let bridge = insert(&node, "AgentToolCall", json!({"request_id":"parent","request_doc_id":parent,"agent_did":"owner","requester_did":null,"session_id":"same-session","tool_call_id":"spawn","tool_name":"spawn_subagent","lifecycle_state":"running","cancel_policy":"cascade","child_request_id":"child","spawn_target_did":"owner"})).await;
+    let bridge = insert(&node, "AgentToolCall", json!({"request_id":"parent","request_doc_id":parent,"agent_did":"owner","requester_did":null,"session_id":"same-session","tool_call_id":"spawn","tool_name":"agent_new","lifecycle_state":"running","await_mode":"background"})).await;
     let child = insert(&node, "AgentRequest", json!({"request_id":"child","purpose":"normal","agent_did":"owner","requester_did":null,"session_id":"child-session","behavior_id":"configured","lifecycle_state":"processing","caused_by_parent_request_id":"parent","caused_by_parent_request_doc_id":parent,"caused_by_parent_tool_call_id":"spawn","caused_by_parent_tool_call_doc_id":bridge})).await;
-    let query = DescendantQuery::all("parent");
-    assert!(
-        resolve_descendant_graph(DescendantGraphAccess::Local(&node), &query)
-            .await
-            .is_err()
-    );
-    let page = resolve_descendant_graph_by_doc_id(
-        DescendantGraphAccess::Local(&node),
-        &query,
-        &parent,
-        Some("owner"),
-        RootRequester::Exact(None),
-    )
-    .await
-    .unwrap();
-    assert_eq!(page.edges.len(), 1);
-    assert_eq!(
-        page.edges[0].child_request_doc_id.as_deref(),
-        Some(child.as_str())
-    );
-    assert_eq!(page.edges[0].immediate_parent_tool_call_doc_id, bridge);
     for (owner, requester) in [
         ("foreign", None),
         ("owner", Some("requester")),
         ("owner", Some("")),
     ] {
-        assert!(resolve_descendant_graph_by_doc_id(
-            DescendantGraphAccess::Local(&node),
-            &query,
-            &parent,
-            Some(owner),
-            RootRequester::Exact(requester)
-        )
-        .await
-        .is_err());
         assert!(interrupt_request_by_doc_id_with_access(
             &crate::config_client::ConfigAccess::Local(node.clone()),
             &parent,
@@ -68,15 +34,6 @@ async fn physical_cancel_and_cascade_root_preserve_exact_scope() {
         .await
         .is_err());
     }
-    assert!(resolve_descendant_graph_by_doc_id(
-        DescendantGraphAccess::Local(&node),
-        &DescendantQuery::all("different-label"),
-        &parent,
-        Some("owner"),
-        RootRequester::Exact(None)
-    )
-    .await
-    .is_err());
     let access = crate::config_client::ConfigAccess::Local(node.clone());
     interrupt_request_by_doc_id_with_access(&access, &parent, "owner", None)
         .await

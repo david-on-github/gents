@@ -41,294 +41,198 @@ pub async fn seed_standalone_fixture() -> (Arc<ClientCore>, TempDir) {
     (core, tmp)
 }
 
-pub async fn seed_cascade_fixture() -> (Arc<ClientCore>, TempDir) {
+pub const OPERATOR: &str = "did:test:operator";
+
+/// `req_parent` in `sess_parent` made four agents-tool calls:
+/// - `tc_start` (`agent_new`) started `sess_child` (`req_child`), then
+///   `tc_message` (`agent_message`) messaged it again (`req_child_2`);
+/// - `tc_peer` (`agent_new`) started `sess_peer` on another agent (`req_peer`);
+/// - `tc_existing` (`agent_message`) messaged `sess_existing`, which the
+///   person started (`req_existing_1`), as `req_existing_2`.
+///
+/// Every session's requester is the operator principal, as the runtime writes
+/// a started session. Returns the core and `req_parent`'s document id.
+pub async fn seed_provenance_fixture() -> (Arc<ClientCore>, TempDir, String) {
     let (core, tmp) = boot_core().await;
+    let parent = create_request(
+        &core,
+        "req_parent",
+        OPERATOR,
+        "sess_parent",
+        "processing",
+        "2026-05-20T00:00:00Z",
+        None,
+    )
+    .await;
+    create_session(&core, OPERATOR, "sess_parent", None).await;
+    create_request(
+        &core,
+        "req_existing_1",
+        OPERATOR,
+        "sess_existing",
+        "completed",
+        "2026-05-20T00:00:30Z",
+        None,
+    )
+    .await;
+    create_session(&core, OPERATOR, "sess_existing", None).await;
+    create_session(&core, OPERATOR, "sess_unrelated", None).await;
+    create_request(
+        &core,
+        "req_unrelated",
+        OPERATOR,
+        "sess_unrelated",
+        "processing",
+        "2026-05-20T00:06:00Z",
+        None,
+    )
+    .await;
 
-    let mutation = r#"mutation {
-        create_AgentRequest(input: { purpose: "normal",
-            request_id: "req_root",
-            agent_did: "did:test:operator",
-            behavior_id: "test-behavior",
-            session_id: "sess_root",
-            content: "cascade fixture root",
-            lifecycle_state: "processing",
-            backend_id: "",
-            created_at: "2026-05-20T00:00:00Z",
-            retry_count: 0
-        }) { _docID }
-    }"#;
-    let response = core.node().execute(mutation).await;
-    assert!(
-        !response.has_errors(),
-        "seed req_root failed: {:?}",
-        response.errors
-    );
-
-    let child_requests = r#"mutation {
-        r_b91: create_AgentRequest(input: { purpose: "normal",
-            request_id: "req_b91",
-            agent_did: "did:test:operator",
-            behavior_id: "test-behavior",
-            session_id: "sess_b91",
-            content: "child b91",
-            lifecycle_state: "processing",
-            backend_id: "",
-            created_at: "2026-05-20T00:01:00Z",
-            retry_count: 0,
-            caused_by_parent_request_id: "req_root",
-            caused_by_parent_tool_call_id: "tc_1"
-        }) { _docID }
-        r_b92: create_AgentRequest(input: { purpose: "normal",
-            request_id: "req_b92",
-            agent_did: "did:test:operator",
-            behavior_id: "test-behavior",
-            session_id: "sess_b92",
-            content: "child b92",
-            lifecycle_state: "claimed",
-            backend_id: "",
-            created_at: "2026-05-20T00:02:00Z",
-            retry_count: 0,
-            caused_by_parent_request_id: "req_root",
-            caused_by_parent_tool_call_id: "tc_2"
-        }) { _docID }
-        r_b93: create_AgentRequest(input: { purpose: "normal",
-            request_id: "req_b93",
-            agent_did: "did:test:operator",
-            behavior_id: "test-behavior",
-            session_id: "sess_b93",
-            content: "child b93",
-            lifecycle_state: "processing",
-            backend_id: "",
-            created_at: "2026-05-20T00:03:00Z",
-            retry_count: 0,
-            caused_by_parent_request_id: "req_root",
-            caused_by_parent_tool_call_id: "tc_3"
-        }) { _docID }
-        r_c01: create_AgentRequest(input: { purpose: "normal",
-            request_id: "req_c01",
-            agent_did: "did:test:operator",
-            behavior_id: "test-behavior",
-            session_id: "sess_c01",
-            content: "child c01",
-            lifecycle_state: "processing",
-            backend_id: "",
-            created_at: "2026-05-20T00:04:00Z",
-            retry_count: 0,
-            caused_by_parent_request_id: "req_root",
-            caused_by_parent_tool_call_id: "tc_4"
-        }) { _docID }
-        r_c02: create_AgentRequest(input: { purpose: "normal",
-            request_id: "req_c02",
-            agent_did: "did:test:operator",
-            behavior_id: "test-behavior",
-            session_id: "sess_c02",
-            content: "child c02",
-            lifecycle_state: "processing",
-            backend_id: "",
-            created_at: "2026-05-20T00:05:00Z",
-            retry_count: 0,
-            caused_by_parent_request_id: "req_root",
-            caused_by_parent_tool_call_id: "tc_5"
-        }) { _docID }
-        r_a17: create_AgentRequest(input: { purpose: "normal",
-            request_id: "req_a17_old",
-            agent_did: "did:test:operator",
-            behavior_id: "test-behavior",
-            session_id: "sess_a17",
-            content: "child a17 old (completed)",
-            lifecycle_state: "completed",
-            backend_id: "",
-            created_at: "2026-05-20T00:06:00Z",
-            retry_count: 0,
-            caused_by_parent_request_id: "req_root",
-            caused_by_parent_tool_call_id: "tc_6"
-        }) { _docID }
-    }"#;
-    let response = core.node().execute(child_requests).await;
-    assert!(
-        !response.has_errors(),
-        "seed child AgentRequests failed: {:?}",
-        response.errors
-    );
-
-    let tool_calls = r#"mutation {
-        tc1: create_AgentToolCall(input: {
-            tool_call_key: "sess_root:tc_1",
-            request_id: "req_root",
-            session_id: "sess_root",
-            message_sequence: 1,
-            tool_name: "summarize",
-            tool_call_id: "tc_1",
-            args: "{}",
-            result: "",
-            status: "called",
-            lifecycle_state: "running",
-            started_at: "2026-05-20T00:01:00Z",
-            await_mode: "background",
-            cancel_policy: "cascade",
-            child_request_id: "req_b91"
-        }) { _docID }
-        tc2: create_AgentToolCall(input: {
-            tool_call_key: "sess_root:tc_2",
-            request_id: "req_root",
-            session_id: "sess_root",
-            message_sequence: 2,
-            tool_name: "index_repo",
-            tool_call_id: "tc_2",
-            args: "{}",
-            result: "",
-            status: "called",
-            lifecycle_state: "running",
-            started_at: "2026-05-20T00:02:00Z",
-            await_mode: "background",
-            cancel_policy: "cascade",
-            child_request_id: "req_b92"
-        }) { _docID }
-        tc3: create_AgentToolCall(input: {
-            tool_call_key: "sess_root:tc_3",
-            request_id: "req_root",
-            session_id: "sess_root",
-            message_sequence: 3,
-            tool_name: "qa_pass",
-            tool_call_id: "tc_3",
-            args: "{}",
-            result: "",
-            status: "called",
-            lifecycle_state: "running",
-            started_at: "2026-05-20T00:03:00Z",
-            await_mode: "background",
-            cancel_policy: "detach",
-            child_request_id: "req_b93"
-        }) { _docID }
-        tc4: create_AgentToolCall(input: {
-            tool_call_key: "sess_root:tc_4",
-            request_id: "req_root",
-            session_id: "sess_root",
-            message_sequence: 4,
-            tool_name: "summarize_caselaw",
-            tool_call_id: "tc_4",
-            args: "{}",
-            result: "",
-            status: "called",
-            lifecycle_state: "running",
-            started_at: "2026-05-20T00:04:00Z",
-            await_mode: "background",
-            cancel_policy: "cascade",
-            child_request_id: "req_c01"
-        }) { _docID }
-        tc5: create_AgentToolCall(input: {
-            tool_call_key: "sess_root:tc_5",
-            request_id: "req_root",
-            session_id: "sess_root",
-            message_sequence: 5,
-            tool_name: "classify_docs",
-            tool_call_id: "tc_5",
-            args: "{}",
-            result: "",
-            status: "called",
-            lifecycle_state: "running",
-            started_at: "2026-05-20T00:05:00Z",
-            await_mode: "background",
-            child_request_id: "req_c02"
-        }) { _docID }
-        tc6: create_AgentToolCall(input: {
-            tool_call_key: "sess_root:tc_6",
-            request_id: "req_root",
-            session_id: "sess_root",
-            message_sequence: 6,
-            tool_name: "earlier_turn",
-            tool_call_id: "tc_6",
-            args: "{}",
-            result: "done",
-            status: "completed",
-            lifecycle_state: "completed",
-            started_at: "2026-05-20T00:06:00Z",
-            await_mode: "foreground",
-            cancel_policy: "cascade",
-            child_request_id: "req_a17_old"
-        }) { _docID }
-    }"#;
-    let response = core.node().execute(tool_calls).await;
-    assert!(
-        !response.has_errors(),
-        "seed AgentToolCalls failed: {:?}",
-        response.errors
-    );
-
-    (core, tmp)
+    for (call, tool, request_id, agent_did, session_id, state, created_at, started) in [
+        (
+            "tc_start",
+            "agent_new",
+            "req_child",
+            OPERATOR,
+            "sess_child",
+            "completed",
+            "2026-05-20T00:01:00Z",
+            true,
+        ),
+        (
+            "tc_message",
+            "agent_message",
+            "req_child_2",
+            OPERATOR,
+            "sess_child",
+            "processing",
+            "2026-05-20T00:02:00Z",
+            false,
+        ),
+        (
+            "tc_peer",
+            "agent_new",
+            "req_peer",
+            "did:test:other",
+            "sess_peer",
+            "processing",
+            "2026-05-20T00:03:00Z",
+            true,
+        ),
+        (
+            "tc_existing",
+            "agent_message",
+            "req_existing_2",
+            OPERATOR,
+            "sess_existing",
+            "processing",
+            "2026-05-20T00:04:00Z",
+            false,
+        ),
+    ] {
+        let call_doc = create_tool_call(&core, call, tool).await;
+        create_request(
+            &core,
+            request_id,
+            agent_did,
+            session_id,
+            state,
+            created_at,
+            Some((&parent, call, &call_doc)),
+        )
+        .await;
+        if started {
+            create_session(&core, agent_did, session_id, Some(&parent)).await;
+        }
+    }
+    (core, tmp, parent)
 }
 
-pub async fn seed_cascade_fixture_with_foreign_request() -> (Arc<ClientCore>, TempDir) {
-    let (core, tmp) = seed_cascade_fixture().await;
-
-    let mutation = r#"mutation {
-        create_AgentRequest(input: { purpose: "normal",
-            request_id: "req_foreign",
-            agent_did: "did:test:other",
-            behavior_id: "other-behavior",
-            session_id: "sess_foreign",
-            content: "foreign agent request",
-            lifecycle_state: "processing",
-            backend_id: "",
-            created_at: "2026-05-20T00:07:00Z",
-            retry_count: 0,
-            caused_by_parent_request_id: "req_root",
-            caused_by_parent_tool_call_id: "tc_1"
-        }) { _docID }
-    }"#;
+async fn created_doc_id(core: &Arc<ClientCore>, mutation: &str, collection: &str) -> String {
     let response = core.node().execute(mutation).await;
     assert!(
         !response.has_errors(),
-        "seed foreign AgentRequest failed: {:?}",
+        "seed {collection}: {:?}",
         response.errors
     );
-
-    (core, tmp)
+    gents::graphql::single_mutation_document(&response, &format!("create_{collection}"))
+        .expect("created document")
+        .and_then(|document| document["_docID"].as_str())
+        .expect("created document id")
+        .to_owned()
 }
 
-pub async fn seed_cascade_fixture_with_foreign_linked_child() -> (Arc<ClientCore>, TempDir) {
-    let (core, tmp) = seed_cascade_fixture().await;
+/// Create one public request of the operator; `cause` is the causing
+/// request's document id, and the causing call's logical and physical ids.
+#[allow(clippy::too_many_arguments)]
+async fn create_request(
+    core: &Arc<ClientCore>,
+    request_id: &str,
+    agent_did: &str,
+    session_id: &str,
+    lifecycle_state: &str,
+    created_at: &str,
+    cause: Option<(&str, &str, &str)>,
+) -> String {
+    let caused = cause
+        .map(|(doc, call, call_doc)| {
+            format!(
+                r#"subagent_depth: 1, caused_by_parent_request_id: "req_parent", caused_by_parent_request_doc_id: "{doc}", caused_by_parent_tool_call_id: "{call}", caused_by_parent_tool_call_doc_id: "{call_doc}","#
+            )
+        })
+        .unwrap_or_default();
+    created_doc_id(
+        core,
+        &format!(
+            r#"mutation {{ create_AgentRequest(input: {{ purpose: "normal", request_id: "{request_id}", agent_did: "{agent_did}", requester_did: "{OPERATOR}", behavior_id: "worker", session_id: "{session_id}", {caused} content: "work", lifecycle_state: "{lifecycle_state}", backend_id: "", created_at: "{created_at}", retry_count: 0 }}) {{ _docID }} }}"#
+        ),
+        "AgentRequest",
+    )
+    .await
+}
 
-    let mutation = r#"mutation {
-        create_AgentRequest(input: { purpose: "normal",
-            request_id: "req_foreign_linked",
-            agent_did: "did:test:other",
-            behavior_id: "other-behavior",
-            session_id: "sess_foreign_linked",
-            content: "foreign linked child request",
-            lifecycle_state: "processing",
-            backend_id: "",
-            created_at: "2026-05-20T00:07:00Z",
-            retry_count: 0,
-            caused_by_parent_request_id: "req_root",
-            caused_by_parent_tool_call_id: "tc_foreign"
-        }) { _docID }
+async fn create_session(
+    core: &Arc<ClientCore>,
+    agent_did: &str,
+    session_id: &str,
+    started_by: Option<&str>,
+) {
+    let session = gents_protocol::session::AgentSession {
+        session_id: session_id.into(),
+        agent_did: agent_did.into(),
+        requester_did: Some(OPERATOR.into()),
+        behavior_id: "worker".into(),
+        created_at: "2026-05-20T00:00:00Z".into(),
+        closed_at: None,
+        title: None,
+        tags: Vec::new(),
+        provenance: started_by.map(|doc_id| gents_protocol::session::SessionProvenance {
+            parent_request_doc_id: Some(doc_id.into()),
+            ..Default::default()
+        }),
+        observation: None,
+    };
+    let input = gents_protocol::graphql::graphql_input_literal(
+        &serde_json::to_value(&session).expect("session json"),
+    )
+    .expect("session input");
+    created_doc_id(
+        core,
+        &format!("mutation {{ create_AgentSession(input: {input}) {{ _docID }} }}"),
+        "AgentSession",
+    )
+    .await;
+}
 
-        create_AgentToolCall(input: {
-            tool_call_key: "sess_root:tc_foreign",
-            request_id: "req_root",
-            session_id: "sess_root",
-            message_sequence: 7,
-            tool_name: "remote_subagent",
-            tool_call_id: "tc_foreign",
-            args: "{}",
-            result: "",
-            status: "called",
-            lifecycle_state: "running",
-            started_at: "2026-05-20T00:07:00Z",
-            await_mode: "background",
-            cancel_policy: "cascade",
-            child_request_id: "req_foreign_linked"
-        }) { _docID }
-    }"#;
-    let response = core.node().execute(mutation).await;
-    assert!(
-        !response.has_errors(),
-        "seed foreign linked child failed: {:?}",
-        response.errors
-    );
-
-    (core, tmp)
+async fn create_tool_call(core: &Arc<ClientCore>, call: &str, tool: &str) -> String {
+    created_doc_id(
+        core,
+        &format!(
+            r#"mutation {{ create_AgentToolCall(input: {{ tool_call_key: "sess_parent:{call}", agent_did: "{OPERATOR}", requester_did: "{OPERATOR}", session_id: "sess_parent", request_id: "req_parent", message_sequence: 1, tool_name: "{tool}", tool_call_id: "{call}", args: "{{}}", result: "", status: "called", lifecycle_state: "running", await_mode: "background" }}) {{ _docID }} }}"#
+        ),
+        "AgentToolCall",
+    )
+    .await
 }
 
 pub async fn fetch_request_row(core: &Arc<ClientCore>, request_id: &str) -> AgentRequestRow {

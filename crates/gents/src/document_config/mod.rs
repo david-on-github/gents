@@ -33,7 +33,7 @@ mod write_tool;
 
 #[cfg(test)]
 pub(crate) use principal::upsert_agent_principal;
-pub use principal::{load_agent_principal, AgentPrincipal};
+pub use principal::{load_agent_principal, AgentPrincipal, DEFAULT_MAX_REQUEST_HOP};
 
 pub use callback::{
     BuiltInCallback, Callback, CallbackBinding, CallbackHandler, CallbackInvocationOrigin,
@@ -158,6 +158,7 @@ pub async fn ensure_agent_principal(
                 enabled: true,
                 created_at: Some(chrono::Utc::now().to_rfc3339()),
                 created_by: Some(owner),
+                max_request_hop: None,
                 tags: Vec::new(),
             };
             let value = serde_json::to_value(&principal)?;

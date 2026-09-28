@@ -36,55 +36,81 @@ async fn message_ids(db: &TestDb) -> Vec<String> {
         .collect()
 }
 
+/// Lean `r6GoalOwnerCase` for every Goal status, including a Paused and a
+/// Complete Goal: a Goal set while a completion is being published never
+/// suppresses it. The notification and its wake are published, and the Goal
+/// is left as it was.
 #[tokio::test]
-async fn canonical_publication_rechecks_goal_after_waiting_for_enqueue_gate() {
-    let (db, parent) = fixture("goal-before-canonical-publication").await;
-    let queue = hints(&parent);
-    let gate = super::super::atomic_inputs::background_completion_gate(
-        &db.node,
-        &parent.session_id,
-        &parent.agent_did,
-        queue.key.as_deref().unwrap(),
-    );
-    let held = gate.lock().await;
-    let publish_node = db.node.clone();
-    let publish_parent = parent.clone();
-    let publication = tokio::spawn(async move {
-        super::super::atomic_inputs::persist_background_completion_with_message(
-            &publish_node,
-            &publish_parent,
-            "terminal output",
-            "canonical-goal-notification",
-            "review notifications",
-            hints(&publish_parent),
-            None,
+async fn canonical_publication_wakes_whatever_goal_owns_the_session() {
+    let cases = crate::lean_vocab_test::lean_r6_backgrounding_cases()
+        .iter()
+        .filter(|case| case.group == "completion_continuation_owner")
+        .filter_map(|case| Some((case, case.goal_status.as_deref()?)))
+        .collect::<Vec<_>>();
+    assert!(cases.iter().any(|(_, status)| *status == "paused"));
+    assert!(cases.iter().any(|(_, status)| *status == "complete"));
+    for (case, status) in cases {
+        let status: crate::goal::GoalStatus =
+            serde_json::from_value(serde_json::json!(status)).unwrap();
+        let (db, parent) = fixture(&format!("goal-publication-{}", case.name)).await;
+        let queue = hints(&parent);
+        let gate = super::super::atomic_inputs::background_completion_gate(
+            &db.node,
+            &parent.session_id,
+            &parent.agent_did,
+            queue.key.as_deref().unwrap(),
+        );
+        let held = gate.lock().await;
+        let publish_node = db.node.clone();
+        let publish_parent = parent.clone();
+        let publication = tokio::spawn(async move {
+            super::super::atomic_inputs::persist_background_completion_with_message(
+                &publish_node,
+                &publish_parent,
+                "terminal output",
+                "canonical-goal-notification",
+                "review notifications",
+                hints(&publish_parent),
+                None,
+            )
+            .await
+        });
+        let goal = crate::goal::set_goal(
+            &db.node,
+            db.agent_did(),
+            &parent.session_id,
+            Some("Goal owns continuation"),
+            Some(status),
+            Some(Some(10)),
         )
         .await
-    });
-    let goal = crate::goal::set_goal(
-        &db.node,
-        db.agent_did(),
-        &parent.session_id,
-        Some("Goal owns continuation"),
-        Some(crate::goal::GoalStatus::Paused),
-        Some(Some(10)),
-    )
-    .await
-    .unwrap();
-    drop(held);
-    let result = publication.await.unwrap().unwrap();
-    assert!(result.request.is_none());
-    assert!(!result.created_request);
-    assert_eq!(message_ids(&db).await.len(), 1);
-    assert_eq!(queue_rows(&db.node, &parent.session_id).await.len(), 1);
-    let after = crate::goal::load_canonical_goal(&db.node, db.agent_did(), &parent.session_id)
-        .await
-        .unwrap()
         .unwrap();
-    assert_eq!(
-        serde_json::to_value(goal).unwrap(),
-        serde_json::to_value(after).unwrap()
-    );
+        drop(held);
+        let result = publication.await.unwrap().unwrap();
+        assert_eq!(
+            result.request.is_some() && result.created_request,
+            case.wake_created == Some(true),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            message_ids(&db).await.len() == 1,
+            case.notification_persisted == Some(true),
+            "{}",
+            case.name
+        );
+        assert_eq!(queue_rows(&db.node, &parent.session_id).await.len(), 2);
+        let after = crate::goal::load_canonical_goal(&db.node, db.agent_did(), &parent.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(goal).unwrap(),
+            serde_json::to_value(after).unwrap(),
+            "{}",
+            case.name
+        );
+    }
 }
 
 #[tokio::test]

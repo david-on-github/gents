@@ -22,7 +22,7 @@ pub struct StreamProcessor<'a, H, W, L>
 where
     L: RequestLifecycleControl,
     W: CanonicalStreamWriter<L>,
-    H: CanonicalSessionHook<W::AcceptedToolCall, W::SpawnAdmissionPlan>,
+    H: CanonicalSessionHook<W::AcceptedToolCall>,
 {
     persistence_hook: &'a H,
     stream_writer: &'a W,
@@ -46,7 +46,7 @@ impl<'a, H, W, L> StreamProcessor<'a, H, W, L>
 where
     L: RequestLifecycleControl,
     W: CanonicalStreamWriter<L>,
-    H: CanonicalSessionHook<W::AcceptedToolCall, W::SpawnAdmissionPlan>,
+    H: CanonicalSessionHook<W::AcceptedToolCall>,
 {
     pub fn new(
         persistence_hook: &'a H,
@@ -137,36 +137,9 @@ where
                 attempt,
                 message,
             }) => {
-                let spawn_admissions = match self
-                    .persistence_hook
-                    .preplan_spawn_admissions(&message, &self.pending_tool_internal_ids)
-                    .await
-                {
-                    Ok(plans) => plans,
-                    Err(error) => {
-                        // This turn cannot be accepted, but its already-acknowledged
-                        // prefix still needs the ordinary, lease-fenced Partial close.
-                        // Keep the preplanning failure even if cleanup also fails.
-                        if let Err(close_error) = self
-                            .persist_partial_turn("persist rejected assistant turn")
-                            .await
-                        {
-                            return Err(error.context(format!(
-                                "failed to close rejected provider turn: {close_error:#}"
-                            )));
-                        }
-                        return Err(error);
-                    }
-                };
                 let published = self
                     .stream_writer
-                    .publish_native_turn_with_spawn_admissions(
-                        self.lifecycle,
-                        turn,
-                        attempt,
-                        &message,
-                        &spawn_admissions,
-                    )
+                    .publish_native_turn(self.lifecycle, turn, attempt, &message)
                     .await?;
                 // Acceptance also commits bytes still waiting for the batch
                 // timer. Consume that signal before clearing the accumulator,

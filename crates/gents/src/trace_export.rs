@@ -499,10 +499,7 @@ fn retryable_for_failure_class(failure_class: ToolFailureClass) -> Option<bool> 
         | ToolFailureClass::External
         | ToolFailureClass::ArgumentInvalid => Some(true),
         ToolFailureClass::Transport => Some(true),
-        // A host may already run the child; a re-spawn would race it.
-        ToolFailureClass::ToolReturnedError
-        | ToolFailureClass::PolicyDenied
-        | ToolFailureClass::SpawnUnclaimed => Some(false),
+        ToolFailureClass::ToolReturnedError | ToolFailureClass::PolicyDenied => Some(false),
     }
 }
 

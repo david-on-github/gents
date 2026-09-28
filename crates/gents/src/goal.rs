@@ -1265,7 +1265,6 @@ pub(crate) const GOAL_BACKED_REQUEST_FINGERPRINT_FIELDS: &str = r#"
     enrollment_request_digest enrollment_admin_did
     enrollment_authorization_sequence enrollment_authorization_expires_at
     runtime_issuer_did runtime_source_request_id runtime_source_kind
-    runtime_bridge_author_did
 "#;
 
 /// Stable logical request identity for goal-backed submission retries.
@@ -1321,7 +1320,6 @@ pub(crate) struct GoalBackedRequestFingerprint {
     runtime_issuer_did: Option<String>,
     runtime_source_request_id: Option<String>,
     runtime_source_kind: Option<String>,
-    runtime_bridge_author_did: Option<String>,
 }
 
 impl GoalBackedRequestFingerprint {
@@ -1419,7 +1417,6 @@ impl GoalBackedRequestFingerprint {
                 .admission
                 .runtime_source_kind
                 .map(|kind| kind.as_str().to_string()),
-            runtime_bridge_author_did: request.admission.runtime_bridge_author_did.clone(),
         })
     }
 }
@@ -1876,6 +1873,48 @@ async fn load_goal_backed_request_by_retry_key(
         request_id: request.request_id.clone(),
         session_id: request.session_id.clone(),
     }))
+}
+
+/// Stage a Task-declared Goal and its first request inside a caller's
+/// transaction, returning the exact request document, so the caller can bind
+/// another fact to that request in the same commit.
+pub(crate) async fn stage_goal_backed_request_in_txn(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    agent_did: &str,
+    session_id: &str,
+    objective: &str,
+    token_budget: Option<i64>,
+    request: &gents_protocol::request_admission::AgentRequestCreate,
+) -> Result<crate::lifecycle::EnqueuedAgentRequest> {
+    stage_goal_backed_request(txn, agent_did, session_id, objective, token_budget, request)
+        .await
+        .and_then(authorize_goal_submission_commit)?;
+    let retry_key = request
+        .retry_key
+        .as_deref()
+        .context("goal-backed request requires a stable retry_key")?;
+    let staged = txn
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{ retry_key: {{ _eq: "{}" }} }}, limit: 2) {{ _docID request_id session_id }} }}"#,
+            escape_graphql_string(retry_key),
+        ))
+        .await?;
+    let rows = staged
+        .pointer("/data/AgentRequest")
+        .and_then(serde_json::Value::as_array)
+        .context("staged goal request lookup omitted rows")?;
+    anyhow::ensure!(
+        rows.len() == 1,
+        "staged goal request is missing or ambiguous"
+    );
+    Ok(crate::lifecycle::EnqueuedAgentRequest {
+        doc_id: rows[0]["_docID"]
+            .as_str()
+            .context("staged goal request lacks _docID")?
+            .to_owned(),
+        request_id: request.request_id.clone(),
+        session_id: request.session_id.clone(),
+    })
 }
 
 /// Embedded-runtime counterpart of [`submit_goal_backed_request`].

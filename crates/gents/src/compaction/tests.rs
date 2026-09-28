@@ -3069,7 +3069,6 @@ async fn integration_compaction_persists_entry_and_prompt_builder_uses_it() {
             accepted,
             deadline,
             crate::tool_call_lifecycle::AwaitMode::Foreground,
-            crate::tool_call_lifecycle::CancelPolicy::Cascade,
         )
         .unwrap();
         tool.start_running().await.unwrap();

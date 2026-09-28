@@ -95,18 +95,14 @@ pub(super) async fn accepted_call(
     internal_call_id: &str,
     args: &str,
 ) -> ToolCallHookAction {
-    if name == crate::toolset::SPAWN_SUBAGENT_TOOL_NAME {
-        publish_spawn_turn(hook, internal_call_id, provider_call_id.as_deref(), args).await;
-    } else {
-        accept_hook_tool_call(
-            hook,
-            internal_call_id,
-            name,
-            args,
-            provider_call_id.as_deref(),
-        )
-        .await;
-    }
+    accept_hook_tool_call(
+        hook,
+        internal_call_id,
+        name,
+        args,
+        provider_call_id.as_deref(),
+    )
+    .await;
     hook.on_tool_call(name, provider_call_id, internal_call_id, args)
         .await
 }
@@ -162,83 +158,4 @@ pub(super) async fn assert_accepted_control_rows(
             "accepted header must bind exact physical {tool_name} row"
         );
     }
-}
-
-async fn publish_spawn_turn(
-    hook: &DefraSessionHook,
-    internal_call_id: &str,
-    provider_call_id: Option<&str>,
-    args: &str,
-) {
-    let arguments: serde_json::Value =
-        serde_json::from_str(args).expect("accepted spawn arguments JSON");
-    let native_id = provider_call_id.unwrap_or(internal_call_id).to_owned();
-    let behavior = arguments["name"]
-        .as_str()
-        .expect("accepted spawn has child behavior")
-        .to_owned();
-    let await_mode = match arguments["await_mode"].as_str() {
-        Some("foreground") => crate::tool_call_lifecycle::AwaitMode::Foreground,
-        Some("background") | None => crate::tool_call_lifecycle::AwaitMode::Background,
-        other => panic!("unsupported accepted spawn mode {other:?}"),
-    };
-    let message = Message::Assistant {
-        id: Some(format!("message-{internal_call_id}")),
-        content: vec![AssistantContent::ToolCall(ToolCall {
-            id: native_id.clone(),
-            call_id: provider_call_id.map(str::to_owned),
-            function: ToolFunction {
-                name: crate::toolset::SPAWN_SUBAGENT_TOOL_NAME.into(),
-                arguments,
-            },
-            signature: None,
-            additional_params: None,
-        })],
-    };
-    let request_id = hook
-        .state
-        .lock()
-        .await
-        .current_request_id
-        .clone()
-        .expect("accepted R4C spawn needs an active request");
-    let mut fixtures = hook_execution_fixtures().lock().await;
-    let fixture = fixtures
-        .get_mut(&hook_execution_fixture_key(hook, &request_id))
-        .expect("accepted R4C spawn needs claimed execution fixture");
-    let turn = fixture.turn;
-    fixture.turn += 1;
-    fixture
-        .writer
-        .start_provider_attempt(
-            &fixture.lifecycle.request().doc_id,
-            turn,
-            0,
-            format!("inference.{}", turn + 1).parse().unwrap(),
-        )
-        .await;
-    let plan = crate::streaming::SpawnAdmissionPlan {
-        tool_call_id: native_id,
-        child_request_id: uuid::Uuid::new_v4().to_string(),
-        spawn_target_did: hook.agent_did.clone(),
-        spawn_behavior_id: behavior,
-        delegated_workspace: None,
-        await_mode,
-    };
-    let published = fixture
-        .writer
-        .publish_native_turn_with_spawn_admissions(&fixture.lifecycle, turn, 0, &message, &[plan])
-        .await
-        .expect("publish accepted R4C spawn turn");
-    let accepted = published
-        .accepted_tools
-        .into_iter()
-        .next()
-        .expect("accepted R4C spawn tool row");
-    drop(fixtures);
-    hook.register_stream_tool_call_identity(internal_call_id, &accepted.id, provider_call_id)
-        .await;
-    hook.adopt_accepted_tool_calls(vec![(internal_call_id.to_string(), accepted)])
-        .await
-        .expect("adopt exact published spawn call");
 }

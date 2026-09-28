@@ -8,6 +8,7 @@ import json
 import os
 import socket
 import struct
+import subprocess
 import sys
 import time
 import uuid
@@ -1015,8 +1016,8 @@ def extract_subagent_lifecycle(
 ) -> dict[str, Any]:
     """Pull the spawned/progress/finished lifecycle off the two rails.
 
-    The early `task`-titled standard `tool_call` (the pager-local
-    foreground-wait marker) is read from the standard rail; the spawned/
+    The early `task`/`agent_new`-titled standard `tool_call` is read from
+    the standard rail; the spawned/
     progress/finished lifecycle is read from the extension rail. Every
     lifecycle candidate first passes the exact outer
     `SessionNotification` validator
@@ -1067,7 +1068,7 @@ def extract_subagent_lifecycle(
         elif (
             method == STANDARD_UPDATE_METHOD
             and kind == "tool_call"
-            and update.get("title") in ("task", "Task", "spawn_subagent")
+            and update.get("title") in ("task", "Task", "agent_new")
             and lifecycle["task_tool_call"] is None
         ):
             lifecycle["task_tool_call"] = update
@@ -1241,24 +1242,25 @@ def require_exact_finished_dto(update: dict[str, Any]) -> None:
 
 
 def require_live_success_dto(update: dict[str, Any]) -> None:
-    """Require this foreground live probe's successful finished outcome.
+    """Require this live probe's successful finished outcome.
 
     Separate from the schema validator: `require_exact_finished_dto` proves
     the DTO is exactly the authoritative serde shape (and a `failed` or
     `cancelled` DTO passes it as well-formed); this check then requires
-    what this particular live foreground success edge must observe —
-    `status == "completed"` and a foreground `will_wake is False`. A valid
-    failed DTO is recognized as well-formed but still fails this edge.
+    what this live success edge must observe — `status == "completed"` and
+    `will_wake is True`, because an agent_new session's result wakes the
+    session that started it. A valid failed DTO is recognized as
+    well-formed but still fails this edge.
     """
     require(
         update["status"] == "completed",
-        f"foreground subagent finished with status {update['status']!r} "
+        f"subagent finished with status {update['status']!r} "
         f"(well-formed exact DTO, but not the completed outcome this live "
         f"success edge requires)",
     )
     require(
-        update["will_wake"] is False,
-        f"foreground subagent_finished will_wake must read false; got "
+        update["will_wake"] is True,
+        f"agent_new subagent_finished will_wake must read true; got "
         f"{update['will_wake']!r}",
     )
 
@@ -1398,7 +1400,7 @@ def self_test_subagent_lifecycle_validators() -> dict[str, int]:
     This inline fixture calls the REAL validators — there is no separate
     fields-only checker, so nothing can bypass `require_exact_finished_dto`
     and no valid outcome can be silently conflated with schema validity.
-    Every case below exercises the same functions the live foreground
+    Every case below exercises the same functions the live
     probe runs on actual wire envelopes:
     - a completed DTO with both optionals absent is an exact DTO and a live
       success;
@@ -1456,7 +1458,7 @@ def self_test_subagent_lifecycle_validators() -> dict[str, int]:
             # ("status must be one of ...") is schema, but a bare completed
             # requirement is not.
             require(
-                "foreground subagent finished with status" not in str(error)
+                "subagent finished with status" not in str(error)
                 and "not the completed outcome" not in str(error),
                 f"schema validator wrongly encoded the live outcome: {error}",
             )
@@ -1572,7 +1574,7 @@ def self_test_subagent_lifecycle_validators() -> dict[str, int]:
         "turns": 1,
         "duration_ms": 1500,
         "tokens_used": 750,
-        "will_wake": False,
+        "will_wake": True,
     }
     failed_with_error = mutate(
         finished_completed, status="failed", error="failed with error"
@@ -1590,12 +1592,16 @@ def self_test_subagent_lifecycle_validators() -> dict[str, int]:
         failed_with_error,
         cancelled_dto,
     ]
-    # The live foreground success edge accepts exactly the completed ones.
+    # The live success edge accepts exactly the completed ones.
     finished_live_success_fixtures = [
         finished_completed,
         mutate(finished_completed, output="worker ran"),
     ]
-    finished_live_reject_fixtures = [failed_with_error, cancelled_dto]
+    finished_live_reject_fixtures = [
+        failed_with_error,
+        cancelled_dto,
+        mutate(finished_completed, will_wake=False),
+    ]
 
     # Schema-level rejections (the validator must not pass on any of
     # these, and none of these rejections may be an outcome rejection).
@@ -1890,7 +1896,7 @@ def self_test_subagent_lifecycle_validators() -> dict[str, int]:
                     "kind": "read",
                     "status": "in_progress",
                     "rawInput": {},
-                    "_meta": {"subagentBackground": False},
+                    "_meta": {"subagentBackground": True},
                 },
                 "_meta": {},
             },
@@ -2402,44 +2408,134 @@ def self_test_subagent_lifecycle_validators() -> dict[str, int]:
     return counters
 
 
+TERMINAL_TOOL_STATUSES = ("completed", "failed")
+
+
+def require_tool_call_progression(updates: list[dict[str, Any]], tool_call_id: str) -> None:
+    """Require one tool call's updates to settle exactly once.
+
+    A call may report any number of non-terminal updates, then exactly one
+    terminal update; nothing follows the terminal update.
+    """
+    statuses = [
+        message.get("params", {}).get("update", {}).get("status") for message in updates
+    ]
+    terminal = [index for index, status in enumerate(statuses) if status in TERMINAL_TOOL_STATUSES]
+    require(terminal, f"tool call {tool_call_id!r} never reported a terminal status: {statuses}")
+    require(
+        len(terminal) == 1,
+        f"tool call {tool_call_id!r} reported more than one terminal status: {statuses}",
+    )
+    require(
+        terminal[0] == len(statuses) - 1,
+        f"tool call {tool_call_id!r} reported updates after its terminal status: {statuses}",
+    )
+
+
+def self_test_tool_call_progression() -> dict[str, int]:
+    def update(status: str | None) -> dict[str, Any]:
+        body: dict[str, Any] = {"sessionUpdate": "tool_call_update", "toolCallId": "tc-1"}
+        if status is not None:
+            body["status"] = status
+        return {"method": STANDARD_UPDATE_METHOD, "params": {"update": body}}
+
+    accepted = 0
+    for statuses in (
+        ["completed"],
+        ["in_progress", "in_progress", "completed"],
+        ["pending", None, "in_progress", "failed"],
+    ):
+        require_tool_call_progression([update(status) for status in statuses], "tc-1")
+        accepted += 1
+    rejected = 0
+    for statuses in (
+        [],
+        ["in_progress"],
+        ["in_progress", "pending"],
+        ["completed", "in_progress"],
+        ["completed", None],
+        ["in_progress", "completed", "completed"],
+        ["failed", "completed"],
+    ):
+        try:
+            require_tool_call_progression([update(status) for status in statuses], "tc-1")
+        except AssertionError:
+            rejected += 1
+        else:
+            raise AssertionError(f"tool call progression {statuses} was accepted")
+    return {"accepted": accepted, "rejected": rejected}
+
+
+def read_until(
+    client: LeaderClient,
+    observed: list[dict[str, Any]],
+    done: Callable[[list[dict[str, Any]]], bool],
+    what: str,
+) -> None:
+    """Append later notifications until `done` holds, then drain a quiet tail.
+
+    Work a turn started in the background keeps notifying after the turn's
+    own response, including the completion wake of the calling session. The
+    quiet tail keeps that wake's trailing updates out of the next edge.
+    """
+    while not done(observed):
+        observed.append(client.recv_acp())
+    timeout = client.sock.gettimeout()
+    client.sock.settimeout(2.0)
+    try:
+        while True:
+            observed.append(client.recv_acp())
+    except TimeoutError:
+        pass
+    finally:
+        client.sock.settimeout(timeout)
+    require(done(observed), f"{what} regressed while draining")
+
+
+def agent_text(messages: list[dict[str, Any]]) -> str:
+    return "".join(
+        message["params"]["update"].get("content", {}).get("text", "")
+        for message in messages
+        if message.get("method") == STANDARD_UPDATE_METHOD
+        and message.get("params", {}).get("update", {}).get("sessionUpdate")
+        == "agent_message_chunk"
+    )
+
+
 def probe_subagent(
     client: LeaderClient,
     session_id: str,
     high_water: SessionHighWater,
     graphql: str | None,
 ) -> dict[str, Any]:
-    """Launch one real foreground subagent and prove the full wire + document contract.
+    """Start one real subagent session and prove the full wire + document contract.
 
-    The turn asks the parent to spawn the `port-live-worker` subagent target
-    in the foreground. From the actual wire envelopes the probe asserts:
-    the early standard `task`-titled tool_call with
-    `_meta.subagentBackground: false`; the exact live extension-rail
+    The turn asks the parent to start the `port-live-worker` target with
+    `agent_new`. The call returns at once and the worker runs in the
+    background; its result reaches the parent as a completion notification,
+    which wakes the parent for a later turn. From the actual wire envelopes
+    the probe asserts: the standard `agent_new` tool_call with
+    `_meta.subagentBackground: true`; the exact live extension-rail
     `x.ai/session_notification` spawned/progress/finished lifecycle
     (snake_case variant fields under the camelCase `sessionId/update/_meta`
     envelope); child-session identity; the exact serde schemas of all three
     lifecycle DTOs (validated by `require_exact_spawned_dto`,
     `require_exact_progress_dto`, and `require_exact_finished_dto`, which
-    accept any well-formed `completed|failed|cancelled` outcome); the
-    finished DTO's required always-serialized `tokens_used` and
-    `will_wake`, optional `error`/`output`, and forbidden
-    `parent_session_id`; then — separately, because this is the live
-    foreground SUCCESS edge — `status == "completed"` and
-    `will_wake is False` via `require_live_success_dto`, so a well-formed
-    failed or cancelled DTO is still rejected as a non-success outcome;
-    the task terminal `tool_call_update`
-    carrying the same tool call id; and — when a GraphQL endpoint is
-    available — the durable parent/child request linkage. The task
-    tool_call must precede the extension spawn in the observations,
-    which is the real contract (the pager registers its blocking foreground
-    wait from the standard tool_call before the subagent lifecycle begins).
+    accept any well-formed `completed|failed|cancelled` outcome); then —
+    separately, because this is the live SUCCESS edge — `status ==
+    "completed"` and `will_wake is True` via `require_live_success_dto`;
+    the agent_new terminal `tool_call_update` carrying the same tool call id;
+    the woken parent's `SUBAGENT_EDGE_DONE` reply; and — when a GraphQL
+    endpoint is available — the durable cause of the child session. The
+    agent_new tool_call must precede the extension spawn in the observations.
     """
     prompt_text = (
-        f"Use the spawn_subagent tool exactly once to spawn the subagent target named "
-        f"'{SUBAGENT_MARKER}' with await_mode foreground and the prompt: 'Reply with exactly "
-        f"one short sentence confirming the subagent worker ran.' Wait for the subagent to "
-        f"finish in the foreground, then reply on one line beginning exactly "
-        f"SUBAGENT_EDGE_DONE followed by the subagent's answer. Do not spawn more than one "
-        f"subagent and do not use any other tool."
+        f"Use the agent_new tool exactly once with agent "
+        f"'{SUBAGENT_MARKER}' and the prompt: 'Reply with exactly "
+        f"one short sentence confirming the subagent worker ran.' When its completion "
+        f"notification arrives, reply on one line beginning exactly "
+        f"SUBAGENT_EDGE_DONE followed by the subagent's answer. Do not start more than one "
+        f"session and do not use any other tool."
     )
     prompt_id = str(uuid.uuid4())
     response, notifications = client.request(
@@ -2460,14 +2556,34 @@ def probe_subagent(
     # bounds. This calls the REAL validators; no fields-only bypass exists.
     result["validator_self_test"] = self_test_subagent_lifecycle_validators()
 
-    lifecycle = extract_subagent_lifecycle(notifications, session_id)
+    observed = list(notifications)
 
-    # 1. The early standard-rail task tool_call with _meta.subagentBackground:false.
+    def settled(messages: list[dict[str, Any]]) -> bool:
+        current = extract_subagent_lifecycle(messages, session_id)
+        call = current["task_tool_call"]
+        if call is None or current["finished"] is None:
+            return False
+        terminal = any(
+            message.get("method") == STANDARD_UPDATE_METHOD
+            and message.get("params", {}).get("update", {}).get("sessionUpdate")
+            == "tool_call_update"
+            and message["params"]["update"].get("toolCallId") == call.get("toolCallId")
+            and message["params"]["update"].get("status") in ("completed", "failed")
+            for message in messages
+        )
+        return terminal and "SUBAGENT_EDGE_DONE" in agent_text(messages[len(notifications):])
+
+    read_until(client, observed, settled, "the subagent completion")
+    notifications = observed
+    lifecycle = extract_subagent_lifecycle(notifications, session_id)
+    result["wake_reply"] = agent_text(notifications).split("SUBAGENT_EDGE_DONE", 1)[-1].strip()
+
+    # 1. The early standard-rail agent_new tool_call with _meta.subagentBackground:true.
     task_call = lifecycle["task_tool_call"]
     require(
         task_call is not None,
-        "subagent turn emitted no standard-rail tool_call titled task/Task/spawn_subagent "
-        "(the pager-local foreground wait marker); observed standard updates: "
+        "subagent turn emitted no standard-rail tool_call titled task/Task/agent_new; "
+        "observed standard updates: "
         f"{result['kinds']}",
     )
     assert task_call is not None
@@ -2483,8 +2599,8 @@ def probe_subagent(
         f"task tool_call lacks an _meta object carrying subagentBackground; got: {task_meta!r}",
     )
     require(
-        task_meta.get("subagentBackground") is False,
-        f"foreground task tool_call _meta.subagentBackground must be false; got: {task_meta!r}",
+        task_meta.get("subagentBackground") is True,
+        f"agent_new tool_call _meta.subagentBackground must be true; got: {task_meta!r}",
     )
     result["task_tool_call_id"] = task_call_id
 
@@ -2545,11 +2661,11 @@ def probe_subagent(
             f"subagent_progress parent_session_id must name the probe session; got: {progress_update}",
         )
 
-    # 4. Finished: exact serde schema first, then this live foreground
-    #    success edge's outcome. The schema validator accepts a well-formed
-    #    failed/cancelled DTO; the separate outcome check requires
-    #    status == "completed" and will_wake is False — so a valid failed
-    #    DTO is recognized as well-formed yet still fails this live edge.
+    # 4. Finished: exact serde schema first, then this live success edge's
+    #    outcome. The schema validator accepts a well-formed failed/cancelled
+    #    DTO; the separate outcome check requires status == "completed" and
+    #    will_wake is True — so a valid failed DTO is recognized as
+    #    well-formed yet still fails this live edge.
     require(
         lifecycle["finished"] is not None,
         "subagent turn emitted no subagent_finished lifecycle event on the live "
@@ -2572,10 +2688,9 @@ def probe_subagent(
     require_exact_finished_dto(finished_update)
     require_live_success_dto(finished_update)
 
-    # 5. The task terminal update with the same tool call id: a
-    #    flattened `tool_call_update` on the standard rail carrying the
-    #    terminal status for the task call id observed above.
-    terminal_task_updates = [
+    # 5. The agent_new call's `tool_call_update`s on the standard rail:
+    #    progress while the worker runs, then exactly one terminal status.
+    task_updates = [
         message
         for message in notifications
         if message.get("method") == STANDARD_UPDATE_METHOD
@@ -2583,20 +2698,15 @@ def probe_subagent(
         and message.get("params", {}).get("update", {}).get("toolCallId") == task_call_id
     ]
     require(
-        terminal_task_updates,
+        task_updates,
         f"no standard-rail tool_call_update carried the task tool call id {task_call_id!r}; "
         f"observed updates: {result['kinds']}",
     )
-    for message in terminal_task_updates:
-        status = message.get("params", {}).get("update", {}).get("status")
-        require(
-            status in ("completed", "failed"),
-            f"task tool_call_update must carry a terminal status; got {status!r}",
-        )
+    require_tool_call_progression(task_updates, task_call_id)
 
-    # 6. Chronology: the task tool_call precedes the extension spawn in the
-    #    observations — the real contract, because the pager registers its
-    #    blocking foreground wait from the standard tool_call first.
+    # 6. Chronology: the agent_new tool_call precedes the extension spawn in
+    #    the observations, because the call's row exists before the session
+    #    it starts.
     task_index = lifecycle["observation_index"]["task_tool_call"]
     spawned_index = lifecycle["observation_index"]["spawned"]
     require(
@@ -2632,18 +2742,20 @@ def probe_subagent(
     result["progress_observed"] = lifecycle["progress"] is not None
     result["task_precedes_spawn"] = True
 
-    # 7. Durable parent/child request linkage, when a GraphQL endpoint is
-    #    available: the child AgentRequest links back to the parent request
-    #    by caused_by_parent_request_id, and the spawn AgentToolCall carries
-    #    the child_request_id on the parent's request.
+    # 7. Durable cause, when a GraphQL endpoint is available: the child
+    #    session's origin request names the parent request and the exact
+    #    agent_new call in its signed caused_by_parent_* fields.
     if graphql:
         documents = query_subagent_documents(graphql, session_id)
         child_requests = documents.get("child_requests", [])
         require(
             child_requests,
-            "no durable child AgentRequest links back to this session's parent requests",
+            "no durable AgentRequest was caused by this session's agent_new calls",
         )
-        linked = [row for row in child_requests if row.get("session_id") == child_session_id]
+        linked = sorted(
+            (row for row in child_requests if row.get("session_id") == child_session_id),
+            key=lambda row: (row.get("created_at") or "", row.get("request_id") or ""),
+        )
         require(
             linked,
             f"no durable child AgentRequest carries the observed child session id "
@@ -2663,8 +2775,8 @@ def probe_subagent(
         spawn_calls = matching_spawn_calls(documents, child_row)
         require(
             spawn_calls,
-            f"no durable spawn AgentToolCall links parent request {parent_request_id!r} to "
-            f"child request {child_row.get('request_id')!r}; spawn rows: "
+            f"no durable agent_new AgentToolCall on parent request {parent_request_id!r} "
+            f"caused child request {child_row.get('request_id')!r}; agent_new rows: "
             f"{documents.get('spawn_tool_calls', [])}",
         )
         require(
@@ -2673,7 +2785,7 @@ def probe_subagent(
             f"{child_row.get('lifecycle_state')!r}",
         )
         result["documents"] = {
-            "child_request_id": child_row.get("request_id"),
+            "caused_request_id": child_row.get("request_id"),
             "parent_request_id": parent_request_id,
             "child_behavior_id": child_row.get("behavior_id"),
             "child_lifecycle_state": child_row.get("lifecycle_state"),
@@ -2684,14 +2796,20 @@ def probe_subagent(
 def matching_spawn_calls(
     documents: dict[str, Any], child_row: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """Return spawn rows proving the child's exact durable parent edge."""
+    """Return agent_new rows proving the child's exact durable cause.
+
+    A caused session's origin request names the parent request and the
+    agent_new call that started it in its signed `caused_by_parent_*`
+    fields; the call row must be that exact physical call on that request.
+    """
     return [
         row
         for row in documents.get("spawn_tool_calls", [])
         if isinstance(row, dict)
-        and row.get("tool_name") in ("spawn_subagent", "task", "Task")
+        and row.get("tool_name") == "agent_new"
+        and row.get("_docID") == child_row.get("caused_by_parent_tool_call_doc_id")
+        and row.get("request_doc_id") == child_row.get("caused_by_parent_request_doc_id")
         and row.get("request_id") == child_row.get("caused_by_parent_request_id")
-        and row.get("child_request_id") == child_row.get("request_id")
     ]
 
 
@@ -2700,11 +2818,11 @@ def query_subagent_documents(
     session_id: str,
     query_fn: Callable[..., dict[str, Any]] = graphql_query,
 ) -> dict[str, Any]:
-    """Query the durable child/spawn rows correlated with one probe session."""
+    """Query the agent_new calls of one probe session and the requests they caused."""
     escaped = graphql_escape(session_id)
     query = f"""{{
-      SpawnToolCalls: AgentToolCall(filter: {{session_id: {{_eq: \"{escaped}\"}}}}, order: {{message_sequence: ASC}}, limit: 65) {{
-        request_id tool_call_id tool_name child_request_id
+      SpawnToolCalls: AgentToolCall(filter: {{session_id: {{_eq: \"{escaped}\"}}, tool_name: {{_eq: \"agent_new\"}}}}, limit: 65) {{
+        _docID request_id request_doc_id tool_call_id tool_name
       }}
     }}"""
     data = query_fn(endpoint, query, timeout=10)
@@ -2713,42 +2831,40 @@ def query_subagent_documents(
     # Fetch one sentinel row beyond the accepted bound so exactly 64 calls is
     # distinguishable from a silently truncated result.
     require(len(spawn_rows) <= 64, "probe session exceeded the bounded tool-call query")
-    child_ids = sorted(
+    call_doc_ids = sorted(
         {
-            row.get("child_request_id")
+            row.get("_docID")
             for row in spawn_rows
-            if isinstance(row, dict)
-            and isinstance(row.get("child_request_id"), str)
-            and row["child_request_id"]
+            if isinstance(row, dict) and isinstance(row.get("_docID"), str) and row["_docID"]
         }
     )
-    if not child_ids:
+    if not call_doc_ids:
         return {"child_requests": [], "spawn_tool_calls": spawn_rows}
 
-    child_literals = ", ".join(f'"{graphql_escape(child_id)}"' for child_id in child_ids)
+    call_literals = ", ".join(f'"{graphql_escape(doc_id)}"' for doc_id in call_doc_ids)
     child_data = query_fn(
         endpoint,
-        f'''{{ AgentRequest(filter: {{request_id: {{_in: [{child_literals}]}}}}, limit: 65) {{
-          request_id session_id behavior_id lifecycle_state caused_by_parent_request_id
+        f'''{{ AgentRequest(filter: {{caused_by_parent_tool_call_doc_id: {{_in: [{call_literals}]}}}}, limit: 65) {{
+          request_id session_id behavior_id lifecycle_state created_at
+          caused_by_parent_request_id caused_by_parent_request_doc_id caused_by_parent_tool_call_doc_id
         }} }}''',
         timeout=10,
     )
     child_rows = child_data.get("AgentRequest")
     require(isinstance(child_rows, list), "AgentRequest query did not return a list")
-    require(len(child_rows) <= 64, "child AgentRequest query exceeded its bounded result set")
+    require(len(child_rows) <= 64, "caused AgentRequest query exceeded its bounded result set")
     children = [row for row in child_rows if isinstance(row, dict)]
-    returned_ids = [row.get("request_id") for row in children]
     require(
-        all(isinstance(request_id, str) and request_id in child_ids for request_id in returned_ids),
-        f"child AgentRequest query returned an unrequested id: {returned_ids}",
+        all(row.get("caused_by_parent_tool_call_doc_id") in call_doc_ids for row in children),
+        f"caused AgentRequest query returned a row for an unrequested call: {children}",
     )
-    require(len(set(returned_ids)) == len(returned_ids), "duplicate child AgentRequest rows")
-    require(set(returned_ids) == set(child_ids), "child AgentRequest query omitted a spawn child")
+    request_ids = [row.get("request_id") for row in children]
+    require(len(set(request_ids)) == len(request_ids), "duplicate caused AgentRequest rows")
     return {"child_requests": children, "spawn_tool_calls": spawn_rows}
 
 
 def self_test_subagent_document_query() -> dict[str, int]:
-    """Exercise the bounded query and exact durable-parent correlation."""
+    """Exercise the bounded query and exact durable-cause correlation."""
     accepted = 0
     rejected = 0
 
@@ -2761,21 +2877,24 @@ def self_test_subagent_document_query() -> dict[str, int]:
         else:
             raise AssertionError("invalid subagent document query fixture was accepted")
 
-    def spawn_row(index: int, child_id: str | None = None) -> dict[str, Any]:
+    def spawn_row(index: int, doc_id: str | None = None) -> dict[str, Any]:
         return {
+            "_docID": doc_id or f"call-doc-{index}",
             "request_id": f"parent-{index}",
+            "request_doc_id": f"parent-doc-{index}",
             "tool_call_id": f"tool-{index}",
-            "tool_name": "task",
-            "child_request_id": child_id or f"child-{index}",
+            "tool_name": "agent_new",
         }
 
-    def child_row(index: int, request_id: str | None = None) -> dict[str, Any]:
+    def child_row(index: int, call_doc_id: str | None = None) -> dict[str, Any]:
         return {
-            "request_id": request_id or f"child-{index}",
+            "request_id": f"child-{index}",
             "session_id": f"child-session-{index}",
             "behavior_id": "port-live-worker",
             "lifecycle_state": "completed",
             "caused_by_parent_request_id": f"parent-{index}",
+            "caused_by_parent_request_doc_id": f"parent-doc-{index}",
+            "caused_by_parent_tool_call_doc_id": call_doc_id or f"call-doc-{index}",
         }
 
     def run_fixture(
@@ -2791,20 +2910,20 @@ def self_test_subagent_document_query() -> dict[str, int]:
             if "SpawnToolCalls" in document:
                 require(graphql_escape(session_id) in document, "session id was not escaped")
                 return {"SpawnToolCalls": spawn_rows}
-            require("_in:" in document, "child requests must use one batched exact-id query")
+            require("_in:" in document, "caused requests must use one batched exact-id query")
             return {"AgentRequest": child_rows}
 
         return query_subagent_documents("fixture", session_id, query), calls
 
-    escaped_child = 'child-"-\\'
+    escaped_doc = 'call-"-\\'
     escaped_result, escaped_calls = run_fixture(
-        [spawn_row(1, escaped_child), dict(spawn_row(1, escaped_child), tool_call_id="tool-2")],
-        [child_row(1, escaped_child)],
+        [spawn_row(1, escaped_doc), dict(spawn_row(1, escaped_doc), tool_call_id="tool-2")],
+        [child_row(1, escaped_doc)],
         'session-"-\\',
     )
-    require(len(escaped_calls) == 2, "deduplicated children must use one batched query")
-    require(graphql_escape(escaped_child) in escaped_calls[1], "child id was not escaped")
-    require(len(escaped_result["child_requests"]) == 1, "deduplicated child lookup drifted")
+    require(len(escaped_calls) == 2, "deduplicated calls must use one batched query")
+    require(graphql_escape(escaped_doc) in escaped_calls[1], "call doc id was not escaped")
+    require(len(escaped_result["child_requests"]) == 1, "deduplicated caused lookup drifted")
     accepted += 1
 
     rows_64 = [spawn_row(index) for index in range(64)]
@@ -2820,47 +2939,96 @@ def self_test_subagent_document_query() -> dict[str, int]:
         )
     )
     expect_reject(lambda: run_fixture([spawn_row(0)], [child_row(0), child_row(0)]))
-    expect_reject(
-        lambda: run_fixture([spawn_row(0)], [child_row(0, "unrequested-child")])
-    )
+    expect_reject(lambda: run_fixture([spawn_row(0)], [child_row(0, "unrequested-call")]))
 
     child = child_row(0)
     require(
         not matching_spawn_calls(
-            {"spawn_tool_calls": [dict(spawn_row(0), request_id="wrong-parent")]}, child
+            {"spawn_tool_calls": [dict(spawn_row(0), request_doc_id="wrong-parent")]}, child
         ),
-        "a spawn from a different parent request must not prove the child edge",
+        "an agent_new call on a different parent request must not prove the child edge",
+    )
+    require(
+        not matching_spawn_calls({"spawn_tool_calls": [spawn_row(0, "other-call")]}, child),
+        "a different agent_new call must not prove the child edge",
     )
     require(
         matching_spawn_calls({"spawn_tool_calls": [spawn_row(0)]}, child),
-        "the exact durable parent/tool/child edge must be accepted",
+        "the exact durable parent/call/child edge must be accepted",
     )
     accepted += 1
     return {"accepted": accepted, "rejected": rejected}
 
 
 def query_documents(endpoint: str, session_id: str) -> dict[str, Any]:
+    """Read the canonical session records: requests, transcript and tool rows."""
     escaped = graphql_escape(session_id)
     query = f"""{{
       AgentSession(filter: {{session_id: {{_eq: \"{escaped}\"}}}}) {{
-        session_id behavior_id status started ended
+        session_id behavior_id created_at closed_at
       }}
-      AgentRequest(filter: {{session_id: {{_eq: \"{escaped}\"}}}}, order: {{created_at: ASC}}) {{
-        request_id content metadata status lifecycle_state terminalized_at interrupt_requested_at
-      }}
-      AgentResponse(filter: {{session_id: {{_eq: \"{escaped}\"}}}}, order: {{created_at: ASC}}) {{
-        request_id status token_count completed_at interrupted_at error_message
+      AgentRequest(filter: {{session_id: {{_eq: \"{escaped}\"}}, purpose: {{_eq: \"normal\"}}}}, order: {{created_at: ASC}}) {{
+        _docID request_id lifecycle_state terminalized_at interrupt_requested_at terminal_output input
       }}
       AgentMessage(filter: {{session_id: {{_eq: \"{escaped}\"}}}}, order: {{sequence: ASC}}) {{
-        request_id sequence role content
+        _docID request_doc_id sequence role
       }}
       AgentToolCall(filter: {{session_id: {{_eq: \"{escaped}\"}}}}, order: {{started_at: ASC}}) {{
-        request_id tool_call_id tool_name args result status lifecycle_state completed_at
+        _docID request_id request_doc_id tool_call_id tool_name status lifecycle_state completed_at
       }}
     }}"""
     data = graphql_query(endpoint, query, timeout=10)
     require(data.get("AgentSession"), "no AgentSession document for probe session")
     return data
+
+
+def json_field(value: Any) -> Any:
+    """A JSON scalar column, whether the endpoint returns it parsed or encoded."""
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def user_turns(documents: dict[str, Any]) -> list[dict[str, Any]]:
+    """The requests the probe's prompts created; runtime wakes are excluded."""
+    turns = []
+    for request in documents.get("AgentRequest", []):
+        queue = (json_field(request.get("input")) or {}).get("queue") or {}
+        if queue.get("source", "user") == "user":
+            turns.append(request)
+    return turns
+
+
+def terminal_message(documents: dict[str, Any], request: dict[str, Any]) -> dict[str, Any] | None:
+    """The assistant message a terminal request names as its canonical output."""
+    output = json_field(request.get("terminal_output")) or {}
+    if output.get("kind") != "message":
+        return None
+    for message in documents.get("AgentMessage", []):
+        if (
+            message.get("_docID") == output.get("message_doc_id")
+            and message.get("request_doc_id") == request.get("_docID")
+            and message.get("role") == "assistant"
+        ):
+            return message
+    return None
+
+
+def turn_settled(
+    documents: dict[str, Any], request: dict[str, Any], interrupted: bool
+) -> bool:
+    if interrupted:
+        return bool(request.get("interrupt_requested_at")) and (
+            request.get("lifecycle_state") == "interrupted"
+        )
+    return (
+        request.get("lifecycle_state") == "completed"
+        and bool(request.get("terminalized_at"))
+        and terminal_message(documents, request) is not None
+    )
 
 
 def query_documents_until_turns(
@@ -2871,20 +3039,22 @@ def query_documents_until_turns(
     timeout_seconds: float = 5.0,
     query_documents_fn: Callable[[str, str], dict[str, Any]] = query_documents,
 ) -> dict[str, Any]:
-    """Wait for request and response materialization for a completed wire turn."""
+    """Wait until every probe turn has its canonical terminal record.
+
+    A completed turn names its final assistant message in
+    `terminal_output`; the cancel turn, when present, is last and ends
+    interrupted.
+    """
     deadline = time.monotonic() + timeout_seconds
 
     def ready(documents: dict[str, Any]) -> bool:
-        cardinality_ready = (
-            len(documents.get("AgentRequest", [])) == expected_turns
-            and len(documents.get("AgentResponse", [])) == expected_turns
+        turns = user_turns(documents)
+        if len(turns) != expected_turns:
+            return False
+        return all(
+            turn_settled(documents, turn, require_interrupted and index == len(turns) - 1)
+            for index, turn in enumerate(turns)
         )
-        interruption_ready = not require_interrupted or (
-            cardinality_ready
-            and bool(documents["AgentRequest"][-1].get("interrupt_requested_at"))
-            and bool(documents["AgentResponse"][-1].get("interrupted_at"))
-        )
-        return cardinality_ready and interruption_ready
 
     _ready, documents = poll_until_deadline(
         lambda: query_documents_fn(endpoint, session_id),
@@ -2897,7 +3067,7 @@ def query_documents_until_turns(
 
 def self_test_document_polling() -> dict[str, int]:
     calls = 0
-    incomplete = {"AgentRequest": [], "AgentResponse": []}
+    incomplete: dict[str, Any] = {"AgentRequest": [], "AgentMessage": []}
 
     def query_once(_endpoint: str, _session_id: str) -> dict[str, Any]:
         nonlocal calls
@@ -2913,43 +3083,148 @@ def self_test_document_polling() -> dict[str, int]:
     )
     require(calls == 1, "edge deadline must retain its one final observation")
     require(observed is incomplete, "edge deadline did not return its latest snapshot")
-    return {"accepted": 1, "rejected": 0}
 
-
-def is_persisted_subprocess_probe(call: dict[str, Any]) -> bool:
-    """Recognize the command marker only in the expected string columns."""
-    args = call.get("args")
-    result = call.get("result")
-    return (
-        isinstance(args, str)
-        and "gents-subprocess-probe" in args
-        and isinstance(result, str)
-        and "gents-subprocess-probe" in result
+    completed = {
+        "_docID": "request-doc",
+        "lifecycle_state": "completed",
+        "terminalized_at": "2026-09-27T00:00:00Z",
+        "terminal_output": json.dumps({"kind": "message", "message_doc_id": "final"}),
+        "input": None,
+    }
+    wake = dict(
+        completed,
+        _docID="wake-doc",
+        input={"queue": {"source": "background_completion", "policy": "coalesce"}},
     )
+    documents = {
+        "AgentRequest": [completed, wake],
+        "AgentMessage": [
+            {"_docID": "header", "request_doc_id": "request-doc", "role": "assistant"},
+            {"_docID": "final", "request_doc_id": "request-doc", "role": "assistant"},
+        ],
+    }
+    require(user_turns(documents) == [completed], "a completion wake counted as a probe turn")
+    require(
+        terminal_message(documents, completed) == documents["AgentMessage"][1],
+        "terminal output did not resolve the final assistant message",
+    )
+    rejected = 0
+    for broken in (
+        dict(completed, terminal_output={"kind": "no_message"}),
+        dict(completed, terminal_output={"kind": "message", "message_doc_id": "missing"}),
+        dict(completed, _docID="other-request"),
+    ):
+        require(terminal_message(documents, broken) is None, f"accepted {broken}")
+        rejected += 1
+    require(
+        not turn_settled(documents, dict(completed, lifecycle_state="processing"), False),
+        "an unfinished turn was accepted as settled",
+    )
+    rejected += 1
+    return {"accepted": 3, "rejected": rejected}
+
+
+SUBPROCESS_MARKER = "gents-subprocess-probe"
+
+# A projection produced by the native owner, checked in with its contract.
+CODEX_PROJECTION_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "crates/gents/tests/fixtures/adapter_projections/envelopes"
+    / "openai_codex_run_trace.envelope.json"
+)
+
+
+def trace_projection(gents: str, graphql: str, request_id: str) -> dict[str, Any]:
+    """Present one request through the native `gents trace project` owner."""
+    completed = subprocess.run(
+        [gents, "trace", "project", "--graphql", graphql,
+         "--request-id", request_id, "--projection", "openai-codex"],
+        check=True, capture_output=True, text=True,
+    )
+    return json.loads(completed.stdout)
+
+
+def persisted_subprocess_calls(
+    projection: dict[str, Any],
+    request_id: str,
+    tool_rows: list[dict[str, Any]],
+    marker: str = SUBPROCESS_MARKER,
+) -> list[str]:
+    """The `AgentToolCall` doc ids whose own arguments and result carry `marker`.
+
+    The projection presents each call's arguments and result together, so
+    both halves belong to one call; that call is then bound to exactly one
+    durable row of the same request.
+    """
+    items = projection.get("output", {}).get("projection", {}).get("items")
+    require(isinstance(items, list), f"trace projection has no items: {projection}")
+    doc_ids = []
+    for item in items:
+        if not (
+            item.get("type") == "tool_call"
+            and item.get("request_id") == request_id
+            and marker in str(item.get("arguments") or "")
+            and marker in str(item.get("output") or "")
+        ):
+            continue
+        rows = [
+            row
+            for row in tool_rows
+            if row.get("request_id") == request_id and row.get("tool_call_id") == item.get("id")
+        ]
+        require(len(rows) == 1, f"tool call {item.get('id')!r} binds {len(rows)} durable rows")
+        doc_ids.append(rows[0]["_docID"])
+    return doc_ids
 
 
 def self_test_persisted_subprocess_probe() -> dict[str, int]:
-    marker = "gents-subprocess-probe"
+    envelope = json.loads(CODEX_PROJECTION_FIXTURE.read_text())
+    request_id = envelope["source_request_id"]
+    call = next(
+        item for item in envelope["output"]["projection"]["items"] if item["type"] == "tool_call"
+    )
+    marker = "adapter_projection"
+    require(marker in call["arguments"] and marker in call["output"], "fixture call drifted")
+    row = {"_docID": "call-doc", "request_id": request_id, "tool_call_id": call["id"]}
     require(
-        is_persisted_subprocess_probe({"args": marker, "result": marker}),
-        "valid subprocess document marker was rejected",
+        persisted_subprocess_calls(envelope, request_id, [row], marker) == ["call-doc"],
+        "the fixture call was not bound to its durable row",
     )
-    invalid = (
-        {"args": None, "result": marker},
-        {"args": marker, "result": None},
-        {"args": {"command": marker}, "result": [marker]},
-    )
+
+    def with_call(**changes: Any) -> dict[str, Any]:
+        items = [
+            dict(item, **changes) if item is call else item
+            for item in envelope["output"]["projection"]["items"]
+        ]
+        return {"output": {"projection": {"items": items}}}
+
+    rejected = 0
+    for projection in (with_call(output="no marker"), with_call(arguments="{}")):
+        require(
+            not persisted_subprocess_calls(projection, request_id, [row], marker),
+            "a call missing one half of the marker was accepted",
+        )
+        rejected += 1
     require(
-        not any(is_persisted_subprocess_probe(call) for call in invalid),
-        "non-string subprocess document fields were accepted",
+        not persisted_subprocess_calls(envelope, "other-request", [row], marker),
+        "a call of another request was accepted",
     )
-    return {"accepted": 1, "rejected": len(invalid)}
+    rejected += 1
+    for rows in ([], [row, dict(row, _docID="twin")]):
+        try:
+            persisted_subprocess_calls(envelope, request_id, rows, marker)
+        except AssertionError:
+            rejected += 1
+        else:
+            raise AssertionError(f"a call bound to {len(rows)} rows was accepted")
+    return {"accepted": 1, "rejected": rejected}
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--socket", help="Grok leader Unix socket (not needed for --edge offline)")
     parser.add_argument("--graphql", help="Optional Gents GraphQL endpoint for document assertions")
+    parser.add_argument("--gents", default="gents", help="gents binary used for trace projection")
     parser.add_argument("--cwd", default=str(Path.cwd()), help="session/new cwd")
     parser.add_argument("--timeout", type=float, default=600.0, help="socket timeout seconds")
     parser.add_argument(
@@ -2979,6 +3254,7 @@ def main() -> int:
             "subagent_document_query_self_test": self_test_subagent_document_query(),
             "subprocess_document_self_test": self_test_persisted_subprocess_probe(),
             "document_poll_self_test": self_test_document_polling(),
+            "tool_call_progression_self_test": self_test_tool_call_progression(),
         }, indent=2, sort_keys=True))
         return 0
     require(args.socket, "--socket is required unless --edge offline is selected")
@@ -3036,29 +3312,36 @@ def main() -> int:
                 expected_turns,
                 require_interrupted=args.edge in ("cancel", "all"),
             )
-            requests = documents.get("AgentRequest", [])
-            responses = documents.get("AgentResponse", [])
-            require(len(requests) == expected_turns, "unexpected AgentRequest count")
-            require(len(responses) == expected_turns, "unexpected AgentResponse count")
-            if args.edge in ("cancel", "all"):
-                require(requests[-1].get("interrupt_requested_at"), "cancel request lacks interrupt marker")
-                require(responses[-1].get("interrupted_at"), "cancel response lacks interrupted marker")
+            turns = user_turns(documents)
+            require(len(turns) == expected_turns, "unexpected probe AgentRequest count")
+            interrupted_last = args.edge in ("cancel", "all")
+            for index, turn in enumerate(turns):
+                interrupted = interrupted_last and index == len(turns) - 1
+                require(
+                    turn_settled(documents, turn, interrupted),
+                    f"probe turn lacks its canonical terminal record: {turn}",
+                )
             if args.edge in ("tool", "all"):
                 require(documents.get("AgentToolCall"), "tool edge lacks AgentToolCall document")
             if args.edge in ("subprocess", "all"):
                 subprocess_calls = [
-                    call
-                    for call in documents.get("AgentToolCall", [])
-                    if is_persisted_subprocess_probe(call)
+                    doc_id
+                    for turn in turns
+                    for doc_id in persisted_subprocess_calls(
+                        trace_projection(args.gents, args.graphql, turn["request_id"]),
+                        turn["request_id"],
+                        documents.get("AgentToolCall", []),
+                    )
                 ]
                 require(
                     subprocess_calls,
-                    "subprocess edge lacks persisted command and output",
+                    "subprocess edge lacks a call whose arguments and result carry the command",
                 )
+                output["subprocess_tool_call_doc_ids"] = subprocess_calls
             output["documents"] = {
                 "sessions": len(documents.get("AgentSession", [])),
-                "requests": len(requests),
-                "responses": len(responses),
+                "requests": len(documents.get("AgentRequest", [])),
+                "probe_turns": len(turns),
                 "messages": len(documents.get("AgentMessage", [])),
                 "tool_calls": len(documents.get("AgentToolCall", [])),
             }

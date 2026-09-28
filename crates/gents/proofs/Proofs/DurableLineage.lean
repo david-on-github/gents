@@ -1,4 +1,5 @@
 import Proofs.Basic
+import Proofs.Request.CausalHop
 
 /-!
 # Durable request lineage
@@ -8,13 +9,18 @@ but document identifiers are the authoritative edges.  This model describes
 the ingest boundary for request lineage:
 
 * logical and physical halves of an edge are either both present or absent;
-* a request is a root, a full subagent bridge, or an explicitly marked
-  request-only control continuation;
+* a request is a root, a session-message request (the full calling request
+  and tool call edge written by `agent_new`/`agent_message`), or an
+  explicitly marked request-only control continuation;
 * malformed replicated rows are rejected individually, without preventing a
   later well-formed row from being considered; and
 * queued steering admission retains signed raw input; canonical publication of
   the prepared message belongs to the owned execution start, not this lineage
   ingest boundary (see `QueuedSteering`).
+
+`subagentDepth` is the causal hop, computed by `CausalHop.nextHop`. The edge
+is provenance only; it grants no hierarchy, cascade or authority over the
+calling session.
 -/
 
 namespace DurableLineage
@@ -64,7 +70,11 @@ theorem malformed_head_does_not_poison
     admissibleRows (bad :: rest) = admissibleRows rest := by
   simp [admissibleRows, hBad]
 
-def steeringContinuation (subagentDepth : Nat) : RawLineage :=
+/-- A request-only control continuation of the session's own work: user
+    steering, a retry, a Goal continuation or a completion wake. It keeps both
+    halves of the parent request edge and no tool-call edge, at any hop,
+    including zero for a top-level session. -/
+def controlContinuation (subagentDepth : Nat) : RawLineage :=
   { hasParentRequestId := true
   , hasParentRequestDocId := true
   , hasParentToolCallId := false
@@ -74,51 +84,77 @@ def steeringContinuation (subagentDepth : Nat) : RawLineage :=
   , controlAllowedAtDepthZero := true
   }
 
-/-- Steering is request-linked, not a new child spawn.  Normalization keeps
-    both halves of the parent request edge and clears both halves of the old
-    tool-call bridge. -/
-theorem steering_continuation_is_admissible
-    (depth : Nat) :
-    admissible (steeringContinuation depth) = true := by
+theorem control_continuation_is_admissible (depth : Nat) :
+    admissible (controlContinuation depth) = true := by
   simp [admissible, edgePairsCoherent, pairCoherent, parentShapeCoherent,
-    depthCoherent, steeringContinuation]
+    depthCoherent, controlContinuation]
 
-def backgroundCompletionContinuation (subagentDepth : Nat) : RawLineage :=
-  { hasParentRequestId := true
-  , hasParentRequestDocId := true
-  , hasParentToolCallId := false
-  , hasParentToolCallDocId := false
-  , subagentDepth
-  , requestOnlyControl := true
-  , controlAllowedAtDepthZero := true
-  }
+/-- How an `agent_new`/`agent_message` is delivered: a new request to an idle,
+    new or remote session, or a steering continuation of a busy local session. -/
+inductive Delivery where
+  | request
+  | steering
+  deriving DecidableEq, Repr
 
-/-- A background-completion wake is a control continuation, not a new
-    subagent generation.  It therefore preserves the parent's depth, including
-    depth zero for a top-level or goal-continuation session. -/
-theorem background_completion_continuation_is_admissible
-    (depth : Nat) :
-    admissible (backgroundCompletionContinuation depth) = true := by
-  simp [admissible, edgePairsCoherent, pairCoherent, parentShapeCoherent,
-    depthCoherent, backgroundCompletionContinuation]
+/-- What a delivered session message is written with. Both deliveries carry
+    the full calling edge (the caller's request and tool call) and the hop
+    `CausalHop.nextHop (.crossSession callerHop) own`. A steering continuation
+    is additionally queued after the busy session's active request; that
+    request orders the queue and is never its origin. -/
+structure SessionMessageWrite where
+  lineage : RawLineage
+  queuedAfterActive : Bool
+  deriving DecidableEq, Repr
 
-def goalContinuation (subagentDepth : Nat) : RawLineage :=
-  { hasParentRequestId := true
-  , hasParentRequestDocId := true
-  , hasParentToolCallId := false
-  , hasParentToolCallDocId := false
-  , subagentDepth
-  , requestOnlyControl := true
-  , controlAllowedAtDepthZero := true
-  }
+def sessionMessageWrite (delivery : Delivery) (callerHop own : Nat) : SessionMessageWrite :=
+  { lineage :=
+      { hasParentRequestId := true
+      , hasParentRequestDocId := true
+      , hasParentToolCallId := true
+      , hasParentToolCallDocId := true
+      , subagentDepth := CausalHop.nextHop (.crossSession callerHop) own
+      , requestOnlyControl := false }
+  , queuedAfterActive := delivery == .steering }
 
-/-- A durable-goal continuation preserves subagent depth and carries both the
-    logical and physical parent request edge. It is controller work, not a new
-    subagent generation. Session and behavior preservation are runtime request-
-    construction obligations outside `RawLineage`. -/
-theorem goal_continuation_is_admissible (depth : Nat) :
-    admissible (goalContinuation depth) = true := by
-  simp [admissible, edgePairsCoherent, pairCoherent, parentShapeCoherent,
-    depthCoherent, goalContinuation]
+/-- Every delivery is an admissible session-message request that names the
+    calling tool call, so its completion settles that call. -/
+theorem session_message_write_names_its_caller (delivery : Delivery) (callerHop own : Nat) :
+    admissible (sessionMessageWrite delivery callerHop own).lineage = true ∧
+      (sessionMessageWrite delivery callerHop own).lineage.hasParentToolCallDocId = true := by
+  simp [sessionMessageWrite, admissible, edgePairsCoherent, pairCoherent,
+    parentShapeCoherent, depthCoherent, CausalHop.nextHop]
+  omega
+
+/-- Interrupting another agent's session — `agent_message` with
+    `interrupt`, or `agent_interrupt` — is allowed in 0.20 only to the session
+    that started it: the target's stored `AgentSession.provenance`, written
+    once when the session is created from its first request and never
+    rewritten, names a request of the caller's session. A later message into
+    the session, even in the same second, cannot transfer this authority.
+    `targetOriginCause` is that starting session, `none` for a root session.
+    General interrupt permissions are deferred to a later release. -/
+def interruptAllowed (callerSession targetSession : String)
+    (targetOriginCause : Option String) : Bool :=
+  CausalHop.sendTargetAllowed callerSession targetSession &&
+    targetOriginCause == some callerSession
+
+/-- A caller that did not start the target session is refused. -/
+theorem non_spawner_interrupt_refused (callerSession targetSession : String)
+    (targetOriginCause : Option String)
+    (h : targetOriginCause ≠ some callerSession) :
+    interruptAllowed callerSession targetSession targetOriginCause = false := by
+  simp [interruptAllowed, CausalHop.sendTargetAllowed, h]
+
+/-- The session that started another session may interrupt it. -/
+theorem spawner_may_interrupt (callerSession targetSession : String)
+    (h : targetSession ≠ callerSession) :
+    interruptAllowed callerSession targetSession (some callerSession) = true := by
+  simp [interruptAllowed, CausalHop.sendTargetAllowed, Ne.symm h]
+
+/-- A root session, which no session started, cannot be interrupted by an
+    agent. -/
+theorem root_session_not_interruptible (callerSession targetSession : String) :
+    interruptAllowed callerSession targetSession none = false := by
+  simp [interruptAllowed]
 
 end DurableLineage

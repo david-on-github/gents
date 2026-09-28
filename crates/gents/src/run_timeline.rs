@@ -61,10 +61,6 @@ pub struct RunTimeline {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session: Option<TimelineSessionRow>,
     pub child_request_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub descendant_edges: Vec<crate::DescendantEdge>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub descendant_graph_diagnostics_error: Option<String>,
     #[serde(default)]
     pub inference_calls: Vec<TimelineInferenceCallRow>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -468,9 +464,9 @@ pub struct TimelineToolCallRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub await_mode: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cancel_policy: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cancel_cause: Option<String>,
+    /// The request this call caused, derived from that request's
+    /// `caused_by_parent_*` edge; never a tool-call column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub child_request_id: Option<String>,
 }
@@ -826,8 +822,6 @@ pub struct TimelineToolCallEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub await_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cancel_policy: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub cancel_cause: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub child_request_id: Option<String>,
@@ -1015,7 +1009,6 @@ pub fn build_run_timeline(mut rows: RunTimelineRows) -> RunTimeline {
                 policy_network: tool_call.policy_network.clone(),
                 latency_ms: tool_call.latency_ms,
                 await_mode: tool_call.await_mode.clone(),
-                cancel_policy: tool_call.cancel_policy.clone(),
                 cancel_cause: tool_call.cancel_cause.clone(),
                 child_request_id: tool_call
                     .child_request_id
@@ -1044,8 +1037,6 @@ pub fn build_run_timeline(mut rows: RunTimelineRows) -> RunTimeline {
         request: rows.request,
         session: rows.session,
         child_request_ids,
-        descendant_edges: Vec::new(),
-        descendant_graph_diagnostics_error: None,
         inference_calls,
         rendered_request_refs: rows.rendered_request_refs,
         background_completions: Vec::new(),
@@ -1121,8 +1112,8 @@ fn goal_transition_events(
         .collect()
 }
 
-/// Whether a child request is physically corroborated by its parent request
-/// and, for tool-spawned children, the exact parent tool-call document.
+/// Whether a caused request is physically corroborated by its calling request
+/// and, for a session message, the exact calling tool-call document.
 ///
 /// This is the single shared provenance rule for read-side projections. It
 /// accepts the runtime's modeled request-only control continuations and
@@ -1161,8 +1152,6 @@ pub fn child_bridge_is_corroborated(
             && nonempty(tool_call.request_doc_id.as_deref()) == Some(root_doc_id)
             && nonempty(tool_call.request_id.as_deref()) == Some(root_request.request_id.as_str())
             && tool_call.tool_call_id == parent_tool_call_id
-            && nonempty(tool_call.child_request_id.as_deref())
-                == Some(child_request.request_id.as_str())
     })
 }
 
@@ -1178,7 +1167,8 @@ fn request_only_control_link_is_corroborated(request: &TimelineRequestRow) -> bo
     request.input.queue.as_ref().is_some_and(|hints| {
         matches!(
             hints.source,
-            crate::lifecycle::queue::QueueSource::Steering
+            crate::lifecycle::queue::QueueSource::User
+                | crate::lifecycle::queue::QueueSource::Steering
                 | crate::lifecycle::queue::QueueSource::Goal
         )
     })
@@ -2301,16 +2291,20 @@ mod tests {
     }
 
     #[test]
-    fn request_only_steering_and_goal_links_are_included_without_tool_bridges() {
-        let control_request = |request_id: &str, source: &str| {
+    fn request_only_queued_links_are_included_without_tool_bridges() {
+        let control_request = |request_id: &str, source: Option<&str>| {
+            let input = source.map_or_else(
+                || serde_json::json!({}),
+                |source| serde_json::json!({"queue": {"source":source,"policy":"append","queued_after_request_id":"req-root"}}),
+            );
             TimelineRequestRow {
-            doc_id: Some(format!("doc-{request_id}")),
-            request_id: request_id.to_string(),
-            input: serde_json::from_value(serde_json::json!({"queue": {"source":source,"policy":"append","queued_after_request_id":"req-root"}})).unwrap(),
-            caused_by_parent_request_id: Some("req-root".to_string()),
-            caused_by_parent_request_doc_id: Some("doc-root".to_string()),
-            ..Default::default()
-        }
+                doc_id: Some(format!("doc-{request_id}")),
+                request_id: request_id.to_string(),
+                input: serde_json::from_value(input).unwrap(),
+                caused_by_parent_request_id: Some("req-root".to_string()),
+                caused_by_parent_request_doc_id: Some("doc-root".to_string()),
+                ..Default::default()
+            }
         };
         let timeline = build_run_timeline(RunTimelineRows {
             request: TimelineRequestRow {
@@ -2319,16 +2313,17 @@ mod tests {
                 ..Default::default()
             },
             requests: vec![
-                control_request("goal-child", "goal"),
-                control_request("steering-child", "steering"),
-                control_request("ordinary-child", "user"),
+                control_request("goal-child", Some("goal")),
+                control_request("steering-child", Some("steering")),
+                control_request("queued-user-child", Some("user")),
+                control_request("ordinary-child", None),
             ],
             ..Default::default()
         });
 
         assert_eq!(
             timeline.child_request_ids,
-            vec!["goal-child", "steering-child"]
+            vec!["goal-child", "queued-user-child", "steering-child"]
         );
         assert!(!timeline.events.iter().any(|event| {
             matches!(event, RunTimelineEvent::Request(request) if request.request_id == "ordinary-child")

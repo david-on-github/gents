@@ -1164,6 +1164,7 @@ mod tests {
             None,
             requester_did,
             Some("event-trigger-config-doc-1"),
+            None,
         )
         .await
         .unwrap();

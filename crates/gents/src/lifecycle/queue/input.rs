@@ -30,12 +30,6 @@ pub(crate) fn row_is_automated_wakeup(row: &AgentRequestRow) -> bool {
     row_queue(row).is_some_and(queue_is_automated_wakeup)
 }
 
-pub(crate) fn row_is_subagent_owned_queue(row: &AgentRequestRow) -> bool {
-    row_queue(row).is_some_and(|queue| {
-        matches!(queue.source, QueueSource::Steering) || queue_is_automated_wakeup(queue)
-    })
-}
-
 /// Stamp the durable wake format marker on a freshly created background wake.
 /// An incoming caller queue never authorizes the internal wake marker.
 pub(crate) fn background_wake_queue(

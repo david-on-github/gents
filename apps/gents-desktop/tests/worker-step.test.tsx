@@ -3,27 +3,38 @@ import { join } from "node:path";
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
+  CausedRequestView,
   RenderedToolCallView,
   SessionSummary,
 } from "@source-inc/gents-desktop-client";
 
 vi.mock("@/lib/router", () => ({ href: () => "#", navigate: vi.fn() }));
 
-import { WorkerStep, workerNow } from "../src/ui/screens/WorkerStep";
-import type { WorkerState, Workers } from "../src/ui/screens/workers";
+import { SubagentList, WorkerStep, workerNow } from "../src/ui/screens/WorkerStep";
+import {
+  NO_WORKERS,
+  type Reached,
+  type Subagent,
+  type Workers,
+} from "../src/ui/screens/workers";
 import { WorkerActionsContext } from "../src/ui/screens/WorkerActions";
 
-const spawn = (statusKind = "success"): RenderedToolCallView =>
+const call = (
+  statusKind = "running",
+  action: "start" | "message" = "start",
+): RenderedToolCallView =>
   ({
     itemKey: "tool-1",
-    toolName: "spawn_subagent",
+    toolName: action === "start" ? "agent_new" : "agent_message",
+    toolCallId: "call-1",
+    requestId: "parent-req",
     statusKind,
-    childRequestId: "child-req",
+    awaitMode: "background",
     presentation: {
       kind: "subagent",
-      action: "spawn",
+      action,
       name: "reviewer",
-      childRequestId: "child-req",
+      sessionId: "child-session",
       description: "Review the diff",
       output: null,
     },
@@ -41,85 +52,161 @@ const summary = (turnState: string | null): SessionSummary =>
     updatedAt: null,
   }) as unknown as SessionSummary;
 
-const worker = (turnState: string | null, extra: Partial<WorkerState> = {}) =>
-  ({
-    sessionId: "child-session",
-    summary: summary(turnState),
-    node: null,
-    edge: null,
-    background: null,
-    ...extra,
-  }) as WorkerState;
+const caused = (requestId: string, lifecycleState: string): CausedRequestView => ({
+  requestId,
+  agentDid: "did:key:reviewer",
+  sessionId: "child-session",
+  requesterDid: null,
+  lifecycleState,
+  createdAt: null,
+});
 
-function renderStep(w: WorkerState | null, cancel = vi.fn()) {
-  const workers: Workers = {
-    byChildRequest: () => w,
-    byToolCall: () => null,
+const subagent = (turnState: string | null): Subagent => ({
+  sessionId: "child-session",
+  agentDid: "did:key:reviewer",
+  summary: summary(turnState),
+  link: {
+    agentDid: "did:key:reviewer",
+    sessionId: "child-session",
+    requesterDid: null,
+    causeRequestDocId: "doc-parent-req",
+  },
+});
+
+/* this row's call caused `request`; the session may be working on others */
+const reached = (
+  request: CausedRequestView,
+  s: Subagent | null = subagent("running"),
+): Reached => ({ request, summary: s?.summary ?? summary("running"), subagent: s });
+
+function workersWith(r: Reached | null): Workers {
+  return {
+    ...NO_WORKERS,
+    all: r?.subagent ? [r.subagent] : [],
+    byToolCall: () => r,
     loaded: true,
   };
-  render(
-    <WorkerActionsContext.Provider value={{ parentRequestId: "parent", cancel }}>
-      <WorkerStep tool={spawn()} workers={workers} />
-    </WorkerActionsContext.Provider>,
-  );
-  return cancel;
 }
 
-describe("worker state", () => {
+function renderStep(
+  tool: RenderedToolCallView,
+  r: Reached | null,
+  actions = { interrupt: vi.fn() },
+) {
+  render(
+    <WorkerActionsContext.Provider value={actions}>
+      <WorkerStep tool={tool} workers={workersWith(r)} />
+    </WorkerActionsContext.Provider>,
+  );
+  return actions;
+}
+
+describe("a subagent row", () => {
+  it("shows the request this row's call caused, not the session's latest", () => {
+    /* the session is working on a later request; this call's has finished */
+    expect(workerNow(call(), reached(caused("child-req", "completed")))).toEqual({
+      tone: "done",
+      text: "finished",
+    });
+    expect(workerNow(call(), reached(caused("child-req", "processing"))).tone).toBe(
+      "running",
+    );
+  });
+
+  it("reads the caused request's lifecycle", () => {
+    const at = (state: string) => workerNow(call(), reached(caused("r", state)));
+    expect(at("pending").text).toBe("waiting for the agent to pick it up");
+    expect(at("processing").tone).toBe("running");
+    expect(at("completed").tone).toBe("done");
+    expect(at("dead").tone).toBe("failed");
+    expect(at("interrupted").tone).toBe("stopped");
+    expect(at("superseded").tone).toBe("stopped");
+  });
+
   it("never infers replication from a missing message count", () => {
-    for (const turn of ["running", "completed", "waitingForClaim"]) {
-      expect(workerNow(spawn(), worker(turn)).text).not.toMatch(/sync/i);
+    for (const state of ["processing", "completed", "pending"]) {
+      expect(workerNow(call(), reached(caused("r", state))).text).not.toMatch(/sync/i);
     }
   });
 
-  it("reads every live turn state the bridge emits as running", () => {
-    expect(workerNow(spawn(), worker("running")).tone).toBe("running");
-    expect(workerNow(spawn(), worker("waitingForClaim"))).toEqual({
+  it("never reads the tool call's own status as a live request", () => {
+    expect(workerNow(call("success"), null)).toEqual({ tone: "done", text: "sent" });
+    expect(workerNow(call("error"), null).tone).toBe("failed");
+    expect(workerNow(call("unknown"), null)).toEqual({
+      tone: "unknown",
+      text: "state unknown",
+    });
+    expect(workerNow(call("running"), null)).toEqual({
       tone: "running",
-      text: "waiting for the agent to pick it up",
+      text: "starting",
     });
   });
 
-  it("uses the lineage request lifecycle when there is no summary", () => {
-    const lifecycle = (lifecycleState: string) =>
-      workerNow(spawn(), {
-        sessionId: null,
-        summary: null,
-        node: { lifecycleState } as WorkerState["node"],
-        edge: null,
-        background: null,
-      });
-    expect(lifecycle("processing").tone).toBe("running");
-    expect(lifecycle("pending").text).toBe("waiting for the agent to pick it up");
-    expect(lifecycle("completed").tone).toBe("done");
-    expect(lifecycle("dead").tone).toBe("failed");
-  });
-
-  it("settles on the terminal turn states", () => {
-    expect(workerNow(spawn(), worker("completed")).tone).toBe("done");
-    expect(workerNow(spawn(), worker("failed")).tone).toBe("failed");
-    expect(workerNow(spawn(), worker("interrupted")).tone).toBe("stopped");
-    expect(workerNow(spawn(), worker("superseded")).tone).toBe("stopped");
-  });
-
-  it("offers Stop on a running worker and targets its current request", () => {
-    const cancel = renderStep(worker("running"));
-    expect(screen.queryByText(/not synced/)).toBeNull();
+  it("stops by interrupting only the request this row's call caused", () => {
+    /* the session has moved on to a later request; Stop names this call's */
+    const request = caused("child-req", "processing");
+    const actions = renderStep(call("running"), reached(request));
     screen.getByRole("button", { name: "Stop Reviewer" }).click();
-    expect(cancel).toHaveBeenCalledWith("child-req-2");
+    expect(actions.interrupt).toHaveBeenCalledTimes(1);
+    expect(actions.interrupt).toHaveBeenCalledWith(request);
   });
 
-  it("offers Stop while a worker waits for the agent", () => {
-    renderStep(worker("waitingForClaim"));
-    expect(
-      screen.getAllByText("waiting for the agent to pick it up").length,
-    ).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: "Stop Reviewer" })).toBeInTheDocument();
+  it("offers no Stop once the caused request is terminal, even while the row runs", () => {
+    renderStep(call("running"), reached(caused("child-req", "completed")));
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
   });
 
-  it("offers no Stop once the worker has settled", () => {
-    renderStep(worker("completed"));
-    expect(screen.queryByRole("button", { name: "Stop Reviewer" })).toBeNull();
+  it("offers no Stop without a caused request to interrupt", () => {
+    renderStep(call("running"), null);
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
+  });
+
+  it("labels a start as Started and a message as Messaged", () => {
+    renderStep(call("success"), reached(caused("child-req", "completed")));
+    expect(screen.getByText("Started")).toBeInTheDocument();
+  });
+
+  it("offers no Stop on a session this one did not start, as agent_interrupt refuses", () => {
+    const existing = reached(caused("req-existing", "processing"), null);
+    const actions = renderStep(call("running", "message"), existing);
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
+    expect(actions.interrupt).not.toBeCalled();
+  });
+
+  it("offers Stop on a message to a session this one started", () => {
+    const request = caused("child-req-3", "processing");
+    const actions = renderStep(call("running", "message"), reached(request));
+    screen.getByRole("button", { name: "Stop Reviewer" }).click();
+    expect(actions.interrupt).toHaveBeenCalledWith(request);
+  });
+
+  it("renders an agent_interrupt call as Interrupted, with no Stop", () => {
+    const interrupt = {
+      ...call("success"),
+      toolName: "agent_interrupt",
+      presentation: {
+        kind: "subagent",
+        action: "interrupt",
+        name: null,
+        sessionId: "child-session",
+        description: null,
+        output: null,
+      },
+    } as unknown as RenderedToolCallView;
+    renderStep(interrupt, null);
+    expect(screen.getByText("Interrupted")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
+  });
+
+  it("labels a message to a session this one did not start as Messaged", () => {
+    const existing = reached(caused("req-existing", "processing"), null);
+    renderStep(call("running", "message"), existing);
+    expect(screen.getByText("Messaged")).toBeInTheDocument();
+  });
+
+  it("links the row to the session it reached, as an ordinary session", () => {
+    renderStep(call("success"), reached(caused("child-req", "completed")));
+    expect(screen.getByRole("link", { name: "Open Reviewer" })).toBeInTheDocument();
   });
 
   it("keeps replication claims out of the transcript, which has no owner for them", () => {
@@ -130,39 +217,42 @@ describe("worker state", () => {
       expect(source, file).not.toMatch(/messageCount == null/);
     }
   });
+});
 
-  it("never reads the tool call's own status as a live worker", () => {
-    expect(workerNow(spawn("success"), null)).toEqual({
-      tone: "done",
-      text: "finished",
-    });
-    expect(workerNow(spawn("error"), null).tone).toBe("failed");
-    expect(workerNow(spawn("unknown"), null)).toEqual({
-      tone: "unknown",
-      text: "state unknown",
-    });
-    expect(workerNow(spawn("running"), null)).toEqual({
-      tone: "running",
-      text: "starting",
-    });
+describe("a background process row", () => {
+  it("offers no desktop Stop: killing a native process is not a desktop control", () => {
+    const process = {
+      itemKey: "proc-1",
+      toolName: "spawn_process",
+      toolCallId: "call-proc",
+      requestId: "parent-req",
+      statusKind: "running",
+      awaitMode: "background",
+      presentation: {
+        kind: "process",
+        action: "spawn",
+        target: "cargo test",
+        description: null,
+        output: null,
+      },
+    } as unknown as RenderedToolCallView;
+    renderStep(process, null);
+    expect(screen.getByText("cargo test")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^Stop / })).toBeNull();
+  });
+});
+
+describe("subagent list", () => {
+  it("lists each started session with its state and a way in", () => {
+    render(
+      <SubagentList workers={workersWith(reached(caused("child-req", "completed")))} />,
+    );
+    expect(screen.getByText("Subagents")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Reviewer/ })).toBeInTheDocument();
   });
 
-  it("offers no Stop without a live fact about the worker", () => {
-    for (const status of ["success", "unknown", "error"]) {
-      const workers: Workers = {
-        byChildRequest: () => null,
-        byToolCall: () => null,
-        loaded: false,
-      };
-      const view = render(
-        <WorkerActionsContext.Provider
-          value={{ parentRequestId: "parent", cancel: vi.fn() }}
-        >
-          <WorkerStep tool={spawn(status)} workers={workers} />
-        </WorkerActionsContext.Provider>,
-      );
-      expect(screen.queryByRole("button", { name: /^Stop / }), status).toBeNull();
-      view.unmount();
-    }
+  it("renders nothing for a session that started no other session", () => {
+    const view = render(<SubagentList workers={NO_WORKERS} />);
+    expect(view.container).toBeEmptyDOMElement();
   });
 });

@@ -31,12 +31,34 @@ pub(crate) struct ProviderPublicationPlan {
     pub(crate) encoded: std::sync::Arc<super::native_encoding::EncodedNativeMessage>,
     pub(crate) expected: std::sync::Arc<gents_protocol::message::Message>,
     pub(crate) tool_deadline_at: String,
-    pub(crate) spawn_admissions: Vec<super::SpawnAdmissionPlan>,
+    /// Provider-native ids of the calls this turn accepts as background rows.
+    pub(crate) background_calls: Vec<String>,
+}
+
+/// Provider-native ids of a turn's `agent_new`/`agent_message` calls: a
+/// started session is a background row from its accepted publication on.
+pub(crate) fn session_message_call_ids(message: &gents_protocol::message::Message) -> Vec<String> {
+    match message {
+        gents_protocol::message::Message::Assistant { content, .. } => content
+            .iter()
+            .filter_map(|part| match part {
+                gents_protocol::message::AssistantContent::ToolCall(call)
+                    if crate::toolset::is_session_message_tool(&call.function.name) =>
+                {
+                    Some(call.id.clone())
+                }
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct PublishedProviderTurn {
     pub(crate) message_doc_id: String,
+    /// Read only by tests that pin the published transcript position.
+    #[cfg(test)]
     pub(crate) sequence: u32,
     pub(crate) accepted_tools: Vec<super::AcceptedToolCall>,
 }
@@ -62,14 +84,8 @@ pub(crate) enum ProviderCloseRejection {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ProviderReplayRejection {
-    #[error("publication replay spawn admission route changed")]
-    SpawnRouteChanged,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum ProviderWorkspaceRejection {
-    #[error("remote spawn workspace differs from accepted parent request")]
-    ParentStampChanged,
+    #[error("publication replay await mode changed")]
+    AwaitModeChanged,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -607,6 +623,7 @@ pub(crate) async fn publish_provider_turn(
     publish_provider_turn_with_time(node, generation, plan, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn publish_provider_turn_at(
     node: &EmbeddedNode,
     generation: &str,
@@ -633,7 +650,7 @@ async fn publish_provider_turn_with_time(
             let encoded = std::sync::Arc::clone(&plan.encoded);
             let expected = std::sync::Arc::clone(&plan.expected);
             let tool_deadline_at = plan.tool_deadline_at.clone();
-            let spawn_admissions = plan.spawn_admissions.clone();
+            let background_calls = plan.background_calls.clone();
             let fixture_now = fixture_now.clone();
             Box::pin(async move {
             let exemplar = final_flush.as_ref().context("provider publication has no output")?;
@@ -647,12 +664,6 @@ async fn publish_provider_turn_with_time(
             );
             anyhow::ensure!(matches!(exemplar.source, OutputSource::ProviderTurn { .. }) || encoded.tool_calls.is_empty(), "authored publication cannot create tool intent");
             let request = load_request_in_txn(txn, exemplar).await?;
-            let parent_subagent_depth = u32::try_from(
-                request
-                    .subagent_depth
-                    .context("accepted request omitted subagent depth")?,
-            )
-            .context("accepted request has invalid subagent depth")?;
             let owner = request.execution_generation.as_deref().context("request generation missing")?;
             let state = request.lifecycle_state.context("request lifecycle missing")?;
             let expiry = request.execution_lease_expires_at.as_deref().context("request expiry missing")?;
@@ -678,7 +689,7 @@ async fn publish_provider_turn_with_time(
                     generation,
                     &message_key,
                     expected.as_ref(),
-                    &spawn_admissions,
+                    &background_calls,
                 )
                 .await;
             }
@@ -716,36 +727,19 @@ async fn publish_provider_turn_with_time(
             let sequence = crate::lifecycle::queue::next_append_sequence_in_transaction(
                 txn, &prepared.agent_did, &prepared.session_id,
             ).await?;
+            anyhow::ensure!(
+                background_calls
+                    .iter()
+                    .all(|id| encoded.tool_calls.iter().any(|tool| tool.id == *id)),
+                "background publication names a tool call outside this turn"
+            );
             let mut tool_doc_ids = Vec::with_capacity(encoded.tool_calls.len());
             for tool in &encoded.tool_calls {
-                let admission = spawn_admissions.iter().find(|plan| plan.tool_call_id == tool.id);
-                anyhow::ensure!(
-                    admission.is_none() || tool.name == crate::toolset::SPAWN_SUBAGENT_TOOL_NAME,
-                    "spawn admission names a non-spawn provider tool"
-                );
-                let arguments = PayloadRef {
-                    close_doc_id: close_doc_id.clone(),
-                    stream: tool.arguments_stream,
+                let await_mode = if background_calls.contains(&tool.id) {
+                    crate::tool_call_lifecycle::AwaitMode::Background
+                } else {
+                    crate::tool_call_lifecycle::AwaitMode::Foreground
                 };
-                let arguments_text = encoded
-                    .streams
-                    .get(usize::try_from(tool.arguments_stream)?)
-                    .context("encoded tool arguments stream is missing")?
-                    .payload
-                    .clone();
-                let remote_admission = admission
-                    .filter(|plan| plan.spawn_target_did != prepared.agent_did);
-                if let Some(plan) = remote_admission {
-                    if plan.delegated_workspace != accepted_parent_workspace(&request)? {
-                        return Err(ProviderWorkspaceRejection::ParentStampChanged.into());
-                    }
-                }
-                let delegated_input = remote_admission
-                    .map(|_| gents_protocol::output::DelegatedToolInput {
-                        source: arguments.clone(),
-                        arguments: arguments_text,
-                        parent_subagent_depth,
-                    });
                 let tool_call_key = format!("{}:{}:{}", prepared.request_doc_id, message_key, tool.native_index);
                 let created = txn.execute_with_variables(
                     "mutation($input: AgentToolCallMutationInputArg!) { create_AgentToolCall(input: $input) { _docID } }",
@@ -761,13 +755,7 @@ async fn publish_provider_turn_with_time(
                         "tool_call_id": tool.id,
                         "lifecycle_state": "pending",
                         "deadline_at": tool_deadline_at,
-                        "await_mode": admission.map(|plan| plan.await_mode.as_str()).unwrap_or("foreground"),
-                        "cancel_policy": "cascade",
-                        "child_request_id": admission.map(|plan| plan.child_request_id.clone()),
-                        "spawn_target_did": admission.map(|plan| plan.spawn_target_did.clone()),
-                        "spawn_behavior_id": admission.map(|plan| plan.spawn_behavior_id.clone()),
-                        "delegated_workspace": admission.and_then(|plan| plan.delegated_workspace.clone()),
-                        "delegated_input": delegated_input
+                        "await_mode": await_mode.as_str()
                     }}),
                 ).await?;
                 tool_doc_ids.push(created_doc_id(&created, "AgentToolCall")?);
@@ -823,16 +811,19 @@ async fn publish_provider_turn_with_time(
                     tool_name: tool.name.clone(),
                     execution_generation: generation.to_owned(),
                     arguments: PayloadRef { close_doc_id: close_doc_id.clone(), stream: tool.arguments_stream },
-                    // The coordinator dispatch object retains its private
-                    // canonical argument reference. Delegated input is the
-                    // persisted remote-host projection on AgentToolCall.
-                    delegated_input: None,
-                    spawn_admission: spawn_admissions.iter()
-                        .find(|plan| plan.tool_call_id == tool.id)
-                        .cloned(),
+                    await_mode: if background_calls.contains(&tool.id) {
+                        crate::tool_call_lifecycle::AwaitMode::Background
+                    } else {
+                        crate::tool_call_lifecycle::AwaitMode::Foreground
+                    },
                 }
             }).collect();
-            Ok(PublishedProviderTurn { message_doc_id, sequence, accepted_tools })
+            Ok(PublishedProviderTurn {
+                message_doc_id,
+                #[cfg(test)]
+                sequence,
+                accepted_tools,
+            })
         })},
     ).await
 }
@@ -843,15 +834,8 @@ async fn replay_publication_in_txn(
     generation: &str,
     message_key: &str,
     expected: &gents_protocol::message::Message,
-    spawn_admissions: &[super::SpawnAdmissionPlan],
+    background_calls: &[String],
 ) -> Result<PublishedProviderTurn> {
-    let parent_request = load_request_in_txn(txn, exemplar).await?;
-    let parent_subagent_depth = u32::try_from(
-        parent_request
-            .subagent_depth
-            .context("accepted replay request omitted subagent depth")?,
-    )
-    .context("accepted replay request has invalid subagent depth")?;
     let requester = exemplar.requester_did.as_ref().map_or_else(
         || "null".to_owned(),
         |did| format!("\"{}\"", escape_graphql_string(did)),
@@ -905,7 +889,7 @@ async fn replay_publication_in_txn(
             continue;
         };
         let response = txn.execute_local_response(&format!(
-            r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}) {{ _docID request_doc_id session_id agent_did requester_did message_sequence tool_call_id tool_name lifecycle_state await_mode child_request_id spawn_target_did spawn_behavior_id delegated_workspace delegated_input }} }}"#,
+            r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}) {{ _docID request_doc_id session_id agent_did requester_did message_sequence tool_call_id tool_name lifecycle_state await_mode }} }}"#,
             escape_graphql_string(tool_call_doc_id),
         )).await?;
         let tools = response
@@ -944,91 +928,19 @@ async fn replay_publication_in_txn(
                     == Some("pending"),
             "publication replay pending tool binding changed"
         );
-        let persisted_admission = match (
-            tool["child_request_id"].as_str(),
-            tool["spawn_target_did"].as_str(),
-            tool["spawn_behavior_id"].as_str(),
-            serde_json::from_value::<Option<gents_protocol::output::DelegatedWorkspace>>(
-                tool["delegated_workspace"].clone(),
-            )
-            .context("publication replay has malformed delegated workspace")?,
-        ) {
-            (None, None, None, None) => None,
-            (
-                Some(child_request_id),
-                Some(spawn_target_did),
-                Some(spawn_behavior_id),
-                delegated_workspace,
-            ) => Some(super::SpawnAdmissionPlan {
-                tool_call_id: id.clone(),
-                child_request_id: child_request_id.to_owned(),
-                spawn_target_did: spawn_target_did.to_owned(),
-                spawn_behavior_id: spawn_behavior_id.to_owned(),
-                delegated_workspace,
-                await_mode: crate::tool_call_lifecycle::AwaitMode::from_persisted(
-                    tool["await_mode"]
-                        .as_str()
-                        .context("spawn admission replay lacks await mode")?,
-                )
-                .context("spawn admission replay has invalid await mode")?,
-            }),
-            _ => anyhow::bail!("publication replay has incomplete immutable spawn admission"),
+        let await_mode = crate::tool_call_lifecycle::AwaitMode::from_persisted(
+            tool["await_mode"]
+                .as_str()
+                .context("publication replay lacks await mode")?,
+        )
+        .context("publication replay has invalid await mode")?;
+        let planned = if background_calls.contains(id) {
+            crate::tool_call_lifecycle::AwaitMode::Background
+        } else {
+            crate::tool_call_lifecycle::AwaitMode::Foreground
         };
-        let delegated_input = serde_json::from_value::<
-            Option<gents_protocol::output::DelegatedToolInput>,
-        >(tool["delegated_input"].clone())
-        .context("publication replay has malformed delegated input")?;
-        let should_delegate = persisted_admission
-            .as_ref()
-            .is_some_and(|plan| plan.spawn_target_did != exemplar.agent_did);
-        if should_delegate {
-            let source = accepted_parent_workspace(&parent_request)?;
-            if !persisted_admission
-                .as_ref()
-                .is_some_and(|plan| plan.delegated_workspace == source)
-            {
-                return Err(ProviderWorkspaceRejection::ParentStampChanged.into());
-            }
-        }
-        let expected_arguments = match expected {
-            gents_protocol::message::Message::Assistant { content, .. } => content
-                .iter()
-                .find_map(|part| match part {
-                    gents_protocol::message::AssistantContent::ToolCall(call) if call.id == *id => {
-                        Some(&call.function.arguments)
-                    }
-                    _ => None,
-                })
-                .map(serde_json::to_string)
-                .transpose()?,
-            _ => None,
-        };
-        anyhow::ensure!(
-            delegated_input_matches(
-                should_delegate,
-                delegated_input.as_ref(),
-                arguments,
-                expected_arguments.as_deref(),
-                parent_subagent_depth,
-            ),
-            "publication replay delegated input changed"
-        );
-        // A lost acknowledgement reruns hook planning and therefore has a
-        // fresh provisional UUID.  The committed accepted row is the genesis
-        // authority: only target/mode may be corroborated here; its persisted
-        // child identity is returned below for dispatch adoption.
-        if let Some(supplied) = spawn_admissions
-            .iter()
-            .find(|plan| plan.tool_call_id == *id)
-        {
-            if !persisted_admission.as_ref().is_some_and(|persisted| {
-                persisted.spawn_target_did == supplied.spawn_target_did
-                    && persisted.spawn_behavior_id == supplied.spawn_behavior_id
-                    && persisted.delegated_workspace == supplied.delegated_workspace
-                    && persisted.await_mode == supplied.await_mode
-            }) {
-                return Err(ProviderReplayRejection::SpawnRouteChanged.into());
-            }
+        if await_mode != planned {
+            return Err(ProviderReplayRejection::AwaitModeChanged.into());
         }
         accepted_tools.push(super::AcceptedToolCall {
             tool_call_doc_id: tool_call_doc_id.clone(),
@@ -1041,35 +953,15 @@ async fn replay_publication_in_txn(
             tool_name: name.clone(),
             execution_generation: generation.to_owned(),
             arguments: arguments.clone(),
-            // Replay returns the coordinator-local dispatch object; the
-            // validated delegated projection remains on the durable row.
-            delegated_input: None,
-            spawn_admission: persisted_admission,
+            await_mode,
         });
     }
     Ok(PublishedProviderTurn {
         message_doc_id: row.doc_id,
+        #[cfg(test)]
         sequence: row.message.sequence,
         accepted_tools,
     })
-}
-
-pub(super) fn delegated_input_matches(
-    should_delegate: bool,
-    input: Option<&gents_protocol::output::DelegatedToolInput>,
-    source: &PayloadRef,
-    arguments: Option<&str>,
-    parent_subagent_depth: u32,
-) -> bool {
-    match (should_delegate, input) {
-        (false, None) => true,
-        (true, Some(input)) => {
-            input.source == *source
-                && arguments == Some(input.arguments.as_str())
-                && input.parent_subagent_depth == parent_subagent_depth
-        }
-        (false, Some(_)) | (true, None) => false,
-    }
 }
 
 /// Append exactly one provider flush. Replaying the same committed fact is a
@@ -1089,6 +981,7 @@ pub(crate) async fn append_provider_segment(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn append_provider_segment_at(
     node: &EmbeddedNode,
     generation: &str,
@@ -1113,6 +1006,7 @@ pub(crate) async fn append_in_txn(
     append_in_txn_with_time(txn, generation, prepared, None).await
 }
 
+#[cfg(test)]
 pub(crate) async fn append_in_txn_at(
     txn: &ConfigApplyTxn<'_>,
     generation: &str,
@@ -1252,33 +1146,6 @@ pub(crate) fn validate_source_purpose(
     Ok(())
 }
 
-/// Reconstruct the existing signed workspace-reference shape from the exact
-/// parent row read in the publication transaction. This is bridge provenance,
-/// not a new workspace grant or an ACP decision.
-fn accepted_parent_workspace(
-    request: &AgentRequestRow,
-) -> Result<Option<gents_protocol::output::DelegatedWorkspace>> {
-    let lineage = crate::lifecycle::WorkspaceLineage {
-        workspace_id: request.workspace_id.clone(),
-        workspace_owner_agent_did: request.workspace_owner_agent_did.clone(),
-        workspace_authority: request.workspace_authority.clone(),
-        workspace_seal_hash: request.workspace_seal_hash.clone(),
-    };
-    lineage.require_authority_if_workspace_id()?;
-    Ok(lineage
-        .workspace_id
-        .map(|workspace_id| gents_protocol::output::DelegatedWorkspace {
-            workspace_id,
-            workspace_owner_agent_did: lineage
-                .workspace_owner_agent_did
-                .expect("validated workspace owner"),
-            workspace_authority: lineage
-                .workspace_authority
-                .expect("validated workspace authority"),
-            workspace_seal_hash: lineage.workspace_seal_hash,
-        }))
-}
-
 async fn load_source_in_txn(
     txn: &ConfigApplyTxn<'_>,
     prepared: &OutputSegment,
@@ -1311,24 +1178,4 @@ async fn load_source_in_txn(
                 .filter(|row| row.segment.source == prepared.source)
                 .collect()
         })
-}
-
-#[cfg(test)]
-mod workspace_guard_tests {
-    use super::*;
-
-    #[test]
-    fn malformed_parent_provenance_is_not_a_workspace_stamp_rejection() {
-        let request = AgentRequestRow {
-            request_id: "injected-malformed-parent".to_owned(),
-            workspace_id: Some("workspace-without-authority".to_owned()),
-            ..Default::default()
-        };
-        let error = accepted_parent_workspace(&request)
-            .expect_err("incomplete parent provenance must fail validation");
-        assert!(
-            error.downcast_ref::<ProviderWorkspaceRejection>().is_none(),
-            "only an authenticated stamp mismatch is a modeled rejection: {error:#}"
-        );
-    }
 }

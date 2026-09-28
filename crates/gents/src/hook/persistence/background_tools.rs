@@ -67,7 +67,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         parent_lifecycle.start_running().await?;
@@ -314,9 +313,10 @@ impl DefraSessionHook {
                                 &execution_request_id,
                                 &execution_tool_doc_id,
                                 &execution_tool_name,
-                                "failed",
+                                BACKGROUND_TIMEOUT_NOTIFICATION.0,
                                 "",
-                                Some("deadline_exceeded"),
+                                Some(BACKGROUND_TIMEOUT_NOTIFICATION.1),
+                                crate::lifecycle::RequestHopCause::Continuation,
                             ),
                         )
                         .await
@@ -350,6 +350,7 @@ impl DefraSessionHook {
                                 "cancelled",
                                 "",
                                 Some("explicit_cancel"),
+                                crate::lifecycle::RequestHopCause::Continuation,
                             ),
                         )
                         .await
@@ -422,6 +423,7 @@ impl DefraSessionHook {
                                 "completed",
                                 &notification_result,
                                 None,
+                                crate::lifecycle::RequestHopCause::Continuation,
                             ),
                         )
                         .await
@@ -498,6 +500,7 @@ impl DefraSessionHook {
                                 "failed",
                                 &notification_result,
                                 Some("tool_failed"),
+                                crate::lifecycle::RequestHopCause::Continuation,
                             ),
                         )
                         .await
@@ -534,6 +537,7 @@ impl DefraSessionHook {
                             "failed",
                             &reason,
                             Some("tool_panicked"),
+                            crate::lifecycle::RequestHopCause::Continuation,
                         ),
                     )
                     .await
@@ -619,7 +623,6 @@ impl DefraSessionHook {
                 args,
                 parent_deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         lifecycle.start_running().await?;
@@ -745,7 +748,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         lifecycle.start_running().await?;
@@ -803,7 +805,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         lifecycle.start_running().await?;
@@ -888,7 +889,6 @@ impl DefraSessionHook {
                 args,
                 deadline_at,
                 crate::tool_call_lifecycle::AwaitMode::Foreground,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .await?;
         control_lifecycle.start_running().await?;
@@ -983,6 +983,31 @@ impl DefraSessionHook {
                 .await;
         }
 
+        if lifecycle.is_session_message() {
+            let mut lifecycle = lifecycle;
+            let (status, request_id) =
+                match crate::session_message::kill(&self.node, &mut lifecycle).await? {
+                    crate::session_message::KillOutcome::Interrupting { request_id } => {
+                        ("interrupting", Some(request_id))
+                    }
+                    crate::session_message::KillOutcome::Cancelled => ("cancelled", None),
+                    crate::session_message::KillOutcome::Settled => ("already_terminal", None),
+                };
+            let result = json_string(json!({
+                "ok": true,
+                "tool_call_id": background_tool_call_id,
+                "status": status,
+                "request_id": request_id,
+                "error": null
+            }));
+            return self
+                .complete_control_tool_call(
+                    &mut control_lifecycle,
+                    CANCEL_PROCESS_TOOL_NAME,
+                    result,
+                )
+                .await;
+        }
         let notification_tool_name = lifecycle.tool_name().to_string();
         let notification_request_id = lifecycle.request_id().to_string();
         let notification_reason = parsed
@@ -1044,6 +1069,7 @@ impl DefraSessionHook {
             "cancelled",
             "",
             Some(notification_reason),
+            crate::lifecycle::RequestHopCause::Continuation,
         )
         .await
         {
@@ -1091,15 +1117,6 @@ fn cancel_process_reply(
     }))
 }
 
-fn background_timeout_terminal() -> ChildTerminal {
-    ChildTerminal::Failed {
-        reason: "background tool deadline exceeded".to_string(),
-        failure_class: FailureClass::External,
-    }
-}
-
-const BACKGROUND_TIMEOUT_COMPLETION_REASON: &str = "deadline_exceeded";
-
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(message) = payload.downcast_ref::<&str>() {
         (*message).to_string()
@@ -1110,13 +1127,14 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+/// A native background process past its own deadline: its completion
+/// notification reports a failure with the `deadline_exceeded` reason, which
+/// recovery's projection of a `timedOut` row reproduces.
+const BACKGROUND_TIMEOUT_NOTIFICATION: (&str, &str) = ("failed", "deadline_exceeded");
+
 #[cfg(test)]
 mod ownership_projection_tests {
-    use super::{
-        background_timeout_terminal, project_background_completion_if_owned,
-        BACKGROUND_TIMEOUT_COMPLETION_REASON,
-    };
-    use crate::tool_call_lifecycle::{ChildTerminal, FailureClass};
+    use super::{project_background_completion_if_owned, BACKGROUND_TIMEOUT_NOTIFICATION};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -1152,16 +1170,40 @@ mod ownership_projection_tests {
         assert!(projected.load(Ordering::SeqCst));
     }
 
-    #[test]
-    fn background_timeout_preserves_failure_metadata() {
-        assert_eq!(BACKGROUND_TIMEOUT_COMPLETION_REASON, "deadline_exceeded");
-        let terminal = background_timeout_terminal();
+    #[tokio::test]
+    async fn background_timeout_preserves_failure_metadata() {
         assert_eq!(
-            terminal,
-            ChildTerminal::Failed {
-                reason: "background tool deadline exceeded".to_string(),
-                failure_class: FailureClass::External,
-            }
+            BACKGROUND_TIMEOUT_NOTIFICATION,
+            ("failed", "deadline_exceeded")
         );
+        let admission = crate::tool_call_lifecycle::admission_fixture::published_admission(
+            crate::tool_call_lifecycle::admission_fixture::PublishedAdmissionOptions {
+                name: "background-timeout-metadata".to_owned(),
+                real_identity: true,
+                await_mode: crate::tool_call_lifecycle::AwaitMode::Background,
+                start_running: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut tool = admission.tool;
+        assert!(tool.timeout().await.unwrap());
+        let doc_id = tool.doc_id().unwrap().to_owned();
+        let response = admission
+            .node
+            .execute(&format!(
+                r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 1) {{ lifecycle_state cancel_cause tool_failure_class status }} }}"#,
+                crate::graphql::escape_graphql_string(&doc_id)
+            ))
+            .await;
+        assert!(!response.has_errors(), "{:?}", response.errors);
+        let row = &response.data.unwrap()["AgentToolCall"][0];
+        assert_eq!(row["lifecycle_state"], "timedOut");
+        assert_eq!(row["cancel_cause"], "deadline");
+        assert_eq!(row["tool_failure_class"], "external");
+        assert_eq!(row["status"], "completionPending");
+        admission.node.shutdown().await;
+        std::fs::remove_dir_all(admission.path).unwrap();
     }
 }

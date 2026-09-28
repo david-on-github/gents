@@ -261,16 +261,6 @@ async fn redrive_in_transaction(
     candidate: &AgentRequestRow,
     request_id: &str,
 ) -> Result<RedriveOutcome> {
-    if crate::goal::load_canonical_goal_in_txn(
-        txn,
-        required_str(candidate.agent_did.as_deref(), "agent_did")?,
-        required_str(candidate.session_id.as_deref(), "session_id")?,
-    )
-    .await?
-    .is_some()
-    {
-        return Ok(RedriveOutcome::Ineligible);
-    }
     let retry_key = format!(
         "retry:doc:{}",
         required_str(candidate.doc_id.as_deref(), "_docID")?
@@ -326,8 +316,11 @@ async fn redrive_in_transaction(
     else {
         return Ok(RedriveOutcome::Ineligible);
     };
+    // Lean `CausalHop.continuation_preserves_hop`: the retried wake copies
+    // the session's current hop, like every same-session continuation.
+    let hop = crate::session::load_session_current_hop_in_txn(txn, agent_did, session_id).await?;
     let response = txn
-        .execute_local_response(&redrive_mutation(candidate, request_id, &retry_key).await?)
+        .execute_local_response(&redrive_mutation(candidate, request_id, &retry_key, hop).await?)
         .await?;
     let created = crate::watcher::agent_request_from_mutation_response(&response, "successor")?
         .context("background wake successor create matched no document")?;
@@ -395,6 +388,7 @@ async fn redrive_mutation(
     candidate: &AgentRequestRow,
     request_id: &str,
     retry_key: &str,
+    hop: u32,
 ) -> Result<String> {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let retry_root = candidate
@@ -407,12 +401,6 @@ async fn redrive_mutation(
     let behavior_id = required_str(candidate.behavior_id.as_deref(), "behavior_id")?;
     let session_id = required_str(candidate.session_id.as_deref(), "session_id")?;
     let doc_id = required_str(candidate.doc_id.as_deref(), "_docID")?;
-    let subagent_depth = candidate
-        .subagent_depth
-        .map(u32::try_from)
-        .transpose()
-        .context("failed background wake subagent_depth must fit in u32")?
-        .unwrap_or_default();
     let retry_count = required_i64(candidate.retry_count, "retry_count")?;
     let max_retries = required_i64(candidate.max_retries, "max_retries")?;
     let admission =
@@ -421,7 +409,7 @@ async fn redrive_mutation(
             &candidate.request_id,
         );
     let parent_link = ParentLink {
-        depth: subagent_depth,
+        depth: hop,
         parent_request_id: candidate.request_id.clone(),
         parent_request_doc_id: doc_id.to_string(),
         ..Default::default()

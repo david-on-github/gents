@@ -549,10 +549,9 @@ async fn startup_source_persistence_exhaustion_fails_closed_and_is_the_exact_run
             Some(slot_runner),
         ),
     );
-    // This fixture configures one active worker. A slot also owns one
-    // retained continuation worker per supported subagent depth.
-    let slot_worker_count =
-        1 + usize::try_from(crate::tool_call_lifecycle::MAX_SUBAGENT_DEPTH).unwrap();
+    // This fixture configures one active worker; a slot runs exactly its
+    // active workers.
+    let slot_worker_count = 1;
     assert_eq!(
         tokio::time::timeout(STARTUP_DEADLOCK_GUARD, slot_started_rx.recv())
             .await

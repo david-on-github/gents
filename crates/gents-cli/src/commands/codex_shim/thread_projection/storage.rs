@@ -30,6 +30,15 @@ pub(super) async fn load_scoped_session(
         .map(|(session, _)| session))
 }
 
+/// A session another session started is a sub-agent thread under its
+/// starter, never a root thread; its stored provenance says so.
+fn is_started(session: &AgentSession) -> bool {
+    session
+        .provenance
+        .as_ref()
+        .is_some_and(|provenance| provenance.parent_request_doc_id.is_some())
+}
+
 pub(super) async fn load_thread_state(
     state: &ShimState,
     session_id: &str,
@@ -46,7 +55,7 @@ pub(super) async fn load_thread_state(
             else {
                 return Ok(None);
             };
-            if row.session.behavior_id != state.behavior_id.as_ref() {
+            if row.session.behavior_id != state.behavior_id.as_ref() || is_started(&row.session) {
                 return Ok(None);
             }
             let head = load_head_in_txn(txn, state, session_id).await?;
@@ -122,7 +131,7 @@ pub(super) async fn list_scoped_sessions(state: &ShimState) -> Result<Vec<AgentS
                 anyhow::ensure!(session.agent_did==state.agent_did.as_ref() && session.requester_did.as_deref()==Some(state.local_requester_did()) && session.behavior_id==state.behavior_id.as_ref(),"thread list crossed owner/requester/behavior scope");
                 anyhow::ensure!(identities.insert(session.session_id.clone()),"thread list has duplicate canonical session identity");
                 Ok(session)
-            }).collect()
+            }).filter(|session| !matches!(session, Ok(session) if is_started(session))).collect()
         })
     }).await
 }

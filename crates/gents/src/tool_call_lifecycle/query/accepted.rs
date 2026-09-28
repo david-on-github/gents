@@ -1,5 +1,4 @@
-//! Direct coordinator admission lookup. Remote hosts must use delegated input;
-//! they must never obtain the parent's mixed output through this reader.
+//! Direct admission lookup of a locally accepted tool call.
 
 use anyhow::{Context, Result};
 use defra_node::EmbeddedNode;
@@ -16,6 +15,7 @@ impl ToolCallLifecycle {
     /// Reconstruct the immutable admission binding of a local direct tool.
     /// This is not dispatch authorization: the start transition rechecks the
     /// live request and pending row atomically under the mutation gate.
+    #[cfg(test)]
     pub(crate) async fn load_accepted_for_dispatch(
         node: &EmbeddedNode,
         tool_doc_id: &str,
@@ -52,7 +52,7 @@ impl ToolCallLifecycle {
                         r#"{{ AgentToolCall(filter: {{
                     {scope}, _docID: {{ _eq: "{tool_id}" }}
                 }}, limit: 2) {{ _docID request_doc_id tool_call_id tool_name
-                    message_sequence lifecycle_state delegated_input spawned_by_tool_call_doc_id }} }}"#
+                    message_sequence lifecycle_state await_mode spawned_by_tool_call_doc_id }} }}"#
                     ))
                     .await?;
                 let rows = response["data"]["AgentToolCall"]
@@ -63,17 +63,6 @@ impl ToolCallLifecycle {
                     "direct admission tool is missing or ambiguous"
                 );
                 let tool = &rows[0];
-                // A remote spawn bridge also carries the host's bounded
-                // delegated input on the coordinator's own physical row.
-                // Its author may still reconstruct the accepted parent
-                // header; a different node must use delegated input instead
-                // and must not read the parent's mixed output.
-                if !tool["delegated_input"].is_null() {
-                    anyhow::ensure!(
-                        node.node_identity_did() == Some(agent_did),
-                        "foreign node cannot reconstruct delegated parent output"
-                    );
-                }
                 anyhow::ensure!(
                     tool["spawned_by_tool_call_doc_id"].is_null(),
                     "spawned process admission belongs to its accepted meta-call owner"
@@ -92,6 +81,10 @@ impl ToolCallLifecycle {
                     .as_u64()
                     .and_then(|value| u32::try_from(value).ok())
                     .context("accepted tool lacks valid message sequence")?;
+                let await_mode = crate::tool_call_lifecycle::AwaitMode::from_persisted(
+                    tool["await_mode"].as_str().unwrap_or("foreground"),
+                )
+                .context("accepted tool has an invalid await mode")?;
                 let request = escape_graphql_string(request_doc_id);
                 let response = txn
                     .execute(&format!(
@@ -119,9 +112,13 @@ impl ToolCallLifecycle {
                     message.role == MessageRole::Assistant,
                     "direct tool binding requires assistant publication"
                 );
-                anyhow::ensure!(message.outcome == OutputOutcome::Complete
-                    || (!require_complete && matches!(tool["lifecycle_state"].as_str(),
-                        Some("completed" | "failed" | "timedOut" | "cancelled"))),
+                anyhow::ensure!(
+                    message.outcome == OutputOutcome::Complete
+                        || (!require_complete
+                            && matches!(
+                                tool["lifecycle_state"].as_str(),
+                                Some("completed" | "failed" | "timedOut" | "cancelled")
+                            )),
                     "partial diagnostic tool bindings must already be terminal and cannot dispatch"
                 );
                 let MessagePublication::RequestExecution {
@@ -166,8 +163,7 @@ impl ToolCallLifecycle {
                     tool_name: name.to_owned(),
                     execution_generation: execution_generation.clone(),
                     arguments: arguments.clone(),
-                    delegated_input: None,
-                    spawn_admission: None,
+                    await_mode,
                 })
             })
         })

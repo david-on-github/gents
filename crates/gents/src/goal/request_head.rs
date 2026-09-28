@@ -85,6 +85,10 @@ pub(super) fn verify_goal_continuation_receipt(
             .created_at
             .as_deref()
             .context("continuation receipt lacks creation time")?,
+        child
+            .subagent_depth
+            .and_then(|hop| u32::try_from(hop).ok())
+            .context("continuation receipt lacks its hop")?,
     )?;
     let actual: GoalBackedRequestFingerprint =
         serde_json::from_value(serde_json::to_value(child)?)?;

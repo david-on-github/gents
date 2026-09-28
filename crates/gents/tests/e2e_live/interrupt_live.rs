@@ -8,7 +8,7 @@
 //! cargo test -p gents --test e2e_live -- live_interrupt_mid_stream_on_openai_compatible -- --ignored --nocapture
 //! ```
 //!
-//! The backend fixture follows the typed `subagent_delegation_live.rs` pattern:
+//! The backend fixture follows the typed `session_message_live.rs` pattern:
 //! the target's agent-DID-scoped `InferenceBackend` plus an `InferenceProfile`
 //! selecting the target's model with high reasoning effort, an `InferenceSampling`
 //! document (temperature 1.0, top_p 0.95), an `AgentContext`, and the
@@ -546,7 +546,7 @@ async fn boot_interrupt_agent(db: &TestDb, target: &InferenceTarget) -> Result<B
 }
 
 /// Install the typed live backend fixture documents (the
-/// `subagent_delegation_live.rs` pattern): an actual agent-DID-scoped
+/// `session_message_live.rs` pattern): an actual agent-DID-scoped
 /// `InferenceBackend` plus the profile/sampling/context/behavior documents the
 /// default behavior resolves through, with the principal's
 /// `default_behavior_id` bound to `LIVE_BEHAVIOR_ID`. The profile selects the

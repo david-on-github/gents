@@ -2,11 +2,11 @@
 
 mod accepted;
 mod result;
-pub(crate) use result::load_tool_call_read_in_txn;
 pub use result::{
     load_tool_call_arguments, load_tool_call_presentation, load_tool_call_result,
     render_tool_result, CanonicalToolCallPresentation,
 };
+pub(crate) use result::{load_tool_call_read, load_tool_call_read_in_txn};
 
 use std::sync::Arc;
 
@@ -17,8 +17,7 @@ use serde::Deserialize;
 use crate::graphql::escape_graphql_string;
 
 use super::{
-    AwaitMode, CancelCause, CancelPolicy, FailureClass, SelectedToolIdentity, ToolCallLifecycle,
-    ToolCallState,
+    AwaitMode, CancelCause, FailureClass, SelectedToolIdentity, ToolCallLifecycle, ToolCallState,
 };
 
 fn decode_selected_tool_identity(
@@ -66,15 +65,9 @@ struct ToolCallRow {
     cancel_cause: Option<String>,
     selected_service_id: Option<String>,
     selected_tool_name: Option<String>,
-    // v3 subagent fields — nullable for v2 rows that pre-date the schema migration.
     await_mode: Option<String>,
-    cancel_policy: Option<String>,
-    child_request_id: Option<String>,
     #[serde(default)]
     spawned_by_tool_call_doc_id: Option<String>,
-    spawn_target_did: Option<String>,
-    spawn_behavior_id: Option<String>,
-    unclaimed_deadline_at: Option<String>,
 }
 
 impl ToolCallLifecycle {
@@ -88,44 +81,6 @@ impl ToolCallLifecycle {
         let escaped_session_id = escape_graphql_string(session_id);
         let escaped_tool_call_id = escape_graphql_string(tool_call_id);
         Self::load_filtered(node, format!("session_id:{{_eq:\"{escaped_session_id}\"}},tool_call_id:{{_eq:\"{escaped_tool_call_id}\"}}")).await
-    }
-
-    /// Rehydrate one physical row by `_docID` within the session scope it
-    /// records. Background owners that hold only the physical identity use
-    /// this; the scoped load still enforces the row's own boundary.
-    pub(crate) async fn load_physical(
-        node: Arc<EmbeddedNode>,
-        doc_id: &str,
-    ) -> Result<Option<Self>> {
-        #[derive(Deserialize)]
-        struct ScopeRow {
-            agent_did: String,
-            requester_did: Option<String>,
-            session_id: String,
-        }
-        let escaped = escape_graphql_string(doc_id);
-        let response = crate::graphql::graphql_with_transaction_retry(
-            &node,
-            &format!(
-                r#"{{ AgentToolCall(filter: {{ _docID: {{ _eq: "{escaped}" }} }}, limit: 2) {{ agent_did requester_did session_id }} }}"#
-            ),
-            "tool call physical scope",
-        )
-        .await?;
-        let rows: Vec<ScopeRow> = crate::graphql::rows(&response, "AgentToolCall")?;
-        let scope = match rows.as_slice() {
-            [] => return Ok(None),
-            [scope] => scope,
-            _ => anyhow::bail!("tool call document {doc_id} resolved to more than one row"),
-        };
-        Self::load_by_doc_id(
-            node.clone(),
-            doc_id,
-            &scope.agent_did,
-            &scope.session_id,
-            scope.requester_did.as_deref(),
-        )
-        .await
     }
 
     /// Rehydrate the exact authorized bridge within its canonical session scope.
@@ -161,12 +116,7 @@ impl ToolCallLifecycle {
                     selected_service_id
                     selected_tool_name
                     await_mode
-                    cancel_policy
-                    child_request_id
                     spawned_by_tool_call_doc_id
-                    spawn_target_did
-                    spawn_behavior_id
-                    unclaimed_deadline_at
         }}}}"#
         );
 
@@ -267,26 +217,12 @@ impl ToolCallLifecycle {
             .and_then(AwaitMode::from_persisted)
             .ok_or_else(|| anyhow!("AgentToolCall is missing a valid await_mode"))?;
 
-        let cancel_policy = row
-            .cancel_policy
-            .as_deref()
-            .and_then(CancelPolicy::from_persisted)
-            .ok_or_else(|| anyhow!("AgentToolCall is missing a valid cancel_policy"))?;
-
-        let child_request_id = row.child_request_id.filter(|s| !s.is_empty());
         if spawned_by_tool_call_doc_id.is_some() {
             anyhow::ensure!(
-                await_mode == AwaitMode::Background && child_request_id.is_none(),
-                "spawned lifecycle must be childless background work"
+                await_mode == AwaitMode::Background,
+                "spawned lifecycle must be background work"
             );
         }
-        let spawn_target_did = row.spawn_target_did.filter(|s| !s.is_empty());
-        let spawn_behavior_id = row.spawn_behavior_id.filter(|s| !s.is_empty());
-        let unclaimed_deadline_at = row
-            .unclaimed_deadline_at
-            .as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc));
         let selected_tool_identity =
             decode_selected_tool_identity(row.selected_service_id, row.selected_tool_name)?;
 
@@ -364,11 +300,6 @@ impl ToolCallLifecycle {
             cancel_cause,
             selected_tool_identity,
             await_mode,
-            cancel_policy,
-            child_request_id,
-            spawn_target_did,
-            spawn_behavior_id,
-            unclaimed_deadline_at,
         }))
     }
 }
@@ -519,7 +450,6 @@ mod tests {
             accepted,
             deadline,
             AwaitMode::Foreground,
-            CancelPolicy::Cascade,
         )
         .expect("accepted lifecycle")
         .with_selected_tool_identity(Some(selected));
@@ -541,6 +471,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&data_path);
     }
 }
-
-#[cfg(test)]
-mod cascade_scope_tests;

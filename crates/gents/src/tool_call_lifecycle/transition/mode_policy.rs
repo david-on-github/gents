@@ -24,16 +24,6 @@ impl ToolCallLifecycle {
             .ok_or_else(|| anyhow!("background called without started_at set"))?;
         let started_at_str = started_at.to_rfc3339();
         let deadline_at_str = self.deadline_at.to_rfc3339();
-        let flip_fragment = Self::background_flip_unclaimed_fragment(
-            self.spawn_target_did.as_deref(),
-            self.agent_did(),
-        );
-        let drop_unclaimed_bound = !flip_fragment.is_empty();
-        let unclaimed_deadline_fragment = if drop_unclaimed_bound {
-            flip_fragment.to_owned()
-        } else {
-            self.resupply_unclaimed_deadline_fragment()
-        };
 
         let escaped_doc_id = escape_graphql_string(doc_id);
 
@@ -45,7 +35,7 @@ impl ToolCallLifecycle {
                         lifecycle_state: {{ _eq: "running" }},
                         await_mode: {{ _eq: "foreground" }}
                     }},
-                    input: {{ await_mode: "background", started_at: "{started_at_str}", deadline_at: "{deadline_at_str}"{unclaimed_deadline_fragment} }}
+                    input: {{ await_mode: "background", started_at: "{started_at_str}", deadline_at: "{deadline_at_str}" }}
                 ) {{ _docID }}
             }}"#
         );
@@ -65,9 +55,6 @@ impl ToolCallLifecycle {
         }
 
         self.await_mode = AwaitMode::Background;
-        if drop_unclaimed_bound {
-            self.unclaimed_deadline_at = None;
-        }
         Ok(())
     }
 
@@ -76,9 +63,13 @@ impl ToolCallLifecycle {
     /// Lean parity: ToolCallContext.Transition.foreground.
     /// Requires Running state. Returns `ModeAlreadyForeground` if already in
     /// Foreground mode. Persists the new await_mode to the row, then updates
-    /// the in-memory field on success.
+    /// the in-memory field on success. An `agent_new`/`agent_message` row
+    /// is background-only: its result arrives only as a message.
     pub async fn foreground(&mut self) -> Result<()> {
         self.ensure_state(&[ToolCallState::Running], "foreground")?;
+        if self.is_session_message() {
+            return Err(IllegalToolCallTransition::SessionMessageIsBackgroundOnly.into());
+        }
         if self.await_mode == AwaitMode::Foreground {
             return Err(IllegalToolCallTransition::ModeAlreadyForeground.into());
         }
@@ -94,7 +85,6 @@ impl ToolCallLifecycle {
             .ok_or_else(|| anyhow!("foreground called without started_at set"))?;
         let started_at_str = started_at.to_rfc3339();
         let deadline_at_str = self.deadline_at.to_rfc3339();
-        let unclaimed_deadline_fragment = self.resupply_unclaimed_deadline_fragment();
 
         let escaped_doc_id = escape_graphql_string(doc_id);
 
@@ -106,7 +96,7 @@ impl ToolCallLifecycle {
                         lifecycle_state: {{ _eq: "running" }},
                         await_mode: {{ _eq: "background" }}
                     }},
-                    input: {{ await_mode: "foreground", started_at: "{started_at_str}", deadline_at: "{deadline_at_str}"{unclaimed_deadline_fragment} }}
+                    input: {{ await_mode: "foreground", started_at: "{started_at_str}", deadline_at: "{deadline_at_str}" }}
                 ) {{ _docID }}
             }}"#
         );
@@ -126,62 +116,6 @@ impl ToolCallLifecycle {
         }
 
         self.await_mode = AwaitMode::Foreground;
-        Ok(())
-    }
-
-    /// Pending|Running policy-flip: cancel_policy Cascade → Detach.
-    ///
-    /// Lean parity: ToolCallContext.Transition.detach. Allowed in both Pending
-    /// and Running states (h_live : pre.state = .pending ∨ pre.state = .running).
-    /// Returns `PolicyAlreadyDetach` if already in Detach policy. One-way — no
-    /// inverse method (matches Lean's structural irreversibility).
-    pub async fn detach(&mut self) -> Result<()> {
-        self.ensure_state(&[ToolCallState::Pending, ToolCallState::Running], "detach")?;
-        if self.cancel_policy == CancelPolicy::Detach {
-            return Err(IllegalToolCallTransition::PolicyAlreadyDetach.into());
-        }
-        // Composed-model parity (`ComposedState.AllToolsPersistent`): a detached
-        // tool must be a linked bridged subagent — `Persistent s t` requires
-        // `t.childRequestId.isSome`, and the composed `tool_step` detach guard
-        // (`IsDetached toolPost → Persistent post toolPost`) forbids detaching a
-        // native (child-less) tool. Enforce the same precondition here so the
-        // runtime cannot reach a state the invariant rules out.
-        if !self.is_subagent_bridge() {
-            return Err(IllegalToolCallTransition::DetachRequiresChildLink.into());
-        }
-
-        let doc_id = self
-            .doc_id
-            .as_ref()
-            .ok_or_else(|| anyhow!("doc_id must be set before policy-flip"))?;
-        // DefraDB requires DateTime fields to be re-supplied on update to
-        // avoid a type-mismatch error when re-validating the document.
-        // started_at is only set once the row is in Running state; for Pending
-        // state the row has not been created yet so this field will be absent.
-        let started_at_fragment = if let Some(started_at) = self.started_at {
-            format!(", started_at: \"{}\"", started_at.to_rfc3339())
-        } else {
-            String::new()
-        };
-        let deadline_at_str = self.deadline_at.to_rfc3339();
-        let unclaimed_deadline_fragment = self.resupply_unclaimed_deadline_fragment();
-
-        let escaped_doc_id = escape_graphql_string(doc_id);
-
-        let mutation = format!(
-            r#"mutation {{
-                update_AgentToolCall(
-                    filter: {{ _docID: {{ _eq: "{escaped_doc_id}" }} }},
-                    input: {{ cancel_policy: "detach", deadline_at: "{deadline_at_str}"{started_at_fragment}{unclaimed_deadline_fragment} }}
-                ) {{ _docID }}
-            }}"#
-        );
-
-        execute_mutation_with_retry(&self.node, &mutation, "detach")
-            .await
-            .context("detach mutation")?;
-
-        self.cancel_policy = CancelPolicy::Detach;
         Ok(())
     }
 }

@@ -1,46 +1,5 @@
 use super::*;
 
-pub(super) async fn ensure_projection_side_effects(
-    node: &EmbeddedNode,
-    parent_session_id: &str,
-    parent_request_id: &str,
-    edge: &ChildEdge,
-    status: &str,
-    summary: &str,
-    bridge_source: &str,
-) -> Result<SideEffects> {
-    // Load the parent request up front so the projection notification is stamped
-    // with the parent session's owning agent_did.
-    let parent_request = crate::request_binding::load_agent_request(node, parent_request_id)
-        .await?
-        .ok_or_else(|| anyhow!("parent AgentRequest {parent_request_id} not found"))?;
-
-    anyhow::ensure!(
-        parent_request.session_id == parent_session_id,
-        "background completion parent session mismatch"
-    );
-    let key = background_completion_notification_message_key(&edge.child_request_id, "subagent");
-    let existing = existing_notification(node, &parent_request, &key).await?;
-    let (notification, presentation) =
-        subagent_notification_presentation(edge, status, summary, bridge_source);
-    notification_delivery::ensure_notification_delivery(
-        node,
-        &parent_request,
-        existing,
-        &notification,
-        &key,
-        Some(crate::lifecycle::queue::ToolNotificationPublication {
-            tool_call_doc_id: edge.parent_tool_call_doc_id.clone(),
-            presentation,
-        }),
-    )
-    .await
-}
-
-pub(super) fn bridge_state_is_terminal(state: &str) -> bool {
-    matches!(state, "completed" | "failed" | "timedOut" | "cancelled")
-}
-
 pub(super) struct ExistingNotification {
     pub(super) doc_id: String,
 }

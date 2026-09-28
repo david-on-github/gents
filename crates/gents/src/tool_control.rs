@@ -4,7 +4,7 @@ use anyhow::Result;
 use defra_node::EmbeddedNode;
 
 use crate::hook::BackgroundExecutionRegistry;
-use crate::tool_call_lifecycle::{AwaitMode, CancelCause, CascadeDispatch, ToolCallLifecycle};
+use crate::tool_call_lifecycle::{AwaitMode, CancelCause, ToolCallLifecycle};
 
 /// Lean `ManagedExec.cancelReply`: `Cancelled` is reported only after the
 /// execution's process was observed to stop.
@@ -50,17 +50,16 @@ pub async fn cancel_session_background_process(
         lifecycle.session_id(),
         lifecycle.agent_did(),
         lifecycle.requester_did(),
-    ) || lifecycle.is_subagent_bridge()
+    ) || lifecycle.is_session_message()
     {
         return Ok(CancelBackgroundToolCallOutcome::NotFound);
     }
-    cancel_background_tool_call(node, executions, agent_did, session_id, tool_call_id).await
+    cancel_background_tool_call(node, executions, session_id, tool_call_id).await
 }
 
 pub async fn cancel_background_tool_call(
     node: Arc<EmbeddedNode>,
     background_executions: &BackgroundExecutionRegistry,
-    agent_did: &str,
     session_id: &str,
     tool_call_id: &str,
 ) -> Result<CancelBackgroundToolCallOutcome> {
@@ -79,8 +78,28 @@ pub async fn cancel_background_tool_call(
         });
     }
 
-    let process_owned = !lifecycle.is_subagent_bridge();
-    if process_owned && !background_executions.contains(tool_call_id).await {
+    if lifecycle.is_session_message() {
+        // A session-message row has no process: the kill interrupts the one
+        // request it caused, or ends the row itself when it cannot wait on
+        // this runtime's own terminal for that request.
+        return Ok(
+            match crate::session_message::kill(&node, &mut lifecycle).await? {
+                crate::session_message::KillOutcome::Settled => {
+                    CancelBackgroundToolCallOutcome::AlreadyTerminal {
+                        state: lifecycle.state().as_str().to_string(),
+                    }
+                }
+                crate::session_message::KillOutcome::Interrupting { .. }
+                | crate::session_message::KillOutcome::Cancelled => {
+                    CancelBackgroundToolCallOutcome::Cancelled {
+                        live_execution_cancelled: false,
+                    }
+                }
+            },
+        );
+    }
+
+    if !background_executions.contains(tool_call_id).await {
         let (process, _) = ToolCallLifecycle::cancel_unowned_background_tool(
             &node,
             &mut lifecycle,
@@ -93,52 +112,30 @@ pub async fn cancel_background_tool_call(
     }
 
     let persisted = lifecycle
-        .cancel_during_run_with_cascade_dispatch(CancelCause::UserCancelled, agent_did)
+        .cancel_during_run(CancelCause::UserCancelled)
         .await;
     // Persist the operator-authored terminal cause before signalling the live
     // worker. Otherwise the worker can observe cancellation first and win the
     // terminal write with the less-specific `interrupted` cause. A persistence
     // failure must still stop the live work: cancellation is best-effort state
     // control, not contingent on observability storage being available.
-    let (live_execution_cancelled, process) = if process_owned {
-        let doc_id = lifecycle
-            .doc_id()
-            .ok_or_else(|| anyhow::anyhow!("background cancellation lacks physical identity"))?
-            .to_owned();
-        let process = background_executions
-            .stop_execution(tool_call_id, &doc_id)
-            .await;
-        (true, Some(process))
-    } else {
-        (background_executions.cancel(tool_call_id).await, None)
-    };
-    let dispatch = match persisted {
-        Ok(dispatch) => dispatch,
-        Err(error) => {
-            tracing::error!(
-                tool_call_id,
-                live_execution_cancelled,
-                %error,
-                "failed to persist background cancellation after stopping live execution",
-            );
-            return Err(error);
-        }
-    };
-
-    if let Some(CascadeDispatch::Local { child, .. }) = dispatch {
-        crate::interrupt::interrupt_request_by_doc_id(
-            node.as_ref(),
-            child
-                .doc_id
-                .as_deref()
-                .expect("verified physical cascade child"),
-            child
-                .agent_did
-                .as_deref()
-                .expect("verified local child principal"),
-            child.requester_did.as_deref(),
-        )
-        .await?;
+    let doc_id = lifecycle
+        .doc_id()
+        .ok_or_else(|| anyhow::anyhow!("background cancellation lacks physical identity"))?
+        .to_owned();
+    let process = background_executions
+        .stop_execution(tool_call_id, &doc_id)
+        .await;
+    let live_execution_cancelled = true;
+    let process = Some(process);
+    if let Err(error) = persisted {
+        tracing::error!(
+            tool_call_id,
+            live_execution_cancelled,
+            %error,
+            "failed to persist background cancellation after stopping live execution",
+        );
+        return Err(error);
     }
 
     if lifecycle.is_cancelled() {
@@ -280,7 +277,6 @@ mod tests {
                 accepted,
                 deadline,
                 AwaitMode::Background,
-                crate::tool_call_lifecycle::CancelPolicy::Cascade,
             )
             .unwrap();
             lifecycle.start_running().await.unwrap();
@@ -390,7 +386,6 @@ mod tests {
             let outcome = cancel_background_tool_call(
                 admission.node.clone(),
                 &registry,
-                &admission.agent_did,
                 admission.tool.session_id(),
                 admission.tool.tool_call_id(),
             )
@@ -510,7 +505,6 @@ mod tests {
             accepted,
             deadline,
             AwaitMode::Background,
-            crate::tool_call_lifecycle::CancelPolicy::Cascade,
         )
         .unwrap();
         lifecycle.start_running().await.unwrap();

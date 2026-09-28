@@ -1,26 +1,5 @@
 use super::*;
 
-/// Standalone queue control when there is no active request to latch. Active
-/// interruption must drain inside the latch transaction so replay cannot widen
-/// its cutoff to later completions.
-pub(crate) async fn drain_automated_wakeups_returning_ids(
-    node: &EmbeddedNode,
-    session_id: &str,
-    agent_did: &str,
-    requester_did: Option<&str>,
-    reason: &str,
-) -> Result<Vec<String>> {
-    drain_pending_session_requests_where(
-        node,
-        session_id,
-        agent_did,
-        requester_did,
-        reason,
-        is_scheduled_automated_wakeup,
-    )
-    .await
-}
-
 pub(crate) async fn drain_automated_wakeups_in_txn(
     txn: &ConfigApplyTxn<'_>,
     session_id: &str,
@@ -41,54 +20,6 @@ pub(crate) async fn drain_automated_wakeups_in_txn(
 
 fn is_scheduled_automated_wakeup(row: &AgentRequestRow) -> bool {
     row.execution_origin.as_deref() == Some("scheduled") && row_is_automated_wakeup(row)
-}
-
-pub(crate) async fn drain_subagent_owned_queue(
-    node: &EmbeddedNode,
-    session_id: &str,
-    agent_did: &str,
-    requester_did: Option<&str>,
-    reason: &str,
-) -> Result<usize> {
-    Ok(drain_pending_session_requests_where(
-        node,
-        session_id,
-        agent_did,
-        requester_did,
-        reason,
-        |row| row_is_subagent_owned_queue(row),
-    )
-    .await?
-    .len())
-}
-
-async fn drain_pending_session_requests_where(
-    node: &EmbeddedNode,
-    session_id: &str,
-    agent_did: &str,
-    requester_did: Option<&str>,
-    reason: &str,
-    should_drain: fn(&AgentRequestRow) -> bool,
-) -> Result<Vec<String>> {
-    crate::config_client::ConfigAccess::transact_local(
-        node,
-        None,
-        "lifecycle.drain_pending_session_requests",
-        |txn| {
-            Box::pin(async move {
-                drain_pending_session_requests_where_in_txn(
-                    txn,
-                    session_id,
-                    agent_did,
-                    requester_did,
-                    reason,
-                    should_drain,
-                )
-                .await
-            })
-        },
-    )
-    .await
 }
 
 // SAFETY (#664): `agent_did` scopes both the pending-row scan and mutation.

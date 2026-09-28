@@ -46,53 +46,6 @@ pub(super) async fn count_live_backgrounded_rows(
         .count())
 }
 
-pub(crate) fn background_receipt_payload(
-    child_request_id: &str,
-    child_session_id: Option<&str>,
-    behavior_id: &str,
-) -> String {
-    json_string(json!({
-        "ok": true,
-        "child_request_id": child_request_id,
-        "child_session_id": child_session_id,
-        "behavior_id": behavior_id,
-        "await_mode": "background",
-        "status": "running"
-    }))
-}
-
-pub(super) fn backgrounded_receipt_payload(
-    child_request_id: &str,
-    child_session_id: &str,
-    behavior_id: &str,
-) -> String {
-    json_string(json!({
-        "ok": true,
-        "child_request_id": child_request_id,
-        "child_session_id": child_session_id,
-        "behavior_id": behavior_id,
-        "await_mode": "background",
-        "status": "running",
-        "backgrounded": true
-    }))
-}
-
-pub(super) async fn wait_for_external_lifecycle_owner(
-    missing_owner_since: &mut Option<chrono::DateTime<chrono::Utc>>,
-    now: chrono::DateTime<chrono::Utc>,
-    internal_call_id: &str,
-) -> anyhow::Result<()> {
-    let first_missing_at = *missing_owner_since.get_or_insert(now);
-    if now - first_missing_at >= chrono::Duration::seconds(5) {
-        anyhow::bail!(
-            "spawn_subagent foreground wait lost lifecycle ownership for tool_call_id={internal_call_id}"
-        );
-    }
-
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    Ok(())
-}
-
 pub(super) fn truncation_mode_for(tool_name: &str) -> TruncationMode {
     crate::truncation::tool_result_truncation_mode(tool_name)
 }
@@ -327,27 +280,6 @@ pub(super) fn json_envelope_with_bounded_result(
     json_string(envelope)
 }
 
-pub(super) fn foreground_terminal_failure_payload(
-    child_request_id: &str,
-    child_session_id: &str,
-    status: &str,
-    reason: impl Into<String>,
-    failure_class: FailureClass,
-) -> String {
-    json_string(json!({
-        "ok": false,
-        "child_request_id": child_request_id,
-        "child_session_id": child_session_id,
-        "await_mode": "foreground",
-        "status": status,
-        "final_response": null,
-        "error": {
-            "reason": reason.into(),
-            "failure_class": failure_class.as_str()
-        }
-    }))
-}
-
 pub(super) fn invalid_tool_arguments_payload(
     tool_name: &str,
     path: &str,
@@ -359,7 +291,7 @@ pub(super) fn invalid_tool_arguments_payload(
         "path": path,
         "message": message.into(),
         "retryable": false,
-        "service_id": "subagent",
+        "service_id": "session",
         "tool_name": tool_name
     }))
 }
@@ -417,21 +349,6 @@ pub(super) fn background_budget_exceeded_payload(current_backgrounded: usize) ->
     }))
 }
 
-pub(super) fn depth_exceeded_payload(parent_subagent_depth: u32) -> String {
-    json_string(json!({
-        "ok": false,
-        "failure_class": "invalid_tool_arguments",
-        "code": "subagent_depth_exceeded",
-        "path": "/behavior_id",
-        "message": "subagent depth ceiling would be exceeded",
-        "retryable": false,
-        "service_id": "subagent",
-        "tool_name": SPAWN_SUBAGENT_TOOL_NAME,
-        "parent_subagent_depth": parent_subagent_depth,
-        "max_subagent_depth": MAX_SUBAGENT_DEPTH
-    }))
-}
-
 pub(super) fn tool_not_allowed_payload(
     tool_name: &str,
     path: &str,
@@ -445,10 +362,10 @@ pub(super) fn tool_not_allowed_payload(
         "path": path,
         "message": message.into(),
         "retryable": false,
-        "service_id": "subagent",
+        "service_id": "session",
         "tool_name": tool_name,
         "requested_tool_name": requested,
-        "allowed_subagent_targets": allowed_targets
+        "allowed_agents": allowed_targets
     }))
 }
 
@@ -464,9 +381,35 @@ pub(super) fn service_unavailable_payload(
         "path": path,
         "message": message.into(),
         "retryable": retryable,
-        "service_id": "subagent",
+        "service_id": "session",
         "tool_name": tool_name
     }))
+}
+
+impl DefraSessionHook {
+    pub(super) async fn ensure_assistant_turn_sequence(
+        &self,
+    ) -> anyhow::Result<(String, String, chrono::DateTime<chrono::Utc>, u32)> {
+        let mut state = self.state.lock().await;
+        let session_id = state
+            .session_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("session hook missing session id"))?;
+        let request_id = state
+            .current_request_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("tool call is missing its active request id"))?;
+        if state.current_request_doc_id.is_none() {
+            anyhow::bail!("tool call is missing its active request document id");
+        }
+        let deadline_at = state
+            .request_deadline_at
+            .ok_or_else(|| anyhow::anyhow!("tool call is missing its request deadline"))?;
+
+        let sequence = state.begin_or_continue_assistant_turn();
+
+        Ok((session_id, request_id, deadline_at, sequence))
+    }
 }
 
 #[cfg(test)]
@@ -583,7 +526,7 @@ mod tests {
         };
         let raw = "line 1\nline 2\nline 3\nline 4";
 
-        let bounded = bounded_tool_result_for_model("wait_subagent", raw, &limits);
+        let bounded = bounded_tool_result_for_model("agent_new", raw, &limits);
 
         assert!(bounded.contains("line 1\nline 2"));
         assert!(!bounded.contains("line 3"));

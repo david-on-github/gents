@@ -31,93 +31,6 @@ async fn codex_shim_live_protocol_uses_real_backend() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires the configured real OpenAI-compatible backend"]
-async fn codex_shim_live_runtime_spawn_projects_real_subagent() -> Result<()> {
-    let suffix = Uuid::new_v4().simple().to_string();
-    let child_token = format!("CHILDLIVE-{}", &suffix[..8]);
-    let smoke = start_live_codex_shim().await?;
-    let child_behavior_id = configure_live_local_subagent(&smoke).await?;
-    let expected_child_model = gents_model_selection_id(&smoke.backend_id, &smoke.model_name);
-
-    let (mut ws, _) = connect_async(format!("ws://127.0.0.1:{}/", smoke.shim_port))
-        .await
-        .context("connecting to live codex-shim websocket")?;
-    initialize_config_and_thread(&mut ws, &smoke.home_dir).await?;
-    let thread_id = start_thread(&mut ws, &smoke.home_dir).await?;
-    let prompt = format!(
-        "Call spawn_subagent exactly once using the target named `codex-live-child`, \
-         prompt `Reply with exactly {child_token} and no extra words`, and await_mode \
-         `foreground`. Do not call any other tool. After the child returns, reply with \
-         exactly {child_token} and no extra words."
-    );
-    send_turn(&mut ws, &thread_id, &prompt).await?;
-    let capture = read_turn_capture(&mut ws).await?;
-
-    assert_eq!(capture.turn.status, codex::TurnStatus::Completed);
-    assert!(
-        capture.text.contains(&child_token),
-        "parent did not return the real child result token {child_token}: {}",
-        capture.text
-    );
-    let (parent_request_id, parent_session_id, parent_behavior_id) =
-        wait_for_request(&smoke.graphql, &smoke.agent_did, &prompt).await?;
-    assert_eq!(parent_session_id, thread_id);
-    assert_eq!(parent_behavior_id, smoke.behavior_id);
-
-    let spawned = wait_for_real_spawn_projection(
-        &smoke.graphql,
-        &parent_request_id,
-        &smoke.agent_did,
-        &child_behavior_id,
-        &child_token,
-    )
-    .await?;
-    assert_eq!(spawned.parent_session_id, thread_id);
-
-    let completed_spawn = capture
-        .completed_collab_items
-        .iter()
-        .rev()
-        .find(|item| {
-            item.tool == codex::CollabAgentTool::SpawnAgent
-                && item.receiver_thread_ids == vec![spawned.child_session_id.clone()]
-                && item.child_status == Some(codex::CollabAgentStatus::Completed)
-        })
-        .ok_or_else(|| {
-            anyhow!(
-                "live turn did not project the completed runtime spawn as a native collab item: {:?}",
-                capture.completed_collab_items
-            )
-        })?;
-    assert_eq!(
-        completed_spawn.status,
-        codex::CollabAgentToolCallStatus::Completed
-    );
-    assert_eq!(
-        completed_spawn.model.as_deref(),
-        Some(expected_child_model.as_str())
-    );
-
-    wait_for_completed_inference_behaviors(
-        &smoke.graphql,
-        &smoke.backend_id,
-        &[&smoke.behavior_id, &child_behavior_id],
-    )
-    .await?;
-    assert_shim_trace_methods(
-        &smoke.shim_trace,
-        &[
-            "initialize",
-            "thread/start",
-            "turn/start",
-            "collabAgentToolCall",
-        ],
-    )?;
-
-    Ok(())
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires the configured real OpenAI-compatible backend"]
 async fn codex_shim_live_gents_filesystem_tools_project_to_codex_items() -> Result<()> {
@@ -173,6 +86,7 @@ async fn codex_shim_live_gents_filesystem_tools_project_to_codex_items() -> Resu
 #[ignore = "requires the configured real OpenAI-compatible backend"]
 async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Result<()> {
     let prompt_token = "PROJLIVE";
+    let second_prompt_token = "GOALLIVE";
     let thread_name = format!("GENTS live projection {}", Uuid::new_v4().simple());
     let goal_objective = format!("exercise live projection {}", Uuid::new_v4().simple());
     let git_branch = "codex-shim-live-projection".to_string();
@@ -224,25 +138,6 @@ async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Resul
     .await?;
     let _: codex::ThreadSettingsUpdateResponse =
         read_typed_response(&mut ws, request_id(403)).await?;
-
-    send_client_request(
-        &mut ws,
-        codex::ClientRequest::ThreadGoalSet {
-            request_id: request_id(404),
-            params: codex::ThreadGoalSetParams {
-                thread_id: thread_id.clone(),
-                objective: Some(goal_objective.clone()),
-                status: Some(codex::ThreadGoalStatus::Active),
-                token_budget: Some(Some(321)),
-            },
-        },
-    )
-    .await?;
-    let goal_set: codex::ThreadGoalSetResponse =
-        read_typed_response(&mut ws, request_id(404)).await?;
-    assert_eq!(goal_set.goal.thread_id, thread_id);
-    assert_eq!(goal_set.goal.objective, goal_objective);
-    assert_eq!(goal_set.goal.token_budget, Some(321));
 
     let expected_git_sha = init_test_git_repo(&smoke.home_dir, &git_branch)?;
     send_client_request(
@@ -346,13 +241,48 @@ async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Resul
         Some("user")
     );
 
+    // An empty thread stays ephemeral until its first turn creates the
+    // durable session, so the Goal is set between two real turns.
+    send_client_request(
+        &mut ws,
+        codex::ClientRequest::ThreadGoalSet {
+            request_id: request_id(404),
+            params: codex::ThreadGoalSetParams {
+                thread_id: thread_id.clone(),
+                objective: Some(goal_objective.clone()),
+                status: Some(codex::ThreadGoalStatus::Active),
+                token_budget: Some(Some(321)),
+            },
+        },
+    )
+    .await?;
+    let goal_set: codex::ThreadGoalSetResponse =
+        read_typed_response(&mut ws, request_id(404)).await?;
+    assert_eq!(goal_set.goal.thread_id, thread_id);
+    assert_eq!(goal_set.goal.objective, goal_objective);
+    assert_eq!(goal_set.goal.token_budget, Some(321));
+
+    let second_prompt =
+        format!("Reply with exactly this token and no extra words: {second_prompt_token}");
+    send_turn(&mut ws, &thread_id, &second_prompt).await?;
+    let (second_text, second_turn) = read_turn_to_completion(&mut ws).await?;
+    assert_eq!(
+        second_turn.status,
+        codex::TurnStatus::Completed,
+        "turn after goal/set did not complete: {second_turn:?}"
+    );
+    assert!(
+        second_text.contains(second_prompt_token),
+        "expected the turn after goal/set to contain {second_prompt_token}, got:\n{second_text}"
+    );
+
     send_client_request(
         &mut ws,
         codex::ClientRequest::ThreadRead {
             request_id: request_id(406),
             params: codex::ThreadReadParams {
                 thread_id: thread_id.clone(),
-                include_turns: false,
+                include_turns: true,
             },
         },
     )
@@ -379,8 +309,14 @@ async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Resul
         .find(|turn| turn.id == completed_turn.id)
         .ok_or_else(|| {
             anyhow!(
-                "live thread/read did not include turn {}",
-                completed_turn.id
+                "live thread/read did not include turn {}: {:?}",
+                completed_turn.id,
+                thread_read
+                    .thread
+                    .turns
+                    .iter()
+                    .map(|turn| (&turn.id, &turn.status, turn.items.len()))
+                    .collect::<Vec<_>>()
             )
         })?;
     assert_turn_has_user_text(history_turn, &prompt);
@@ -440,14 +376,16 @@ async fn codex_shim_live_thread_projection_survives_real_backend_turn() -> Resul
             "thread/name/set",
             "thread/memoryMode/set",
             "thread/settings/update",
-            "thread/goal/set",
             "thread/metadata/update",
+            "turn/start",
+            "thread/goal/set",
             "turn/start",
             "thread/read",
             "thread/list",
             "thread/goal/get",
         ],
     )?;
+    assert_shim_trace_method_count_at_least(&smoke.shim_trace, "turn/start", 2)?;
 
     Ok(())
 }

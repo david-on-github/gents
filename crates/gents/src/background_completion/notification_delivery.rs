@@ -1,12 +1,16 @@
 use super::*;
 
 pub(super) struct SideEffects {
-    pub(super) notification_sequence: u32,
     pub(super) wake_request_id: Option<String>,
-    pub(super) created_notification: bool,
     pub(super) created_wake: bool,
 }
 
+/// Append a background tool's completion notification and its coalesced
+/// wake, written at `wake`'s hop: a native process continues its session, and
+/// a session-message row's completion is caused by the request it caused. A
+/// wake over the woken principal's bound is still written, after its
+/// notification, and refused at admission.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn append_background_tool_completion(
     node: &EmbeddedNode,
     parent_session_id: &str,
@@ -16,6 +20,7 @@ pub(crate) async fn append_background_tool_completion(
     status: &str,
     result: &str,
     reason: Option<&str>,
+    wake: crate::lifecycle::RequestHopCause,
 ) -> Result<()> {
     // Load the parent request up front so the completion notification is stamped
     // with the parent session's owning agent_did.
@@ -30,18 +35,19 @@ pub(crate) async fn append_background_tool_completion(
     let existing =
         existing_tool_completion_notification(node, &parent_request, tool_call_doc_id).await?;
     let tool_call_id = load_tool_call_id(node, tool_call_doc_id).await?;
+    let existing_text = match &existing {
+        Some(existing) => stored_notification_text(node, &parent_request, &existing.doc_id).await,
+        None => None,
+    };
     let render = |budget: usize| {
         tool_completion_presentation(&tool_call_id, tool_name, status, result, reason, budget)
     };
     // A published notice is replayed exactly (Lean ToolDelivery
     // notification replay), so a redrive renders with the budget that notice
     // was rendered under, not whatever the configuration says now.
-    let published_budget = match &existing {
-        Some(existing) => {
-            published_notification_budget(node, &parent_request, &existing.doc_id, &render).await
-        }
-        None => None,
-    };
+    let published_budget = existing_text
+        .as_deref()
+        .and_then(|stored| published_notification_budget(stored, &render));
     let output_budget = match published_budget {
         Some(budget) => budget,
         None => crate::tool_surface::configured_output_budget(
@@ -61,6 +67,7 @@ pub(crate) async fn append_background_tool_completion(
         existing,
         &notification,
         &key,
+        wake,
         Some(crate::lifecycle::queue::ToolNotificationPublication {
             tool_call_doc_id: tool_call_doc_id.to_owned(),
             presentation,
@@ -84,17 +91,14 @@ pub(crate) async fn append_background_tool_completion(
     Ok(())
 }
 
-/// The summary budget an already published notice was rendered under: the
-/// unescaped length of its `<result>` body, with or without a truncation
-/// marker, whichever re-renders the stored text exactly. `None` when the
-/// stored notice cannot be read or matches neither, which leaves the atomic
-/// publication owner to reject the conflicting replay.
-async fn published_notification_budget(
+/// The stored text of an already published notice, or `None` when it cannot
+/// be read, which leaves the atomic publication owner to reject a
+/// conflicting replay.
+async fn stored_notification_text(
     node: &EmbeddedNode,
     parent: &crate::AgentRequest,
     notification_doc_id: &str,
-    render: &impl Fn(usize) -> (String, Vec<gents_protocol::output::PresentationPart>),
-) -> Option<usize> {
+) -> Option<String> {
     let (_, message) = crate::session::load_canonical_message_from_node(
         node,
         notification_doc_id,
@@ -110,7 +114,17 @@ async fn published_notification_budget(
         )
     })
     .ok()?;
-    let stored = message.rag_text()?;
+    message.rag_text()
+}
+
+/// The summary budget an already published notice was rendered under: the
+/// unescaped length of its `<result>` body, with or without a truncation
+/// marker, whichever re-renders the stored text exactly. `None` when it
+/// matches neither.
+fn published_notification_budget(
+    stored: &str,
+    render: &impl Fn(usize) -> (String, Vec<gents_protocol::output::PresentationPart>),
+) -> Option<usize> {
     let body = stored.split_once("<result>")?.1.split_once("</result>")?.0;
     let unescaped = body
         .replace("&lt;", "<")
@@ -160,11 +174,10 @@ pub(super) async fn ensure_notification_delivery(
     existing: Option<side_effects::ExistingNotification>,
     content: &str,
     message_key: &str,
+    wake: crate::lifecycle::RequestHopCause,
     native: Option<crate::lifecycle::queue::ToolNotificationPublication>,
 ) -> Result<SideEffects> {
-    let native = native.context(
-        "subagent background notification requires its dedicated canonical provenance builder",
-    )?;
+    let native = native.context("background notification requires its canonical provenance")?;
     let enqueued = crate::lifecycle::queue::persist_background_completion_with_message_canonical(
         node,
         parent,
@@ -181,12 +194,11 @@ pub(super) async fn ensure_notification_delivery(
         },
         existing.as_ref().map(|receipt| receipt.doc_id.as_str()),
         &native,
+        wake,
     )
     .await?;
     Ok(SideEffects {
-        notification_sequence: enqueued.message_sequence,
         wake_request_id: enqueued.request.map(|request| request.request_id),
-        created_notification: existing.is_none(),
         created_wake: enqueued.created_request,
     })
 }

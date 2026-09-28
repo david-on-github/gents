@@ -225,126 +225,6 @@ fn open_extension_surfaces_carry_capture_metadata() {
     assert_eq!(captures[1]["provenance_status"], "unsupported_manifest");
 }
 
-fn projection_descendant_edge(
-    child_request_id: &str,
-    materialization_state: crate::DescendantMaterializationState,
-    authorization_state: crate::DescendantAuthorizationState,
-    control_authority: crate::DescendantControlAuthority,
-) -> crate::DescendantEdge {
-    crate::DescendantEdge {
-        cursor: format!("cursor-{child_request_id}"),
-        root_request_id: "req-root".to_string(),
-        immediate_parent_request_id: "req-root".to_string(),
-        immediate_parent_request_doc_id: "doc-root".to_string(),
-        immediate_parent_agent_did: "did:test:root".to_string(),
-        immediate_parent_requester_did: None,
-        immediate_parent_tool_call_doc_id: format!("doc-tool-{child_request_id}"),
-        immediate_parent_session_id: "session-root".to_string(),
-        immediate_parent_tool_call_id: format!("tool-{child_request_id}"),
-        child_request_id: child_request_id.to_string(),
-        child_request_doc_id: Some(format!("doc-{child_request_id}")),
-        child_requester_did: Some("did:test:root".to_string()),
-        child_session_id: Some(format!("session-{child_request_id}")),
-        principal_did: Some(format!("did:test:{child_request_id}")),
-        behavior_id: Some(format!("behavior-{child_request_id}")),
-        target: Some(format!("target-{child_request_id}")),
-        await_mode: "background".to_string(),
-        cancel_policy: Some("cascade".to_string()),
-        lifecycle_state: "running".to_string(),
-        stop_pending: false,
-        child_lifecycle_state: Some(RequestLifecycleState::Processing),
-        materialization_state,
-        terminal_result_ref: None,
-        transcript_cursor: 0,
-        authorization_state,
-        control_authority,
-        diagnostic: None,
-        depth: 1,
-        created_at: Some("2026-08-16T00:00:00Z".to_string()),
-        updated_at: Some("2026-08-16T00:00:01Z".to_string()),
-    }
-}
-
-#[test]
-fn external_descendant_projections_only_promote_readable_edges() {
-    let mut timeline = build_run_timeline(RunTimelineRows {
-        request: TimelineRequestRow {
-            doc_id: Some("doc-root".to_string()),
-            request_id: "req-root".to_string(),
-            agent_did: Some("did:test:root".to_string()),
-            behavior_id: Some("root".to_string()),
-            session_id: Some("session-root".to_string()),
-            lifecycle_state: Some(RequestLifecycleState::Processing),
-            ..Default::default()
-        },
-        ..Default::default()
-    });
-    timeline.descendant_edges = vec![
-        projection_descendant_edge(
-            "child-readable",
-            crate::DescendantMaterializationState::MaterializedRemote,
-            crate::DescendantAuthorizationState::Authorized,
-            crate::DescendantControlAuthority::Authorized,
-        ),
-        projection_descendant_edge(
-            "child-pending-private",
-            crate::DescendantMaterializationState::AwaitingChild,
-            crate::DescendantAuthorizationState::PendingMaterialization,
-            crate::DescendantControlAuthority::PendingMaterialization,
-        ),
-        projection_descendant_edge(
-            "child-rejected-private",
-            crate::DescendantMaterializationState::AuthorizationPending,
-            crate::DescendantAuthorizationState::RejectedPhysicalLineage,
-            crate::DescendantControlAuthority::RejectedPhysicalLineage,
-        ),
-    ];
-
-    let context = ProjectionContext::default();
-    let codex = build_adapter_projection(
-        AdapterProjectionKind::OpenAiCodexRunTrace,
-        &timeline,
-        &context,
-    );
-    let AdapterProjection::OpenAiCodexRunTrace(codex) = codex.output else {
-        panic!("Codex projection");
-    };
-    assert_eq!(codex.child_run_ids, vec!["child-readable"]);
-
-    let langgraph = build_adapter_projection(
-        AdapterProjectionKind::LangGraphStateHistory,
-        &timeline,
-        &context,
-    );
-    let AdapterProjection::LangGraphStateHistory(langgraph) = langgraph.output else {
-        panic!("LangGraph projection");
-    };
-    assert_eq!(
-        langgraph.values.get("child_request_ids"),
-        Some(&json!(["child-readable"]))
-    );
-    assert!(langgraph
-        .nodes
-        .iter()
-        .any(|node| node.request_id.as_deref() == Some("child-readable")));
-    assert!(langgraph
-        .tasks
-        .iter()
-        .any(|task| { task.child_request_id.as_deref() == Some("child-readable") }));
-
-    let multi =
-        build_adapter_projection(AdapterProjectionKind::MultiAgentTask, &timeline, &context);
-    let AdapterProjection::MultiAgentTask(multi) = multi.output else {
-        panic!("multi-agent projection");
-    };
-    assert_eq!(multi.delegations.len(), 1);
-    assert_eq!(multi.delegations[0].child_request_id, "child-readable");
-
-    let serialized = serde_json::to_string(&(codex, langgraph, multi)).unwrap();
-    assert!(!serialized.contains("child-pending-private"));
-    assert!(!serialized.contains("child-rejected-private"));
-}
-
 fn workspace_root() -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -1409,4 +1289,63 @@ fn external_contract_fixtures_validate_without_runtime_dependencies() {
             );
         }
     }
+}
+
+/// An `agent_new` row names the request it caused in the run timeline, read
+/// through `session_origin::caused_requests`, and the projection carries
+/// that delegation.
+#[tokio::test]
+async fn an_agent_new_row_links_the_request_it_caused() {
+    use crate::tool_call_lifecycle::admission_fixture::{
+        published_session_message, PublishedAdmissionOptions,
+    };
+    let message = published_session_message(PublishedAdmissionOptions {
+        name: "timeline-caused-request".to_owned(),
+        real_identity: true,
+        await_mode: crate::tool_call_lifecycle::AwaitMode::Background,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let node = message.admission.node.clone();
+    let caller_request_id = crate::request_binding::load_agent_request_by_doc_id(
+        &node,
+        message.admission.tool.request_doc_id().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .request_id;
+    let tool_call_id = message.admission.tool.tool_call_id().to_owned();
+    let rows = crate::run_timeline_fetch::load_run_timeline_rows(
+        &crate::config_client::ConfigAccess::Local(node.clone()),
+        &caller_request_id,
+    )
+    .await
+    .unwrap();
+    let row = rows
+        .tool_calls
+        .iter()
+        .find(|row| row.tool_call_id == tool_call_id)
+        .expect("agent_new row in the timeline");
+    assert_eq!(
+        row.child_request_id.as_deref(),
+        Some(message.caused_request_id.as_str())
+    );
+
+    let timeline = crate::run_timeline::build_run_timeline(rows);
+    let envelope = build_adapter_projection(
+        AdapterProjectionKind::AtifTrajectory,
+        &timeline,
+        &ProjectionContext::default(),
+    );
+    assert!(
+        projection_delegations(&envelope).contains(&ProjectionDelegation {
+            parent_request_id: caller_request_id,
+            child_request_id: message.caused_request_id.clone(),
+            parent_tool_call_id: Some(tool_call_id),
+        })
+    );
+    node.shutdown().await;
+    std::fs::remove_dir_all(&message.admission.path).unwrap();
 }

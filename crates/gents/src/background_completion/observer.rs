@@ -18,7 +18,6 @@ struct BackgroundCompletionObserver {
     cancel: CancellationToken,
     subscription: events::Subscription,
     collection_id_to_name: HashMap<String, String>,
-    processed_child_request_ids: HashSet<String>,
 }
 
 impl BackgroundCompletionObserver {
@@ -36,12 +35,10 @@ impl BackgroundCompletionObserver {
             cancel,
             subscription,
             collection_id_to_name: HashMap::new(),
-            processed_child_request_ids: HashSet::new(),
         }
     }
 
     async fn run(&mut self) -> Result<()> {
-        self.project_ready_children().await?;
         self.run_reconcilers().await?;
         let mut reconciler_tick = tokio::time::interval(Duration::from_secs(5));
         loop {
@@ -49,14 +46,13 @@ impl BackgroundCompletionObserver {
                 biased;
                 _ = self.cancel.cancelled() => return Ok(()),
                 _ = reconciler_tick.tick() => {
-                    self.project_ready_children().await?;
                     self.run_reconcilers().await?;
                     continue;
                 }
                 msg = self.subscription.recv() => {
                     match msg {
                         Some(message) => message,
-                        None => anyhow::bail!("subagent completion subscription channel closed"),
+                        None => anyhow::bail!("background completion subscription channel closed"),
                     }
                 }
             };
@@ -65,9 +61,8 @@ impl BackgroundCompletionObserver {
             if dropped > 0 {
                 tracing::warn!(
                     dropped,
-                    "subagent completion observer dropped messages; scanning terminal children"
+                    "background completion observer dropped messages; running the recovery sweeps"
                 );
-                self.project_ready_children().await?;
                 self.run_reconcilers().await?;
             }
 
@@ -82,20 +77,20 @@ impl BackgroundCompletionObserver {
                 continue;
             }
 
-            let Some(child_request_id) =
-                load_request_id_by_doc_id(self.node.as_ref(), &update.doc_id).await?
-            else {
-                continue;
-            };
-            self.project_child_if_needed(child_request_id).await;
+            if let Err(error) = super::session_message::settle_rows_after_request_update(
+                &self.node,
+                &self.local_did,
+                &update.doc_id,
+            )
+            .await
+            {
+                tracing::warn!(
+                    request_doc_id = %update.doc_id,
+                    error = %format!("{error:#}"),
+                    "session-message settlement from a request update failed; the periodic scan retries"
+                );
+            }
         }
-    }
-
-    async fn project_ready_children(&mut self) -> Result<()> {
-        for child_request_id in load_terminal_child_request_ids(self.node.as_ref()).await? {
-            self.project_child_if_needed(child_request_id).await;
-        }
-        Ok(())
     }
 
     async fn run_reconcilers(&mut self) -> Result<()> {
@@ -149,22 +144,6 @@ impl BackgroundCompletionObserver {
                 "redrove failed background-completion wakes"
             );
         }
-        let unclaimed =
-            reconcile_unclaimed_cross_deployment_spawns(self.node.clone(), &self.local_did).await?;
-        if !unclaimed.is_empty() {
-            tracing::debug!(
-                count = unclaimed.len(),
-                "reconciled unclaimed subagent spawns"
-            );
-        }
-        let cancel_ack = observe_cancel_cascade_ack(self.node.clone(), &self.local_did).await?;
-        if !cancel_ack.is_empty() {
-            tracing::debug!(
-                count = cancel_ack.len(),
-                "observed cross-deployment cancel acks"
-            );
-        }
-
         // Owner-scoped terminal-convergence re-drive (#664): re-assert the
         // terminal state of recently-terminalized own-requests so the terminal
         // delta reaches replicas that missed the one-shot PushLog.
@@ -183,39 +162,6 @@ impl BackgroundCompletionObserver {
         Ok(())
     }
 
-    async fn project_child_if_needed(&mut self, child_request_id: String) {
-        if self.processed_child_request_ids.contains(&child_request_id) {
-            return;
-        }
-
-        match project_background_subagent_completion(
-            self.node.clone(),
-            &child_request_id,
-            &self.local_did,
-        )
-        .await
-        {
-            Ok(BackgroundCompletionOutcome::Projected { .. })
-            | Ok(BackgroundCompletionOutcome::AlreadyProjected)
-            | Ok(BackgroundCompletionOutcome::NotLocalOwner) => {
-                self.processed_child_request_ids.insert(child_request_id);
-            }
-            Ok(
-                BackgroundCompletionOutcome::NotTerminal
-                | BackgroundCompletionOutcome::NotBackground
-                | BackgroundCompletionOutcome::MissingFinalResponse
-                | BackgroundCompletionOutcome::Unlinked,
-            ) => {}
-            Err(error) => {
-                tracing::error!(
-                    child_request_id = %child_request_id,
-                    error = %error,
-                    "background subagent terminal projection failed; will retry"
-                );
-            }
-        }
-    }
-
     async fn resolve_collection_name(&mut self, collection_id: &str) -> Option<String> {
         if let Some(name) = self.collection_id_to_name.get(collection_id) {
             return Some(name.clone());
@@ -227,7 +173,7 @@ impl BackgroundCompletionObserver {
                 tracing::warn!(
                     collection_id = %collection_id,
                     %error,
-                    "subagent completion observer failed to list collections"
+                    "background completion observer failed to list collections"
                 );
                 return None;
             }
@@ -241,7 +187,7 @@ impl BackgroundCompletionObserver {
                     tracing::warn!(
                         collection_name = %name,
                         %error,
-                        "subagent completion observer failed to fetch collection definition",
+                        "background completion observer failed to fetch collection definition",
                     );
                     continue;
                 }

@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::runtime_snapshot::ActiveRuntimeSnapshot;
 
-pub(crate) mod cross_deployment_cancel_mirror;
 pub(crate) mod deferred_delivery;
 pub(crate) mod event_delivery;
 pub(crate) mod event_source;
@@ -16,7 +15,6 @@ pub(crate) mod goal_source;
 pub(crate) mod manual_source;
 pub(crate) mod production_materializer;
 pub(crate) mod schedule_source;
-pub(crate) mod subagent_source;
 pub mod subscription_source;
 
 #[cfg(test)]
@@ -349,47 +347,19 @@ impl TriggerEngine {
             node: node_scope,
             ctx: ctx_scope,
         };
-        let rendered = match crate::template::render_template(&intent.task.prompt_template, &scope)
-        {
-            Ok(s) => s,
-            Err(e) => {
-                let result = FireResult::Errored {
-                    error: format!("template: {e}"),
-                };
-                (intent.on_result)(result.clone());
-                return result;
-            }
-        };
-        let rendered_goal_objective = match intent.task.goal_objective_template.as_deref() {
-            Some(template) => match crate::template::render_template(template, &scope) {
-                Ok(objective) => Some(objective),
-                Err(error) => {
-                    let result = FireResult::Errored {
-                        error: format!("goal template: {error}"),
-                    };
-                    (intent.on_result)(result.clone());
-                    return result;
-                }
-            },
-            None if intent.task.goal_token_budget.is_some() => {
-                let result = FireResult::Errored {
-                    error: "goal token budget requires a goal objective template".to_string(),
-                };
-                (intent.on_result)(result.clone());
-                return result;
-            }
-            None => None,
-        };
-        if let Err(error) = crate::goal::validate_task_goal_declaration(
-            rendered_goal_objective.as_deref(),
+        let (rendered, rendered_goal_objective) = match crate::template::render_task(
+            &intent.task.prompt_template,
+            intent.task.goal_objective_template.as_deref(),
             intent.task.goal_token_budget,
+            &scope,
         ) {
-            let result = FireResult::Errored {
-                error: format!("goal declaration: {error}"),
-            };
-            (intent.on_result)(result.clone());
-            return result;
-        }
+            Ok(rendered) => rendered,
+            Err(error) => {
+                let result = FireResult::Errored { error };
+                (intent.on_result)(result.clone());
+                return result;
+            }
+        };
         let concurrency_agent_did = || {
             snapshot
                 .behavior(&intent.task.behavior_id)
@@ -624,89 +594,4 @@ impl TriggerEngine {
         (intent.on_result)(result.clone());
         result
     }
-}
-
-#[doc(hidden)]
-pub async fn run_subagent_source_for_test(
-    node: Arc<defra_node::EmbeddedNode>,
-    snapshot_rx: watch::Receiver<Arc<ActiveRuntimeSnapshot>>,
-    authorized_peer_dids: std::collections::HashSet<String>,
-    cancel: CancellationToken,
-) {
-    struct UnusedMaterializer;
-    impl MaterializerHandle for UnusedMaterializer {
-        fn materialize(
-            &self,
-            _task: &crate::runtime_snapshot::ResolvedTask,
-            _trigger_id: Option<&str>,
-            _trigger_kind: TriggerKind,
-            _trigger_doc_id: Option<&str>,
-            _source_doc_id: Option<&str>,
-            _correlation: Option<&str>,
-            _trigger_context: Option<&str>,
-            _rendered_prompt: &str,
-            _rendered_goal_objective: Option<&str>,
-            _durable_fire_key: &str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + '_>>
-        {
-            Box::pin(async {
-                unreachable!(
-                    "SubagentSource fires pre-materialized requests; materialize is never called"
-                )
-            })
-        }
-
-        fn has_active_runtime_request_for_trigger(
-            &self,
-            _agent_did: &str,
-            _trigger_id: &str,
-            _excluded_request_id: Option<&str>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send + '_>>
-        {
-            Box::pin(async { Ok(false) })
-        }
-
-        fn supersede_active_runtime_requests_for_trigger(
-            &self,
-            _agent_did: &str,
-            _trigger_id: &str,
-            _excluded_request_id: Option<&str>,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<usize>> + Send + '_>>
-        {
-            Box::pin(async { Ok(0) })
-        }
-
-        fn recover_goal_task_fire(
-            &self,
-            _task: &crate::runtime_snapshot::ResolvedTask,
-            _durable_fire_key: &str,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = anyhow::Result<Option<String>>> + Send + '_>,
-        > {
-            Box::pin(async { Ok(None) })
-        }
-
-        fn has_materialized_group_request(
-            &self,
-            _agent_did: &str,
-            _trigger_id: &str,
-            _durable_fire_key: &str,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send + '_>>
-        {
-            Box::pin(async { Ok(false) })
-        }
-    }
-
-    let subagent_source: Box<dyn TriggerSource> = Box::new(
-        subagent_source::SubagentSource::with_subscription_source_for_test(
-            node.clone(),
-            snapshot_rx.clone(),
-            node,
-            authorized_peer_dids,
-            cancel.clone(),
-        ),
-    );
-    let materializer: Arc<dyn MaterializerHandle> = Arc::new(UnusedMaterializer);
-    let engine = TriggerEngine::new(snapshot_rx, materializer);
-    engine.run(vec![subagent_source], cancel).await;
 }

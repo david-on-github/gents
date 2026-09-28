@@ -21,6 +21,7 @@ pub(super) async fn resolve_timeline_messages_for_session(
 
 /// The canonical messages at one accepted sequence of an exact session scope.
 /// Duplicate headers at a sequence are returned, never silently picked.
+#[cfg(test)]
 pub(super) async fn resolve_timeline_messages_at_sequence(
     access: &ConfigAccess,
     agent_did: &str,
@@ -125,6 +126,7 @@ pub(super) async fn load_timeline_tool_observations_for_session(
 
 /// Lifecycle observations for one exact physical tool document in a session
 /// scope. A document outside the scope yields no rows.
+#[cfg(test)]
 pub(super) async fn load_timeline_tool_observation(
     access: &ConfigAccess,
     agent_did: &str,
@@ -165,7 +167,6 @@ async fn load_tool_observations(
                 tool_name
                 tool_call_id
                 spawned_by_tool_call_doc_id
-                delegated_input
                 status
                 lifecycle_state
                 started_at
@@ -184,9 +185,7 @@ async fn load_tool_observations(
                 policy_network
                 latency_ms
                 await_mode
-                cancel_policy
                 cancel_cause
-                child_request_id
             }}
         }}"#,
     );
@@ -302,12 +301,11 @@ pub(super) struct ToolLifecycleObservation {
     #[serde(flatten)]
     pub(super) row: TimelineToolCallRow,
     pub(super) spawned_by_tool_call_doc_id: Option<String>,
-    pub(super) delegated_input: Option<gents_protocol::output::DelegatedToolInput>,
 }
 
 /// The lifecycle row contributes status, never payload bytes. Payloads come
-/// from the already authorized, fully reconstructed session messages (or the
-/// host's argument-only delegated admission). An absent delivery stays absent.
+/// from the already authorized, fully reconstructed session messages. An
+/// absent delivery stays absent.
 pub(super) fn resolve_tool_payloads(
     observation: ToolLifecycleObservation,
     messages: &[TimelineMessageRow],
@@ -317,7 +315,6 @@ pub(super) fn resolve_tool_payloads(
     let ToolLifecycleObservation {
         mut row,
         spawned_by_tool_call_doc_id,
-        delegated_input,
     } = observation;
     // `status` is a nullable historical display mirror. The accepted
     // lifecycle row is authoritative even before dispatch has installed a
@@ -337,16 +334,8 @@ pub(super) fn resolve_tool_payloads(
         .request_doc_id
         .as_deref()
         .context("timeline tool lacks physical request binding")?;
-    anyhow::ensure!(
-        !(spawned_by_tool_call_doc_id.is_some() && delegated_input.is_some()),
-        "timeline tool cannot be both spawned and delegated"
-    );
-    let mut accepted_call_id = None;
-    if let Some(input) = delegated_input {
-        // The source ref is provenance, not permission to fetch its private
-        // coordinator stream. The authorized host row carries exact arguments.
-        row.args = input.arguments;
-    } else {
+    let accepted_call_id;
+    {
         let binding_doc = spawned_by_tool_call_doc_id.as_deref().unwrap_or(tool_doc);
         let mut bindings = Vec::new();
         for message in messages {

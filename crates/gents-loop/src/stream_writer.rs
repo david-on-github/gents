@@ -25,7 +25,6 @@ pub struct CanonicalPublishedTurn<Accepted> {
 /// Native durable publication supplied to the generic stream processor.
 pub trait CanonicalStreamWriter<L: RequestLifecycleControl>: StreamWriter {
     type AcceptedToolCall: Send;
-    type SpawnAdmissionPlan: Send;
 
     fn publish_authored_message(
         &self,
@@ -56,13 +55,12 @@ pub trait CanonicalStreamWriter<L: RequestLifecycleControl>: StreamWriter {
         close: ProviderAttemptClose,
     ) -> impl std::future::Future<Output = anyhow::Result<()>> + Send;
 
-    fn publish_native_turn_with_spawn_admissions(
+    fn publish_native_turn(
         &self,
         lifecycle: &L,
         turn: usize,
         attempt: u32,
         message: &Message,
-        spawn_admissions: &[Self::SpawnAdmissionPlan],
     ) -> impl std::future::Future<
         Output = anyhow::Result<CanonicalPublishedTurn<Self::AcceptedToolCall>>,
     > + Send;

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
 
 use super::context::{ToolContext, ToolError};
@@ -879,13 +879,15 @@ pub(crate) fn select_sandbox_for_policy(
             Ok("macos_seatbelt")
         }
         CommandExecutionMode::ArtifactWrite => {
-            bail!("artifact_write requires macOS sandbox-exec enforcement")
+            anyhow::bail!("artifact_write requires macOS sandbox-exec enforcement")
         }
         CommandExecutionMode::WorkspaceWrite => {
             if cfg!(target_os = "macos") {
-                bail!("macOS sandbox-exec is required for workspace_write bash but was not found")
+                anyhow::bail!(
+                    "macOS sandbox-exec is required for workspace_write bash but was not found"
+                )
             } else {
-                bail!(
+                anyhow::bail!(
                     "workspace_write bash requires macOS seatbelt sandbox enforcement on this build"
                 )
             }
@@ -1056,7 +1058,7 @@ fn sandboxed_workspace_write_command(
     _sandbox: &'static str,
     _artifact_only: bool,
 ) -> Result<(String, Vec<String>, &'static str)> {
-    bail!("workspace_write bash requires macOS seatbelt sandbox enforcement on this build")
+    anyhow::bail!("workspace_write bash requires macOS seatbelt sandbox enforcement on this build")
 }
 
 #[cfg(target_os = "macos")]

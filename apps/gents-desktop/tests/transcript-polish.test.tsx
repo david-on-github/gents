@@ -16,6 +16,8 @@ import { TranscriptPanel } from "../src/ui/screens/SessionScreen";
 import { ToolBody } from "../src/ui/screens/tool-views";
 import { diffText, lineCount, toolSummary } from "../src/ui/screens/tool-summary";
 import { activityStatus, isStopping } from "../src/ui/screens/activity-status";
+import { NO_WORKERS } from "../src/ui/screens/workers";
+import { NO_PARENT } from "../src/ui/screens/parentWork";
 
 function tool(
   presentation: RenderedToolCallView["presentation"],
@@ -92,8 +94,8 @@ const panel = (
     stopping={stopping}
     ownerRef={{ current: null }}
     session={snapshot}
-    workers={{ byChildRequest: () => null } as never}
-    parentWork={{ parent: null, sentBy: () => null } as never}
+    workers={NO_WORKERS}
+    parentWork={NO_PARENT}
     workerActions={{} as never}
     deployment={null}
   />

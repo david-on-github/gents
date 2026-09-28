@@ -122,8 +122,7 @@ fn validate_rejects_blank_subagent_target_ids() {
         agent_did: "did:test:test".to_string(),
         subagents: Some(SubagentTools {
             target_ids: vec!["".to_string()],
-            spawn_enabled: Some(true),
-            ..Default::default()
+            enabled: Some(true),
         }),
         ..Default::default()
     };
@@ -873,7 +872,7 @@ async fn tools_document_round_trips_write_tools() {
 }
 
 #[tokio::test]
-async fn tools_document_round_trips_subagent_default_await_mode() {
+async fn tools_document_round_trips_session_message_enablement() {
     let node = defra_node::EmbeddedNode::builder().build().await.unwrap();
     crate::ensure_runtime_schemas(&node).await.unwrap();
 
@@ -881,8 +880,7 @@ async fn tools_document_round_trips_subagent_default_await_mode() {
         tools_id: "amy-background-tools".to_string(),
         agent_did: "did:key:z-test-background".to_string(),
         subagents: Some(SubagentTools {
-            background_enabled: Some(true),
-            default_await_mode: Some("background".to_string()),
+            enabled: Some(true),
             ..Default::default()
         }),
         ..Default::default()
@@ -890,7 +888,7 @@ async fn tools_document_round_trips_subagent_default_await_mode() {
     let access = crate::config_client::ConfigAccess::Local(std::sync::Arc::new(node));
     write_tools_document(&access, &doc)
         .await
-        .expect("write should persist the subagent default await mode");
+        .expect("write should persist the session-message enablement");
 
     let loaded: Tools = access
         .transact("test.tools.read", |txn| {
@@ -912,15 +910,7 @@ async fn tools_document_round_trips_subagent_default_await_mode() {
         .await
         .expect("read should succeed")
         .expect("tools should exist");
-    assert_eq!(
-        loaded
-            .subagents
-            .as_ref()
-            .unwrap()
-            .default_await_mode
-            .as_deref(),
-        Some("background")
-    );
+    assert_eq!(loaded.subagents.as_ref().unwrap().enabled, Some(true));
 }
 
 #[tokio::test]
@@ -1246,10 +1236,7 @@ fn validate_accepts_well_formed_subagent_target_documents() {
         agent_did: "did:test:test".to_string(),
         subagents: Some(SubagentTools {
             target_ids: vec!["amy-code".to_string(), "amy-research".to_string()],
-            spawn_enabled: Some(true),
-            steering_enabled: Some(false),
-            background_enabled: Some(true),
-            ..Default::default()
+            enabled: Some(true),
         }),
         ..Default::default()
     };
@@ -1260,38 +1247,14 @@ fn validate_accepts_well_formed_subagent_target_documents() {
 }
 
 #[test]
-fn validate_rejects_background_default_when_background_disabled() {
-    let doc = Tools {
-        tools_id: "test-tools".to_string(),
-        agent_did: "did:test:test".to_string(),
-        subagents: Some(SubagentTools {
-            background_enabled: Some(false),
-            default_await_mode: Some("background".to_string()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let result = doc.validate();
-    assert!(result.is_err());
-    assert!(
-        format!("{}", result.unwrap_err()).contains("default_await_mode"),
-        "error message must mention subagents.default_await_mode"
-    );
-}
-
-#[test]
 fn tools_validation_reports_every_violation() {
-    let doc = Tools {
-        tools_id: "invalid-tools".to_string(),
-        agent_did: "did:test:test".to_string(),
-        subagents: Some(SubagentTools {
-            target_ids: vec![String::new()],
-            background_enabled: Some(false),
-            default_await_mode: Some("background".to_string()),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
+    let doc: Tools = serde_json::from_value(serde_json::json!({
+        "tools_id": "invalid-tools",
+        "agent_did": "did:test:test",
+        "host": {"bash": {"mode": "ReadOnly", "max_output_chars": 0}},
+        "subagents": {"target_ids": [""]}
+    }))
+    .unwrap();
 
     let violations = doc.validation_violations();
     assert_eq!(violations.len(), 2, "{violations:?}");
@@ -1300,7 +1263,7 @@ fn tools_validation_reports_every_violation() {
         .any(|error| error.contains("subagents.target_ids")));
     assert!(violations
         .iter()
-        .any(|error| error.contains("default_await_mode")));
+        .any(|error| error.contains("host.bash.max_output_chars")));
 }
 
 #[test]
@@ -1314,7 +1277,7 @@ fn validate_rejects_undeclared_subagent_target_reference() {
             serde_json::json!({
                 "tools_id": "test-tools",
                 "agent_did": "did:test:test",
-                "subagents": {"target_ids": ["amy-code"], "spawn_enabled": true}
+                "subagents": {"target_ids": ["amy-code"], "enabled": true}
             }),
         )],
     )

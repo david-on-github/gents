@@ -57,8 +57,9 @@ pub(super) fn background_completion_gate(
     gate
 }
 
-/// Atomically persist background input. Goal-owned sessions bind it to its
-/// parent without waking; otherwise reuse or create the coalesced pending wake.
+/// Atomically persist background input and reuse or create the coalesced
+/// pending wake. A Goal on the session, in any status, never suppresses the
+/// wake (Lean `CompletionContinuation.enqueueWake?`).
 /// A concurrent claim conflicts and retries, so a wake cannot precede its input.
 /// The single transaction owner for fresh input and canonical receipt replay.
 /// An observed receipt ID is reloaded and validated inside this transaction.
@@ -71,6 +72,7 @@ pub(crate) async fn persist_background_completion_with_message_canonical(
     queue: RequestQueue,
     existing_notification_doc_id: Option<&str>,
     native: &ToolNotificationPublication,
+    wake: crate::lifecycle::RequestHopCause,
 ) -> Result<EnqueuedBackgroundCompletionInput> {
     anyhow::ensure!(
         queue.source == QueueSource::BackgroundCompletion && queue.policy == QueuePolicy::Coalesce,
@@ -110,6 +112,7 @@ pub(crate) async fn persist_background_completion_with_message_canonical(
                     queue,
                     existing_notification_doc_id,
                     native,
+                    wake,
                 )
                 .await
             })
@@ -149,6 +152,31 @@ pub(crate) async fn persist_background_completion_with_message(
     wake_content: &str,
     queue: RequestQueue,
     existing_notification_doc_id: Option<&str>,
+) -> Result<EnqueuedBackgroundCompletionInput> {
+    persist_background_completion_with_message_waking(
+        node,
+        parent,
+        notification_content,
+        message_key,
+        wake_content,
+        queue,
+        existing_notification_doc_id,
+        crate::lifecycle::RequestHopCause::Continuation,
+    )
+    .await
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn persist_background_completion_with_message_waking(
+    node: &EmbeddedNode,
+    parent: &AgentRequest,
+    notification_content: &str,
+    message_key: &str,
+    wake_content: &str,
+    queue: RequestQueue,
+    existing_notification_doc_id: Option<&str>,
+    wake: crate::lifecycle::RequestHopCause,
 ) -> Result<EnqueuedBackgroundCompletionInput> {
     use gents_protocol::output::{
         OutputOutcome, OutputSegment, OutputSource, OutputWriter, SegmentRun, SourceClose,
@@ -278,6 +306,7 @@ pub(crate) async fn persist_background_completion_with_message(
                 end_byte: notification_content.len() as u64,
             }],
         },
+        wake,
     )
     .await
 }
@@ -293,13 +322,10 @@ async fn background_completion_transaction_attempt(
     queue: &RequestQueue,
     existing_notification_doc_id: Option<&str>,
     native: &ToolNotificationPublication,
+    wake: crate::lifecycle::RequestHopCause,
 ) -> Result<EnqueuedBackgroundCompletionInput> {
     use sha2::{Digest, Sha256};
 
-    let goal_owned =
-        crate::goal::load_canonical_goal_in_txn(txn, &parent.agent_did, &parent.session_id)
-            .await?
-            .is_some();
     let escaped_session_id = escape_graphql_string(&parent.session_id);
     let escaped_agent_did = escape_graphql_string(&parent.agent_did);
     let notification_filter = match existing_notification_doc_id {
@@ -338,6 +364,7 @@ async fn background_completion_transaction_attempt(
                     request_id
                     session_id
                     input
+                    subagent_depth
                 }}
                 generations: AgentRequest(
                     filter: {{
@@ -401,24 +428,17 @@ async fn background_completion_transaction_attempt(
             "canonical notification replay request binding is invalid"
         );
         let bound = &rows[0];
-        let parent_bound = bound.doc_id.as_deref() == Some(parent.doc_id.as_str());
-        let wake_bound = row_matches_coalesced_source_and_key(
-            bound,
-            QueueSource::BackgroundCompletion,
-            queue_key,
-        );
         anyhow::ensure!(
-            (goal_owned && parent_bound) || (!goal_owned && wake_bound),
-            "canonical notification replay uses the wrong Goal/wake binding"
+            row_matches_coalesced_source_and_key(
+                bound,
+                QueueSource::BackgroundCompletion,
+                queue_key,
+            ),
+            "canonical notification replay is not bound to its coalesced wake"
         );
-        let request = if goal_owned {
-            None
-        } else {
-            Some(
-                queue_row_to_enqueued_request(bound)
-                    .context("canonical wake binding is incomplete")?,
-            )
-        };
+        let request = Some(
+            queue_row_to_enqueued_request(bound).context("canonical wake binding is incomplete")?,
+        );
         return Ok(EnqueuedBackgroundCompletionInput {
             request,
             message_sequence: row.message.sequence,
@@ -426,42 +446,35 @@ async fn background_completion_transaction_attempt(
         });
     }
 
-    if goal_owned {
-        // GoalSource owns automatic continuation for this session, including when
-        // its Goal is terminal or paused. The durable input belongs to the
-        // request whose background work actually produced it.
-        anyhow::ensure!(
-            !parent.doc_id.trim().is_empty() && !parent.request_id.trim().is_empty(),
-            "Goal-owned background notification requires a parent request binding"
-        );
-        let message_sequence =
-            next_append_sequence_in_transaction(txn, &parent.agent_did, &parent.session_id).await?;
-        publish_native_tool_notification(
-            txn,
-            parent,
-            &parent.doc_id,
-            message_sequence,
-            message_key,
-            content,
-            native,
-        )
-        .await?;
-        return Ok(EnqueuedBackgroundCompletionInput {
-            request: None,
-            message_sequence,
-            created_request: false,
-        });
-    }
-
+    let current_hop =
+        crate::session::load_session_current_hop_in_txn(txn, &parent.agent_did, &parent.session_id)
+            .await?;
+    // A wake over the bound is written like any other and refused at
+    // admission, so it becomes the session's latest request and every later
+    // same-session continuation copies its hop.
+    let wake_hop = crate::lifecycle::next_request_hop(wake, current_hop);
     let pending_rows: Vec<AgentRequestRow> =
         serde_json::from_value(response["data"]["pending"].clone())
             .context("decode pending AgentRequest rows")?;
-    let pending = pending_rows
-        .into_iter()
-        .find(|row| {
-            row_matches_coalesced_source_and_key(row, QueueSource::BackgroundCompletion, queue_key)
-        })
-        .and_then(|row| queue_row_to_enqueued_request(&row));
+    // Every pending notification is consumed by whichever wake claims next
+    // (the claim snapshots the session's input by sequence), so the one
+    // pending wake must carry the highest hop any of them requires: a lower
+    // one is superseded by a new wake at this hop rather than joined.
+    let (pending, lower) = match pending_rows.into_iter().find(|row| {
+        row_matches_coalesced_source_and_key(row, QueueSource::BackgroundCompletion, queue_key)
+    }) {
+        Some(row)
+            if row
+                .subagent_depth
+                .and_then(|hop| u32::try_from(hop).ok())
+                .unwrap_or(0)
+                >= wake_hop =>
+        {
+            (queue_row_to_enqueued_request(&row), None)
+        }
+        Some(row) => (None, Some(row)),
+        None => (None, None),
+    };
     let message_sequence =
         next_append_sequence_in_transaction(txn, &parent.agent_did, &parent.session_id).await?;
     let mut max_generation = None::<u64>;
@@ -502,8 +515,9 @@ async fn background_completion_transaction_attempt(
                 )),
                 ..Default::default()
             };
-            let request_mutation = session_request_create_mutation(
+            let request_mutation = session_request_create_mutation_at_hop(
                 parent,
+                wake_hop,
                 behavior_id,
                 wake_content,
                 ExecutionOrigin::Scheduled,
@@ -515,6 +529,20 @@ async fn background_completion_transaction_attempt(
             .await?;
             let response = txn.execute(&request_mutation).await?;
             let doc_id = transaction_created_doc_id(&response, "AgentRequest")?;
+            if let Some(lower) = &lower {
+                let lower_doc_id = lower
+                    .doc_id
+                    .as_deref()
+                    .context("pending wake is missing _docID")?;
+                txn.execute(&super::coalescing::supersede_pending_mutation(
+                    lower_doc_id,
+                    &parent.agent_did,
+                    &request_id,
+                    &doc_id,
+                    "raised to the hop of a later completion",
+                ))
+                .await?;
+            }
             (
                 EnqueuedAgentRequest {
                     doc_id,

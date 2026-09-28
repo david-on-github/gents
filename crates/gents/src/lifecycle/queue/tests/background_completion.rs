@@ -101,6 +101,7 @@ async fn desktop_session_runtime_controls_preserve_owner_and_reject_foreign_ance
                 1,
                 false,
                 "2030-01-01T00:00:01Z",
+                parent.subagent_depth,
             )
             .unwrap();
             crate::sign_agent_request_create(db.identity.as_ref(), &mut continuation)
@@ -977,11 +978,7 @@ async fn successor_acknowledges_input_left_by_a_failed_active_wake() {
     .unwrap();
     assert_eq!(timeline.background_completions.len(), 2);
     assert!(timeline.background_completion_diagnostics_error.is_none());
-    assert!(timeline.descendant_edges.is_empty());
-    assert!(timeline
-        .descendant_graph_diagnostics_error
-        .as_deref()
-        .is_some_and(|error| error.contains("points to missing parent")));
+    assert!(timeline.child_request_ids.is_empty());
 }
 
 #[tokio::test]
@@ -1022,4 +1019,163 @@ async fn append_sequence_excludes_foreign_session_messages_and_reservations() {
         next, 7,
         "own background reservation remains ahead of own message; foreign rows cannot move this session's cursor"
     );
+}
+
+/// Lean `CausalHop.completionWake`: the next wake claim consumes every pending
+/// notification, so a notification that needs a higher hop raises the one
+/// pending wake instead of riding a lower-hop wake already queued.
+#[tokio::test]
+async fn a_lower_hop_wake_never_consumes_a_higher_hop_notification() {
+    let db = test_db("wake-hop-raise").await;
+    let parent = root_parent(db.agent_did(), "wake-hop-raise-session");
+    let native = persist_background_completion_with_message(
+        &db.node,
+        &parent,
+        "native process done",
+        "background-completion-notification:native:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+    )
+    .await
+    .unwrap();
+    let native_wake = native.request.expect("native wake").doc_id;
+    let raised = persist_background_completion_with_message_waking(
+        &db.node,
+        &parent,
+        "agent result",
+        "background-completion-notification:agent:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+        crate::lifecycle::RequestHopCause::CrossSession { cause_hop: 1 },
+    )
+    .await
+    .unwrap();
+    assert!(raised.created_request);
+    let raised_wake = raised.request.expect("raised wake").doc_id;
+    assert_ne!(raised_wake, native_wake);
+    let later = persist_background_completion_with_message(
+        &db.node,
+        &parent,
+        "another native process done",
+        "background-completion-notification:native-2:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(!later.created_request);
+    assert_eq!(later.request.expect("joined wake").doc_id, raised_wake);
+
+    let response = db
+        .node
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{ session_id: {{ _eq: "{}" }}, execution_origin: {{ _eq: "scheduled" }} }}) {{ _docID lifecycle_state subagent_depth superseded_by_request_doc_id }} }}"#,
+            escape_graphql_string(&parent.session_id)
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let rows = response.data.unwrap()["AgentRequest"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let pending = rows
+        .iter()
+        .filter(|row| row["lifecycle_state"] == "pending")
+        .collect::<Vec<_>>();
+    assert_eq!(pending.len(), 1, "{rows:?}");
+    assert_eq!(pending[0]["_docID"], raised_wake.as_str());
+    assert_eq!(pending[0]["subagent_depth"], 2);
+    let lower = rows
+        .iter()
+        .find(|row| row["_docID"] == native_wake.as_str())
+        .unwrap();
+    assert_eq!(lower["lifecycle_state"], "superseded");
+    assert_eq!(lower["superseded_by_request_doc_id"], raised_wake.as_str());
+}
+
+/// An agent loop, Lean `CausalHop.continuation_preserves_admission`: session A
+/// messages B and starts a background process in the same turn. B's result
+/// needs a wake over the bound; A's process wake must not run that result at
+/// A's old hop, now or later.
+#[tokio::test]
+async fn a_refused_cross_session_wake_refuses_every_later_native_wake() {
+    let db = test_db("wake-hop-refusal").await;
+    let parent = root_parent(db.agent_did(), "wake-hop-refusal-session");
+    let bound = crate::document_config::DEFAULT_MAX_REQUEST_HOP;
+    let hop_of = |doc_id: String| {
+        let node = db.node.clone();
+        async move {
+            let response = node
+                .execute(&format!(
+                    r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}) {{ subagent_depth lifecycle_state }} }}"#,
+                    escape_graphql_string(&doc_id)
+                ))
+                .await;
+            assert!(!response.has_errors(), "{:?}", response.errors);
+            response.data.unwrap()["AgentRequest"][0].clone()
+        }
+    };
+    // A's background process completed first: a wake at A's hop is pending.
+    let native = persist_background_completion_with_message_waking(
+        &db.node,
+        &parent,
+        "sleep done",
+        "background-completion-notification:sleep:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+        crate::lifecycle::RequestHopCause::Continuation,
+    )
+    .await
+    .unwrap();
+    let native_wake = native.request.expect("native wake").doc_id;
+    // B ran at the bound; its result's wake is over it.
+    let refused = persist_background_completion_with_message_waking(
+        &db.node,
+        &parent,
+        "B result",
+        "background-completion-notification:b:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+        crate::lifecycle::RequestHopCause::CrossSession { cause_hop: bound },
+    )
+    .await
+    .unwrap();
+    let refused_wake = refused.request.expect("over-bound wake").doc_id;
+    let refused_row = hop_of(refused_wake.clone()).await;
+    assert_eq!(refused_row["subagent_depth"], bound + 1);
+    assert!(!crate::lifecycle::request_hop_within_bound(
+        bound,
+        bound + 1
+    ));
+    assert_eq!(hop_of(native_wake).await["lifecycle_state"], "superseded");
+    // Admission refuses the over-bound wake; it stays the session's latest.
+    let response = db
+        .node
+        .execute(&format!(
+            r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, input: {{ lifecycle_state: "dead" }}) {{ _docID }} }}"#,
+            escape_graphql_string(&refused_wake)
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    // A later process wake copies the refused hop and is refused as well.
+    let later = persist_background_completion_with_message_waking(
+        &db.node,
+        &parent,
+        "another sleep done",
+        "background-completion-notification:sleep-2:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+        crate::lifecycle::RequestHopCause::Continuation,
+    )
+    .await
+    .unwrap();
+    assert!(later.created_request);
+    let later_row = hop_of(later.request.expect("later wake").doc_id).await;
+    assert_eq!(later_row["subagent_depth"], bound + 1);
 }
