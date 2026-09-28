@@ -168,7 +168,8 @@ fn checked(
     }
 }
 
-/// A row no check produced: its version is `"0"` and it carries no feedback.
+/// A row no check produced: its version is `"0"`. Only a `stage_failed` row
+/// carries feedback, attached by [`failed`].
 fn synthetic(
     stage: &EvalStage,
     check: &EvalCheckRef,
