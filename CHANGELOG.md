@@ -8,6 +8,11 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- Durable trigger delivery (#2041) adds non-branchable `TriggerFire`,
+  `EventSourceCursor`, and `FireOutcome` collections and updates the canonical
+  schema baseline. v0.20 still requires a fresh home; this does not provide an
+  additive migration for existing pre-0.20 stores.
+
 - Sub-agents are ordinary sessions, and 0.20.0 requires a fresh home (#1937).
   `spawn_subagent`, `wait_subagent`, `read_subagent`, `list_subagents` and
   `cancel_subagent` are replaced by the agents tool group
