@@ -79,7 +79,7 @@ async fn assignment(access: &ConfigAccess, label: &str) -> Result<()> {
 async fn evidence(access: &ConfigAccess, owner: &str) -> Result<Value> {
     Ok(json!({
         "owner_did":owner,
-        "requests":rows(access, "AgentRequest", "_docID request_id session_id behavior_id lifecycle_state content", owner).await?,
+        "requests":rows(access, "AgentRequest", "_docID request_id session_id behavior_id lifecycle_state content failure_reason", owner).await?,
         "fires":rows(access, "TriggerFire", "fire_key owner_did trigger_id source_collection source_doc_id request_id session_id queued_serial emit_outcome", owner).await?,
         "outcomes":rows(access, "FireOutcome", "handoff_id fire_key owner_did trigger_id source_collection source_doc_id request_id session_id source_handoff_id terminal_state", owner).await?,
     }))
@@ -89,6 +89,14 @@ async fn wait_deliveries(access: &ConfigAccess, owner: &str, labels: &[&str]) ->
     let deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
     let state = loop {
         let state = evidence(access, owner).await?;
+        ensure!(
+            state["requests"].as_array().unwrap().iter().all(|row| {
+                !gents_protocol::request_lifecycle::RequestLifecycleState::is_terminal_str(
+                    row["lifecycle_state"].as_str(),
+                ) || row["lifecycle_state"] == "completed"
+            }),
+            "process recovery request failed: {state}"
+        );
         for collection in ["requests", "fires", "outcomes"] {
             ensure!(
                 state[collection].as_array().context("evidence rows")?.len() <= labels.len(),

@@ -311,10 +311,18 @@ async fn two_lead_sessions_route_64_real_worker_outcomes_without_chaining() -> R
         let requests = rows(
             &access,
             "AgentRequest",
-            "request_id session_id behavior_id content lifecycle_state",
+            "request_id session_id behavior_id content lifecycle_state failure_reason",
             &owner,
         )
         .await?;
+        ensure!(
+            requests.iter().all(|row| {
+                !gents_protocol::request_lifecycle::RequestLifecycleState::is_terminal_str(
+                    row["lifecycle_state"].as_str(),
+                ) || row["lifecycle_state"] == "completed"
+            }),
+            "live delivery request failed: {requests:?}"
+        );
         for session in &sessions {
             let scoped = requests
                 .iter()
