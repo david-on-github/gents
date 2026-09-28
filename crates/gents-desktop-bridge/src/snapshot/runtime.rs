@@ -450,6 +450,10 @@ pub async fn build_runtime_snapshot(core: &ClientCore) -> DesktopRuntimeSnapshot
         })
         .collect::<Vec<_>>();
 
+    let access = gents::config_client::ConfigAccess::Local(core.node_arc());
+    for deployment in &mut deployments {
+        super::runtime_tasks::resolve_summary_starters(&access, &mut deployment.sessions).await;
+    }
     deployments.sort_by(|left, right| left.label.cmp(&right.label));
 
     DesktopRuntimeSnapshot {
@@ -912,6 +916,7 @@ mod behavior_environment_tests {
         turn_state: Option<&str>,
     ) -> SessionSummary {
         SessionSummary {
+            started_by: None,
             agent_did: "did:test:owner".into(),
             requester_did: None,
             latest_request_doc_id: None,

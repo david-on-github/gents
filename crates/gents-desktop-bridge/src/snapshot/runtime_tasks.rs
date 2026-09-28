@@ -135,6 +135,7 @@ pub(super) fn session_summaries(
                 .and_then(|id| tasks.iter().find(|task| task.task_id == id))
                 .and_then(|task| task.name.clone());
             SessionSummary {
+                started_by: None,
                 session_id: session.session_id.clone(),
                 agent_did: session.agent_did.clone(),
                 requester_did: session.requester_did.clone(),
@@ -292,5 +293,41 @@ mod trigger_recent_runs_tests {
             recent_runs_for_task_views(&rows, "owner", "other").total_fires,
             0
         );
+    }
+}
+
+/// Resolve immutable creation provenance through the runtime lineage owner,
+/// including causing requests outside the bounded client request cache.
+pub(super) async fn resolve_summary_starters(
+    access: &gents::config_client::ConfigAccess,
+    summaries: &mut [SessionSummary],
+) {
+    for summary in summaries {
+        if summary
+            .provenance
+            .as_ref()
+            .and_then(|p| p.parent_request_doc_id.as_ref())
+            .is_none()
+        {
+            continue;
+        }
+        let scope = gents::session_origin::SessionScope {
+            agent_did: summary.agent_did.clone(),
+            session_id: summary.session_id.clone(),
+            requester_did: summary.requester_did.clone(),
+        };
+        match gents::session_origin::started_by(access, &scope).await {
+            Ok(link) => {
+                summary.started_by = link.map(|link| super::super::types::LinkedSessionView {
+                    agent_did: link.scope.agent_did,
+                    session_id: link.scope.session_id,
+                    requester_did: link.scope.requester_did,
+                    cause_request_doc_id: link.cause_request_doc_id,
+                })
+            }
+            Err(error) => {
+                tracing::warn!(session_id = %summary.session_id, %error, "session starter unavailable")
+            }
+        }
     }
 }

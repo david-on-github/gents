@@ -692,6 +692,7 @@ export function createDesktopUiHarness(
             }
           : null;
         const summary: SessionSummary = {
+          startedBy: null,
           sessionId: session.sessionId,
           agentDid: session.agentDid ?? AGENT_DID,
           requesterDid: null,

@@ -37,11 +37,15 @@ export function SessionsScreen({ shell }: { shell: Shell }) {
   /* which parents are showing their workers; a person who opened one meant it */
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const conversations = filterSessions(deployment?.sessions ?? [], filter, held, query);
-  /* the session whose latest request spawned this one, by provenance */
   const parentOf = (c: SessionSummary) => {
-    const id = c.provenance?.parent_request_doc_id;
-    return id
-      ? (deployment?.sessions.find((s) => s.latestRequestId === id) ?? null)
+    const parent = c.startedBy;
+    return parent
+      ? (deployment?.sessions.find(
+          (s) =>
+            s.sessionId === parent.sessionId &&
+            s.agentDid === parent.agentDid &&
+            s.requesterDid === parent.requesterDid,
+        ) ?? null)
       : null;
   };
 
