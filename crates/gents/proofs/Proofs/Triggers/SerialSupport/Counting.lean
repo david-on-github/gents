@@ -155,6 +155,56 @@ theorem dispatchStep_parallel_count_eq
       rw [List.filter_append, List.filter_cons_of_neg (by rw [h_pred_false]; decide),
           List.filter_nil, List.append_nil]
 
+theorem dispatchStep_queuedSerial_count_eq
+    (s : SystemState) (snap : TriggerSnapshot) (intent : FireIntent) (t : TriggerKey)
+    (h_queuedSerial : intent.concurrency = .queuedSerial)
+    (h_hyp_post : ∀ r ∈ (dispatchStep s snap intent).requests,
+                  r.causedBy = some t → r.concurrency = .serial) :
+    (dispatchStep s snap intent).nonTerminalCountFor t
+      ≤ s.nonTerminalCountFor t := by
+  unfold SystemState.nonTerminalCountFor at *
+  unfold dispatchStep at *
+  cases h_disp : dispatch snap intent with
+  | none =>
+    simp only [h_disp]
+    exact Nat.le_refl _
+  | some seed =>
+    simp only [h_disp, h_queuedSerial] at *
+    set p : AgentRequest → Bool :=
+      (fun r => (r.causedBy == some t) && !r.isTerminal) with hp_def
+    set newRequest : AgentRequest :=
+      { id := s!"dispatched-{s.requests.length}"
+      , causedBy :=
+          match seed.causedByTriggerId with
+          | none     => none
+          | some tid => some tid
+      , concurrency := .queuedSerial
+      , isTerminal := false
+      , executionOrigin :=
+          match seed.causedByTriggerKind with
+          | .manual            => .interactive
+          | .schedule | .event => .scheduled } with hnew_def
+    by_cases h_match : p newRequest = true
+    ·
+      exfalso
+      simp only [hp_def] at h_match
+      have h_cb_eq : newRequest.causedBy = some t := by
+        have := (Bool.and_eq_true _ _).mp h_match
+        exact beq_iff_eq.mp this.1
+      have h_mem_new : newRequest ∈ s.requests ++ [newRequest] :=
+        List.mem_append_right _ (List.mem_singleton.mpr rfl)
+      have h_serial := h_hyp_post newRequest h_mem_new h_cb_eq
+      have h_conc_par : newRequest.concurrency = .queuedSerial := rfl
+      rw [h_conc_par] at h_serial
+      exact absurd h_serial (by decide)
+    · have h_pred_false : p newRequest = false := by
+        cases h : p newRequest with
+        | false => rfl
+        | true => exact absurd h h_match
+      show (List.filter p (s.requests ++ [newRequest])).length ≤ (s.requests.filter p).length
+      rw [List.filter_append, List.filter_cons_of_neg (by rw [h_pred_false]; decide),
+          List.filter_nil, List.append_nil]
+
 theorem dispatchStep_latestOnly_count_le
     (s : SystemState) (snap : TriggerSnapshot) (intent : FireIntent) (t : TriggerKey)
     (h_latest : intent.concurrency = .latestOnly)

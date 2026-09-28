@@ -30,6 +30,7 @@ end TriggerKind
 inductive ConcurrencyMode where
   | parallel
   | serial
+  | queuedSerial
   | latestOnly
   deriving DecidableEq, Repr
 
