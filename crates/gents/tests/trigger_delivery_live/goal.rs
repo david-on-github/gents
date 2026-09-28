@@ -11,6 +11,7 @@ async fn evidence(access: &ConfigAccess, owner: &str) -> Result<Value> {
     let query = format!(
         r#"{{
         AgentRequest(filter:{{agent_did:{{_eq:"{owner}"}}}}){{_docID request_id session_id lifecycle_state caused_by_trigger_kind failure_reason}}
+        Trigger(filter:{{agent_did:{{_eq:"{owner}"}}}}){{trigger_id last_status last_error}}
         TriggerFire(filter:{{owner_did:{{_eq:"{owner}"}}}}){{fire_key trigger_id request_id session_id goal_id goal_assignment_applied}}
         FireOutcome(filter:{{owner_did:{{_eq:"{owner}"}}}}){{fire_key trigger_id request_id session_id goal_id terminal_state created_at}}
         Goal(filter:{{agent_did:{{_eq:"{owner}"}}}}){{goal_id session_id objective status assignment_root_request_doc_id}}
@@ -33,6 +34,24 @@ fn table<'a>(state: &'a Value, name: &str) -> &'a [Value] {
         .unwrap_or_default()
 }
 
+fn healthy(state: &Value) -> Result<()> {
+    ensure!(
+        table(state, "AgentRequest").iter().all(|row| {
+            !gents_protocol::request_lifecycle::RequestLifecycleState::is_terminal_str(
+                row["lifecycle_state"].as_str(),
+            ) || row["lifecycle_state"] == "completed"
+        }),
+        "live Goal request failed: {state}"
+    );
+    ensure!(
+        table(state, "Trigger")
+            .iter()
+            .all(|row| row["last_status"] != "error"),
+        "live Goal trigger admission failed: {state}"
+    );
+    Ok(())
+}
+
 fn inference_running(state: &Value, request: &str) -> bool {
     table(state, "InferenceCall").iter().any(|row| {
         row["request_id"] == request
@@ -46,8 +65,8 @@ async fn submit(access: &ConfigAccess, kind: &str) -> Result<()> {
         .write(
             "test.delivery_goal.submit",
             &format!(
-        "mutation {{create_DeliveryGoalWork(input:{{kind:\"{}\",session_id:\"{}\"}}){{_docID}}}}",
-        escape_graphql_string(kind), escape_graphql_string(SESSION),
+        "mutation {{create_DeliveryGoalWork(input:{{handoff_id:\"{}\",kind:\"{}\",session_id:\"{}\"}}){{_docID}}}}",
+        escape_graphql_string(&format!("goal-{kind}")), escape_graphql_string(kind), escape_graphql_string(SESSION),
     ),
         )
         .await?;
@@ -76,7 +95,7 @@ async fn goal_task_waits_for_claim_and_emits_only_after_model_completion() -> Re
     access.add_schema(SCHEMA).await?;
     access
         .add_schema(
-            "type DeliveryGoalWork { kind: String @immutable session_id: String @immutable }",
+            "type DeliveryGoalWork { handoff_id: String @immutable kind: String @immutable session_id: String @immutable }",
         )
         .await?;
     configure(&access, &db.node, &owner, &endpoints).await?;
@@ -112,6 +131,7 @@ async fn goal_task_waits_for_claim_and_emits_only_after_model_completion() -> Re
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
         loop {
             let state = evidence(&access, &owner).await?;
+            healthy(&state)?;
             if inference_running(&state, INITIAL) { break; }
             ensure!(tokio::time::Instant::now() < deadline, "initial real inference never started: {state}");
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -119,6 +139,7 @@ async fn goal_task_waits_for_claim_and_emits_only_after_model_completion() -> Re
         submit(&access, "goal").await?;
         let queued = loop {
             let state = evidence(&access, &owner).await?;
+            healthy(&state)?;
             if table(&state, "TriggerFire").iter().any(|row| row["trigger_id"] == "delivery-goal-goal") { break state; }
             ensure!(tokio::time::Instant::now() < deadline, "Goal Task admission timed out: {state}");
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -132,6 +153,7 @@ async fn goal_task_waits_for_claim_and_emits_only_after_model_completion() -> Re
         let fire_key = string(fire, "fire_key")?.to_owned();
         let continuing = loop {
             let state = evidence(&access, &owner).await?;
+            healthy(&state)?;
             ensure!(table(&state, "FireOutcome").is_empty(), "Goal emitted before observable continuation boundary: {state}");
             let initial_complete = table(&state, "AgentRequest").iter().any(|row| row["request_id"] == request_id && row["lifecycle_state"] == "completed");
             let child_running = table(&state, "AgentRequest").iter().any(|row|
@@ -148,9 +170,10 @@ async fn goal_task_waits_for_claim_and_emits_only_after_model_completion() -> Re
         submit(&access, "reply").await?;
         let queued_reply = loop {
             let state = evidence(&access, &owner).await?;
+            healthy(&state)?;
             if let Some(reply) = table(&state, "TriggerFire").iter().find(|row| row["trigger_id"] == "delivery-goal-reply") {
                 let request = table(&state, "AgentRequest").iter().find(|row| row["request_id"] == reply["request_id"]).context("reply request missing")?;
-                ensure!(matches!(request["lifecycle_state"].as_str(), Some("pending" | "queued")), "reply did not queue behind continuation: {state}");
+                ensure!(request["lifecycle_state"] == "pending", "reply did not queue behind continuation: {state}");
                 break state;
             }
             ensure!(tokio::time::Instant::now() < deadline, "reply admission timed out: {state}");
@@ -158,6 +181,7 @@ async fn goal_task_waits_for_claim_and_emits_only_after_model_completion() -> Re
         };
         let complete = loop {
             let state = evidence(&access, &owner).await?;
+            healthy(&state)?;
             let outcomes = table(&state, "FireOutcome");
             ensure!(outcomes.len() <= 1, "duplicate or chained Goal outcomes: {state}");
             let replied = table(&state, "TriggerFire").iter().find(|row| row["trigger_id"] == "delivery-goal-reply").is_some_and(|fire|
