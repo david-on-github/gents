@@ -17,9 +17,26 @@ struct Request {
     fire: Fire,
     running: bool,
     terminal: bool,
-    goal_status: String,
-    goal_wrapup_completed: bool,
+    assignment_replaced: bool,
     goal_assignment_applied: bool,
+}
+
+#[derive(Clone, Deserialize)]
+struct GoalBinding {
+    owner: String,
+    session: String,
+    assignment: FireIdentity,
+    status: String,
+}
+impl GoalBinding {
+    fn observation(&self) -> durable::GoalOutcomeBinding {
+        durable::GoalOutcomeBinding {
+            owner_did: self.owner.clone(),
+            session_id: self.session.clone(),
+            assignment_request_id: self.assignment.request_id(),
+            status: self.status.clone(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -27,11 +44,11 @@ struct State {
     receipts: Vec<FireIdentity>,
     requests: Vec<Request>,
     outcomes: Vec<FireIdentity>,
+    goals: Vec<GoalBinding>,
 }
 
 fn contract() -> serde_json::Value {
-    gents_lean_contract::load_contract_snapshot::<serde_json::Value>()
-        .unwrap()["trigger_delivery"]
+    gents_lean_contract::load_contract_snapshot::<serde_json::Value>().unwrap()["trigger_delivery"]
         .clone()
 }
 
@@ -45,9 +62,11 @@ fn receipt(fire: &Fire, index: usize) -> TriggerFire {
         fire_key: key.clone(),
         identity: fire.identity.clone(),
         task_id: "contract-task".into(),
-        request_id: format!("trigger-request:{key}"),
+        request_id: fire.identity.request_id(),
         session_id: fire.session.clone(),
-        goal_id: fire.goal_backed.then(|| format!("goal:{}", fire.session)),
+        goal_id: fire
+            .goal_backed
+            .then(|| crate::goal::deterministic_goal_id(&fire.identity.owner_did, &fire.session)),
         goal_objective: fire.goal_backed.then(|| "contract objective".into()),
         goal_token_budget: None,
         goal_assignment_applied: false,
@@ -62,15 +81,17 @@ fn receipt(fire: &Fire, index: usize) -> TriggerFire {
 }
 
 fn request_mutation(receipt: &TriggerFire) -> String {
-    format!(r#"mutation {{ create_AgentRequest(input: {{
+    format!(
+        r#"mutation {{ create_AgentRequest(input: {{
         request_id: "{}", agent_did: "{}", session_id: "{}",
-        behavior_id: "general", purpose: "normal", lifecycle_state: "pending",
+        behavior_id: "general", content: "contract task", purpose: "normal", lifecycle_state: "pending",
         created_at: "{}"
     }}) {{ _docID }} }}"#,
         escape_graphql_string(&receipt.request_id),
         escape_graphql_string(&receipt.identity.owner_did),
         escape_graphql_string(&receipt.session_id),
-        escape_graphql_string(&receipt.created_at))
+        escape_graphql_string(&receipt.created_at)
+    )
 }
 
 #[test]
@@ -80,31 +101,71 @@ fn durable_delivery_predicates_match_executable_lean_owners() {
         let id: FireIdentity = decode(&case["identity"]);
         let key = durable::fire_key(&id);
         assert_eq!(key, case["key"].as_str().unwrap());
-        assert_eq!(format!("trigger-request:{key}"), case["request_id"]);
-        assert_eq!(format!("trigger-session:{key}"), case["session_id"]);
-        assert_eq!(format!("outcome:{key}"), case["outcome_id"]);
+        assert_eq!(id.request_id(), case["request_id"]);
+        assert_eq!(id.session_id(), case["session_id"]);
+        assert_eq!(id.outcome_id(), case["outcome_id"]);
     }
     for case in cases["sessions"].as_array().unwrap() {
         let id: FireIdentity = decode(&case["identity"]);
-        assert_eq!(durable::resolve_session_id(&id, case["target"].as_str(),
-            case["owned"].as_bool().unwrap()), decode::<Option<String>>(&case["resolved"]));
+        assert_eq!(
+            durable::resolve_session_id(
+                &id,
+                case["target"].as_str(),
+                case["owned"].as_bool().unwrap()
+            ),
+            decode::<Option<String>>(&case["resolved"])
+        );
     }
     for case in cases["outcomes"].as_array().unwrap() {
         let state: State = decode(&case["pre"]);
-        let r = &state.requests[0];
-        assert_eq!((!r.fire.goal_backed || r.goal_assignment_applied) && durable::outcome_due(r.fire.emit_outcome, r.fire.goal_backed,
-            &r.goal_status, r.goal_wrapup_completed, r.terminal), case["due"].as_bool().unwrap(), "{}", case["name"]);
+        let request = &state.requests[0];
+        let mut fire = receipt(&request.fire, 0);
+        fire.goal_assignment_applied = request.goal_assignment_applied;
+        let binding = state.goals.first().map(GoalBinding::observation);
+        let reason = durable::fire_outcome_reason(
+            &fire,
+            request.terminal,
+            request.assignment_replaced,
+            binding.as_ref(),
+        );
+        assert_eq!(
+            reason,
+            decode::<Option<String>>(&case["reason"]),
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            reason.is_some(),
+            case["due"].as_bool().unwrap(),
+            "{}",
+            case["name"]
+        );
     }
     for case in cases["queues"].as_array().unwrap() {
-        let state: State = decode(&case["pre"]);
-        let rows = state.requests.iter().map(|r| durable::FireQueueRow {
-            identity: r.fire.identity.clone(), session_id: r.fire.session.clone(),
-            queued_serial: r.fire.serial, running: r.running, terminal: r.terminal,
-        }).collect::<Vec<_>>();
-        assert_eq!(durable::queued_claim_allowed(&rows, &decode(&case["identity"])),
-            case["can_claim"].as_bool().unwrap(), "{}", case["name"]);
+        let identity: FireIdentity = decode(&case["identity"]);
+        let rows: Vec<durable::ClaimObservation> = decode(&case["observations"]);
+        let candidate = rows
+            .iter()
+            .find(|row| row.document == identity.fire_key())
+            .unwrap();
+        assert_eq!(
+            durable::observed_claim_allowed(candidate, &rows),
+            case["can_claim"].as_bool().unwrap(),
+            "{}",
+            case["name"]
+        );
     }
-
+    for case in cases["self_sessions"].as_array().unwrap() {
+        assert_eq!(
+            crate::toolset::session_history::is_current_session(
+                case["caller_owner"].as_str().unwrap(),
+                case["caller_session"].as_str().unwrap(),
+                case["listed_owner"].as_str().unwrap(),
+                case["listed_session"].as_str().unwrap()
+            ),
+            case["current"].as_bool().unwrap()
+        );
+    }
 }
 
 #[tokio::test]
@@ -116,66 +177,282 @@ async fn generated_fire_transactions_are_atomic_and_owner_scoped() {
         for (index, request) in pre.requests.iter().enumerate() {
             let fire = receipt(&request.fire, index);
             let mutation = request_mutation(&fire);
-            crate::config_client::ConfigAccess::transact_local(&node, None, "test.seed_fire",
-                |txn| Box::pin(async { durable::stage_fire_request(txn, &fire, &mutation).await }))
-                .await.unwrap();
+            crate::config_client::ConfigAccess::transact_local(
+                &node,
+                None,
+                "test.seed_fire",
+                |txn| Box::pin(async { durable::stage_fire_request(txn, &fire, &mutation).await }),
+            )
+            .await
+            .unwrap();
         }
         let f: Fire = decode(&case["fire"]);
         let fire = receipt(&f, pre.requests.len());
         let mutation = request_mutation(&fire);
         let commit = case["commit"].as_bool().unwrap();
-        let result = crate::config_client::ConfigAccess::transact_local(&node, None,
-            "test.fire_crash_boundary", |txn| Box::pin(async {
-                durable::stage_fire_request(txn, &fire, &mutation).await?;
-                anyhow::ensure!(commit, "injected pre-commit crash");
-                Ok(())
-            })).await;
-        assert_eq!(result.is_ok(), commit, "{}", case["name"]);
-        let response = crate::graphql::graphql_with_transaction_retry(&node,
-            "{ TriggerFire { fire_key } AgentRequest { request_id } }", "test.fire_receipts")
-            .await.unwrap();
+        let result = crate::config_client::ConfigAccess::transact_local(
+            &node,
+            None,
+            "test.fire_crash_boundary",
+            |txn| {
+                Box::pin(async {
+                    durable::stage_fire_request(txn, &fire, &mutation).await?;
+                    anyhow::ensure!(commit, "injected pre-commit crash");
+                    Ok(())
+                })
+            },
+        )
+        .await;
+        if case["source_allowed"].as_bool().unwrap() {
+            assert_eq!(result.is_ok(), commit, "{}", case["name"]);
+        } else {
+            assert!(result.is_err(), "outcome chaining must reject admission");
+        }
+        let response = crate::graphql::graphql_with_transaction_retry(
+            &node,
+            "{ TriggerFire { fire_key } AgentRequest { request_id } }",
+            "test.fire_receipts",
+        )
+        .await
+        .unwrap();
         let post: State = decode(&case["post"]);
         let data = response.data.unwrap();
-        assert_eq!(data["TriggerFire"].as_array().unwrap().len(), post.receipts.len(), "{}", case["name"]);
-        assert_eq!(data["AgentRequest"].as_array().unwrap().len(), post.requests.len(), "{}", case["name"]);
+        assert_eq!(
+            data["TriggerFire"].as_array().unwrap().len(),
+            post.receipts.len(),
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            data["AgentRequest"].as_array().unwrap().len(),
+            post.requests.len(),
+            "{}",
+            case["name"]
+        );
         assert!(post.outcomes.is_empty());
     }
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum OutcomeAction {
+    Admit {
+        fire: Fire,
+    },
+    Claim {
+        identity: FireIdentity,
+    },
+    RequestTerminal {
+        identity: FireIdentity,
+        terminal_state: String,
+        commit: bool,
+    },
+    GoalStatus {
+        identity: FireIdentity,
+        status: String,
+    },
+    Recover {
+        commit: bool,
+    },
+}
+
+async fn persisted_outcome_requests(
+    access: &crate::config_client::ConfigAccess,
+) -> Vec<gents_protocol::row::AgentRequestRow> {
+    let response = access
+        .execute(&format!(
+            "{{AgentRequest {{{}}}}}",
+            crate::watcher::AGENT_REQUEST_FIELDS
+        ))
+        .await
+        .unwrap();
+    serde_json::from_value(response["data"]["AgentRequest"].clone()).unwrap()
+}
+
 #[tokio::test]
-async fn generated_terminal_outcomes_recover_once_without_chaining() {
-    for case in contract()["outcomes"].as_array().unwrap() {
-        let node = defra_node::EmbeddedNode::builder().build().await.unwrap();
+async fn generated_terminal_outcome_action_traces_use_native_owners() {
+    use crate::config_client::ConfigAccess;
+    for trace in contract()["outcome_traces"].as_array().unwrap() {
+        let node = std::sync::Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
         ensure_runtime_schemas(&node).await.unwrap();
-        let pre: State = decode(&case["pre"]);
-        let request = &pre.requests[0];
-        let mut fire = receipt(&request.fire, 0);
-        fire.goal_assignment_applied = request.goal_assignment_applied;
-        let publish = || crate::config_client::ConfigAccess::transact_local(&node, None,
-            "test.terminal_outcome", |txn| Box::pin(async {
-                durable::stage_outcome(txn, &fire, &request.goal_status, request.goal_wrapup_completed, request.terminal,
-                    if request.fire.goal_backed { &request.goal_status } else { "completed" },
-                    "contract terminal", "2030-01-01T00:01:00Z").await
-            }));
-        if !pre.outcomes.is_empty() { publish().await.unwrap(); }
-        let rollback: anyhow::Result<()> = crate::config_client::ConfigAccess::transact_local(
-            &node, None, "test.outcome_precommit_crash", |txn| Box::pin(async {
-                durable::stage_outcome(txn, &fire, &request.goal_status, request.goal_wrapup_completed, request.terminal,
-                    "completed", "contract terminal", "2030-01-01T00:01:00Z").await?;
-                anyhow::bail!("injected crash before outcome commit")
-            })).await;
-        assert!(rollback.is_err());
-        publish().await.unwrap();
-        publish().await.unwrap();
-        let response = crate::graphql::graphql_with_transaction_retry(&node,
-            "{ FireOutcome { handoff_id source_handoff_id } }", "test.outcomes").await.unwrap();
-        let post: State = decode(&case["post"]);
-        let data = response.data.unwrap();
-        let outcomes = data["FireOutcome"].as_array().unwrap();
-        assert_eq!(outcomes.len(), post.outcomes.len(), "{}", case["name"]);
-        for outcome in outcomes {
-            assert_eq!(outcome["handoff_id"], format!("outcome:{}", fire.fire_key));
-            assert_eq!(outcome["source_handoff_id"], fire.source_handoff_id.as_deref().unwrap());
+        let access = ConfigAccess::Local(node.clone());
+        let mut published = std::collections::BTreeMap::new();
+        let mut terminal_states = std::collections::BTreeMap::new();
+        for (index, step) in trace["steps"].as_array().unwrap().iter().enumerate() {
+            let action: OutcomeAction = decode(&step["action"]);
+            let expected: State = decode(&step["post"]);
+            match action {
+                OutcomeAction::Admit { fire } => {
+                    let receipt = receipt(&fire, index);
+                    let mutation = request_mutation(&receipt);
+                    let result = access
+                        .transact("test.outcome_trace_admit", |txn| {
+                            let receipt = &receipt;
+                            let mutation = &mutation;
+                            Box::pin(async move {
+                                durable::stage_fire_request(txn, receipt, mutation).await
+                            })
+                        })
+                        .await;
+                    assert_eq!(
+                        result.is_ok(),
+                        expected.receipts.contains(&fire.identity),
+                        "{}",
+                        trace["name"]
+                    );
+                }
+                OutcomeAction::Claim { identity } => {
+                    let rows = persisted_outcome_requests(&access).await;
+                    let row = rows
+                        .iter()
+                        .find(|row| row.request_id == identity.request_id())
+                        .unwrap();
+                    let request = crate::watcher::AgentRequest::try_from(row.clone()).unwrap();
+                    let mut lifecycle = crate::RequestLifecycle::new_with_execution_binding(
+                        node.clone(),
+                        "general",
+                        &identity.owner_did,
+                        request,
+                        60,
+                        crate::lifecycle::ExecutionOrigin::Interactive,
+                        "test-backend",
+                    );
+                    let now = chrono::Utc::now();
+                    assert!(
+                        lifecycle
+                            .claim_pending_durable_with_inputs(
+                                || now,
+                                || (now, uuid::Uuid::new_v4().to_string())
+                            )
+                            .await
+                            .unwrap()
+                            .was_claimed(),
+                        "{}",
+                        trace["name"]
+                    );
+                }
+                OutcomeAction::RequestTerminal {
+                    identity,
+                    terminal_state,
+                    commit,
+                } => {
+                    if commit {
+                        terminal_states.insert(identity.request_id(), terminal_state.clone());
+                    }
+                    let result = access.transact("test.inject_terminal_publication_gap", |txn| {
+                        let identity = &identity;
+                        let terminal_state = &terminal_state;
+                        Box::pin(async move {
+                            txn.execute(&format!("mutation {{update_AgentRequest(filter: {{request_id: {{_eq: \"{}\"}}}}, input: {{lifecycle_state: \"{}\"}}) {{_docID}}}}", escape_graphql_string(&identity.request_id()), escape_graphql_string(terminal_state))).await?;
+                            anyhow::ensure!(commit, "injected terminal transaction crash"); Ok(())
+                        })
+                    }).await;
+                    assert_eq!(result.is_ok(), commit);
+                }
+                OutcomeAction::GoalStatus { identity, status } => {
+                    let rows = persisted_outcome_requests(&access).await;
+                    let request = rows
+                        .iter()
+                        .find(|row| row.request_id == identity.request_id())
+                        .unwrap();
+                    access.write("test.inject_goal_publication_gap", &format!("mutation {{update_Goal(filter: {{agent_did: {{_eq: \"{}\"}}, session_id: {{_eq: \"{}\"}}}}, input: {{status: \"{}\"}}) {{_docID}}}}",
+                        escape_graphql_string(&identity.owner_did), escape_graphql_string(request.session_id.as_deref().unwrap()), escape_graphql_string(&status))).await.unwrap();
+                }
+                OutcomeAction::Recover { commit } => {
+                    if commit {
+                        durable::recover_outcomes(&node, "owner-a").await.unwrap();
+                    } else {
+                        let result: anyhow::Result<()> = access
+                            .transact("test.outcome_publication_rollback", |txn| {
+                                Box::pin(async move {
+                                    durable::recover_outcomes_in_txn(txn, "owner-a").await?;
+                                    anyhow::bail!("injected outcome transaction crash")
+                                })
+                            })
+                            .await;
+                        assert!(result.is_err());
+                    }
+                }
+            }
+            for publication in step["published"].as_array().unwrap() {
+                let identity: FireIdentity = decode(&publication["identity"]);
+                published.insert(
+                    identity.outcome_id(),
+                    publication["reason"].as_str().unwrap().to_owned(),
+                );
+            }
+            let response = access.execute("{FireOutcome {handoff_id terminal_state} TriggerFire {fire_key goal_assignment_applied} Goal {agent_did session_id assignment_root_request_doc_id status}}").await.unwrap();
+            let outcomes = response["data"]["FireOutcome"].as_array().unwrap();
+            assert_eq!(
+                outcomes.len(),
+                expected.outcomes.len(),
+                "{} step {index}",
+                trace["name"]
+            );
+            for id in &expected.outcomes {
+                let outcome = outcomes
+                    .iter()
+                    .find(|row| row["handoff_id"] == id.outcome_id())
+                    .unwrap();
+                let reason = &published[&id.outcome_id()];
+                assert_eq!(
+                    outcome["terminal_state"],
+                    if reason == "request_terminal" {
+                        &terminal_states[&id.request_id()]
+                    } else {
+                        reason
+                    },
+                    "{} step {index}",
+                    trace["name"]
+                );
+            }
+            let requests = persisted_outcome_requests(&access).await;
+            assert_eq!(
+                requests.len(),
+                expected.requests.len(),
+                "{} step {index}",
+                trace["name"]
+            );
+            for expected_request in &expected.requests {
+                let row = requests
+                    .iter()
+                    .find(|row| row.request_id == expected_request.fire.identity.request_id())
+                    .unwrap();
+                assert_eq!(
+                    row.lifecycle_state.is_some_and(|state| state.is_terminal()),
+                    expected_request.terminal
+                );
+                let receipts = response["data"]["TriggerFire"].as_array().unwrap();
+                let receipt = receipts
+                    .iter()
+                    .find(|row| row["fire_key"] == expected_request.fire.identity.fire_key())
+                    .unwrap();
+                assert_eq!(
+                    receipt["goal_assignment_applied"]
+                        .as_bool()
+                        .unwrap_or(false),
+                    expected_request.goal_assignment_applied
+                );
+            }
+            let goals = response["data"]["Goal"].as_array().unwrap();
+            assert_eq!(goals.len(), expected.goals.len());
+            for binding in &expected.goals {
+                let goal = goals
+                    .iter()
+                    .find(|row| {
+                        row["agent_did"] == binding.owner && row["session_id"] == binding.session
+                    })
+                    .unwrap();
+                let assignment = requests
+                    .iter()
+                    .find(|row| row.request_id == binding.assignment.request_id())
+                    .unwrap();
+                assert_eq!(
+                    goal["assignment_root_request_doc_id"].as_str(),
+                    assignment.doc_id.as_deref()
+                );
+                assert_eq!(goal["status"], binding.status);
+            }
         }
     }
 }
@@ -186,12 +463,16 @@ struct Arrival {
     identity: FireIdentity,
 }
 
-async fn create_arrival_source(access: &crate::config_client::ConfigAccess, label: &str) -> String {
+async fn create_arrival_source(
+    access: &crate::config_client::ConfigAccess,
+    label: &str,
+    eligible: bool,
+) -> String {
     let response = access
         .write(
             "test.arrival_document",
             &format!(
-                "mutation {{ create_Work(input: {{label: \"{}\"}}) {{ _docID }} }}",
+                "mutation {{ create_Work(input: {{label: \"{}\", eligible: {eligible}}}) {{ _docID }} }}",
                 escape_graphql_string(label),
             ),
         )
@@ -229,7 +510,7 @@ async fn generated_arrival_checkpoints_preserve_committed_delivery_across_crashe
         ensure_runtime_schemas(&node).await.unwrap();
         let access = ConfigAccess::Local(node.clone());
         access
-            .add_schema("type Work { label: String }")
+            .add_schema("type Work { label: String eligible: Boolean }")
             .await
             .unwrap();
         let source: Vec<Arrival> = decode(&case["source"]);
@@ -242,20 +523,27 @@ async fn generated_arrival_checkpoints_preserve_committed_delivery_across_crashe
         for entry in source.iter().take(seed_head) {
             documents.insert(
                 entry.identity.source_doc_id.clone(),
-                create_arrival_source(&access, &entry.identity.source_doc_id).await,
+                create_arrival_source(
+                    &access,
+                    &entry.identity.source_doc_id,
+                    case["source_eligible"][entry.position.parse::<usize>().unwrap() - 1]
+                        .as_bool()
+                        .unwrap(),
+                )
+                .await,
             );
         }
         access.transact("test.arrival_config", |txn| Box::pin(async move {
             txn.execute_with_variables(
                 "mutation($input:EventSourceMutationInputArg!){create_EventSource(input:$input){_docID}}",
                 &serde_json::json!({"input":{"agent_did":"owner-a","event_source_id":"source",
-                    "source_collection":"Work","event_kind":"created"}}),
+                    "source_collection":"Work","event_kind":"created", "filter":"{eligible: {_eq: true}}"}}),
             ).await?;
             txn.execute_with_variables(
                 "mutation($input:TriggerMutationInputArg!){create_Trigger(input:$input){_docID}}",
                 &serde_json::json!({"input":{"agent_did":"owner-a","trigger_id":"handoff",
                     "task_id":"contract-task","source":{"kind":"event","event_source_id":"source"},
-                    "enabled":case["enabled"]}}),
+                    "enabled":case["enabled"], "concurrency":case["mode"]}}),
             ).await?;
             Ok(())
         })).await.unwrap();
@@ -268,7 +556,14 @@ async fn generated_arrival_checkpoints_preserve_committed_delivery_across_crashe
         for entry in source.iter().skip(seed_head) {
             documents.insert(
                 entry.identity.source_doc_id.clone(),
-                create_arrival_source(&access, &entry.identity.source_doc_id).await,
+                create_arrival_source(
+                    &access,
+                    &entry.identity.source_doc_id,
+                    case["source_eligible"][entry.position.parse::<usize>().unwrap() - 1]
+                        .as_bool()
+                        .unwrap(),
+                )
+                .await,
             );
         }
         let pre_after = case["pre_cursor"]["after"].as_str().unwrap();
@@ -326,40 +621,27 @@ async fn generated_arrival_checkpoints_preserve_committed_delivery_across_crashe
         }
         if let Some(commit) = case["checkpoint_commit"].as_bool() {
             let entry: Arrival = decode(&case["entry"]);
-            let doc_id = documents[&entry.identity.source_doc_id].clone();
-            let matched = case["matches_filter"].as_bool().unwrap();
-            let checkpointed: anyhow::Result<()> = access
+            let busy = case["busy"].as_bool().unwrap();
+            let checkpointed: anyhow::Result<bool> = access
                 .transact("test.arrival_checkpoint_crash", |txn| {
-                    let doc_id = &doc_id;
                     let entry = &entry;
                     Box::pin(async move {
-                        if matched {
-                            event_source_cursor::acknowledge_fire(
-                                txn,
-                                "owner-a",
-                                "handoff",
-                                "Work",
-                                &doc_id,
-                                &entry.position,
-                            )
-                            .await?;
-                        } else {
-                            event_source_cursor::advance(
-                                txn,
-                                "owner-a",
-                                "handoff",
-                                "Work",
-                                &entry.position,
-                            )
-                            .await?;
-                        }
+                        let accepted = event_source_cursor::checkpoint_prefix(
+                            txn,
+                            "owner-a",
+                            "handoff",
+                            "Work",
+                            &entry.position,
+                            busy,
+                        )
+                        .await?;
                         anyhow::ensure!(commit, "injected crash before checkpoint commit");
-                        Ok(())
+                        Ok(accepted)
                     })
                 })
                 .await;
             assert_eq!(
-                checkpointed.is_ok(),
+                checkpointed.as_ref().copied().unwrap_or(false),
                 case["checkpoint_succeeds"].as_bool().unwrap(),
                 "{}: {checkpointed:?}",
                 case["name"]
@@ -440,8 +722,14 @@ fn observed_claim_cohorts_match_lean() {
 #[test]
 fn task_goal_assignment_root_matches_lean() {
     let contract = gents_lean_contract::load_contract_snapshot::<serde_json::Value>().unwrap();
-    for case in contract["trigger_delivery"]["assignment_roots"].as_array().unwrap() {
-        assert_eq!(crate::goal::assignment_allows(case["assigned"].as_str(), case["observed"].as_str()),
-            case["allowed"].as_bool().unwrap(), "{case}");
+    for case in contract["trigger_delivery"]["assignment_roots"]
+        .as_array()
+        .unwrap()
+    {
+        assert_eq!(
+            crate::goal::assignment_allows(case["assigned"].as_str(), case["observed"].as_str()),
+            case["allowed"].as_bool().unwrap(),
+            "{case}"
+        );
     }
 }
