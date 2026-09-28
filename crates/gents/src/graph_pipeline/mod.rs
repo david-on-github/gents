@@ -49,9 +49,10 @@ pub use tools::{
 pub use types::{
     BundledProvenance, CapabilityManifestEntry, DeliveryConcurrency, DeliveryMode, Diagnostic,
     DiagnosticCode, EntryBinding, GraphEdge, GraphIntent, GraphLimits, GraphNode, GraphPlan,
-    GroupCount, PackagePlan, PlannedEdge, PlannedEntry, PlannedNode, PlannedPackageArtifact,
-    PlannedResult, PortCardinality, PortRef, PortSpec, RequiredSchemaDigest, ResultCardinality,
-    ResultContract, StageCapability, StageTarget, WorkspaceAuthority, COMPILER_VERSION,
+    GraphSessionSelection, GroupCount, PackagePlan, PlannedEdge, PlannedEntry, PlannedNode,
+    PlannedPackageArtifact, PlannedResult, PortCardinality, PortRef, PortSpec,
+    RequiredSchemaDigest, ResultCardinality, ResultContract, StageCapability, StageTarget,
+    WorkspaceAuthority, COMPILER_VERSION,
 };
 
 #[cfg(test)]
