@@ -27,7 +27,8 @@ def fireJson (f : Fire) : String := object [
 
 def requestJson (r : Request) : String := object [
   ("fire", fireJson r.fire), ("running", toString r.running),
-  ("terminal", toString r.terminal), ("goal_status", jsonString r.goalStatus.toDefraDB)]
+  ("terminal", toString r.terminal), ("goal_status", jsonString r.goalStatus.toDefraDB),
+  ("goal_wrapup_completed", toString r.goalWrapupCompleted)]
 
 def stateJson (s : State) : String := object [
   ("receipts", jsonArray (s.receipts.map identityJson)),
@@ -84,7 +85,8 @@ def outcomeCases : List String :=
    outcomeCase "continuing_goal_has_no_outcome" goal false,
    outcomeCase "completed_goal" { goal with goalStatus := .complete } false,
    outcomeCase "blocked_goal" { goal with goalStatus := .blocked } false,
-   outcomeCase "budget_exhausted_goal" { goal with goalStatus := .budgetLimited } false,
+   outcomeCase "budget_wrapup_pending" { goal with goalStatus := .budgetLimited } false,
+   outcomeCase "budget_exhausted_goal" { goal with goalStatus := .budgetLimited, goalWrapupCompleted := true } false,
    outcomeCase "paused_goal" { goal with goalStatus := .paused } false,
    outcomeCase "usage_limited_goal" { goal with goalStatus := .usageLimited } false]
 

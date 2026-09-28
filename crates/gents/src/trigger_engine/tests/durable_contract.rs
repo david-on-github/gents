@@ -18,6 +18,7 @@ struct Request {
     running: bool,
     terminal: bool,
     goal_status: String,
+    goal_wrapup_completed: bool,
 }
 
 #[derive(Deserialize)]
@@ -88,7 +89,7 @@ fn durable_delivery_predicates_match_executable_lean_owners() {
         let state: State = decode(&case["pre"]);
         let r = &state.requests[0];
         assert_eq!(durable::outcome_due(r.fire.emit_outcome, r.fire.goal_backed,
-            &r.goal_status, r.terminal), case["due"].as_bool().unwrap(), "{}", case["name"]);
+            &r.goal_status, r.goal_wrapup_completed, r.terminal), case["due"].as_bool().unwrap(), "{}", case["name"]);
     }
     for case in cases["queues"].as_array().unwrap() {
         let state: State = decode(&case["pre"]);
@@ -154,14 +155,14 @@ async fn generated_terminal_outcomes_recover_once_without_chaining() {
         let fire = receipt(&request.fire, 0);
         let publish = || crate::config_client::ConfigAccess::transact_local(&node, None,
             "test.terminal_outcome", |txn| Box::pin(async {
-                durable::stage_outcome(txn, &fire, &request.goal_status, request.terminal,
+                durable::stage_outcome(txn, &fire, &request.goal_status, request.goal_wrapup_completed, request.terminal,
                     if request.fire.goal_backed { &request.goal_status } else { "completed" },
                     "contract terminal", "2030-01-01T00:01:00Z").await
             }));
         if !pre.outcomes.is_empty() { publish().await.unwrap(); }
         let rollback: anyhow::Result<()> = crate::config_client::ConfigAccess::transact_local(
             &node, None, "test.outcome_precommit_crash", |txn| Box::pin(async {
-                durable::stage_outcome(txn, &fire, &request.goal_status, request.terminal,
+                durable::stage_outcome(txn, &fire, &request.goal_status, request.goal_wrapup_completed, request.terminal,
                     "completed", "contract terminal", "2030-01-01T00:01:00Z").await?;
                 anyhow::bail!("injected crash before outcome commit")
             })).await;
