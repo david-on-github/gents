@@ -1669,7 +1669,9 @@ mod tests {
     }
 
     /// A hint made only of normal components still leaves the runs directory
-    /// through a symlink, whether the trial directory or its home is the link.
+    /// through a symlink, whether the trial directory, its home or its
+    /// workspace is the link. The workspace fixture has a real home, so only
+    /// the workspace check refuses it.
     #[tokio::test]
     async fn recollect_refuses_a_home_hint_that_resolves_outside_the_runs_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -1685,8 +1687,15 @@ mod tests {
         std::os::unix::fs::symlink(&outside, runs_dir.join("linked")).unwrap();
         std::os::unix::fs::symlink(outside.join("home"), runs_dir.join("real").join("home"))
             .unwrap();
+        close(
+            EmbeddedHome::create_retained(&runs_dir.join("ws").join("home"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        std::os::unix::fs::symlink(&outside, runs_dir.join("ws").join("workspace")).unwrap();
         let executor = EmbeddedExecutor::new(DocumentRuntimeOptions::default(), runs_dir);
-        for hint in ["linked", "real"] {
+        for hint in ["linked", "real", "ws"] {
             let locator = TrialLocator {
                 trial_agent_did: "did:key:zAny".to_string(),
                 session_id: "s-1".to_string(),
