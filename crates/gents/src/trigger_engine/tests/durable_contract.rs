@@ -104,14 +104,7 @@ fn durable_delivery_predicates_match_executable_lean_owners() {
         assert_eq!(durable::queued_claim_allowed(&rows, &decode(&case["identity"])),
             case["can_claim"].as_bool().unwrap(), "{}", case["name"]);
     }
-    for case in cases["cursors"].as_array().unwrap() {
-        assert_eq!(durable::pending_delivery_ids(case["seeded"].as_bool().unwrap(),
-            &decode::<Vec<FireIdentity>>(&case["baseline"]),
-            &decode::<Vec<FireIdentity>>(&case["committed"]),
-            &decode::<Vec<FireIdentity>>(&case["source"]),
-            case["enabled"].as_bool().unwrap()), decode::<Vec<FireIdentity>>(&case["pending"]),
-            "{}", case["name"]);
-    }
+
 }
 
 #[tokio::test]
@@ -184,5 +177,242 @@ async fn generated_terminal_outcomes_recover_once_without_chaining() {
             assert_eq!(outcome["handoff_id"], format!("outcome:{}", fire.fire_key));
             assert_eq!(outcome["source_handoff_id"], fire.source_handoff_id.as_deref().unwrap());
         }
+    }
+}
+
+#[derive(Clone, Deserialize)]
+struct Arrival {
+    position: String,
+    identity: FireIdentity,
+}
+
+async fn create_arrival_source(access: &crate::config_client::ConfigAccess, label: &str) -> String {
+    let response = access
+        .write(
+            "test.arrival_document",
+            &format!(
+                "mutation {{ create_Work(input: {{label: \"{}\"}}) {{ _docID }} }}",
+                escape_graphql_string(label),
+            ),
+        )
+        .await
+        .unwrap();
+    let value = &response["data"]["create_Work"];
+    let document = value
+        .as_array()
+        .and_then(|rows| rows.first())
+        .unwrap_or(value);
+    document["_docID"].as_str().unwrap().to_owned()
+}
+
+async fn saved_arrival_cursor(access: &crate::config_client::ConfigAccess) -> String {
+    access
+        .transact("test.read_arrival_cursor", |txn| {
+            Box::pin(async move {
+                Ok(crate::config_client::event_source_cursor::load_or_seed(
+                    txn, "owner-a", "handoff",
+                )
+                .await?
+                .cursor
+                .after)
+            })
+        })
+        .await
+        .unwrap()
+}
+
+#[tokio::test]
+async fn generated_arrival_checkpoints_preserve_committed_delivery_across_crashes() {
+    use crate::config_client::{event_source_cursor, ConfigAccess};
+    for case in contract()["cursors"].as_array().unwrap() {
+        let node = std::sync::Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
+        ensure_runtime_schemas(&node).await.unwrap();
+        let access = ConfigAccess::Local(node.clone());
+        access
+            .add_schema("type Work { label: String }")
+            .await
+            .unwrap();
+        let source: Vec<Arrival> = decode(&case["source"]);
+        let seed_head = case["seed_head"]
+            .as_str()
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let mut documents = std::collections::BTreeMap::new();
+        for entry in source.iter().take(seed_head) {
+            documents.insert(
+                entry.identity.source_doc_id.clone(),
+                create_arrival_source(&access, &entry.identity.source_doc_id).await,
+            );
+        }
+        access.transact("test.arrival_config", |txn| Box::pin(async move {
+            txn.execute_with_variables(
+                "mutation($input:EventSourceMutationInputArg!){create_EventSource(input:$input){_docID}}",
+                &serde_json::json!({"input":{"agent_did":"owner-a","event_source_id":"source",
+                    "source_collection":"Work","event_kind":"created"}}),
+            ).await?;
+            txn.execute_with_variables(
+                "mutation($input:TriggerMutationInputArg!){create_Trigger(input:$input){_docID}}",
+                &serde_json::json!({"input":{"agent_did":"owner-a","trigger_id":"handoff",
+                    "task_id":"contract-task","source":{"kind":"event","event_source_id":"source"},
+                    "enabled":case["enabled"]}}),
+            ).await?;
+            Ok(())
+        })).await.unwrap();
+        assert_eq!(
+            saved_arrival_cursor(&access).await,
+            seed_head.to_string(),
+            "{}",
+            case["name"]
+        );
+        for entry in source.iter().skip(seed_head) {
+            documents.insert(
+                entry.identity.source_doc_id.clone(),
+                create_arrival_source(&access, &entry.identity.source_doc_id).await,
+            );
+        }
+        let pre_after = case["pre_cursor"]["after"].as_str().unwrap();
+        access
+            .transact("test.prior_checkpoint", |txn| {
+                Box::pin(async move {
+                    event_source_cursor::advance(txn, "owner-a", "handoff", "Work", pre_after).await
+                })
+            })
+            .await
+            .unwrap();
+        if case["restart"].as_bool().unwrap() {
+            assert_eq!(
+                saved_arrival_cursor(&access).await,
+                pre_after,
+                "{}",
+                case["name"]
+            );
+        }
+        let adapt_fire = |mut fire: Fire| {
+            fire.identity.source_doc_id = documents[&fire.identity.source_doc_id].clone();
+            fire
+        };
+        let pre: State = decode(&case["pre"]);
+        for (index, request) in pre.requests.iter().enumerate() {
+            let receipt = receipt(&adapt_fire(request.fire.clone()), index);
+            let mutation = request_mutation(&receipt);
+            access
+                .transact("test.prior_arrival_admission", |txn| {
+                    let receipt = &receipt;
+                    let mutation = &mutation;
+                    Box::pin(async move {
+                        durable::stage_fire_request(txn, &receipt, &mutation).await?;
+                        Ok(())
+                    })
+                })
+                .await
+                .unwrap();
+        }
+        if let Some(commit) = case["admission_commit"].as_bool() {
+            let receipt = receipt(&adapt_fire(decode(&case["fire"])), pre.requests.len());
+            let mutation = request_mutation(&receipt);
+            let admitted: anyhow::Result<()> = access
+                .transact("test.arrival_admission_crash", |txn| {
+                    let receipt = &receipt;
+                    let mutation = &mutation;
+                    Box::pin(async move {
+                        durable::stage_fire_request(txn, &receipt, &mutation).await?;
+                        anyhow::ensure!(commit, "injected crash before receipt/request commit");
+                        Ok(())
+                    })
+                })
+                .await;
+            assert_eq!(admitted.is_ok(), commit, "{}: {admitted:?}", case["name"]);
+        }
+        if let Some(commit) = case["checkpoint_commit"].as_bool() {
+            let entry: Arrival = decode(&case["entry"]);
+            let doc_id = documents[&entry.identity.source_doc_id].clone();
+            let matched = case["matches_filter"].as_bool().unwrap();
+            let checkpointed: anyhow::Result<()> = access
+                .transact("test.arrival_checkpoint_crash", |txn| {
+                    let doc_id = &doc_id;
+                    let entry = &entry;
+                    Box::pin(async move {
+                        if matched {
+                            event_source_cursor::acknowledge_fire(
+                                txn,
+                                "owner-a",
+                                "handoff",
+                                "Work",
+                                &doc_id,
+                                &entry.position,
+                            )
+                            .await?;
+                        } else {
+                            event_source_cursor::advance(
+                                txn,
+                                "owner-a",
+                                "handoff",
+                                "Work",
+                                &entry.position,
+                            )
+                            .await?;
+                        }
+                        anyhow::ensure!(commit, "injected crash before checkpoint commit");
+                        Ok(())
+                    })
+                })
+                .await;
+            assert_eq!(
+                checkpointed.is_ok(),
+                case["checkpoint_succeeds"].as_bool().unwrap(),
+                "{}: {checkpointed:?}",
+                case["name"]
+            );
+        }
+        let after = saved_arrival_cursor(&access).await;
+        assert_eq!(
+            after,
+            case["post_cursor"]["after"].as_str().unwrap(),
+            "{}",
+            case["name"]
+        );
+        let page = access.execute(&format!(
+            "{{ _documentArrivals(collection: \"Work\", after: \"{}\", limit: 128) {{ entries {{ cursor docID }} }} }}",
+            escape_graphql_string(&after),
+        )).await.unwrap();
+        let actual = page["data"]["_documentArrivals"]["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| {
+                (
+                    entry["cursor"].as_str().unwrap().to_owned(),
+                    entry["docID"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = decode::<Vec<Arrival>>(&case["journal_after"])
+            .iter()
+            .map(|entry| {
+                (
+                    entry.position.clone(),
+                    documents[&entry.identity.source_doc_id].clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected, "{}", case["name"]);
+        let rows = access
+            .execute("{ TriggerFire { source_doc_id } AgentRequest { request_id } }")
+            .await
+            .unwrap();
+        let post: State = decode(&case["post"]);
+        assert_eq!(
+            rows["data"]["TriggerFire"].as_array().unwrap().len(),
+            post.receipts.len(),
+            "{}",
+            case["name"]
+        );
+        assert_eq!(
+            rows["data"]["AgentRequest"].as_array().unwrap().len(),
+            post.requests.len(),
+            "{}",
+            case["name"]
+        );
     }
 }

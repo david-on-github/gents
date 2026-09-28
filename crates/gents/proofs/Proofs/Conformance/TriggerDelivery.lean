@@ -92,22 +92,72 @@ def outcomeCases : List String :=
    outcomeCase "paused_goal" { goal with goalStatus := .paused } false,
    outcomeCase "usage_limited_goal" { goal with goalStatus := .usageLimited } false]
 
+def arrival (position : Nat) (document : String) : EventDelivery.Durable.Arrival :=
+  { position, identity := identity "owner-a" document }
+
+def arrivalJson (entry : EventDelivery.Durable.Arrival) : String := object [
+  ("position", jsonString (toString entry.position)), ("identity", identityJson entry.identity)]
+
+def cursorJson (cursor : EventDelivery.Durable.Cursor) : String := object [
+  ("seeded", toString cursor.seeded), ("after", jsonString (toString cursor.after))]
+
+structure CursorScenario where
+  name : String
+  seedHead : Nat := 1
+  priorAfter : Option Nat := none
+  restart : Bool := false
+  enabled : Bool := true
+  committed : State := {}
+  entry : EventDelivery.Durable.Arrival := arrival 2 "b"
+  matchesFilter : Bool := true
+  admissionCommit : Option Bool := none
+  checkpointCommit : Option Bool := none
+
+def cursorCase (scenario : CursorScenario) : String :=
+  let source := [arrival 1 "a", arrival 2 "b", arrival 3 "c"]
+  let first := EventDelivery.Durable.seed {} scenario.seedHead
+  let saved := match scenario.priorAfter with
+    | none => first
+    | some position => EventDelivery.Durable.advance first position true
+  let before := if scenario.restart then EventDelivery.Durable.seed saved 3 else saved
+  let f := { fire scenario.entry.identity.document with identity := scenario.entry.identity }
+  let afterState := match scenario.admissionCommit with
+    | none => scenario.committed
+    | some commit => admitTransaction scenario.committed f commit
+  let afterCursor := match scenario.checkpointCommit with
+    | none => before
+    | some commit => EventDelivery.Durable.acknowledge before afterState scenario.entry scenario.matchesFilter commit
+  let optionalBool := fun value : Option Bool => match value with
+    | none => "null"
+    | some value => toString value
+  object [
+    ("name", jsonString scenario.name), ("seed_head", jsonString (toString scenario.seedHead)),
+    ("restart", toString scenario.restart), ("enabled", toString scenario.enabled),
+    ("pre_cursor", cursorJson before), ("post_cursor", cursorJson afterCursor),
+    ("pre", stateJson scenario.committed), ("post", stateJson afterState),
+    ("source", jsonArray (source.map arrivalJson)), ("entry", arrivalJson scenario.entry),
+    ("fire", fireJson f), ("matches_filter", toString scenario.matchesFilter),
+    ("admission_commit", optionalBool scenario.admissionCommit),
+    ("checkpoint_commit", optionalBool scenario.checkpointCommit),
+    ("checkpoint_succeeds", optionalBool (scenario.checkpointCommit.map fun commit => commit && (!scenario.matchesFilter || admitted afterState scenario.entry.identity))),
+    ("acknowledgment_allowed", toString (!scenario.matchesFilter || admitted afterState scenario.entry.identity)),
+    ("pending", jsonArray ((EventDelivery.Durable.pending afterCursor source scenario.enabled).map arrivalJson)),
+    ("journal_after", jsonArray ((EventDelivery.Durable.pending afterCursor source true).map arrivalJson))]
+
 def cursorCases : List String :=
-  let a := identity "owner-a" "a"
-  let b := identity "owner-a" "b"
-  let c := identity "owner-a" "c"
-  let baseline := EventDelivery.Durable.seed {} [a]
-  [("first_seed", baseline, ({} : State), [a], true),
-   ("disabled_waits", baseline, {}, [a,b,c], false),
-   ("reenabled_preserves_order", baseline, {}, [a,b,c], true),
-   ("restart_preserves_seed", EventDelivery.Durable.seed baseline [a,b,c], {}, [a,b,c], true),
-   ("committed_fire_is_cursor", baseline, admit {} (fire "b"), [a,b,c], true)].map
-    fun (name, cursor, committed, source, enabled) => object [
-      ("name", jsonString name), ("seeded", toString cursor.seeded),
-      ("baseline", jsonArray (cursor.baseline.map identityJson)),
-      ("committed", jsonArray (committed.receipts.map identityJson)),
-      ("source", jsonArray (source.map identityJson)), ("enabled", toString enabled),
-      ("pending", jsonArray ((EventDelivery.Durable.pending cursor committed source enabled).map identityJson))]
+  [({ name := "first_seed_excludes_existing", seedHead := 3 } : CursorScenario),
+   { name := "first_seed_disabled_retains_later_arrivals", enabled := false },
+   { name := "reenabled_delivers_receiving_order" },
+   { name := "restart_does_not_reseed", restart := true },
+   { name := "crash_before_fire_commit", admissionCommit := some false, checkpointCommit := some true },
+   { name := "crash_after_fire_commit_before_checkpoint", admissionCommit := some true },
+   { name := "checkpoint_transaction_crashes", admissionCommit := some true, checkpointCommit := some false },
+   { name := "replay_after_receipt_commit", committed := admit {} (fire "b"), admissionCommit := some true, checkpointCommit := some true },
+   { name := "checkpoint_commits", admissionCommit := some true, checkpointCommit := some true },
+   { name := "replay_after_checkpoint_commit", priorAfter := some 2, committed := admit {} (fire "b"), admissionCommit := some true, checkpointCommit := some true },
+   { name := "unmatched_filter_checkpoint", matchesFilter := false, checkpointCommit := some true },
+   { name := "stale_checkpoint_keeps_progress", priorAfter := some 3, committed := admit {} (fire "b"), checkpointCommit := some true },
+   { name := "unadmitted_match_cannot_checkpoint", checkpointCommit := some true }].map cursorCase
 
 def identityCases : List String :=
   [identity "owner-a" "a", identity "owner-b" "a", identity "a:b" "é",
