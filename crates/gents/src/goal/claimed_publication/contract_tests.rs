@@ -239,11 +239,13 @@ async fn run_generated_wait_observations() {
         "every new generated wait case is owner-bound"
     );
     for case in cases {
-        let fixture = Fixture::new_with_parent_state(&case.before, false).await;
+        let fixture = Fixture::new_with_earlier_request(
+            &case.before,
+            false,
+            (case.name == "unrelated_wait_cannot_suppress").then_some("older-wait-parent"),
+        )
+        .await;
         if case.name == "unrelated_wait_cannot_suppress" {
-            fixture
-                .other_request("older-wait-parent", "2010-01-01T00:00:00Z", "pending")
-                .await;
             let older = crate::watcher::AgentRequest::try_from(
                 request_rows(&fixture.node)
                     .await

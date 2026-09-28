@@ -3,7 +3,7 @@ use crate::config_client::ConfigApplyTxn;
 use crate::graphql::escape_graphql_string;
 use anyhow::{ensure, Result};
 use gents_protocol::trigger_delivery::{FireIdentity, TriggerFire};
-pub(crate) use recovery::recover_outcomes;
+pub(crate) use recovery::{recover_outcomes, recover_outcomes_in_txn};
 
 #[derive(Clone)]
 pub(crate) struct PreparedFire {
@@ -12,15 +12,7 @@ pub(crate) struct PreparedFire {
 }
 
 pub(crate) fn fire_key(identity: &FireIdentity) -> String {
-    [
-        &identity.owner_did,
-        &identity.trigger_id,
-        &identity.source_collection,
-        &identity.source_doc_id,
-    ]
-    .into_iter()
-    .map(|value| format!("{}:{value}", value.chars().count()))
-    .collect()
+    identity.fire_key()
 }
 
 pub(crate) fn resolve_session_id(
@@ -29,57 +21,84 @@ pub(crate) fn resolve_session_id(
     owned: bool,
 ) -> Option<String> {
     match target {
-        None => Some(format!("trigger-session:{}", fire_key(identity))),
+        None => Some(identity.session_id()),
         Some(value) if !value.is_empty() && owned => Some(value.to_owned()),
         Some(_) => None,
     }
 }
 
-pub(crate) fn outcome_due(
-    emit: bool,
-    goal_backed: bool,
-    goal_status: &str,
-    _wrapup_completed: bool,
-    terminal: bool,
-) -> bool {
-    emit && if goal_backed {
-        matches!(goal_status, "complete" | "blocked" | "budget_limited")
-    } else {
-        terminal
-    }
-}
-
-pub(crate) struct FireQueueRow {
-    pub identity: FireIdentity,
+pub(crate) struct GoalOutcomeBinding {
+    pub owner_did: String,
     pub session_id: String,
-    pub queued_serial: bool,
-    pub running: bool,
-    pub terminal: bool,
+    pub assignment_request_id: String,
+    pub status: String,
 }
 
-pub(crate) fn queued_claim_allowed(rows: &[FireQueueRow], identity: &FireIdentity) -> bool {
-    let Some(index) = rows.iter().position(|r| &r.identity == identity) else {
-        return false;
-    };
-    let candidate = &rows[index];
-    let conflicts = |other: &FireQueueRow| {
-        candidate.identity.owner_did == other.identity.owner_did
-            && (candidate.session_id == other.session_id
-                || (candidate.queued_serial
-                    && candidate.identity.trigger_id == other.identity.trigger_id))
-    };
-    !candidate.running
-        && !candidate.terminal
-        && !rows
-            .iter()
-            .any(|r| r.running && !r.terminal && conflicts(r))
-        && !rows[..index].iter().any(|r| !r.terminal && conflicts(r))
+pub(crate) fn fire_outcome_reason(
+    fire: &TriggerFire,
+    request_terminal: bool,
+    assignment_replaced: bool,
+    goal: Option<&GoalOutcomeBinding>,
+) -> Option<String> {
+    if !fire.emit_outcome {
+        return None;
+    }
+    if fire.goal_id.is_none() || !fire.goal_assignment_applied {
+        return request_terminal.then(|| "request_terminal".into());
+    }
+    if assignment_replaced {
+        return Some("superseded".into());
+    }
+    let goal = goal.filter(|goal| {
+        goal.owner_did == fire.identity.owner_did
+            && goal.session_id == fire.session_id
+            && goal.assignment_request_id == fire.request_id
+    })?;
+    matches!(
+        goal.status.as_str(),
+        "complete" | "blocked" | "budget_limited"
+    )
+    .then(|| goal.status.clone())
 }
 
-/// The receipt's unique index arbitrates concurrent admissions. Both writes
-/// use the caller's transaction, so rollback cannot leave an admitted fire
-/// without its request. A duplicate never executes its supplied mutation.
-#[cfg(test)]
+async fn observe_goal_outcome_binding(
+    txn: &ConfigApplyTxn<'_>,
+    fire: &TriggerFire,
+) -> Result<Option<GoalOutcomeBinding>> {
+    let Some(expected_goal_id) = &fire.goal_id else {
+        return Ok(None);
+    };
+    let Some(goal) =
+        crate::goal::load_canonical_goal_in_txn(txn, &fire.identity.owner_did, &fire.session_id)
+            .await?
+    else {
+        return Ok(None);
+    };
+    ensure!(
+        &goal.goal_id == expected_goal_id,
+        "Task fire Goal identity changed during outcome observation"
+    );
+    let Some(assignment_request_id) = crate::goal::assignment_request_id_in_txn(txn, &goal).await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(GoalOutcomeBinding {
+        owner_did: goal.agent_did,
+        session_id: goal.session_id,
+        assignment_request_id,
+        status: goal.status,
+    }))
+}
+
+fn assignment_replaced(fire: &TriggerFire, binding: Option<&GoalOutcomeBinding>) -> bool {
+    fire.goal_assignment_applied
+        && binding.is_some_and(|goal| {
+            goal.owner_did == fire.identity.owner_did
+                && goal.session_id == fire.session_id
+                && goal.assignment_request_id != fire.request_id
+        })
+}
+
 pub(crate) async fn stage_fire_request(
     txn: &ConfigApplyTxn<'_>,
     fire: &TriggerFire,
@@ -109,7 +128,7 @@ pub(crate) async fn stage_fire_receipt(
         "noncanonical fire identity"
     );
     ensure!(
-        fire.request_id == format!("trigger-request:{}", fire.fire_key),
+        fire.request_id == fire.identity.request_id(),
         "noncanonical fire request ID"
     );
     let prior = txn
@@ -133,30 +152,33 @@ pub(crate) async fn stage_fire_receipt(
 pub(crate) async fn stage_outcome(
     txn: &ConfigApplyTxn<'_>,
     fire: &TriggerFire,
-    goal_status: &str,
-    wrapup_completed: bool,
+    goal: Option<&GoalOutcomeBinding>,
+    assignment_replaced: bool,
     request_terminal: bool,
     terminal_state: &str,
     reason: &str,
     now: &str,
 ) -> Result<bool> {
-    if fire.goal_id.is_some() && !fire.goal_assignment_applied {
+    let Some(classification) =
+        fire_outcome_reason(fire, request_terminal, assignment_replaced, goal)
+    else {
         return Ok(false);
-    }
-    if !outcome_due(
-        fire.emit_outcome,
-        fire.goal_id.is_some(),
-        goal_status,
-        wrapup_completed,
-        request_terminal,
-    ) {
-        return Ok(false);
-    }
+    };
+    let terminal_state = if classification == "request_terminal" {
+        terminal_state
+    } else {
+        &classification
+    };
+    let reason = if classification == "superseded" {
+        "superseded by a newer Task Goal assignment"
+    } else {
+        reason
+    };
     ensure!(
         fire.fire_key == fire_key(&fire.identity),
         "noncanonical outcome fire identity"
     );
-    let handoff_id = format!("outcome:{}", fire.fire_key);
+    let handoff_id = fire.identity.outcome_id();
     let prior = txn
         .execute(&format!(
             "{{ FireOutcome(filter: {{handoff_id: {{_eq: \"{}\"}}}}) {{ handoff_id }} }}",
@@ -206,20 +228,7 @@ pub(crate) async fn publish_request_outcome(
     let response = txn.execute(&format!("{{ TriggerFire(filter: {{owner_did: {{_eq: \"{}\"}}, request_id: {{_eq: \"{}\"}}}}) {{ {FIRE_FIELDS} }} }}", escape_graphql_string(owner), escape_graphql_string(request_id))).await?;
     let rows: Vec<TriggerFire> = serde_json::from_value(response["data"]["TriggerFire"].clone())?;
     for fire in rows {
-        // Goal-backed requests notify only through the Goal terminal owner.
-        if fire.goal_id.is_none() {
-            stage_outcome(
-                txn,
-                &fire,
-                "active",
-                false,
-                true,
-                terminal_state,
-                reason,
-                now,
-            )
-            .await?;
-        }
+        stage_outcome(txn, &fire, None, false, true, terminal_state, reason, now).await?;
     }
     Ok(())
 }
@@ -228,21 +237,20 @@ pub(crate) async fn publish_goal_outcomes(
     txn: &ConfigApplyTxn<'_>,
     owner: &str,
     goal_id: &str,
-    status: &str,
-    wrapup_completed: bool,
     reason: &str,
     now: &str,
 ) -> Result<()> {
     let response = txn.execute(&format!("{{ TriggerFire(filter: {{owner_did: {{_eq: \"{}\"}}, goal_id: {{_eq: \"{}\"}}}}) {{ {FIRE_FIELDS} }} }}", escape_graphql_string(owner), escape_graphql_string(goal_id))).await?;
     let rows: Vec<TriggerFire> = serde_json::from_value(response["data"]["TriggerFire"].clone())?;
     for fire in rows {
+        let binding = observe_goal_outcome_binding(txn, &fire).await?;
         stage_outcome(
             txn,
             &fire,
-            status,
-            wrapup_completed,
+            binding.as_ref(),
+            assignment_replaced(&fire, binding.as_ref()),
             false,
-            status,
+            "",
             reason,
             now,
         )

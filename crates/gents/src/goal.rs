@@ -22,8 +22,9 @@ pub use readiness_gate::{
     GoalGatedDecision, ObservedGoalBehavior, GOAL_READINESS_WAIT_PREFIX,
 };
 pub(crate) use request_head::{
-    assignment_allows, authenticated_goal_request_members, goal_session_is_idle,
-    latest_authenticated_session_request, latest_goal_request, verify_goal_continuation_edge,
+    assignment_allows, assignment_request_id_in_txn, authenticated_goal_request_members,
+    goal_session_is_idle, latest_authenticated_session_request, latest_goal_request,
+    verify_goal_continuation_edge,
 };
 
 pub const GOAL_TRIGGER_KIND: &str = "goal";
@@ -2180,8 +2181,6 @@ pub(crate) async fn apply_claimed_task_goal_in_txn(
             txn,
             &goal.agent_did,
             &goal.goal_id,
-            &goal.status,
-            goal.wrapup_completed.unwrap_or(false),
             goal.last_blocked_reason.as_deref().unwrap_or(&goal.status),
             now,
         )
@@ -2269,6 +2268,14 @@ pub(crate) async fn apply_claimed_task_goal_in_txn(
         input: {{goal_assignment_applied: true}}) {{_docID}} }}"#
     ))
     .await?;
+    crate::trigger_engine::durable::publish_goal_outcomes(
+        txn,
+        &updated.agent_did,
+        &updated.goal_id,
+        "Task Goal assignment replaced",
+        now,
+    )
+    .await?;
     Ok(())
 }
 
@@ -2355,8 +2362,6 @@ async fn set_goal_in_txn(
             txn,
             agent_did,
             &updated.goal_id,
-            &updated.status,
-            updated.wrapup_completed.unwrap_or(false),
             updated
                 .last_blocked_reason
                 .as_deref()
@@ -2538,8 +2543,6 @@ pub async fn update_goal_fields_if_status(
                         txn,
                         &updated.agent_did,
                         &updated.goal_id,
-                        &updated.status,
-                        updated.wrapup_completed.unwrap_or(false),
                         updated
                             .last_blocked_reason
                             .as_deref()

@@ -364,3 +364,22 @@ pub(super) async fn retire_stale_assignment_continuations_in_txn(
     }
     Ok(allowed)
 }
+
+pub(crate) async fn assignment_request_id_in_txn(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    goal: &GoalDocument,
+) -> Result<Option<String>> {
+    let Some(root) = goal.assignment_root_request_doc_id.as_deref() else {
+        return Ok(None);
+    };
+    let response = txn.execute_local_response(&format!(
+        r#"{{AgentRequest(filter: {{_docID: {{_eq: "{}"}}, agent_did: {{_eq: "{}"}}, session_id: {{_eq: "{}"}}}}) {{request_id}}}}"#,
+        escape_graphql_string(root), escape_graphql_string(&goal.agent_did), escape_graphql_string(&goal.session_id)
+    )).await?;
+    let requests: Vec<AgentRequestRow> = crate::graphql::rows(&response, "AgentRequest")?;
+    anyhow::ensure!(
+        requests.len() == 1,
+        "Goal assignment has no unique request in its owner/session"
+    );
+    Ok(Some(requests[0].request_id.clone()))
+}

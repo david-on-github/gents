@@ -21,6 +21,14 @@ impl Fixture {
     }
 
     pub async fn new_with_parent_state(before: &Value, terminal_parent: bool) -> Self {
+        Self::new_with_earlier_request(before, terminal_parent, None).await
+    }
+
+    pub async fn new_with_earlier_request(
+        before: &Value,
+        terminal_parent: bool,
+        earlier: Option<&str>,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let identity =
             Arc::new(KeyIdentity::load_or_create(temp.path().join("target.key"), None).unwrap());
@@ -42,6 +50,24 @@ impl Fixture {
         )
         .await
         .unwrap();
+        if let Some(request_id) = earlier {
+            let mut request = AgentRequestCreate::base(
+                gents_protocol::request_admission::RequestPurpose::Normal,
+                request_id,
+                identity.did(),
+                identity.did(),
+                "contract-behavior",
+                SESSION,
+                "Earlier work",
+                "interactive",
+                "2010-01-01T00:00:00Z",
+                AgentRequestAdmissionRecord::local_self(identity.did()),
+            );
+            crate::sign_agent_request_create(identity.as_ref(), &mut request)
+                .await
+                .unwrap();
+            execute(&node, &request.graphql_mutation().unwrap()).await;
+        }
         let mut create = AgentRequestCreate::base(
             gents_protocol::request_admission::RequestPurpose::Normal,
             PARENT,

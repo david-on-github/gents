@@ -350,7 +350,7 @@ async fn task_assignment_root_fences_older_chain_even_when_its_child_is_newer() 
     goal.assignment_root_request_doc_id = Some(new_doc.into());
     access.write("test.assignment_binding", &format!("mutation {{update_Goal(filter: {{_docID: {{_eq: \"{}\"}}}}, input: {{assignment_root_request_doc_id: \"{}\"}}) {{_docID}}}}",
         escape_graphql_string(&goal.doc_id), escape_graphql_string(new_doc))).await.unwrap();
-    let parent = crate::watcher::AgentRequest::try_from(old.clone()).unwrap();
+    let mut parent = crate::watcher::AgentRequest::try_from(old.clone()).unwrap();
     for sequence in [1, 2] {
         let mut child = prepare_goal_continuation(
             &parent,
@@ -401,5 +401,12 @@ async fn task_assignment_root_fences_older_chain_even_when_its_child_is_newer() 
                 .lifecycle_state,
             Some(RequestLifecycleState::Superseded)
         );
+        parent = crate::watcher::AgentRequest::try_from(
+            rows.iter()
+                .find(|row| row.request_id == child.request_id)
+                .unwrap()
+                .clone(),
+        )
+        .unwrap();
     }
 }
