@@ -18,12 +18,60 @@ use std::{
 };
 use support::live_inference::{boot_live_agent, terminal_assistant_answer};
 
+fn artifact_directory(label: &str) -> Result<std::path::PathBuf> {
+    let root = std::env::var_os("GENTS_DELIVERY_ARTIFACT_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    std::fs::create_dir_all(&root)?;
+    Ok(tempfile::Builder::new()
+        .prefix(&format!("gents-delivery-{label}-"))
+        .tempdir_in(root)?
+        .keep())
+}
+
+/// Durable admitted-provider intervals use a half-open boundary: an ending
+/// call releases its slot before a call beginning at the same timestamp.
+fn provider_peaks(calls: &[Value]) -> Result<BTreeMap<String, usize>> {
+    let mut events: BTreeMap<String, Vec<(chrono::DateTime<chrono::FixedOffset>, i32)>> =
+        BTreeMap::new();
+    for call in calls.iter().filter(|row| row["call_kind"] == "inference") {
+        let start = chrono::DateTime::parse_from_rfc3339(string(call, "started_at")?)?;
+        let end = chrono::DateTime::parse_from_rfc3339(string(call, "ended_at")?)?;
+        ensure!(end > start, "invalid provider interval: {call}");
+        for key in [string(call, "backend_id")?, "all"] {
+            events
+                .entry(key.into())
+                .or_default()
+                .extend([(start, 1), (end, -1)]);
+        }
+    }
+    let mut peaks = BTreeMap::new();
+    for (backend, mut edges) in events {
+        edges.sort();
+        let (mut active, mut peak) = (0i32, 0i32);
+        for (_, delta) in edges {
+            active += delta;
+            peak = peak.max(active);
+        }
+        ensure!(active == 0, "provider interval imbalance");
+        let bound = if backend == "all" { 64 } else { 32 };
+        ensure!(
+            peak <= bound,
+            "backend admission exceeded configured capacity: {backend} peak={peak}"
+        );
+        peaks.insert(backend, peak as usize);
+    }
+    Ok(peaks)
+}
+
 const SCHEMA: &str = r#"
 type DeliveryRunStart {
     handoff_id: String @immutable
+    tags: [String!] @immutable
 }
 type DeliveryWork {
     handoff_id: String @immutable
+    tags: [String!] @immutable
     reply_session_id: String @immutable
     lane: Int @immutable
     shard_id: String @immutable
@@ -40,6 +88,7 @@ async fn apply(
         .into_iter()
         .map(|(collection, mut value)| {
             value["agent_did"] = json!(owner);
+            value["tags"] = json!(["test", "trigger-delivery-live"]);
             DesiredStateApplyDocument {
                 collection,
                 add: value.clone(),
@@ -191,7 +240,11 @@ async fn two_lead_sessions_route_64_real_worker_outcomes_without_chaining() -> R
         endpoints[0] != endpoints[1],
         "two distinct inference endpoints required"
     );
-    let db = support::test_db("trigger-delivery-real-inference").await;
+    let artifacts = artifact_directory("burst")?;
+    let home =
+        gents::eval::runner::embedded::EmbeddedHome::create_retained(&artifacts.join("home"))
+            .await?;
+    let db = support::test_db_from_home(home);
     let identity: Arc<dyn AgentIdentity> = db.node_identity.clone();
     let owner = identity.did().to_owned();
     let access = ConfigAccess::Local(db.node.clone());
@@ -204,7 +257,7 @@ async fn two_lead_sessions_route_64_real_worker_outcomes_without_chaining() -> R
             .write(
                 "test.delivery_live.start",
                 &format!(
-            "mutation {{ create_DeliveryRunStart(input: {{ handoff_id: \"{}\" }}) {{ _docID }} }}",
+            "mutation {{ create_DeliveryRunStart(input: {{ handoff_id: \"{}\", tags: [\"test\"] }}) {{ _docID }} }}",
             escape_graphql_string(label)
         ),
             )
@@ -248,7 +301,7 @@ async fn two_lead_sessions_route_64_real_worker_outcomes_without_chaining() -> R
         let session = &sessions[(shard / 2) % 2];
         expected.insert(handoff.clone(), session.clone());
         access.write("test.delivery_live.assignment", &format!(
-            "mutation {{ create_DeliveryWork(input: {{ handoff_id: \"{}\", reply_session_id: \"{}\", lane: {}, shard_id: \"{}\", attempt: 1 }}) {{ _docID }} }}",
+            "mutation {{ create_DeliveryWork(input: {{ handoff_id: \"{}\", reply_session_id: \"{}\", lane: {}, shard_id: \"{}\", attempt: 1, tags: [\"test\"] }}) {{ _docID }} }}",
             escape_graphql_string(&handoff), escape_graphql_string(session), shard % 2,
             escape_graphql_string(&format!("shard-{shard:02}")),
         )).await?;
@@ -325,7 +378,7 @@ async fn two_lead_sessions_route_64_real_worker_outcomes_without_chaining() -> R
     let calls = rows(
         &access,
         "InferenceCall",
-        "request_id backend_id call_kind call_state",
+        "request_id backend_id call_kind call_state started_at ended_at",
         &owner,
     )
     .await?;
@@ -409,6 +462,24 @@ async fn two_lead_sessions_route_64_real_worker_outcomes_without_chaining() -> R
             "lead did not receive its rendered session: {answer}"
         );
     }
+    let peaks = provider_peaks(&calls)?;
+    ensure!(
+        peaks["delivery-backend-0"] > 1 && peaks["delivery-backend-1"] > 1,
+        "both endpoints must demonstrate concurrent provider calls: {peaks:?}"
+    );
+    std::fs::write(
+        artifacts.join("evidence.json"),
+        serde_json::to_vec_pretty(&json!({
+            "owner_did":owner, "endpoints":endpoints, "configured_backend_capacity":[32,32],
+            "provider_peak_overlap":peaks, "lead_sessions":sessions, "requests":requests,
+            "fires":fires, "outcomes":outcomes, "inference_calls":calls,
+            "observed_busy_queue":observed_busy_queue
+        }))?,
+    )?;
     runtime.shutdown().await;
+    db.node.shutdown().await;
     Ok(())
 }
+
+#[path = "trigger_delivery_live/process.rs"]
+mod process;
