@@ -173,6 +173,9 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Fixed
 
+- Desktop observation retains other agents when a document is deleted and prevents
+  an older reload from replacing a freshly observed request (#1960, #2054).
+
 - `config apply` no longer refuses an event source whose `correlation_field` or
   group `expected_count` field is declared non-nillable (`String!`, `Int!`) with
   a false "does not exist", and accepts every field type a canonical count can
