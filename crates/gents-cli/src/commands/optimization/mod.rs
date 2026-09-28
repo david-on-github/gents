@@ -610,6 +610,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_proposer_behavior_with_tools_is_refused_before_anything_runs() {
+        let fixture = Fixture::new().await;
+        let pack = fixture.pack_arg();
+        let error = optimization(
+            &fixture,
+            &[
+                "run",
+                DEFINITION,
+                "--subject",
+                pack.as_str(),
+                "--proposer",
+                "behavior:lsp_rust",
+            ],
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.starts_with("proposer behavior lsp-coder has tools [")
+                && message.ends_with("]; a proposer must be tool-less"),
+            "{error:#}"
+        );
+        assert!(message.contains("\"lsp\""), "{message}");
+    }
+
+    /// `prompt_proposer` passes the tool-less check and reaches the next one.
+    #[tokio::test]
     async fn a_behavior_proposer_needs_a_served_home() {
         let fixture = Fixture::new().await;
         let pack = fixture.pack_arg();
