@@ -9,7 +9,7 @@ use gents::collection::Collection;
 use gents::config_client::{apply_desired_state_plan, read_desired_state_record_in_txn};
 use gents::config_client::{ConfigAccess, DesiredStateApplyDocument, DesiredStateApplyPlan};
 use gents::document_config::{EventSource, Schedule, Task, Trigger};
-use gents::{task_session_title, write_manual_agent_request_with_conversation_title};
+use gents::task_session_title;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -302,19 +302,25 @@ async fn execute_config_rows<T: DeserializeOwned>(
         .collect()
 }
 
-async fn load_task_on(access: &ConfigAccess, agent_did: &str, task_id: &str) -> Result<Task> {
+async fn load_task_on(
+    access: &ConfigAccess,
+    agent_did: &str,
+    task_id: &str,
+) -> Result<(String, Task)> {
     let query = format!(
         r#"query {{
             Task(filter: {{
                 agent_did: {{ _eq: "{agent_did}" }},
                 task_id: {{ _eq: "{task_id}" }}
             }}, limit: 2) {{
+                _docID
                 task_id
                 agent_did
                 display_name
                 description
                 behavior_id
                 prompt_template
+                emit_outcome
                 goal_objective_template
                 goal_token_budget
                 hooks
@@ -328,16 +334,22 @@ async fn load_task_on(access: &ConfigAccess, agent_did: &str, task_id: &str) -> 
         agent_did = escape_graphql_string(agent_did),
         task_id = escape_graphql_string(task_id),
     );
-    let mut rows = execute_config_rows(access, "Task", &query, "load canonical manual task")
-        .await?
-        .into_iter();
-    let row = rows
+    let mut rows =
+        execute_config_rows::<Value>(access, "Task", &query, "load canonical manual task")
+            .await?
+            .into_iter();
+    let mut row = rows
         .next()
         .ok_or_else(|| anyhow!("task {task_id} was not found for {agent_did}"))?;
     if rows.next().is_some() {
         bail!("task {task_id} is ambiguous for {agent_did}");
     }
-    Ok(row)
+    let doc_id = row
+        .as_object_mut()
+        .and_then(|row| row.remove("_docID"))
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .context("Task has no physical document ID")?;
+    Ok((doc_id, serde_json::from_value(row)?))
 }
 
 async fn ensure_behavior_enabled_on(
@@ -390,6 +402,7 @@ async fn ensure_behavior_enabled_on(
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ManualTaskInvocation {
+    pub fire: gents_protocol::trigger_delivery::TriggerFire,
     pub agent_did: String,
     pub task_id: String,
     pub behavior_id: String,
@@ -399,7 +412,11 @@ pub struct ManualTaskInvocation {
     pub session_title: String,
 }
 
-fn render_task_invocation(task: &Task, args: serde_json::Value) -> Result<ManualTaskInvocation> {
+fn render_task_invocation(
+    task: &Task,
+    task_doc_id: &str,
+    args: serde_json::Value,
+) -> Result<ManualTaskInvocation> {
     let task_id = normalize_required("task_id", &task.task_id)?;
     let agent_did = normalize_required("agent_did", &task.agent_did)?;
     let behavior_id = normalize_required("behavior_id", &task.behavior_id)?;
@@ -413,7 +430,19 @@ fn render_task_invocation(task: &Task, args: serde_json::Value) -> Result<Manual
     )?;
     let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
     let (node_scope, ctx_scope) = gents::template::task_node_ctx(agent_did, behavior_id, &now);
+    let invocation_key = uuid::Uuid::new_v4().to_string();
+    let identity = gents_protocol::trigger_delivery::FireIdentity {
+        owner_did: agent_did.into(),
+        trigger_id: format!("manual:{task_id}:{invocation_key}"),
+        source_collection: "Task".into(),
+        source_doc_id: task_doc_id.into(),
+    };
+    let fire_key = gents::lifecycle::task_fire_key(&identity);
+    let session_id = format!("trigger-session:{fire_key}");
+    let request_id = format!("trigger-request:{fire_key}");
     let scope = gents::TemplateScope {
+        session: Some(serde_json::json!({"session_id": session_id})),
+        request: Some(serde_json::json!({"request_id": request_id})),
         event: serde_json::json!({
             "fired_at": now,
             "trigger_id": serde_json::Value::Null,
@@ -449,7 +478,28 @@ fn render_task_invocation(task: &Task, args: serde_json::Value) -> Result<Manual
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or(task_id);
+    let fire = gents_protocol::trigger_delivery::TriggerFire {
+        fire_key,
+        identity,
+        task_id: task_id.into(),
+        request_id,
+        session_id: session_id.clone(),
+        goal_id: goal_objective
+            .as_ref()
+            .map(|_| gents::goal::deterministic_goal_id(agent_did, &session_id)),
+        goal_objective: goal_objective.clone(),
+        goal_token_budget: task.goal_token_budget,
+        goal_assignment_applied: false,
+        emit_outcome: task.emit_outcome,
+        queued_serial: false,
+        source_handoff_id: Some(invocation_key),
+        reply_session_id: None,
+        shard_id: None,
+        attempt: None,
+        created_at: now,
+    };
     Ok(ManualTaskInvocation {
+        fire,
         agent_did: agent_did.to_string(),
         task_id: task_id.to_string(),
         behavior_id: behavior_id.to_string(),
@@ -471,13 +521,13 @@ pub async fn resolve_task_now_on(
 ) -> Result<ManualTaskInvocation> {
     let agent_did = normalize_required("agent_did", agent_did)?;
     let task_id = normalize_required("task_id", task_id)?;
-    let task = load_task_on(config_access, agent_did, task_id).await?;
+    let (task_doc_id, task) = load_task_on(config_access, agent_did, task_id).await?;
     if !task.enabled {
         bail!("task {task_id} is disabled");
     }
     let behavior_id = normalize_required("behavior_id", &task.behavior_id)?;
     ensure_behavior_enabled_on(config_access, agent_did, behavior_id).await?;
-    render_task_invocation(&task, args)
+    render_task_invocation(&task, &task_doc_id, args)
 }
 
 async fn enqueue_task_now(
@@ -486,101 +536,46 @@ async fn enqueue_task_now(
     task_row: &Task,
     args: serde_json::Value,
 ) -> Result<String> {
-    let task_id = normalize_required("task_id", &task_row.task_id)?;
-    let agent_did = normalize_required("agent_did", &task_row.agent_did)?;
-    let behavior_id = normalize_required("behavior_id", &task_row.behavior_id)?;
-    let prompt_template = normalize_required("prompt_template", &task_row.prompt_template)?;
-    if !task_row.enabled {
-        bail!("task {task_id} is disabled");
-    }
-
-    let task_label = task_row
-        .display_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(task_id);
-    let conversation_title = task_session_title(task_label);
-
-    let goal_objective_template = task_row.goal_objective_template.as_deref();
-    gents::goal::validate_task_goal_declaration(
-        goal_objective_template,
-        task_row.goal_token_budget,
-    )?;
-    if let Some(goal_objective_template) = goal_objective_template {
-        let goal_objective_template = goal_objective_template.trim();
-        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true);
-        let (node_scope, ctx_scope) = gents::template::task_node_ctx(agent_did, behavior_id, &now);
-        let scope = gents::TemplateScope {
-            event: serde_json::json!({
-                "fired_at": now,
-                "trigger_id": serde_json::Value::Null,
-                "trigger_kind": "manual",
-            }),
-            doc: None,
-            args: Some(args),
-            group: None,
-            node: node_scope,
-            ctx: ctx_scope,
-        };
-        let content = gents::render_template(prompt_template, &scope)
-            .map_err(|error| anyhow!("render manual template for task {task_id}: {error}"))?;
-        let objective = gents::render_template(goal_objective_template, &scope)
-            .map_err(|error| anyhow!("render goal template for task {task_id}: {error}"))?;
-        if objective.trim().is_empty() {
-            bail!("task {task_id} rendered an empty goal objective");
-        }
-        let invocation_id = uuid::Uuid::new_v4().to_string();
-        let identity = gents::goal::task_goal_fire_identity(
-            agent_did,
-            task_id,
-            &format!("desktop-manual:{invocation_id}"),
-        );
-        let create = gents::build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title(
-            agent_did,
-            behavior_id,
-            &content,
+    let owner = escape_graphql_string(&task_row.agent_did);
+    let task_id = escape_graphql_string(&task_row.task_id);
+    let response = gents::graphql::graphql_with_transaction_retry(node, &format!(
+        r#"{{Task(filter: {{agent_did: {{_eq: "{owner}"}}, task_id: {{_eq: "{task_id}"}}}}, limit: 2) {{_docID}}}}"#),
+        "resolve desktop Task physical identity").await?;
+    let rows = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("Task"))
+        .and_then(Value::as_array)
+        .context("Task identity query omitted rows")?;
+    anyhow::ensure!(rows.len() == 1, "Task identity is absent or ambiguous");
+    let doc_id = rows[0]["_docID"]
+        .as_str()
+        .context("Task has no physical document ID")?;
+    let invocation = render_task_invocation(task_row, doc_id, args)?;
+    let create =
+        gents::build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title(
+            &invocation.agent_did,
+            &invocation.behavior_id,
+            &invocation.content,
             gents::lifecycle::ExecutionOrigin::Interactive,
             gents::lifecycle::TriggerLineage {
-                trigger_id: None,
-                trigger_kind: Some("manual".to_string()),
-                source_doc_id: None,
-                correlation: None,
-                trigger_context: None,
+                trigger_kind: Some("manual".into()),
+                ..gents::lifecycle::TriggerLineage::default()
             },
-            Some(&conversation_title),
+            Some(&invocation.session_title),
             None,
-            &identity.request_id,
-            &identity.session_id,
-            Some(&identity.retry_key),
+            &invocation.fire.request_id,
+            &invocation.fire.session_id,
+            Some(&invocation.fire.fire_key),
             None,
             None,
         )
         .await?;
-        let enqueued = gents::goal::submit_goal_backed_request_local(
-            node,
-            actor,
-            agent_did,
-            &identity.session_id,
-            &objective,
-            task_row.goal_token_budget,
-            &create,
-        )
-        .await?;
-        return Ok(enqueued.doc_id);
-    }
-
-    write_manual_agent_request_with_conversation_title(
-        node,
-        actor,
-        agent_did,
-        behavior_id,
-        task_id,
-        prompt_template,
-        args,
-        Some(&conversation_title),
+    Ok(
+        gents::lifecycle::write_task_delivery_local(node, actor, &invocation.fire, false, &create)
+            .await?
+            .doc_id,
     )
-    .await
 }
 
 /// Fire a schedule's task immediately.
@@ -660,6 +655,7 @@ pub async fn fire_schedule_now(
                 description
                 behavior_id
                 prompt_template
+                emit_outcome
                 goal_objective_template
                 goal_token_budget
                 hooks
@@ -769,13 +765,13 @@ pub async fn resolve_schedule_now_on(
     if matching.next().is_some() {
         bail!("schedule {schedule_id} has multiple enabled Triggers; run a Trigger explicitly");
     }
-    let task = load_task_on(config_access, agent_did, &trigger.task_id).await?;
+    let (task_doc_id, task) = load_task_on(config_access, agent_did, &trigger.task_id).await?;
     if !task.enabled {
         bail!("task {} is disabled", task.task_id);
     }
     let behavior_id = normalize_required("behavior_id", &task.behavior_id)?;
     ensure_behavior_enabled_on(config_access, agent_did, behavior_id).await?;
-    render_task_invocation(&task, serde_json::json!({}))
+    render_task_invocation(&task, &task_doc_id, serde_json::json!({}))
 }
 
 #[cfg(test)]
@@ -783,6 +779,35 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
+
+    #[test]
+    fn manual_task_templates_use_admitted_ids_and_budget_is_opt_in() -> Result<()> {
+        let task: Task = serde_json::from_value(json!({
+            "agent_did": "did:test:task-render", "task_id": "task", "behavior_id": "behavior",
+            "prompt_template": "Session {{ session.session_id }} request {{ request.request_id }}",
+            "goal_objective_template": "Finish in {{ session.session_id }}", "emit_outcome": true,
+        }))?;
+        let invocation = render_task_invocation(&task, "physical-task-document", json!({}))?;
+        assert_eq!(
+            invocation.fire.identity.source_doc_id,
+            "physical-task-document"
+        );
+        assert_eq!(
+            invocation.content,
+            format!(
+                "Session {} request {}",
+                invocation.fire.session_id, invocation.fire.request_id
+            )
+        );
+        assert_eq!(
+            invocation.goal_objective.as_deref(),
+            Some(format!("Finish in {}", invocation.fire.session_id).as_str())
+        );
+        assert!(invocation.fire.emit_outcome);
+        assert_eq!(invocation.fire.goal_token_budget, None);
+        assert!(!invocation.fire.goal_assignment_applied);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn canonical_task_resolution_ignores_stale_desktop_revision() -> Result<()> {
