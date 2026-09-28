@@ -131,14 +131,8 @@ async fn behavior_proposer(
     subject_dir: &Path,
     subject_behavior: &str,
 ) -> Result<BehaviorProposer<LiveTurn>> {
-    let gents::ConfigAccess::Graphql(graphql) = &*ctx.access else {
-        anyhow::bail!(
-            "start `gents server` for this home and retry: a behavior proposer runs on a served home"
-        );
-    };
-    crate::request_helpers::ensure_local_request_signer(args.scope.home.as_deref(), &ctx.owner)?;
-    let preamble = subject_preamble(subject_dir, subject_behavior, &args.target)?;
-    let manifest = gents::pack::resolve_pack(pack)?.manifest;
+    let resolved = gents::pack::resolve_pack(pack)?;
+    let manifest = &resolved.manifest;
     let [slot] = manifest.metadata.inference_slots.as_slice() else {
         anyhow::bail!(
             "pack {pack} declares {} inference slots; a proposer pack declares one",
@@ -146,6 +140,14 @@ async fn behavior_proposer(
         );
     };
     let behavior_id = proposer_behavior_id(pack, slot, behavior)?;
+    ensure_tool_less(&resolved, &ctx.owner, &behavior_id)?;
+    let gents::ConfigAccess::Graphql(graphql) = &*ctx.access else {
+        anyhow::bail!(
+            "start `gents server` for this home and retry: a behavior proposer runs on a served home"
+        );
+    };
+    crate::request_helpers::ensure_local_request_signer(args.scope.home.as_deref(), &ctx.owner)?;
+    let preamble = subject_preamble(subject_dir, subject_behavior, &args.target)?;
     let profile = args.proposer_profile.clone().unwrap_or_else(|| {
         default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
     });
@@ -162,6 +164,73 @@ async fn behavior_proposer(
         },
         preamble,
     ))
+}
+
+/// A proposer is tool-less, so a proposal draws only on the turns it is
+/// sent: the behavior's tool surface, resolved from the pack's documents by
+/// the runtime's owner, names no tool. The readonly ceiling narrows a host
+/// tool without removing it and needs no root, so the answer does not depend
+/// on how the server was started.
+fn ensure_tool_less(
+    pack: &gents::pack::ResolvedPack,
+    owner: &str,
+    behavior_id: &str,
+) -> Result<()> {
+    let config = gents::pack::load_pack_config(
+        &pack.manifest,
+        &gents::pack::PackInstallOptions {
+            agent_did: owner.to_owned(),
+        },
+        &|path| pack.asset(path).map(Vec::from),
+        &|_name| None,
+    )
+    .with_context(|| format!("loading the {} pack", pack.manifest.name))?;
+    let behavior = config
+        .agent_behaviors
+        .iter()
+        .find(|behavior| behavior.behavior_id == behavior_id)
+        .with_context(|| format!("pack {} has no behavior {behavior_id}", pack.manifest.name))?;
+    let tools_id = behavior.context_id.as_deref().and_then(|id| {
+        config
+            .contexts
+            .iter()
+            .find(|context| context.context_id == id)
+            .and_then(|context| context.tools_id.as_deref())
+    });
+    let no_tools = gents::document_config::Tools::default();
+    let tools = match tools_id {
+        Some(id) => config
+            .tools
+            .iter()
+            .find(|tools| tools.tools_id == id)
+            .with_context(|| format!("behavior {behavior_id} names unknown tools {id}"))?,
+        None => &no_tools,
+    };
+    let active = config
+        .agent_behaviors
+        .iter()
+        .map(|behavior| behavior.behavior_id.clone())
+        .collect();
+    let names = gents::BehaviorToolConfig::from_tools_documents(
+        behavior_id,
+        tools,
+        &config.datastore_tool_surfaces,
+        &config.eth_tools,
+        &config.subagent_targets,
+        &gents::ToolCeiling::readonly(),
+        Vec::new(),
+    )?
+    .explain_with_runtime_availability(
+        gents::tool_surface::RuntimeToolAvailability::all(),
+        owner,
+        &active,
+    )
+    .tool_names;
+    anyhow::ensure!(
+        names.is_empty(),
+        "proposer behavior {behavior_id} has tools {names:?}; a proposer must be tool-less"
+    );
+    Ok(())
 }
 
 /// The session's first user turn: the subject's dossier, so a proposal

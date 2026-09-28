@@ -4,7 +4,10 @@
 //! opens no transaction and names no path, so it cannot read a check's
 //! parameters beyond what a failing check's own message states, another
 //! case's body or the database it is being optimized against; `target.rs`
-//! and `subject.rs` build the patch from the text it returns.
+//! and `subject.rs` build the patch from the text it returns. A proposer
+//! that asks a behavior holds this only while the behavior has no tools, so
+//! `gents optimization run` refuses one whose resolved tool surface is not
+//! empty.
 //!
 //! [`ProposalInput`] is therefore a boundary type, and its field list is the
 //! statement of what an optimizer may learn. Feedback reaches it only from the
