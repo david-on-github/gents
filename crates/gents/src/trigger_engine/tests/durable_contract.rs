@@ -422,6 +422,14 @@ async fn generated_terminal_outcome_action_traces_use_native_owners() {
                     row.lifecycle_state.is_some_and(|state| state.is_terminal()),
                     expected_request.terminal
                 );
+                assert_eq!(
+                    row.lifecycle_state.is_some_and(|state| matches!(
+                        state,
+                        gents_protocol::request_lifecycle::RequestLifecycleState::Claimed
+                            | gents_protocol::request_lifecycle::RequestLifecycleState::Processing
+                    )),
+                    expected_request.running
+                );
                 let receipts = response["data"]["TriggerFire"].as_array().unwrap();
                 let receipt = receipts
                     .iter()
