@@ -1860,6 +1860,13 @@ reply exactly BLOCKED_JOB_DONE. Do not call any other tool."
     )
     .await;
     assert_eq!(worker_terminal, "interrupted");
+    assert!(
+        !release.exists(),
+        "the worker must have been interrupted while still blocked"
+    );
+    // The worker's session sees its cancelled command and a live model may
+    // run it again; released, that retry cannot hold the session open.
+    std::fs::write(&release, b"release").expect("release worker");
     let settled = wait_for_tool_call_settled(
         &db.node,
         start_request_id,
@@ -1876,10 +1883,6 @@ reply exactly BLOCKED_JOB_DONE. Do not call any other tool."
         Duration::from_secs(120),
     )
     .await;
-    assert!(
-        !release.exists(),
-        "the worker must have been interrupted while still blocked"
-    );
     let wake = wait_for_completion_wake(
         db.node.as_ref(),
         spawner_session,
@@ -1901,7 +1904,6 @@ reply exactly BLOCKED_JOB_DONE. Do not call any other tool."
         "[live-interrupt] non-spawner refused; spawner interrupted; notification delivered and wake completed"
     );
 
-    std::fs::write(&release, b"release").expect("release blocker");
     wait_for_session_quiescent(db.node.as_ref(), spawner_session, Duration::from_secs(240)).await;
     agent.shutdown().await;
     Ok(())
@@ -2391,6 +2393,13 @@ sentence that repeats, verbatim, every code word reported in the notifications."
         Duration::from_secs(60),
     )
     .await;
+    assert!(
+        !middle_release.exists(),
+        "middle must have been interrupted while still blocked"
+    );
+    // Middle's wake sees its cancelled command in the transcript and a live
+    // model may run it again; released, that retry cannot hold the wake open.
+    std::fs::write(&middle_release, b"release").expect("release middle");
 
     // No cascade: the session middle started keeps running, and middle's
     // background row for it outlives middle's interrupted turn.
@@ -2478,10 +2487,6 @@ sentence that repeats, verbatim, every code word reported in the notifications."
             .filter(|row| !row.is_title_audit())
             .all(|row| row.lifecycle_state.as_deref() == Some("completed")),
         "no request of leaf's session may be interrupted: {leaf_requests:?}"
-    );
-    assert!(
-        !middle_release.exists(),
-        "middle must have been interrupted while still blocked"
     );
     tracing::info!(
         middle_session = %middle.session_id,
@@ -2627,13 +2632,16 @@ async fn live_agent_message_interrupt_steers() -> Result<()> {
         wait_for_request_terminal(fx.node(), &worker.request_id, Duration::from_secs(120)).await,
         "interrupted"
     );
-    assert_eq!(
-        wait_for_request_terminal(fx.node(), &steer.request_id, Duration::from_secs(240)).await,
-        "completed"
-    );
     assert!(
         !release.exists(),
         "the worker must have been interrupted while still blocked"
+    );
+    // The steer runs in the worker's session, which holds the cancelled
+    // command; released, a live model's retry of it cannot hold the steer open.
+    std::fs::write(&release, b"release").expect("release worker");
+    assert_eq!(
+        wait_for_request_terminal(fx.node(), &steer.request_id, Duration::from_secs(240)).await,
+        "completed"
     );
     let steer_answer = terminal_assistant_answer(fx.node(), &steer.request_id).await;
     let steer_token = steer_code.rsplit('-').next().expect("code word suffix");
