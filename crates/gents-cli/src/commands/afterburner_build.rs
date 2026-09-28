@@ -106,9 +106,64 @@ pub(crate) fn compile(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;
     }
+    let _target_dir = if matches!(
+        SourceLang::from_str(&local.manifest.package.language),
+        Ok(SourceLang::Rust)
+    ) {
+        let target_dir = std::path::absolute(dir.join("target"))
+            .with_context(|| format!("resolving the target directory of {}", dir.display()))?;
+        Some(CargoTargetDirPin::start(&target_dir))
+    } else {
+        None
+    };
     let _progress_to_stderr = StdoutToStderr::start()?;
     dispatch_compile(dir, local, out_path, false)
         .with_context(|| format!("compiling {owner} from {}", dir.display()))
+}
+
+/// While alive, `CARGO_TARGET_DIR` names the package's own `target/`
+/// directory; the caller's value (or its absence) is restored on drop.
+///
+/// Afterburner's Rust compile (`lang::compile_rust` at the pinned rev) runs
+/// `cargo build --release --target wasm32-wasip1` in the package directory
+/// with this process's environment, then reads the module from the fixed
+/// path `<package>/target/wasm32-wasip1/release`. It takes no target
+/// directory, so a caller's `CARGO_TARGET_DIR` (or a Cargo
+/// `build.target-dir`) sends the build elsewhere and the read fails with
+/// `reading .../target/wasm32-wasip1/release: No such file`. Pinning the
+/// variable is the environment form of `--target-dir` for that one nested
+/// build, making the directory Cargo writes the directory Afterburner reads.
+/// The path must be absolute: Cargo resolves a relative one against the
+/// package directory it runs in, not against this process's directory.
+/// It pins rather than removes the variable because removal would still
+/// let a `build.target-dir` in the caller's Cargo configuration redirect
+/// the output. The environment is process-wide, so pins are serialized and
+/// held only for the compile; other threads that spawn Cargo meanwhile see
+/// the pinned value.
+struct CargoTargetDirPin {
+    saved: Option<std::ffi::OsString>,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl CargoTargetDirPin {
+    const VAR: &'static str = "CARGO_TARGET_DIR";
+
+    fn start(target_dir: &Path) -> Self {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let lock = LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let saved = std::env::var_os(Self::VAR);
+        std::env::set_var(Self::VAR, target_dir);
+        Self { saved, _lock: lock }
+    }
+}
+
+impl Drop for CargoTargetDirPin {
+    fn drop(&mut self) {
+        match self.saved.take() {
+            Some(value) => std::env::set_var(Self::VAR, value),
+            None => std::env::remove_var(Self::VAR),
+        }
+    }
 }
 
 /// While alive, whatever the process or the toolchains it starts write to
@@ -288,6 +343,53 @@ mod tests {
               [[bin]]\nname = \"sample\"\npath = \"source/main.rs\"\n",
         );
         assert_compiles_to_wasm32_wasip1(&root, "rust");
+    }
+
+    /// A caller's `CARGO_TARGET_DIR` must not move the nested Cargo build
+    /// away from the directory Afterburner reads the module from, and the
+    /// caller's value must survive the compile.
+    #[test]
+    fn rust_compiles_when_the_caller_redirects_cargo_target_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("pkg");
+        write_package(
+            &root,
+            "rust",
+            "source/main.rs",
+            b"fn main() { println!(\"{{}}\"); }",
+        );
+        write(
+            &root.join("Cargo.toml"),
+            b"[workspace]\n\n\
+              [package]\nname = \"sample\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+              [[bin]]\nname = \"sample\"\npath = \"source/main.rs\"\n",
+        );
+        let redirected = dir.path().join("redirected-target");
+        let local = load_and_validate("redirected rust plugin", &root).unwrap();
+        let out = dir.path().join("rust.afb");
+        let _guard = compile_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let caller = std::env::var_os("CARGO_TARGET_DIR");
+        std::env::set_var("CARGO_TARGET_DIR", &redirected);
+        let result = compile("redirected rust plugin", &root, local, &out);
+        let after = std::env::var_os("CARGO_TARGET_DIR");
+        match caller {
+            Some(value) => std::env::set_var("CARGO_TARGET_DIR", value),
+            None => std::env::remove_var("CARGO_TARGET_DIR"),
+        }
+        result.unwrap_or_else(|error| {
+            panic!("compiling with CARGO_TARGET_DIR redirected must succeed: {error:#}")
+        });
+        assert_eq!(after.as_deref(), Some(redirected.as_os_str()));
+        assert!(!redirected.join("wasm32-wasip1").exists());
+        assert!(root
+            .join("target/wasm32-wasip1/release/sample.wasm")
+            .is_file());
+        let afb = Afb::from_bytes(&std::fs::read(&out).unwrap()).unwrap();
+        assert!(afb
+            .precompiled
+            .contains_key("precompiled/wasm32-wasip1/main.wasm"));
     }
 
     /// `go` 1.27.1: verified present on this machine (`go version`).
