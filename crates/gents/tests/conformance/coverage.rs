@@ -715,15 +715,24 @@ fn lean_contract_coverage_ledger_accounts_for_every_emitted_domain() {
         "Lean trigger dispatch case count drifted from emitted cases"
     );
     for (domain, families) in [
-        ("Triggers.Durable", &["admissions", "identities", "sessions", "self_sessions"][..]),
+        (
+            "Triggers.Durable",
+            &["admissions", "identities", "sessions", "self_sessions"][..],
+        ),
         ("Triggers.Queue", &["queues", "observed_claims"][..]),
         ("EventDelivery.Durable", &["cursors"][..]),
-        ("Triggers.Durable.Outcomes", &["outcomes", "outcome_traces", "assignment_roots"][..]),
+        (
+            "Triggers.Durable.Outcomes",
+            &["outcomes", "outcome_traces", "assignment_roots"][..],
+        ),
     ] {
         for family in families {
-            assert!(snapshot.trigger_delivery[*family]
-                .as_array().is_some_and(|cases| !cases.is_empty()),
-                "trigger_delivery must emit nonempty {family} cases");
+            assert!(
+                snapshot.trigger_delivery[*family]
+                    .as_array()
+                    .is_some_and(|cases| !cases.is_empty()),
+                "trigger_delivery must emit nonempty {family} cases"
+            );
         }
         emitted.insert(("trigger_delivery".into(), domain.into()));
     }
