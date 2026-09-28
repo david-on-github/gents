@@ -620,10 +620,64 @@ impl Host {
         ])
         .await;
         control(&["close", &self.id]).await?;
-        archive.context("retaining stopped runtime home")?;
-        Ok(())
+        archive.map(|_| ()).map_err(|error| {
+            let message = format!("{error:#}");
+            if message.contains(RUNTIME_EXITED) {
+                stages::EvaluationFailure::Runtime(message).into()
+            } else {
+                error.context("retaining stopped runtime home")
+            }
+        })
     }
 }
+
+/// Combines a stage or trial outcome with retiring its runtime. A runtime that
+/// died before it was stopped explains the error its callers observed, so the
+/// runtime failure takes precedence; otherwise retirement never replaces a verdict.
+pub(super) fn retire_outcome<T>(result: Result<T>, retired: Result<()>) -> Result<T> {
+    match (result, retired.map_err(stages::infrastructure)) {
+        (Err(stage), Err(retired))
+            if matches!(
+                retired.downcast_ref::<stages::EvaluationFailure>(),
+                Some(stages::EvaluationFailure::Runtime(_))
+            ) =>
+        {
+            Err(retired.context(format!("stage error after runtime exit: {stage:#}")))
+        }
+        (result, retired) => stages::retain_outcome(result, retired),
+    }
+}
+
+#[test]
+fn runtime_exit_explains_the_stage_error_but_other_retirement_failures_do_not_replace_it() {
+    let kind = |error: &anyhow::Error| {
+        error
+            .downcast_ref::<stages::EvaluationFailure>()
+            .map(stages::EvaluationFailure::kind)
+    };
+    let exited = || -> Result<()> {
+        Err(stages::EvaluationFailure::Runtime(format!("{RUNTIME_EXITED}: killed")).into())
+    };
+    let stage =
+        || -> Result<()> { Err(stages::model_acceptance(anyhow::anyhow!("posting GraphQL"))) };
+
+    let error = retire_outcome(stage(), exited()).unwrap_err();
+    assert_eq!(kind(&error), Some("runtime"));
+    assert!(format!("{error:#}").contains("posting GraphQL"));
+    assert_eq!(
+        kind(&retire_outcome(Ok(()), exited()).unwrap_err()),
+        Some("runtime")
+    );
+
+    let error = retire_outcome(stage(), Err(anyhow::anyhow!("docker rm failed"))).unwrap_err();
+    assert_eq!(kind(&error), Some("model_acceptance"));
+    assert!(format!("{error:#}").contains("docker rm failed"));
+}
+
+/// Emitted by `scripts/evals/host-environment.mjs` (`runtimeExitedMessage`)
+/// when the runtime died before the controller stopped it, such as a memcg
+/// OOM kill; the retained `memory.json` holds the cgroup counters.
+const RUNTIME_EXITED: &str = "Runtime exited before it was stopped";
 
 pub(super) fn input_document_id<'a>(receipt: &'a Value, collection: &str) -> Result<&'a str> {
     let rows = receipt["data"][format!("add_{collection}")]

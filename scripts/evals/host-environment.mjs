@@ -24,10 +24,28 @@ function boundedDockerOutput(value) {
 
 // Only isolated fixture Docker commands use this formatter; it must not include argv.
 export function formatDockerCommandFailure(error) {
-  return new Error(
-    `Host fixture Docker command failed: exit_code=${error.code ?? "unknown"} signal=${error.signal ?? "none"}\n` +
-      `stderr: ${boundedDockerOutput(error.stderr)}\n` +
-      `stdout: ${boundedDockerOutput(error.stdout)}`,
+  return Object.assign(
+    new Error(
+      `Host fixture Docker command failed: exit_code=${error.code ?? "unknown"} signal=${error.signal ?? "none"}\n` +
+        `stderr: ${boundedDockerOutput(error.stderr)}\n` +
+        `stdout: ${boundedDockerOutput(error.stdout)}`,
+    ),
+    { exitCode: error.code },
+  );
+}
+
+// The Rust coordinator classifies a controller failure carrying this text as a
+// runtime failure; keep it in sync with `RUNTIME_EXITED` in configurator_evals/host.rs.
+export const runtimeExitedMessage = "Runtime exited before it was stopped";
+
+export function runtimeExitedError(memory) {
+  const { oom_kill } = memory.events;
+  return Object.assign(
+    new Error(
+      `${runtimeExitedMessage}: ${oom_kill > 0 ? "killed by the container memory limit" : "no OOM kill recorded"} ` +
+        `(oom_kill=${oom_kill} peak_bytes=${memory.peak_bytes} limit_bytes=${memory.limit_bytes})`,
+    ),
+    { runtimeExited: true, memory },
   );
 }
 
@@ -361,7 +379,12 @@ export class HostEnvironment {
   }
 
   async stopRuntime() {
-    await this.exec(["/opt/steward-fixture/stop-runtime.sh"]);
+    try {
+      await this.exec(["/opt/steward-fixture/stop-runtime.sh"]);
+    } catch (error) {
+      if (error.exitCode !== 3) throw error;
+      throw runtimeExitedError(await this.memoryObservation());
+    }
   }
 
   // The original stays stopped until the coordinator retires the candidate.
@@ -456,7 +479,14 @@ export class HostEnvironment {
   }
 
   async archiveRuntime(directory) {
-    await this.stopRuntime();
+    // A runtime that already died still leaves its home and memory evidence.
+    let exited;
+    try {
+      await this.stopRuntime();
+    } catch (error) {
+      if (!error.runtimeExited) throw error;
+      exited = error;
+    }
     const path = await archiveContainerDirectory(
       this.id,
       "/runtime",
@@ -468,6 +498,7 @@ export class HostEnvironment {
       JSON.stringify(await this.memoryObservation(), null, 2) + "\n",
       { flag: "wx", mode: 0o600 },
     );
+    if (exited) throw exited;
   }
 
   async memoryObservation() {
