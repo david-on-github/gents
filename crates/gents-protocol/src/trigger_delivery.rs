@@ -57,14 +57,14 @@ pub struct FireOutcome {
     pub created_at: String,
 }
 
-/// The first-seed exclusion set is durable. Delivery progress is reconstructed
-/// from committed TriggerFire receipts, so an interrupted scan cannot skip an
-/// uncommitted fire. Each trigger has an independent cursor on a shared source.
+/// Position in DefraDB's receiving-node document-arrival journal. Each trigger
+/// checkpoints independently; the cursor advances only after admission commits
+/// or a document is conclusively excluded by the configured filter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventSourceCursor {
     pub owner_did: String,
     pub trigger_id: String,
     pub source_collection: String,
-    pub seeded_source_doc_ids: Vec<String>,
+    pub after: String,
 }
