@@ -447,7 +447,7 @@ mod tests {
         text_gate(&task.baseline, TEMPLATE, 32 * 1024).unwrap();
         text_gate(
             &task.baseline,
-            "{{ doc.owner }}: {{ doc.goal }} {{ doc.extra }} at {{ ctx.now }}\n",
+            "{{ doc.owner }}: {{ doc.goal }} at {{ ctx.now }}\n",
             32 * 1024,
         )
         .unwrap();
@@ -455,6 +455,38 @@ mod tests {
         // A context prompt is not a template: braces there are only text.
         let context = fixture(false);
         text_gate(&context.baseline, "Watch {{ nothing }}.\n", 32 * 1024).unwrap();
+    }
+
+    /// Rendering is strict-undefined, so a variable the seed document does
+    /// not carry errors the fire instead of rendering a prompt; only the
+    /// baseline's own paths and the runtime catalog are known to be there.
+    #[test]
+    fn a_task_candidate_that_adds_a_template_variable_is_rejected() {
+        let task = task_fixture(false);
+        let rejection = text_gate(
+            &task.baseline,
+            "Do {{ doc.goal }} for {{ doc.owner }} by {{ doc.missing }}.\n",
+            32 * 1024,
+        )
+        .unwrap_err();
+        assert_eq!(rejection.reason, "template_variables_added");
+        assert!(
+            rejection.detail.contains("doc.missing"),
+            "{}",
+            rejection.detail
+        );
+        assert!(
+            !rejection.detail.contains("doc.goal"),
+            "{}",
+            rejection.detail
+        );
+
+        text_gate(
+            &task.baseline,
+            "Do {{ doc.goal }} for {{ doc.owner }} on {{ node.node_did }} at {{ ctx.now }}.\n",
+            32 * 1024,
+        )
+        .unwrap();
     }
 
     /// The owner's install-time checks run on the candidate: a `node.*` or
