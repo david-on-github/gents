@@ -62,8 +62,8 @@ const POLL: Duration = Duration::from_millis(250);
 pub struct EmbeddedExecutor {
     pub runtime_options: DocumentRuntimeOptions,
     /// A trial's home directory is `<runs_dir>/<run_id>/trials/<trial_id>`, so
-    /// a [`TrialLocator::home_hint`] is a path relative to this directory and
-    /// never an absolute path out of the run.
+    /// a [`TrialLocator::home_hint`] is a path relative to this directory;
+    /// `recollect` refuses one that resolves outside it.
     pub runs_dir: PathBuf,
     /// What [`TrialExecutor::provision`] created, until `execute` takes it.
     provisioned: Mutex<HashMap<String, Provisioned>>,
@@ -240,6 +240,11 @@ impl TrialExecutor for EmbeddedExecutor {
     /// positions onto the case first (M4). The home also does not record
     /// whether a request was interrupted on its stage's deadline, so nothing
     /// read back here is classified as a deadline.
+    ///
+    /// The hint is refused unless it is relative, has no `..`, and both the
+    /// trial directory and its home resolve, symlinks followed, under the
+    /// resolved `runs_dir`. That is checked once, before the home is opened;
+    /// a link swapped in after the check is not caught.
     async fn recollect(&self, at: &TrialLocator, captures: &[Capture]) -> Option<TrialEvidence> {
         let hint = at.home_hint.as_deref()?;
         let trial_dir = self.runs_dir.join(hint);
