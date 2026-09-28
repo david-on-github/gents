@@ -652,10 +652,23 @@ async fn generated_arrival_checkpoints_preserve_committed_delivery_across_crashe
                     })
                 })
                 .await;
+            let accepted = if commit {
+                checkpointed.unwrap_or_else(|error| {
+                    panic!("{}: unexpected checkpoint error: {error:#}", case["name"])
+                })
+            } else {
+                let error = checkpointed.expect_err("injected checkpoint must roll back");
+                assert!(
+                    format!("{error:#}").contains("injected crash before checkpoint commit"),
+                    "{}: unexpected rollback error: {error:#}",
+                    case["name"]
+                );
+                false
+            };
             assert_eq!(
-                checkpointed.as_ref().copied().unwrap_or(false),
+                accepted,
                 case["checkpoint_succeeds"].as_bool().unwrap(),
-                "{}: {checkpointed:?}",
+                "{}",
                 case["name"]
             );
         }
