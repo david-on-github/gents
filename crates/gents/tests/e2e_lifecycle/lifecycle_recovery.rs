@@ -19,10 +19,12 @@ use crate::support::fixtures::{
 };
 use crate::support::interrupt::create_runtime_request_with_valid_until;
 use crate::support::snapshots::{
-    fetch_message_snapshots_for_session, fetch_tool_call_snapshots_for_session,
+    fetch_message_snapshots_for_session, fetch_session_snapshot,
+    fetch_tool_call_snapshots_for_session,
 };
 use crate::support::{
     accepted_turn::{
+        boot_accepted_turn_with_backend_capacity_and_dynamic_followups,
         boot_prepared_accepted_turn, prepare_accepted_turn, AcceptedTurnRuntime, AcceptedTurnSpec,
     },
     create_agent_session, create_request, create_request_for_agent_with_signed_fields, first_row,
@@ -183,7 +185,7 @@ async fn boot_running_recovery_subagent(
         "await_mode": await_mode,
     })
     .to_string();
-    let prepared = prepare_accepted_turn(
+    let runtime = boot_accepted_turn_with_backend_capacity_and_dynamic_followups(
         db,
         AcceptedTurnSpec {
             backend_id: "lifecycle-recovery-subagent-backend",
@@ -211,21 +213,16 @@ async fn boot_running_recovery_subagent(
             subagent_depth: None,
             request_setup: None,
         },
-    )
-    .await;
-    prepared.backend.enable_dynamic_followups(&prompt);
-    let identity: Arc<dyn gents::AgentIdentity> = db.node_identity.clone();
-    let agent = gents::Gents::from_default_behavior_documents(
-        db.node.clone(),
-        identity,
         gents::DocumentRuntimeOptions {
             tool_ceiling: gents::ToolCeiling::meta_only(),
             ..Default::default()
         },
+        // Parent follow-up and child streams are held; title inference needs
+        // its own slot to settle before the deliberate crash.
+        3,
+        &prompt,
     )
-    .await
-    .expect("build recovery subagent runtime");
-    let runtime = boot_prepared_accepted_turn(db, prepared, agent).await;
+    .await;
     let (parent_doc_id, bridge_doc_id, child_request_id, child_request_doc_id) = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         async {
@@ -250,6 +247,61 @@ async fn boot_running_recovery_subagent(
             }
         },
     ).await.expect("canonical subagent bridge did not reach running");
+    let child = db.node.execute(&format!(
+        r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 2) {{ _docID request_id agent_did session_id caused_by_parent_request_doc_id caused_by_parent_tool_call_doc_id }} }}"#,
+        gents::graphql::escape_graphql_string(&child_request_doc_id),
+    )).await;
+    let child = first_row::<AgentRequestRow>(&child, "AgentRequest");
+    assert_eq!(child.doc_id.as_deref(), Some(child_request_doc_id.as_str()));
+    assert_eq!(child.request_id, child_request_id);
+    assert_eq!(child.agent_did.as_deref(), Some(agent_did.as_str()));
+    assert_eq!(
+        child.caused_by_parent_request_doc_id.as_deref(),
+        Some(parent_doc_id.as_str())
+    );
+    assert_eq!(
+        child.caused_by_parent_tool_call_doc_id.as_deref(),
+        Some(bridge_doc_id.as_str())
+    );
+    let child_session_id = child.session_id.expect("spawned child session");
+    let title_purpose = gents_protocol::request_admission::RequestPurpose::TitleAudit;
+    // Principal-wide recovery also owns title audits. Establish their durable
+    // completion before crashing only the parent/child bridge under test.
+    let mut last_title_rows = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        loop {
+            let titles = db.node.execute(&format!(
+                r#"{{ AgentRequest(filter: {{ caused_by_parent_request_doc_id: {{ _eq: "{}" }}, purpose: {{ _eq: "{}" }} }}) {{ _docID request_id purpose agent_did session_id lifecycle_state terminal_output caused_by_parent_request_doc_id }} }}"#,
+                gents::graphql::escape_graphql_string(&child_request_doc_id),
+                gents::graphql::escape_graphql_string(title_purpose.as_str()),
+            )).await;
+            assert!(!titles.has_errors(), "load child title audit: {:?}", titles.errors);
+            let rows: Vec<AgentRequestRow> = serde_json::from_value(
+                titles.data.expect("child title query data")["AgentRequest"].clone(),
+            ).expect("canonical child title audit rows");
+            last_title_rows = rows.clone();
+            assert!(rows.len() <= 1, "one owned title audit per child: {rows:?}");
+            if let Some(title) = rows.first() {
+                assert_eq!(title.purpose, Some(title_purpose));
+                assert_eq!(title.agent_did.as_deref(), Some(agent_did.as_str()));
+                assert_eq!(title.session_id.as_deref(), Some(child_session_id.as_str()));
+                assert_eq!(title.caused_by_parent_request_doc_id.as_deref(), Some(child_request_doc_id.as_str()));
+                if title.lifecycle_state.is_some_and(RequestLifecycleState::is_terminal) {
+                    assert_eq!(title.lifecycle_state, Some(RequestLifecycleState::Completed), "child title must complete before crash: {title:?}");
+                    assert_eq!(title.terminal_output, Some(gents_protocol::output::TerminalOutput::NoMessage));
+                    let session = fetch_session_snapshot(&db.node, &child_session_id).await.expect("child session exists");
+                    assert_eq!(session.agent_did, agent_did);
+                    if session.title.as_ref().is_some_and(|title| {
+                        title.source == gents_protocol::session::SessionTitleSource::Generated
+                            && !title.text.trim().is_empty()
+                    }) {
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }).await.unwrap_or_else(|error| panic!("child title audit and generated title did not complete before crash: {error}; rows={last_title_rows:?}"));
     // Spawn defaults to cascade; detachment is a separate lifecycle action,
     // not a spawn argument. Exercise that owner before the crash boundary.
     if cancel_policy == "detach" {
@@ -1205,6 +1257,30 @@ async fn recover_interrupted_request_after_crash(
         Some(RequestLifecycleState::Interrupted),
         "canonical request recovery must establish the terminal-parent boundary"
     );
+    if let Some((child_doc_id, child_request_id)) = protected_child {
+        let child = node.execute(&format!(
+            r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, limit: 2) {{ _docID request_id lifecycle_state caused_by_parent_request_doc_id }} }}"#,
+            gents::graphql::escape_graphql_string(&child_doc_id),
+        )).await;
+        let child = first_row::<AgentRequestRow>(&child, "AgentRequest");
+        assert_eq!(child.doc_id.as_deref(), Some(child_doc_id.as_str()));
+        assert_eq!(child.request_id, child_request_id);
+        assert_eq!(
+            child.caused_by_parent_request_doc_id.as_deref(),
+            Some(doc_id)
+        );
+        assert!(
+            matches!(
+                child.lifecycle_state,
+                Some(
+                    RequestLifecycleState::Pending
+                        | RequestLifecycleState::Claimed
+                        | RequestLifecycleState::Processing
+                )
+            ),
+            "protected child must stay nonterminal after request recovery: {child:?}"
+        );
+    }
 }
 
 async fn seed_accepted_request_projection(
