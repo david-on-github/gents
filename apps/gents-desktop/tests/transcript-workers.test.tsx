@@ -330,6 +330,40 @@ describe("subagent lineage freshness", () => {
     }
   });
 
+  it("does not follow streamed live deltas once every caused request settled", async () => {
+    const api = apiWith(async () =>
+      view([caused("r-1", "session-1", "completed", "req-1", "call-1")]),
+    );
+    const tool = call("req-1", "call-1", "success");
+    const at = (storeVersion: number) =>
+      ({
+        ...shellFor(api, []),
+        selectedSession: {
+          sessionId: "parent-session",
+          timelineItems: [
+            group(tool),
+            {
+              kind: "liveAssistant",
+              itemKey: "live",
+              content: `chunk ${storeVersion}`,
+              reasoning: null,
+            },
+          ],
+          projectionRevision: { storeVersion, reconcileVersion: 1 },
+        },
+      }) as unknown as Shell;
+    const { result, rerender } = renderHook(
+      ({ version }: { version: number }) => useBoth(at(version)),
+      { initialProps: { version: 1 } },
+    );
+    await waitFor(() =>
+      expect(result.current.byToolCall(tool)?.request.lifecycleState).toBe("completed"),
+    );
+    for (let version = 2; version <= 50; version += 1) rerender({ version });
+    await Promise.resolve();
+    expect(api.sessionProvenance).toHaveBeenCalledTimes(1);
+  });
+
   it("asks for operations facts only when the transcript has a background process", async () => {
     const api = apiWith(async () => view([]));
     renderHook(() => useBoth(shellFor(api, [group(call("req-1", "call-1"))])));

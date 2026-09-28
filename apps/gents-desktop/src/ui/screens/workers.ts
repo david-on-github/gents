@@ -17,6 +17,7 @@ import type {
   SessionSummary,
 } from "@source-inc/gents-desktop-client";
 import type { Shell } from "@/hooks/useShell";
+import { isLive } from "@/lib/live";
 
 export type Subagent = {
   sessionId: string;
@@ -96,10 +97,13 @@ type Held<T> = { scope: string; value: T };
 
 /* The selected session's provenance. Its scope is exact: the session's
    agent, label and requester, as the session list reports them. It is asked
-   again whenever the client store's observation of this session moves
-   (projectionRevision.storeVersion) or the session list does, so a caused
-   request settling anywhere this desktop observes refreshes it; there is no
-   timer of its own. */
+   again when the transcript gains a row or a tool row's status moves, or the
+   session list does. While a request it caused is live it is also asked
+   whenever the client store's observation moves
+   (projectionRevision.storeVersion), so a caused request settling anywhere
+   this desktop observes refreshes it; there is no timer of its own. Every
+   applied live delta advances storeVersion, so a settled lineage must not
+   follow it: that would be one bridge call per streamed chunk. */
 export function useSessionProvenance(shell: Shell): SessionProvenanceView | null {
   const session = shell.selectedSession;
   const sessionId = session?.sessionId ?? null;
@@ -111,16 +115,39 @@ export function useSessionProvenance(shell: Shell): SessionProvenanceView | null
   const scope = `${agentDid ?? ""}\u0000${sessionId ?? ""}\u0000${requesterDid ?? ""}`;
   const [held, setHeld] = useState<Held<SessionProvenanceView> | null>(null);
   const provenance = held?.scope === scope ? held.value : null;
-  /* the store observation owner's version and the session list are the cues;
-     their values, not their identities, are what is compared */
-  const storeVersion = session?.projectionRevision?.storeVersion ?? null;
+  /* the cues are compared by value, not identity; a live delta changes only
+     the liveAssistant row, which the row cue leaves out */
+  const awaitsCaused =
+    provenance?.calls.some((c) => isLive(c.caused.lifecycleState)) ?? false;
+  const observed = session?.projectionRevision?.storeVersion ?? null;
+  const storeVersion = awaitsCaused ? observed : null;
+  const rowsCue = useMemo(() => {
+    const items = session?.timelineItems ?? [];
+    const rows = items.filter((i) => i.kind !== "liveAssistant");
+    const statuses = rows.flatMap((i) =>
+      i.kind === "toolGroup" ? i.tools.map((t) => `${t.itemKey}:${t.statusKind}`) : [],
+    );
+    return `${rows[rows.length - 1]?.itemKey ?? ""}\u0001${statuses.join()}`;
+  }, [session?.timelineItems]);
   const sessionsCue = (sessions ?? [])
     .map((s) => `${s.sessionId}:${s.turnState ?? ""}:${s.updatedAt ?? ""}`)
     .join();
   const generation = useRef(0);
+  /* what the last ask observed: a live lineage arriving starts following the
+     store version without asking again for the one it was read at */
+  const asked = useRef<{ cues: string; version: number | null } | null>(null);
   useEffect(() => {
     /* without the session's summary its exact scope is unknown */
     if (!agentDid || !sessionId || !listed) return;
+    const cues = `${scope}\u0002${rowsCue}\u0002${sessionsCue}`;
+    const last = asked.current;
+    if (
+      last?.cues === cues &&
+      (storeVersion === null || last.version === storeVersion)
+    ) {
+      return;
+    }
+    asked.current = { cues, version: observed };
     const ask = ++generation.current;
     void shell.api.sessionProvenance({ sessionId, agentDid, requesterDid }).then(
       (value) => {
@@ -128,6 +155,7 @@ export function useSessionProvenance(shell: Shell): SessionProvenanceView | null
       },
       () => {
         /* the last known lineage stays; the next cue asks again */
+        if (generation.current === ask) asked.current = null;
       },
     );
   }, [
@@ -138,6 +166,7 @@ export function useSessionProvenance(shell: Shell): SessionProvenanceView | null
     listed,
     scope,
     storeVersion,
+    rowsCue,
     sessionsCue,
   ]);
   return provenance;
