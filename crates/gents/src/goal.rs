@@ -537,6 +537,8 @@ pub struct GoalDocument {
     #[serde(default)]
     pub token_budget: Option<i64>,
     #[serde(default)]
+    pub assignment_root_request_doc_id: Option<String>,
+    #[serde(default)]
     pub tokens_used: Option<i64>,
     #[serde(default)]
     pub active_time_seconds: Option<i64>,

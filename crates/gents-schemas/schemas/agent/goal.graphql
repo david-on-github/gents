@@ -10,6 +10,7 @@ type Goal @branchable {
     token_budget: Int
     tokens_used: Int
     token_usage_baseline: Int
+    assignment_root_request_doc_id: String
     active_time_seconds: Int
     active_started_at: String
     consecutive_blocked_audits: Int
