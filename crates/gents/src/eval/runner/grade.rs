@@ -60,8 +60,7 @@ pub fn grade(
         let feedback_row = stage
             .checks
             .iter()
-            .position(|check| check.tier == EvalTier::Acceptance)
-            .unwrap_or(0);
+            .position(|check| check.tier == EvalTier::Acceptance);
         for (index, check) in stage.checks.iter().enumerate() {
             rows.push(match observed {
                 None if observed_nothing => synthetic(
@@ -81,7 +80,7 @@ pub fn grade(
                     "skipped_prerequisite",
                 ),
                 Some(observed) => match observed.failure_kind {
-                    Some(kind) => failed(stage, check, kind, observed, index == feedback_row),
+                    Some(kind) => failed(stage, check, kind, observed, Some(index) == feedback_row),
                     None => checked(stage, check, observed, registry),
                 },
             });
