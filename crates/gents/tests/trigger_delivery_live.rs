@@ -318,6 +318,7 @@ async fn two_lead_sessions_route_64_real_worker_outcomes_without_chaining() -> R
         )).await?;
     }
     let mut observed_busy_queue = false;
+    let mut next_evidence = tokio::time::Instant::now();
     let (requests, fires, outcomes) = loop {
         let requests = rows(
             &access,
@@ -358,6 +359,30 @@ async fn two_lead_sessions_route_64_real_worker_outcomes_without_chaining() -> R
             &owner,
         )
         .await?;
+        if tokio::time::Instant::now() >= next_evidence {
+            let calls = rows(
+                &access,
+                "InferenceCall",
+                "request_id backend_id call_kind call_state started_at ended_at",
+                &owner,
+            )
+            .await?;
+            let triggers = rows(
+                &access,
+                "Trigger",
+                "trigger_id last_status last_error",
+                &owner,
+            )
+            .await?;
+            std::fs::write(
+                artifacts.join("progress.json"),
+                serde_json::to_vec_pretty(&json!({
+                    "requests": requests, "fires": fires, "outcomes": outcomes,
+                    "calls": calls, "triggers": triggers,
+                }))?,
+            )?;
+            next_evidence = tokio::time::Instant::now() + Duration::from_secs(5);
+        }
         if requests.len() == 130
             && outcomes.len() == 64
             && fires.len() == 130
