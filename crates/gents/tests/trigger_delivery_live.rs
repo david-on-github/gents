@@ -78,11 +78,11 @@ fn provider_peaks(calls: &[Value]) -> Result<BTreeMap<String, usize>> {
 const SCHEMA: &str = r#"
 type DeliveryRunStart {
     handoff_id: String @immutable
-    tags: [String!] @immutable
+    tags: [String!]
 }
 type DeliveryWork {
     handoff_id: String @immutable
-    tags: [String!] @immutable
+    tags: [String!]
     reply_session_id: String @immutable
     lane: Int @immutable
     shard_id: String @immutable
