@@ -23,10 +23,21 @@ fn artifact_directory(label: &str) -> Result<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     std::fs::create_dir_all(&root)?;
-    Ok(tempfile::Builder::new()
+    let source_sha = std::env::var("GENTS_DELIVERY_SOURCE_SHA")
+        .context("GENTS_DELIVERY_SOURCE_SHA must identify the committed source under test")?;
+    ensure!(
+        source_sha.len() == 40 && source_sha.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        "GENTS_DELIVERY_SOURCE_SHA must be a full commit SHA"
+    );
+    let directory = tempfile::Builder::new()
         .prefix(&format!("gents-delivery-{label}-"))
         .tempdir_in(root)?
-        .keep())
+        .keep();
+    std::fs::write(
+        directory.join("source-commit.txt"),
+        format!("{source_sha}\n"),
+    )?;
+    Ok(directory)
 }
 
 /// Durable admitted-provider intervals use a half-open boundary: an ending
