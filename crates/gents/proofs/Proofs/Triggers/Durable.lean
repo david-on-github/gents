@@ -239,4 +239,50 @@ theorem task_assignment_invalidates_previous_controller (previous : GoalAssignme
 theorem new_assignment_usage_baseline (usage : Nat) :
     (assignGoal none usage).usageBaseline = usage := rfl
 
+/-- Native creation-arrival positions are authoritative after journal activation.
+A request with neither a position nor a fire receipt belongs to the pre-journal
+ordinary cohort. Such documents existed before every journaled arrival; their
+relative order is unavailable and retains ordinary running-session exclusion.
+Receipt-backed documents never qualify for this historical exception. -/
+structure ClaimObservation where
+  document : String
+  owner : String
+  session : String
+  trigger : String := ""
+  serial : Bool := false
+  receipt : Bool := false
+  arrival : Option Nat := none
+  running : Bool := false
+  terminal : Bool := false
+  deriving DecidableEq, Repr
+
+def claimConflict (candidate other : ClaimObservation) : Bool :=
+  candidate.owner == other.owner &&
+    (candidate.session == other.session ||
+      (candidate.serial && candidate.receipt && other.receipt &&
+        candidate.trigger == other.trigger))
+
+def observedPrecedes (candidate other : ClaimObservation) : Bool :=
+  match candidate.arrival, other.arrival with
+  | some _, none => true
+  | some next, some prior => prior < next
+  | none, _ => false
+
+def observedClaimAllowed (candidate : ClaimObservation) (rows : List ClaimObservation) : Bool :=
+  !candidate.running && !candidate.terminal &&
+  !(candidate.receipt && candidate.arrival.isNone) &&
+  !rows.any (fun other => other.document != candidate.document &&
+    !other.terminal && claimConflict candidate other &&
+    ((other.receipt && other.arrival.isNone) || other.running ||
+      observedPrecedes candidate other))
+
+theorem receipt_without_arrival_cannot_claim (candidate : ClaimObservation)
+    (hReceipt : candidate.receipt = true) (hArrival : candidate.arrival = none)
+    (rows : List ClaimObservation) : observedClaimAllowed candidate rows = false := by
+  simp [observedClaimAllowed, hReceipt, hArrival]
+
+theorem historical_pending_has_no_order (candidate other : ClaimObservation)
+    (hArrival : candidate.arrival = none) : observedPrecedes candidate other = false := by
+  simp [observedPrecedes, hArrival]
+
 end Triggers.Durable
