@@ -109,13 +109,19 @@ export async function waitForRequestCompletion({
         );
       }
 
-      if (isTerminalTurnState(diagnostics.desktop.turnState)) {
+      if (
+        diagnostics.desktop.request &&
+        isTerminalTurnState(diagnostics.desktop.turnState)
+      ) {
         const snapshot = await adapter.fetchSessionSnapshot(
           request.sessionId,
           request.agentDid,
           request.requestId,
         );
-        if (snapshot) {
+        if (
+          snapshot?.latestRequestId === request.requestId &&
+          isTerminalTurnState(snapshot.turnState)
+        ) {
           return snapshot;
         }
       }
