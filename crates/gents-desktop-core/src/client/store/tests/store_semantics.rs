@@ -38,6 +38,7 @@ fn trigger(
     source: gents::document_config::TriggerSource,
 ) -> Trigger {
     Trigger {
+        session_id_template: None,
         agent_did: "did:agent:1".to_string(),
         trigger_id: trigger_id.to_string(),
         display_name: None,
@@ -71,6 +72,7 @@ fn trigger_observation(
 
 fn task_row(task_id: &str, behavior_id: &str) -> Task {
     Task {
+        emit_outcome: false,
         task_id: task_id.to_string(),
         agent_did: "did:agent:1".to_string(),
         display_name: None,
