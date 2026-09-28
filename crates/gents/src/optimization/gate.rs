@@ -18,15 +18,20 @@ use std::collections::BTreeSet;
 
 use serde_json::Value;
 
-use crate::optimization::subject::MaterializedPack;
+use crate::config_client::DesiredStateApplyPlan;
+use crate::optimization::subject::{baseline_text, MaterializedPack};
+use crate::optimization::target::TargetField;
 use crate::pack::interpolate;
+use crate::template::parse_template_for_validation;
+use crate::{Collection, ConfigReferences};
 
 const CONFIG_ASSET: &str = "pack_config.json";
 
 /// Why a candidate never reached a validation run. `reason` is a closed
 /// vocabulary for the journal — `empty_text`, `text_too_long`,
-/// `unexpected_change`, `text_mismatch` or `duplicate_candidate` — and
-/// `detail` is diagnostics for an operator.
+/// `template_invalid`, `template_variables_dropped`, `unexpected_change`,
+/// `text_mismatch` or `duplicate_candidate` — and `detail` is diagnostics for
+/// an operator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructuralRejection {
     pub reason: &'static str,
@@ -69,15 +74,25 @@ fn raw_config(pack: &MaterializedPack) -> Result<Value, StructuralRejection> {
     })
 }
 
-/// The raw `system_prompt` of `context_id`, and the config with it masked.
-fn split_prompt(mut raw: Value, context_id: &str) -> Result<(Value, Value), StructuralRejection> {
-    let context = raw["contexts"]
+/// The raw target field of `pack`'s target document, and the config with it
+/// masked.
+fn split_prompt(
+    mut raw: Value,
+    pack: &MaterializedPack,
+) -> Result<(Value, Value), StructuralRejection> {
+    let (array, id_key, field) = pack.target.pack_slot();
+    let document = raw[array]
         .as_array_mut()
         .into_iter()
         .flatten()
-        .find(|context| context["context_id"].as_str() == Some(context_id))
-        .ok_or_else(|| reject("unexpected_change", format!("no context {context_id:?}")))?;
-    let prompt = context["system_prompt"].take();
+        .find(|document| document[id_key].as_str() == Some(pack.target_id.as_str()))
+        .ok_or_else(|| {
+            reject(
+                "unexpected_change",
+                format!("no {array} entry {:?}", pack.target_id),
+            )
+        })?;
+    let prompt = document[field].take();
     Ok((prompt, raw))
 }
 
@@ -106,7 +121,78 @@ pub fn text_gate(
             "an inline prompt beginning with ./ is read by the pack loader as a sidecar path",
         ));
     }
+    if baseline.target == TargetField::TaskPromptTemplate {
+        let current = baseline_text(baseline)
+            .map_err(|error| reject("unexpected_change", format!("{error:#}")))?;
+        let dropped: Vec<String> = template_variables(&current)?
+            .difference(&template_variables(text)?)
+            .cloned()
+            .collect();
+        if !dropped.is_empty() {
+            return Err(reject(
+                "template_variables_dropped",
+                format!("the candidate template no longer references {dropped:?}"),
+            ));
+        }
+        owner_validation(baseline, text)?;
+    }
     Ok(())
+}
+
+/// The checks the owner runs on a task at desired-state apply, on the
+/// baseline's task with `text` as its template: the catalog for `node.*` and
+/// `ctx.*`, and the roots its triggers' sources forbid. Only the task and its
+/// triggers are validated, because the pack's other documents name
+/// inference-slot markers that bind at execution.
+fn owner_validation(baseline: &MaterializedPack, text: &str) -> Result<(), StructuralRejection> {
+    let invalid = |error: anyhow::Error| reject("template_invalid", format!("{error:#}"));
+    let mut config = baseline.config.clone();
+    let task = config
+        .tasks
+        .iter_mut()
+        .find(|task| task.task_id == baseline.target_id)
+        .ok_or_else(|| {
+            reject(
+                "unexpected_change",
+                format!("pack declares no task {:?}", baseline.target_id),
+            )
+        })?;
+    task.prompt_template = text.to_owned();
+    task.validate().map_err(invalid)?;
+    let plan = DesiredStateApplyPlan::from_pack_config(&config).map_err(invalid)?;
+    let references = ConfigReferences::from_documents(
+        &config.agent_principal.agent_did,
+        plan.documents()
+            .iter()
+            .map(|document| (document.collection, document.add.clone())),
+    )
+    .map_err(invalid)?;
+    plan.documents()
+        .iter()
+        .filter(|document| document.collection == Collection::Trigger)
+        .try_for_each(|document| {
+            references
+                .validate_document(Collection::Trigger, &document.add)
+                .map_err(invalid)
+        })
+}
+
+/// The variable paths a task template renders, as the template owner reads
+/// them; a template the owner cannot parse renders nothing.
+fn template_variables(template: &str) -> Result<BTreeSet<String>, StructuralRejection> {
+    parse_template_for_validation(template)
+        .map(|references| {
+            references
+                .into_iter()
+                .map(|reference| reference.path.join("."))
+                .collect()
+        })
+        .map_err(|error| {
+            reject(
+                "template_invalid",
+                format!("the template does not parse: {error}"),
+            )
+        })
 }
 
 /// Decide whether `candidate` may be evaluated at all.
@@ -166,12 +252,12 @@ pub fn structural_gate(
             format!("expected only {allowed:?} to change, but {changed:?} did"),
         ));
     }
-    if candidate.context_id != baseline.context_id {
+    if (candidate.target, &candidate.target_id) != (baseline.target, &baseline.target_id) {
         return Err(reject(
             "unexpected_change",
             format!(
-                "the subject behavior's context moved from {:?} to {:?}",
-                baseline.context_id, candidate.context_id
+                "the target moved from {:?} to {:?}",
+                baseline.target_id, candidate.target_id
             ),
         ));
     }
@@ -189,15 +275,15 @@ pub fn structural_gate(
         // Inline: the configs agree once the target is masked, and the
         // candidate's target is exactly the proposed text's escaped form.
         None => {
-            let (_, baseline_rest) = split_prompt(raw_config(baseline)?, &baseline.context_id)?;
-            let (prompt, candidate_rest) =
-                split_prompt(raw_config(candidate)?, &candidate.context_id)?;
+            let (_, baseline_rest) = split_prompt(raw_config(baseline)?, baseline)?;
+            let (prompt, candidate_rest) = split_prompt(raw_config(candidate)?, candidate)?;
             if baseline_rest != candidate_rest {
+                let (array, _, field) = baseline.target.pack_slot();
                 return Err(reject(
                     "unexpected_change",
                     format!(
-                        "{CONFIG_ASSET} changed besides contexts[{:?}].system_prompt",
-                        baseline.context_id
+                        "{CONFIG_ASSET} changed besides {array}[{:?}].{field}",
+                        baseline.target_id
                     ),
                 ));
             }
@@ -206,7 +292,7 @@ pub fn structural_gate(
             if prompt.as_str() != Some(interpolate::escape(text).as_str()) {
                 return Err(reject(
                     "text_mismatch",
-                    "the inline system_prompt is not the proposed text",
+                    "the inline target field is not the proposed text",
                 ));
             }
         }
@@ -218,9 +304,11 @@ pub fn structural_gate(
 mod tests {
     use super::*;
     use crate::optimization::subject::tests::{
-        write_fixture_pack, write_inline_fixture_pack, FIXTURE_PROMPT,
+        write_fixture_pack, write_inline_fixture_pack, write_task_fixture_pack, FIXTURE_PROMPT,
+        FIXTURE_TEMPLATE,
     };
     use crate::optimization::subject::{materialize_candidate, materialize_pack};
+    use crate::optimization::target::TargetField;
 
     const OWNER: &str = "did:key:gate-owner";
     const TEXT: &str = "Watch the mailbox, and say why.\n";
@@ -239,7 +327,14 @@ mod tests {
         } else {
             write_fixture_pack(&root.join("baseline"));
         }
-        let baseline = materialize_pack(&root.join("baseline"), OWNER, "monitor").unwrap();
+        let baseline = materialize_pack(
+            &root.join("baseline"),
+            OWNER,
+            "monitor",
+            TargetField::AgentContextSystemPrompt,
+            None,
+        )
+        .unwrap();
         Fixture {
             _dirs: dirs,
             root,
@@ -263,6 +358,125 @@ mod tests {
             32 * 1024,
             &[fixture.baseline.digest.clone()],
         )
+    }
+
+    fn task_fixture(inline: bool) -> Fixture {
+        let dirs = tempfile::tempdir().unwrap();
+        let root = dirs.path().to_path_buf();
+        write_task_fixture_pack(&root.join("baseline"), inline);
+        let baseline = materialize_pack(
+            &root.join("baseline"),
+            OWNER,
+            "monitor",
+            TargetField::TaskPromptTemplate,
+            Some("plan"),
+        )
+        .unwrap();
+        Fixture {
+            _dirs: dirs,
+            root,
+            baseline,
+        }
+    }
+
+    const TEMPLATE: &str = "Do {{ doc.goal }} for {{ doc.owner }}, and say why.\n";
+
+    #[test]
+    fn a_one_field_task_candidate_passes_in_a_sidecar_and_inline() {
+        for inline in [false, true] {
+            let fixture = task_fixture(inline);
+            assert_eq!(fixture.baseline.prompt_asset.is_none(), inline);
+            let candidate = candidate(&fixture, TEMPLATE, "c1");
+            gate(&fixture, &candidate, TEMPLATE).unwrap();
+            let rejection = gate(&fixture, &candidate, FIXTURE_TEMPLATE).unwrap_err();
+            assert_eq!(rejection.reason, "text_mismatch");
+        }
+    }
+
+    #[test]
+    fn an_inline_task_candidate_that_changed_another_task_field_is_rejected() {
+        let fixture = task_fixture(true);
+        let mut tampered = candidate(&fixture, TEMPLATE, "c2");
+        let mut raw: serde_json::Value =
+            serde_json::from_slice(&tampered.files["pack_config.json"]).unwrap();
+        raw["tasks"][0]["display_name"] = serde_json::json!("Renamed");
+        tampered.files.insert(
+            "pack_config.json".into(),
+            serde_json::to_vec_pretty(&raw).unwrap(),
+        );
+        let rejection = gate(&fixture, &tampered, TEMPLATE).unwrap_err();
+        assert_eq!(rejection.reason, "unexpected_change");
+        assert!(
+            rejection.detail.contains("besides tasks"),
+            "{}",
+            rejection.detail
+        );
+    }
+
+    #[test]
+    fn a_task_candidate_that_does_not_parse_is_rejected() {
+        let task = task_fixture(false);
+        let rejection = text_gate(&task.baseline, "Do {{ args.goal ", 32 * 1024).unwrap_err();
+        assert_eq!(rejection.reason, "template_invalid");
+        assert!(
+            rejection.detail.contains("does not parse"),
+            "{}",
+            rejection.detail
+        );
+    }
+
+    /// A task's trigger renders the template with its variables when a seed
+    /// stage fires it; a candidate that drops one would render another prompt
+    /// shape.
+    #[test]
+    fn a_task_candidate_that_drops_a_template_variable_is_rejected() {
+        let task = task_fixture(false);
+        let rejection = text_gate(&task.baseline, "Do {{ doc.goal }}.\n", 32 * 1024).unwrap_err();
+        assert_eq!(rejection.reason, "template_variables_dropped");
+        assert!(
+            rejection.detail.contains("doc.owner"),
+            "{}",
+            rejection.detail
+        );
+        assert!(
+            !rejection.detail.contains("doc.goal"),
+            "{}",
+            rejection.detail
+        );
+
+        text_gate(&task.baseline, TEMPLATE, 32 * 1024).unwrap();
+        text_gate(
+            &task.baseline,
+            "{{ doc.owner }}: {{ doc.goal }} {{ doc.extra }} at {{ ctx.now }}\n",
+            32 * 1024,
+        )
+        .unwrap();
+
+        // A context prompt is not a template: braces there are only text.
+        let context = fixture(false);
+        text_gate(&context.baseline, "Watch {{ nothing }}.\n", 32 * 1024).unwrap();
+    }
+
+    /// The owner's install-time checks run on the candidate: a `node.*` or
+    /// `ctx.*` variable the catalog lacks, or a root the task's trigger source
+    /// forbids, would be refused at promotion and must not spend a trial.
+    #[test]
+    fn a_task_candidate_the_owner_would_refuse_at_install_is_rejected() {
+        let task = task_fixture(false);
+        for (text, variable) in [
+            (
+                "Do {{ doc.goal }} for {{ doc.owner }} on {{ node.bogus }}.\n",
+                "node.bogus",
+            ),
+            (
+                "Do {{ doc.goal }} for {{ doc.owner }} as {{ args.mode }}.\n",
+                "args.mode",
+            ),
+        ] {
+            let rejection = text_gate(&task.baseline, text, 32 * 1024).unwrap_err();
+            assert_eq!(rejection.reason, "template_invalid", "{text}");
+            assert!(rejection.detail.contains(variable), "{}", rejection.detail);
+        }
     }
 
     #[test]

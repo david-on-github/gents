@@ -25,6 +25,10 @@ An eval **definition** is identified by a `definition_id` and holds a list of
 - **stage** — one turn of the subject's run: a `prompt` it receives, a
   `deadline_secs` it must finish within, the `checks` that grade what
   happened, and the `capture`s that gather the evidence those checks read.
+- `seed` (instead of `prompt`): a document `{collection, document}` the
+  runner writes so the pack's own trigger fires its task; use it when the
+  behavior is normally driven by a trigger; the collection must be one from
+  the `# Subject` dossier.
 - **capture** — what a stage reads back after the subject's turn ends: a
   `documents` capture (a collection, a DefraDB filter, and the fields to
   read) or a `file` capture (a glob over the trial workspace).
@@ -54,6 +58,8 @@ capture in each stage: a stage's checks may not repeat
 a check name, so a second real check ref needs a second stage. When you
 draft for real, every check name you use must come from the `# Check
 catalog` you were actually given.
+A seed stage swaps `"prompt"` for `"seed": { "collection": "RestockRequest", "document": { ... } }`
+and is otherwise the same shape.
 
 ```json
 {

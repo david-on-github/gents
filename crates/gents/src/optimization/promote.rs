@@ -188,6 +188,13 @@ async fn job_in_state(
     Ok(job)
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    /// Test seam between the closure's digest check and the target write:
+    /// signals the first `Notify`, then waits on the second, once.
+    static BETWEEN_CHECK_AND_WRITE: std::sync::Arc<(tokio::sync::Notify, tokio::sync::Notify)>;
+}
+
 /// Write the retained checkpoint's text onto the live target, guarded by the
 /// whole frozen closure.
 pub async fn promote(
@@ -218,7 +225,13 @@ pub async fn promote(
     // still digests to the journal's and holds the text about to go live.
     let origin = &job.origin;
     let checked = verified_checkpoint(origin, job_id, &retained).and_then(|path| {
-        let pack = materialize_pack(&path, &origin.owner, &origin.subject.behavior_id)?;
+        let pack = materialize_pack(
+            &path,
+            &origin.owner,
+            &origin.subject.behavior_id,
+            origin.target.field,
+            origin.target.task_id(),
+        )?;
         let text = baseline_text(&pack)?;
         anyhow::ensure!(
             text == retained.text,
@@ -239,6 +252,11 @@ pub async fn promote(
                 let drifted = between(&job.origin.closure, &closure_digests(&live)?);
                 if !drifted.is_empty() {
                     return Err(anyhow::Error::new(ClosureDrift(drifted)));
+                }
+                #[cfg(test)]
+                if let Ok(gate) = BETWEEN_CHECK_AND_WRITE.try_with(std::sync::Arc::clone) {
+                    gate.0.notify_one();
+                    gate.1.notified().await;
                 }
                 // Writes only the target; expects the entire frozen closure.
                 let (plan, promotion) = promotion_plan(&job.origin, &live, text)?;
@@ -367,9 +385,12 @@ mod tests {
     use crate::eval::runner::freeze::tests::OWNER;
     use crate::optimization::driver::job_dir;
     use crate::optimization::driver::matrix::{
-        accepting_harness, rejecting_harness, Harness, BASELINE_PROMPT, CANDIDATE_PROMPT,
+        accepting_harness, accepting_task_harness, rejecting_harness, Harness, BASELINE_PROMPT,
+        CANDIDATE_PROMPT, CANDIDATE_TEMPLATE,
     };
     use crate::optimization::job::load_job;
+    use crate::optimization::subject::tests::FIXTURE_TEMPLATE;
+    use crate::optimization::target::TargetField;
     use crate::Collection;
     use serde_json::json;
 
@@ -397,6 +418,64 @@ mod tests {
                             .to_owned()
                     })
             })
+    }
+
+    async fn live_template(access: &ConfigAccess) -> Option<String> {
+        read_closure(access)
+            .await
+            .iter()
+            .find_map(|(collection, value)| {
+                (*collection == Collection::Task && value["task_id"] == "plan").then(|| {
+                    value["prompt_template"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_owned()
+                })
+            })
+    }
+
+    #[tokio::test]
+    async fn a_task_template_promotion_writes_the_task_and_reverts_it() {
+        let (harness, request) = accepting_task_harness("promote-task").await;
+        let digest = checkpoint_digest(&harness, &request.job_id).await;
+        let job = load_job(harness.access(), OWNER, &request.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(job.origin.target.field, TargetField::TaskPromptTemplate);
+        assert_eq!(job.origin.target.id, "plan");
+        let before = read_closure(harness.access()).await;
+
+        let promotion = promote(harness.access(), OWNER, &request.job_id, &digest, OWNER)
+            .await
+            .unwrap();
+        assert_eq!(promotion.previous_text, FIXTURE_TEMPLATE);
+        assert_eq!(
+            live_template(harness.access()).await.as_deref(),
+            Some(CANDIDATE_TEMPLATE)
+        );
+        assert_eq!(
+            live_prompt(harness.access()).await.as_deref(),
+            Some(BASELINE_PROMPT),
+            "the context is untouched"
+        );
+        let after = read_closure(harness.access()).await;
+        assert_eq!(after.len(), before.len());
+
+        revert(
+            harness.access(),
+            OWNER,
+            &request.job_id,
+            &promotion.target_digest,
+            OWNER,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            live_template(harness.access()).await.as_deref(),
+            Some(FIXTURE_TEMPLATE)
+        );
+        assert_eq!(state(&harness, &request.job_id).await, JobState::Reverted);
     }
 
     async fn state(harness: &Harness, job_id: &str) -> JobState {
@@ -714,6 +793,66 @@ mod tests {
             "the live node is unchanged"
         );
         assert_eq!(state(&harness, &request.job_id).await, JobState::Stale);
+    }
+
+    /// A closure edit that commits while the promotion holds its snapshot,
+    /// after the digest check and before the write, conflicts at commit: the
+    /// transaction replays, sees the drift, and refuses with the target untouched.
+    #[tokio::test]
+    async fn a_closure_edit_committed_between_the_check_and_the_write_refuses_the_promotion() {
+        let (harness, request) = accepting_harness("promote-raced").await;
+        let digest = checkpoint_digest(&harness, &request.job_id).await;
+        let gate = std::sync::Arc::new((tokio::sync::Notify::new(), tokio::sync::Notify::new()));
+        let promotion = BETWEEN_CHECK_AND_WRITE.scope(
+            std::sync::Arc::clone(&gate),
+            promote(harness.access(), OWNER, &request.job_id, &digest, OWNER),
+        );
+        let ConfigAccess::Local(node) = harness.access() else {
+            unreachable!("the harness is embedded")
+        };
+        let edit = async {
+            gate.0.notified().await;
+            // Lands outside the process write gate, as another writer would.
+            let response = node
+                .execute(
+                    r#"mutation { update_Tools(filter: {tools_id: {_eq: "monitor-tools"}}, input: {display_name: "Monitor tools, renamed"}) { _docID } }"#,
+                )
+                .await;
+            assert!(!response.has_errors(), "{:?}", response.errors);
+            gate.1.notify_one();
+        };
+        // The seam fires once; a regression that fires it again would wait on
+        // the second gate forever, so a hang is a failure, not a stall.
+        let (result, ()) = tokio::time::timeout(std::time::Duration::from_secs(60), async {
+            tokio::join!(promotion, edit)
+        })
+        .await
+        .expect("the promotion and the edit finished");
+
+        let error = result.unwrap_err();
+        let refusal = promote_refused(&error).unwrap_or_else(|| panic!("{error:#}"));
+        assert_eq!(refusal.reason, "stale_closure");
+        assert!(refusal.detail.contains("Tools"), "{}", refusal.detail);
+        assert_eq!(
+            live_prompt(harness.access()).await.as_deref(),
+            Some(BASELINE_PROMPT),
+            "the target is untouched"
+        );
+        assert_eq!(state(&harness, &request.job_id).await, JobState::Stale);
+        let job = load_job(harness.access(), OWNER, &request.job_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(
+                job.journal.last(),
+                Some(JournalEntry::PromotionRefused { drifted })
+                    if drifted.iter().any(|document| document.collection == "Tools"
+                        && document.id == "monitor-tools")
+            ),
+            "{:?}",
+            job.journal.last()
+        );
     }
 
     #[tokio::test]

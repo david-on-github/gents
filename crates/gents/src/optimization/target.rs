@@ -15,25 +15,34 @@ use crate::config_client::{
 };
 use crate::Collection;
 
-/// The one field an optimization job may change in v1 (ruling R2). A Task's
-/// `prompt_template` is deferred; adding it is a new variant and a new
-/// structural check, not a flag on this one.
+/// The one field of one document an optimization job may change (ruling
+/// R2): a context's system prompt, or the prompt template a task's trigger
+/// renders when a seed stage fires it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TargetField {
     AgentContextSystemPrompt,
+    TaskPromptTemplate,
 }
 
 impl TargetField {
     pub fn collection(&self) -> Collection {
         match self {
             Self::AgentContextSystemPrompt => Collection::AgentContext,
+            Self::TaskPromptTemplate => Collection::Task,
         }
     }
 
     pub fn field_name(&self) -> &'static str {
+        self.pack_slot().2
+    }
+
+    /// Where the field sits in a raw `pack_config.json`: the array, the
+    /// document id key and the field.
+    pub fn pack_slot(&self) -> (&'static str, &'static str, &'static str) {
         match self {
-            Self::AgentContextSystemPrompt => "system_prompt",
+            Self::AgentContextSystemPrompt => ("contexts", "context_id", "system_prompt"),
+            Self::TaskPromptTemplate => ("tasks", "task_id", "prompt_template"),
         }
     }
 }
@@ -43,6 +52,13 @@ pub struct Target {
     pub field: TargetField,
     pub owner: String,
     pub id: String,
+}
+
+impl Target {
+    /// The task a task prompt template target names.
+    pub fn task_id(&self) -> Option<&str> {
+        (self.field == TargetField::TaskPromptTemplate).then_some(self.id.as_str())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -424,9 +440,8 @@ mod tests {
             .all(|expectation| expectation.digest.is_some()));
     }
 
-    /// Ruling R2: v1 has exactly one target field.
     #[test]
-    fn the_one_target_field_is_the_context_system_prompt() {
+    fn the_context_system_prompt_target_field() {
         assert_eq!(
             TargetField::AgentContextSystemPrompt.collection(),
             Collection::AgentContext
@@ -436,14 +451,64 @@ mod tests {
             "system_prompt"
         );
         assert_eq!(
+            TargetField::AgentContextSystemPrompt.pack_slot(),
+            ("contexts", "context_id", "system_prompt")
+        );
+        assert_eq!(
             serde_json::to_value(TargetField::AgentContextSystemPrompt).unwrap(),
             json!("agent_context_system_prompt"),
             "the frozen wire form of the target field"
         );
-        assert!(
-            serde_json::from_value::<TargetField>(json!("task_prompt_template")).is_err(),
-            "no second target field exists in v1"
+    }
+
+    #[test]
+    fn the_task_prompt_template_target_field() {
+        assert_eq!(
+            TargetField::TaskPromptTemplate.collection(),
+            Collection::Task
         );
+        assert_eq!(
+            TargetField::TaskPromptTemplate.field_name(),
+            "prompt_template"
+        );
+        assert_eq!(
+            TargetField::TaskPromptTemplate.pack_slot(),
+            ("tasks", "task_id", "prompt_template")
+        );
+        assert_eq!(
+            serde_json::to_value(TargetField::TaskPromptTemplate).unwrap(),
+            json!("task_prompt_template")
+        );
+        let task = Target {
+            field: TargetField::TaskPromptTemplate,
+            owner: OWNER.into(),
+            id: "plan".into(),
+        };
+        let mut before = closure("a");
+        before.push((
+            Collection::Task,
+            json!({
+                "task_id": "plan",
+                "agent_did": OWNER,
+                "behavior_id": "monitor",
+                "prompt_template": "Plan {{ args.goal }}.\n",
+            }),
+        ));
+        assert_eq!(
+            current_text(&before, &task).unwrap(),
+            "Plan {{ args.goal }}.\n"
+        );
+        let after = apply_text(&before, &task, "Do {{ args.goal }}.\n").unwrap();
+        assert_eq!(
+            after[..2],
+            before[..2],
+            "the behavior and context are untouched"
+        );
+        assert_eq!(
+            current_text(&after, &task).unwrap(),
+            "Do {{ args.goal }}.\n"
+        );
+        assert_eq!(current_text(&after, &target()).unwrap(), "a");
     }
 
     /// Finding F5: a definition is frozen in `JobOrigin::definition`, never in

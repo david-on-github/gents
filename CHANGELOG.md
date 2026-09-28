@@ -74,6 +74,11 @@ source consistency checks, not a separate runtime compatibility version.
   `cancel_subagent` on the same child stops that work. A parent interrupt does
   not end a child's steerability. Cancelled children and children fenced by
   an unclaimed-spawn expiry still refuse steering (#1538).
+- `gents optimization run --proposer behavior:<pack>[:<behavior>]` drives a
+  job with a model-driven proposer from the bundled `prompt_proposer` pack,
+  binding its inference slot to `--proposer-profile`.
+  `--proposer-timeout-secs` bounds each reply; `scripted:<file>` works as
+  before, and `--proposer` is still required.
 
 ### Changed
 

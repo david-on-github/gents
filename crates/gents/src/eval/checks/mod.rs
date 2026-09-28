@@ -121,7 +121,7 @@ mod tests {
         let check = registry.get("captured_rows_count").expect("the seed check");
         assert_eq!(
             (check.name(), check.version()),
-            ("captured_rows_count", "1")
+            ("captured_rows_count", "2")
         );
         assert!(registry.get("no_such_check").is_none());
     }

@@ -17,7 +17,7 @@ use crate::eval::PairedEvidence;
 pub const POLICY_VERSION: &str = "v2";
 
 /// Cases at or below this count are tested by exact enumeration.
-const EXACT_CASE_LIMIT: usize = 20;
+pub(crate) const EXACT_CASE_LIMIT: usize = 20;
 
 // The exact branch packs one sign bit per case into a single `u64` mask, so the
 // limit has to stay inside that word.
@@ -26,6 +26,7 @@ const _: () = assert!(EXACT_CASE_LIMIT < 64);
 /// Frozen into a job at start. A rule change is a new version, never an edit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyV2 {
+    /// At least 1 (`check_policy`): a case with no pairs is not evidence.
     pub min_pairs: u64,
     pub max_not_evidence_bp: u64,
     pub max_asymmetry_bp: u64,
@@ -39,6 +40,10 @@ pub struct PolicyV2 {
     /// not by `decide`.
     pub max_missing_usage_bp: u64,
     pub max_reruns: u32,
+    /// Above `EXACT_CASE_LIMIT` cases the p-value is sampled at a resolution
+    /// of `1e6 / (samples + 1)` ppm and is never zero; fewer samples only
+    /// coarsen it and cost power. `check_policy` refuses a count too coarse
+    /// to reach the effective alpha.
     pub monte_carlo_samples: u32,
 }
 
@@ -59,6 +64,18 @@ impl PolicyV2 {
             max_reruns: 1,
             monte_carlo_samples: 100_000,
         }
+    }
+
+    /// Whether this is the placeholder defaults with any `max_rounds`:
+    /// `max_rounds` sizes a job's budget (the Bonferroni divisor), not a
+    /// calibrated value, so the defaults sized to any round count are still
+    /// uncalibrated.
+    pub fn is_placeholder(&self) -> bool {
+        *self
+            == Self {
+                max_rounds: self.max_rounds,
+                ..Self::uncalibrated()
+            }
     }
 }
 
@@ -210,12 +227,21 @@ pub fn no_case_regression(policy: &PolicyV2, evidence: &Evidence) -> bool {
     })
 }
 
-/// Gate 2b, `Optimization.costOk`.
+/// Gate 2b, `Optimization.costOk`. The model is over naturals; a product past
+/// the integer width is not ok rather than wrapped.
 pub fn cost_ok(policy: &PolicyV2, tokens: &TokenTotals) -> bool {
-    tokens.candidate_tokens as u128 * tokens.baseline_trials as u128 * 10_000
-        <= tokens.baseline_tokens as u128
-            * tokens.candidate_trials as u128
-            * (10_000 + policy.max_token_increase_bp as u128)
+    let candidate = (tokens.candidate_tokens as u128)
+        .checked_mul(tokens.baseline_trials as u128)
+        .and_then(|product| product.checked_mul(10_000));
+    let baseline = (tokens.baseline_tokens as u128)
+        .checked_mul(tokens.candidate_trials as u128)
+        .and_then(|product| product.checked_mul(10_000 + policy.max_token_increase_bp as u128));
+    match (candidate, baseline) {
+        (Some(candidate), Some(baseline)) => candidate <= baseline,
+        // Only the allowed side past the width: the exact answer over naturals.
+        (Some(_), None) => true,
+        _ => false,
+    }
 }
 
 fn gcd(a: u128, b: u128) -> u128 {
@@ -674,6 +700,29 @@ mod tests {
         assert_eq!(report.p_ppm, None);
         assert_eq!(report.mean_diff_bp, None);
         assert_eq!((report.improved, report.tied, report.worsened), (30, 0, 0));
+    }
+
+    /// `Optimization.costOk` is over naturals; a product past the integer
+    /// width is not a cheaper candidate.
+    #[test]
+    fn a_cost_product_past_the_integer_width_is_not_ok() {
+        let totals = TokenTotals {
+            baseline_tokens: 1,
+            baseline_trials: 1 << 63,
+            candidate_tokens: 1 << 63,
+            candidate_trials: 1,
+        };
+        assert!(!cost_ok(&params(), &totals));
+        // Only the allowed side past the width is the exact answer: ok.
+        assert!(cost_ok(
+            &params(),
+            &TokenTotals {
+                baseline_tokens: 1 << 63,
+                baseline_trials: 1,
+                candidate_tokens: 1,
+                candidate_trials: 1 << 63,
+            }
+        ));
     }
 
     #[test]

@@ -14,13 +14,14 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use gents_protocol::request_lifecycle::RequestLifecycleState;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use crate::config_client::{
@@ -28,14 +29,14 @@ use crate::config_client::{
 };
 use crate::defra_node::EmbeddedNode;
 use crate::document_config::{InferenceSampling, PackConfig};
-use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome};
+use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome, RUNTIME_READY_TIMEOUT};
 use crate::eval::runner::embedded::observe::{
     await_terminal, classify_request_outcome, collect_request_evidence, RequestEvidence,
     TerminalObservation,
 };
 use crate::eval::runner::executor::{
-    Capture, CaptureResult, FileRef, InferenceBinding, Isolation, StageEvidence, StageSpec,
-    TrialEvidence, TrialExecutor, TrialFixtures, TrialLocator, TrialSpec,
+    Capture, CaptureResult, FileRef, FixtureDocument, InferenceBinding, Isolation, StageEvidence,
+    StageSpec, TrialEvidence, TrialExecutor, TrialFixtures, TrialLocator, TrialSpec,
 };
 use crate::eval::{Anchor, OutcomeKind, ProviderReason, TrialUsage};
 use crate::graphql::{
@@ -49,7 +50,7 @@ use crate::pack::{
     bind_pack_install_config, declared_paths, digest_declared_assets, load_pack_config,
     PackInferenceBindings, PackInstallOptions, PackManifest,
 };
-use crate::{Collection, ConfigAccess, DocumentRuntimeOptions};
+use crate::{Collection, ConfigAccess, DocumentRuntimeOptions, RuntimeSnapshotObserver};
 
 /// How long a request is watched after it has been interrupted, on the stage
 /// deadline or on cancellation, before the observation gives up on it settling.
@@ -165,18 +166,24 @@ impl EmbeddedExecutor {
             close(home).await;
             return infrastructure(&spec.trial_id, locator, &error);
         }
+        // The trial's own latch on its event sources, so a seed stage writes
+        // only once the pack's triggers can see the write.
+        let (event_sources_ready, ready) = watch::channel(None);
+        let mut options = self.runtime_options.clone();
+        // Replaces any observer the caller's options carried: the trial's
+        // latch is the only reader of this runtime's snapshots.
+        options.runtime_snapshot_observer = Some(Arc::new(EventSourcesReady(event_sources_ready)));
         // A failed boot has already stopped whatever it spawned, so the home is
         // ours to close.
-        let runtime =
-            match boot_runtime(&home, home.identity.clone(), self.runtime_options.clone()).await {
-                Ok((runtime, _agent)) => runtime,
-                Err(error) => {
-                    close(home).await;
-                    return infrastructure(&spec.trial_id, locator, &error);
-                }
-            };
+        let runtime = match boot_runtime(&home, home.identity.clone(), options).await {
+            Ok((runtime, _agent)) => runtime,
+            Err(error) => {
+                close(home).await;
+                return infrastructure(&spec.trial_id, locator, &error);
+            }
+        };
 
-        let stages = run_stages(spec, &cancel, &home, &locator, &workspace).await;
+        let stages = run_stages(spec, &cancel, &home, &locator, &workspace, &ready).await;
 
         if let Err(error) = runtime.shutdown().await {
             tracing::warn!(
@@ -188,6 +195,22 @@ impl EmbeddedExecutor {
         close(home).await;
         let (usage, anchor) = (usage(&stages), anchor(&stages));
         TrialEvidence::new(locator, stages, usage, anchor)
+    }
+}
+
+/// The first reconcile of the trial runtime's event sources, once there is one.
+type Reconciled = Option<Result<(), String>>;
+
+/// Latches the first reconcile of the trial runtime's event sources.
+struct EventSourcesReady(watch::Sender<Reconciled>);
+
+impl RuntimeSnapshotObserver for EventSourcesReady {
+    fn on_generation_published(&self, _: u64, _: &str, _: &[String]) {}
+
+    fn on_event_sources_reconciled(&self, generation: u64, _: &str, result: Result<(), &str>) {
+        if generation >= 1 && self.0.borrow().is_none() {
+            let _ = self.0.send(Some(result.map_err(str::to_owned)));
+        }
     }
 }
 
@@ -614,25 +637,13 @@ async fn install_fixtures(
             .context("adding a fixture schema")?;
     }
     for fixture in &fixtures.documents {
-        let collection = &fixture.collection;
-        validate_collection_identifier(collection)?;
-        // The document is arbitrary authored JSON, so it travels as a variable
-        // and is never interpolated into the mutation.
-        let mutation = format!(
-            "mutation($input: {collection}MutationInputArg!) {{ create_{collection}(input: $input) {{ _docID }} }}"
-        );
-        let variables = json!({ "input": fixture.document });
-        access
-            .transact("eval.trial.fixture_document", |txn| {
-                let (mutation, variables) = (&mutation, &variables);
-                Box::pin(async move {
-                    txn.execute_with_variables(mutation, variables)
-                        .await
-                        .map(|_| ())
-                })
-            })
-            .await
-            .with_context(|| format!("creating a {collection} fixture document"))?;
+        create_document(
+            access,
+            "eval.trial.fixture_document",
+            &fixture.collection,
+            &fixture.document,
+        )
+        .await?;
     }
     for file in &fixtures.files {
         let path = workspace_path(workspace, &file.path)?;
@@ -644,6 +655,32 @@ async fn install_fixtures(
             .with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Writes one authored row and returns its `_docID`. The document is arbitrary
+/// authored JSON, so it travels as a variable and is never interpolated into
+/// the mutation.
+async fn create_document(
+    access: &ConfigAccess,
+    label: &'static str,
+    collection: &str,
+    document: &Value,
+) -> Result<String> {
+    validate_collection_identifier(collection)?;
+    let mutation = format!(
+        "mutation($input: {collection}MutationInputArg!) {{ create_{collection}(input: $input) {{ _docID }} }}"
+    );
+    let variables = json!({ "input": document });
+    access
+        .transact(label, |txn| {
+            let (mutation, variables) = (&mutation, &variables);
+            Box::pin(async move {
+                let response = txn.execute_with_variables(mutation, variables).await?;
+                crate::graphql::created_doc_id(&response, collection)
+            })
+        })
+        .await
+        .with_context(|| format!("creating a {collection} document"))
 }
 
 /// A fixture path names a file inside the trial's workspace, never a path out
@@ -667,11 +704,12 @@ async fn run_stages(
     home: &EmbeddedHome,
     locator: &TrialLocator,
     workspace: &Path,
+    ready: &watch::Receiver<Reconciled>,
 ) -> Vec<StageEvidence> {
     let mut stages = Vec::new();
     for stage in &spec.stages {
         spec.progress.stage_started(&stage.stage_id);
-        let evidence = run_stage(spec, cancel, home, locator, workspace, stage).await;
+        let evidence = run_stage(spec, cancel, home, locator, workspace, stage, ready).await;
         spec.progress.stage_ended(&stage.stage_id);
         let failed = evidence.failure_kind.is_some();
         stages.push(evidence);
@@ -689,8 +727,9 @@ async fn run_stage(
     locator: &TrialLocator,
     workspace: &Path,
     stage: &StageSpec,
+    ready: &watch::Receiver<Reconciled>,
 ) -> StageEvidence {
-    let observed = submit_and_observe(spec, cancel, home, locator, stage).await;
+    let observed = submit_and_observe(spec, cancel, home, locator, stage, ready).await;
     StageEvidence {
         stage_id: stage.stage_id.clone(),
         request_id: observed.request_id,
@@ -738,6 +777,16 @@ impl ObservedStage {
             evidence: RequestEvidence::default(),
         }
     }
+
+    /// A stage cancelled before it had a request: the same
+    /// [`OutcomeKind::Runtime`] a cancelled running stage gets from
+    /// [`stage_failure_kind`], since either way the request did not finish.
+    fn cancelled() -> Self {
+        Self {
+            failure_kind: Some(OutcomeKind::Runtime),
+            ..Self::unsubmitted()
+        }
+    }
 }
 
 async fn submit_and_observe(
@@ -746,29 +795,45 @@ async fn submit_and_observe(
     home: &EmbeddedHome,
     locator: &TrialLocator,
     stage: &StageSpec,
+    ready: &watch::Receiver<Reconciled>,
 ) -> ObservedStage {
-    let request_id = uuid::Uuid::new_v4().to_string();
-    if let Err(error) =
-        submit_stage(&home.node, locator, &spec.behavior_id, stage, &request_id).await
-    {
-        tracing::warn!(
-            error = %format!("{error:#}"),
-            trial_id = %spec.trial_id,
-            stage_id = %stage.stage_id,
-            "eval stage could not be submitted"
-        );
-        return ObservedStage::unsubmitted();
-    }
+    let deadline = Duration::from_secs(stage.deadline_secs);
+    // A seed stage spends part of the deadline waiting for the fire; the
+    // request it observes gets the remainder.
+    let submit = async {
+        match &stage.seed {
+            Some(seed) => seed_and_await_fire(home, ready, seed, deadline).await,
+            None => {
+                let request_id = uuid::Uuid::new_v4().to_string();
+                submit_stage(&home.node, locator, &spec.behavior_id, stage, &request_id)
+                    .await
+                    .map(|()| (request_id, deadline))
+            }
+        }
+    };
+    // A cancel that lands between the request write and its return ends here
+    // without interrupt_and_settle; the trial home is torn down with it.
+    let submitted = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return ObservedStage::cancelled(),
+        submitted = submit => submitted,
+    };
+    let (request_id, remaining) = match submitted {
+        Ok(submitted) => submitted,
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                trial_id = %spec.trial_id,
+                stage_id = %stage.stage_id,
+                "eval stage could not be submitted"
+            );
+            return ObservedStage::unsubmitted();
+        }
+    };
 
     let cancelled;
     let observed = tokio::select! {
-        observed = await_terminal(
-            &home.node,
-            &request_id,
-            Duration::from_secs(stage.deadline_secs),
-            GRACE,
-            POLL,
-        ) => {
+        observed = await_terminal(&home.node, &request_id, remaining, GRACE, POLL) => {
             cancelled = false;
             observed
         }
@@ -921,6 +986,73 @@ async fn submit_stage(
         .map_err(|error| anyhow!("building the stage request mutation: {error}"))?;
     ConfigAccess::write_local(node, "eval.trial.submit_stage", &mutation).await?;
     Ok(())
+}
+
+/// A seed stage: once the runtime's event sources are reconciled, write the
+/// document and take the request the pack's trigger fires for it. The wait for
+/// the event sources gets its own runtime-ready budget; the wait for the fire
+/// spends the stage's own deadline, and what it leaves is returned with the
+/// request for the terminal wait.
+async fn seed_and_await_fire(
+    home: &EmbeddedHome,
+    ready: &watch::Receiver<Reconciled>,
+    seed: &FixtureDocument,
+    deadline: Duration,
+) -> Result<(String, Duration)> {
+    let reconciled = tokio::time::timeout(
+        RUNTIME_READY_TIMEOUT,
+        ready.clone().wait_for(Option::is_some),
+    )
+    .await
+    .context("waiting for the trial runtime's event sources")?
+    .context("the trial runtime stopped before its event sources were reconciled")?
+    .clone();
+    if let Some(Err(error)) = reconciled {
+        anyhow::bail!("the trial runtime's event sources did not reconcile: {error}");
+    }
+    let access = ConfigAccess::Local(home.node.clone());
+    let doc_id = create_document(
+        &access,
+        "eval.trial.seed_document",
+        &seed.collection,
+        &seed.document,
+    )
+    .await?;
+    tracing::debug!(collection = %seed.collection, doc_id = %doc_id, "eval seed document written");
+    let started = Instant::now();
+    loop {
+        if let Some(request_id) = fired_request(&home.node, &doc_id).await? {
+            return Ok((request_id, deadline.saturating_sub(started.elapsed())));
+        }
+        anyhow::ensure!(
+            started.elapsed() < deadline,
+            "no trigger fired a request within {deadline:?} of seeding {}",
+            seed.collection
+        );
+        tokio::time::sleep(POLL).await;
+    }
+}
+
+/// The earliest request an event trigger fired for the seed document: the
+/// trigger engine records the source document's `_docID` as
+/// `caused_by_source_doc_id`, so a fire left by another stage's seed is never
+/// taken. A trial home holds a handful of requests, so the filter is applied
+/// here rather than asked of a nullable column.
+async fn fired_request(node: &EmbeddedNode, doc_id: &str) -> Result<Option<String>> {
+    let query =
+        r#"{ AgentRequest(order: { created_at: ASC }) { request_id caused_by_source_doc_id } }"#;
+    let response = graphql_with_transaction_retry(node, query, "eval trial fired request").await?;
+    Ok(response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("AgentRequest"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .filter(|row| row.get("caused_by_source_doc_id").and_then(Value::as_str) == Some(doc_id))
+        .find_map(|row| row.get("request_id")?.as_str())
+        .map(ToOwned::to_owned))
 }
 
 /// Step 5: what the trial left behind, read out of its own home and workspace.
@@ -1408,6 +1540,56 @@ mod tests {
         );
     }
 
+    /// Cancellation reaches a seed stage before it has a request: while it
+    /// waits for the event sources, writes the seed, or polls for the fire.
+    /// It ends the way a cancelled running stage does, as the request not
+    /// finishing, and never waits out the runtime-ready budget.
+    #[tokio::test]
+    async fn a_cancelled_seed_stage_is_runtime_before_any_request_exists() {
+        let home = EmbeddedHome::create_temp("seed-cancel").await.unwrap();
+        let cancel = CancellationToken::new();
+        let stage = StageSpec {
+            stage_id: "fire".into(),
+            prompt: String::new(),
+            seed: Some(FixtureDocument {
+                collection: "NoSuchItem".into(),
+                document: json!({}),
+            }),
+            deadline_secs: 120,
+            captures: Vec::new(),
+        };
+        let locator = TrialLocator {
+            trial_agent_did: home.did().to_string(),
+            session_id: "s".into(),
+            home_hint: None,
+        };
+        // Never ready: only the cancel can end the wait.
+        let (_ready_tx, never_ready) = watch::channel(None);
+        let canceller = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            canceller.cancel();
+        });
+        let observed = tokio::time::timeout(
+            Duration::from_secs(5),
+            submit_and_observe(
+                &TrialSpec::empty_for_tests("t1"),
+                &cancel,
+                &home,
+                &locator,
+                &stage,
+                &never_ready,
+            ),
+        )
+        .await
+        .expect("the cancel ends the stage at once");
+        assert_eq!(
+            (observed.request_id, observed.failure_kind),
+            (None, Some(OutcomeKind::Runtime))
+        );
+        assert_eq!(observed.terminal_state, None);
+    }
+
     /// A pack may only reference an inference slot, so installing one into a
     /// trial home has to bind that slot to the profile the run froze. Without
     /// the binding the behavior would reach the home still naming
@@ -1664,6 +1846,7 @@ mod tests {
         let stage = StageSpec {
             stage_id: "only".to_string(),
             prompt: "hello".to_string(),
+            seed: None,
             deadline_secs: 1,
             captures: vec![
                 Capture::Documents {
@@ -1690,6 +1873,7 @@ mod tests {
             &locator,
             &workspace,
             &stage,
+            &watch::channel(None).1,
         )
         .await;
 

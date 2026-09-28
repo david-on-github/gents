@@ -55,6 +55,7 @@ use crate::optimization::job::{create_job, load_job, Budgets, JobState, JournalE
 use crate::optimization::policy::{Decision, InconclusiveReason, Mode, PolicyV2, RejectReason};
 use crate::optimization::proposer::{Proposal, ProposalInput, Proposer, ScriptedProposer};
 use crate::optimization::subject::{baseline_text, materialize_candidate, materialize_pack};
+use crate::optimization::target::TargetField;
 use crate::Collection;
 
 pub(crate) const VALIDATION_CASES: [&str; 6] =
@@ -492,6 +493,8 @@ impl Harness {
             owner: OWNER.into(),
             evaluator_did: self.launching.evaluator_did(),
             behavior_id: "monitor".into(),
+            target_field: TargetField::AgentContextSystemPrompt,
+            task_id: None,
             definition_id: definition_id.into(),
             inference_profile_id: "local".into(),
             baseline_pack: self.pack.clone(),
@@ -692,6 +695,63 @@ pub(crate) async fn accepting_harness(job_id: &str) -> (Harness, JobRequest) {
         &request,
         &executor,
         &repeating_proposer(CANDIDATE_PROMPT),
+    )
+    .await;
+    assert_eq!(outcome.state, JobState::ReadyToPromote, "{outcome:#?}");
+    (harness, request)
+}
+
+pub(crate) const CANDIDATE_TEMPLATE: &str = "Do {{ doc.goal }} for {{ doc.owner }}, and say why.\n";
+
+/// [`accepting_harness`] for a task prompt template target: the live task
+/// `plan` of the monitor behavior and a pack holding it as a sidecar.
+pub(crate) async fn accepting_task_harness(job_id: &str) -> (Harness, JobRequest) {
+    use crate::optimization::subject::tests::{write_task_fixture_pack, FIXTURE_TEMPLATE};
+    let harness = Harness::new().await;
+    harness
+        .install(vec![
+            (
+                Collection::Task,
+                json!({
+                    "task_id": "plan",
+                    "agent_did": OWNER,
+                    "behavior_id": "monitor",
+                    "prompt_template": FIXTURE_TEMPLATE,
+                }),
+            ),
+            (
+                Collection::EventSource,
+                json!({
+                    "event_source_id": "plan-source",
+                    "agent_did": OWNER,
+                    "source_collection": "PlanItem",
+                }),
+            ),
+            (
+                Collection::Trigger,
+                json!({
+                    "trigger_id": "plan-trigger",
+                    "agent_did": OWNER,
+                    "task_id": "plan",
+                    "source": {"kind": "event", "event_source_id": "plan-source"},
+                }),
+            ),
+        ])
+        .await;
+    let pack = harness.jobs_dir.parent().unwrap().join("task-subject");
+    write_task_fixture_pack(&pack, false);
+    let executor = script(base_executor(), "baseline", &VALIDATION_CASES, |_| fail());
+    let request = JobRequest {
+        baseline_pack: pack,
+        target_field: TargetField::TaskPromptTemplate,
+        task_id: Some("plan".into()),
+        ..harness.request(job_id, DEFINITION, budgets(1_000))
+    };
+    let outcome = settle(
+        &harness,
+        &request,
+        &executor,
+        &repeating_proposer(CANDIDATE_TEMPLATE),
     )
     .await;
     assert_eq!(outcome.state, JobState::ReadyToPromote, "{outcome:#?}");
@@ -1619,7 +1679,14 @@ async fn a_job_created_without_frozen_resumes_to_the_journal_of_its_twin() {
     // Everything the freeze wrote before the crash: the baseline copy, then
     // the row. The origin names no job id, so the twin's is this job's.
     let resumed = harness.request("unfrozen-b", DEFINITION, budgets(1_000));
-    let source = materialize_pack(&resumed.baseline_pack, OWNER, "monitor").unwrap();
+    let source = materialize_pack(
+        &resumed.baseline_pack,
+        OWNER,
+        "monitor",
+        TargetField::AgentContextSystemPrompt,
+        None,
+    )
+    .unwrap();
     let copy = materialize_candidate(
         &source,
         OWNER,

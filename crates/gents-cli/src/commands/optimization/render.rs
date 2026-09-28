@@ -3,7 +3,6 @@
 
 use std::io::{self, Write};
 
-use gents::eval::report::is_placeholder;
 use gents::optimization::{Decision, JobState, JobView, JournalEntry, PolicyV2};
 
 use crate::commands::eval::render::{decision_label, signed_percent, wire};
@@ -15,7 +14,7 @@ const NOT_RECOMPUTABLE: &str = "not recomputable: definition changed or runs inv
 
 /// [`UNCALIBRATED_BANNER`] when `policy` is the placeholder defaults.
 pub(crate) fn uncalibrated_banner(policy: &PolicyV2, out: &mut dyn Write) -> io::Result<()> {
-    if is_placeholder(policy) {
+    if policy.is_placeholder() {
         writeln!(out, "{UNCALIBRATED_BANNER}")?;
     }
     Ok(())

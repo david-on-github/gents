@@ -722,6 +722,10 @@ fn stage_specs(case: &EvalCase, fallback: &[Capture]) -> Vec<StageSpec> {
         .map(|stage| StageSpec {
             stage_id: stage.stage_id.clone(),
             prompt: stage.prompt.clone(),
+            seed: stage.seed.as_ref().map(|seed| FixtureDocument {
+                collection: seed.collection.clone(),
+                document: seed.document.clone(),
+            }),
             deadline_secs: stage.deadline_secs,
             captures: if stage.capture.is_empty() {
                 fallback.to_vec()
@@ -2338,7 +2342,12 @@ mod tests {
                         {"kind": "file", "name": "notes", "glob": "**/*.txt"}
                     ]
                 },
-                {"stage_id": "bare", "prompt": "p", "deadline_secs": 60}
+                {"stage_id": "bare", "prompt": "p", "deadline_secs": 60},
+                {
+                    "stage_id": "seeded",
+                    "seed": {"collection": "Event", "document": {"kind": "signup"}},
+                    "deadline_secs": 60
+                }
             ]
         }))
         .unwrap();
@@ -2371,6 +2380,14 @@ mod tests {
             ]
         );
         assert_eq!(stages[1].captures, fallback);
+        assert_eq!(stages[0].seed, None);
+        assert_eq!(
+            stages[2].seed,
+            Some(FixtureDocument {
+                collection: "Event".into(),
+                document: json!({"kind": "signup"}),
+            })
+        );
     }
 
     /// A slot cancelled mid-trial under `max_infra_retries: 0` is planned

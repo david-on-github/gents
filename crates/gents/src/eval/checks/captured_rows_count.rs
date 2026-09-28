@@ -32,7 +32,7 @@ impl Check for CapturedRowsCount {
     }
 
     fn version(&self) -> &'static str {
-        "1"
+        "2"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -128,19 +128,19 @@ fn failed(reason_code: &str, detail: String, rows: u64) -> CheckVerdict {
     CheckVerdict {
         kind: OutcomeKind::ModelAcceptance,
         score_bp: Some(0),
+        feedback: Some(detail.clone()),
         raw: raw(reason_code, detail, Some(rows)),
-        feedback: None,
     }
 }
 
 /// The check itself could not reach a verdict, which is no evidence about the
-/// subject.
+/// subject, so it carries no feedback: its detail names the check's params.
 fn grader(reason_code: &str, detail: String, rows: Option<u64>) -> CheckVerdict {
     CheckVerdict {
         kind: OutcomeKind::Grader,
         score_bp: None,
-        raw: raw(reason_code, detail, rows),
         feedback: None,
+        raw: raw(reason_code, detail, rows),
     }
 }
 
@@ -184,6 +184,38 @@ mod tests {
         );
         assert_eq!(verdict.raw["reason_code"], "below_min");
         assert_eq!(verdict.raw["count"], 1);
+    }
+
+    #[test]
+    fn a_non_passing_verdict_carries_its_reason_as_feedback() {
+        let verdict =
+            CapturedRowsCount.evaluate(&json!({"name": "items", "min": 1}), &stage(vec![]));
+        assert_eq!(
+            verdict.feedback.as_deref(),
+            Some("items holds 0 rows, fewer than the 1 required")
+        );
+        let verdict = CapturedRowsCount.evaluate(
+            &json!({"name": "items", "min": 0, "max": 0}),
+            &stage(vec![]),
+        );
+        assert_eq!(verdict.raw["reason_code"], "in_range");
+        assert_eq!(verdict.feedback, None);
+    }
+
+    /// A grader verdict is no evidence about the subject, and its message
+    /// carries the check's params, so neither reaches the proposer.
+    #[test]
+    fn a_grader_verdict_carries_no_feedback() {
+        let verdict = CapturedRowsCount
+            .evaluate(&json!({"name": "other", "min": 1}), &stage(vec![json!({})]));
+        assert_eq!(verdict.raw["reason_code"], "missing_capture");
+        assert_eq!(verdict.feedback, None);
+        let verdict = CapturedRowsCount.evaluate(
+            &json!({"name": "items", "min": 2, "max": 1}),
+            &stage(vec![]),
+        );
+        assert_eq!(verdict.raw["reason_code"], "bad_params");
+        assert_eq!(verdict.feedback, None);
     }
 
     #[test]

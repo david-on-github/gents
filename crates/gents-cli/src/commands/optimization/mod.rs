@@ -1,6 +1,6 @@
 //! `gents optimization`: thin commands over `gents::optimization`. A job is
-//! driven only by a scripted proposer supplied as a file until an LLM
-//! proposer exists.
+//! driven by a scripted proposer supplied as a file, or by a behavior of a
+//! pack asked once per round on the served home.
 //!
 //! Refusals the library returns are re-raised with exactly their text
 //! ([`surface_refusal`]); `main` prints them and exits 1. Clap exits 2 on a
@@ -13,25 +13,31 @@ use anyhow::{Context, Result};
 use gents::eval::checks::CheckRegistry;
 use gents::eval::documents::default_breaker_threshold;
 use gents::eval::runner::embedded::EmbeddedExecutor;
-use gents::eval::runner::{run_dir, RunOptions};
+use gents::eval::runner::RunOptions;
+use gents::optimization::target::TargetField;
 use gents::optimization::{
     derive_state, job_dir, job_refused, load_job, promote_refused, removable, run_job,
-    show as show_job, Budgets, JobOutcome, JobRequest, JobState, PolicyV2, Proposal,
-    ScriptedProposer,
+    show as show_job, validate_job_id, Budgets, JobOutcome, JobRequest, JobState, PolicyV2,
+    Proposal, Proposer, ScriptedProposer,
 };
 use gents::{default_behavior_id_for_agent, default_inference_profile_id_for_behavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::{
     OptimizationCommand, OptimizationDigestArgs, OptimizationRmArgs, OptimizationRunArgs,
-    OptimizationShowArgs, PolicyArg,
+    OptimizationShowArgs, PolicyArg, ProposerArg, TargetArg,
 };
+use crate::commands::eval::init::install_pack_slot;
+use crate::commands::eval::init::turn::LiveTurn;
 use crate::commands::eval::{
     cancel_on_ctrl_c, default_id, follow_progress, load_policy, source_commit, source_dirty,
     write_json, Deps, EvalContext, Progress,
 };
 use crate::commands::pack::resolve_subject_pack;
 
+use behavior_proposer::BehaviorProposer;
+
+mod behavior_proposer;
 mod render;
 #[cfg(test)]
 pub(crate) mod testing;
@@ -114,6 +120,95 @@ fn scripted_proposer(path: &Path, rounds: u32) -> Result<ScriptedProposer> {
     ))
 }
 
+/// The proposer behavior of a built-in pack, installed into the home with
+/// its one inference slot bound to `--proposer-profile` or the default
+/// profile, asked on a fresh session of the served home.
+async fn behavior_proposer(
+    ctx: &EvalContext,
+    args: &OptimizationRunArgs,
+    pack: &str,
+    behavior: Option<&str>,
+    subject_dir: &Path,
+    subject_behavior: &str,
+) -> Result<BehaviorProposer<LiveTurn>> {
+    let gents::ConfigAccess::Graphql(graphql) = &*ctx.access else {
+        anyhow::bail!(
+            "start `gents server` for this home and retry: a behavior proposer runs on a served home"
+        );
+    };
+    crate::request_helpers::ensure_local_request_signer(args.scope.home.as_deref(), &ctx.owner)?;
+    let preamble = subject_preamble(subject_dir, subject_behavior, &args.target)?;
+    let manifest = gents::pack::resolve_pack(pack)?.manifest;
+    let [slot] = manifest.metadata.inference_slots.as_slice() else {
+        anyhow::bail!(
+            "pack {pack} declares {} inference slots; a proposer pack declares one",
+            manifest.metadata.inference_slots.len()
+        );
+    };
+    let behavior_id = proposer_behavior_id(pack, slot, behavior)?;
+    let profile = args.proposer_profile.clone().unwrap_or_else(|| {
+        default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
+    });
+    install_pack_slot(&ctx.access, &ctx.owner, pack, &slot.name, &profile).await?;
+    Ok(BehaviorProposer::with_preamble(
+        LiveTurn {
+            graphql: graphql.clone(),
+            agent_did: ctx.owner.clone(),
+            behavior_id,
+            session_id: uuid::Uuid::new_v4().to_string(),
+            timeout_secs: args.proposer_timeout_secs,
+            poll_secs: 1,
+            quiet: args.json,
+        },
+        preamble,
+    ))
+}
+
+/// The session's first user turn: the subject's dossier, so a proposal
+/// names the subject's real tools and surfaces rather than guessing them.
+fn subject_preamble(subject_dir: &Path, behavior_id: &str, target: &TargetArg) -> Result<String> {
+    let dossier = crate::commands::eval::init::dossier::render(subject_dir, Some(behavior_id))?;
+    let instruction = match target {
+        TargetArg::Context => "this behavior's system prompt".to_owned(),
+        TargetArg::Task(task_id) => format!(
+            "the prompt template of its task {task_id:?}, rendered when the task fires; \
+             every {{{{ variable }}}} of the current template must stay in the new one"
+        ),
+    };
+    Ok(format!(
+        "{}\n\nThe instruction you will rewrite is {instruction}. \
+         Every later turn carries the current instruction and the training feedback.",
+        dossier.text
+    ))
+}
+
+/// The behavior `--proposer behavior:<pack>[:<behavior>]` asks: the named
+/// one when the slot declares it, else the slot's only behavior.
+fn proposer_behavior_id(
+    pack: &str,
+    slot: &gents::pack::PackInferenceSlot,
+    behavior: Option<&str>,
+) -> Result<String> {
+    match behavior {
+        Some(behavior) => {
+            anyhow::ensure!(
+                slot.behaviors.iter().any(|known| known == behavior),
+                "pack {pack} has no inference-slot behavior {behavior:?}; it declares {:?}",
+                slot.behaviors
+            );
+            Ok(behavior.to_owned())
+        }
+        None => match slot.behaviors.as_slice() {
+            [only] => Ok(only.clone()),
+            [] => anyhow::bail!("pack {pack}: slot {} names no behavior", slot.name),
+            many => anyhow::bail!(
+                "pack {pack} declares {} inference-slot behaviors; pass --proposer behavior:{pack}:<behavior> with one of {many:?}",
+                many.len()
+            ),
+        },
+    }
+}
+
 async fn run(
     ctx: &EvalContext,
     args: &OptimizationRunArgs,
@@ -121,9 +216,8 @@ async fn run(
     out: &mut dyn Write,
 ) -> Result<()> {
     let proposer_arg = args.proposer.as_ref().context(
-        "optimization run needs a proposer: no model-driven proposer is available yet; pass --proposer scripted:<file>",
+        "optimization run needs a proposer: pass --proposer scripted:<file> or --proposer behavior:<pack>[:<behavior>]",
     )?;
-    let proposer = scripted_proposer(&proposer_arg.script, args.rounds)?;
     let subject = resolve_subject_pack(
         &ctx.home_dir,
         &args.subject.pack,
@@ -138,6 +232,21 @@ async fn run(
     let behavior_id = match &args.subject.behavior {
         Some(behavior) => behavior.clone(),
         None => subject.default_behavior()?,
+    };
+    let proposer: Box<dyn Proposer> = match proposer_arg {
+        ProposerArg::Scripted(script) => Box::new(scripted_proposer(script, args.rounds)?),
+        ProposerArg::Behavior { pack, behavior } => {
+            let proposer = behavior_proposer(
+                ctx,
+                args,
+                pack,
+                behavior.as_deref(),
+                &baseline_pack,
+                &behavior_id,
+            )
+            .await?;
+            Box::new(proposer)
+        }
     };
     // Bonferroni: the divisor must be the number of candidates the budget
     // allows, and the driver refuses a policy that disagrees.
@@ -155,11 +264,17 @@ async fn run(
         .job_id
         .clone()
         .unwrap_or_else(|| default_id(&args.definition_id));
+    let (target_field, task_id) = match &args.target {
+        TargetArg::Context => (TargetField::AgentContextSystemPrompt, None),
+        TargetArg::Task(task_id) => (TargetField::TaskPromptTemplate, Some(task_id.clone())),
+    };
     let request = JobRequest {
         job_id: job_id.clone(),
         owner: ctx.owner.clone(),
         evaluator_did: ctx.owner.clone(),
         behavior_id,
+        target_field,
+        task_id,
         definition_id: args.definition_id.clone(),
         inference_profile_id: args.profile.clone().unwrap_or_else(|| {
             default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
@@ -196,13 +311,16 @@ async fn run(
             &ctx.access,
             &request,
             deps.executor,
-            &proposer,
+            proposer.as_ref(),
             deps.registry,
             &policy,
             deps.cancel.clone(),
         ),
     )
-    .await?;
+    .await
+    .with_context(|| {
+        format!("job {job_id} stopped before it finished; run the same command with --job-id {job_id} to resume it")
+    })?;
     // A job left running is not a success: the view still renders, then the
     // command fails with the resume note, so a script never reads it as done.
     let stopped = (outcome.state == JobState::Running).then(|| {
@@ -345,7 +463,7 @@ async fn revert(
 /// Delete `<jobs_dir>/<job_id>/`, the job's own jobs directory as its origin
 /// recorded it, when that is under this home. Its documents and runs stay.
 async fn rm(ctx: &EvalContext, args: &OptimizationRmArgs, out: &mut dyn Write) -> Result<()> {
-    validate_job_id(ctx, &args.job_id)?;
+    validate_job_id(&args.job_id)?;
     let job = load_job(&ctx.access, &ctx.owner, &args.job_id)
         .await?
         .with_context(|| format!("no optimization job {:?} for {}", args.job_id, ctx.owner))?;
@@ -387,18 +505,6 @@ async fn rm(ctx: &EvalContext, args: &OptimizationRmArgs, out: &mut dyn Write) -
     Ok(())
 }
 
-/// The driver's job-id rule, checked before any I/O or path: not blank, and
-/// one ordinary path component, whose owner is [`run_dir`].
-fn validate_job_id(ctx: &EvalContext, job_id: &str) -> Result<()> {
-    anyhow::ensure!(
-        !job_id.trim().is_empty(),
-        "job_id {job_id:?} must not be blank"
-    );
-    run_dir(&ctx.jobs_dir(), job_id)
-        .map_err(|_| anyhow::anyhow!("job_id {job_id:?} must be one ordinary path component"))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -406,17 +512,17 @@ mod tests {
     use gents::eval::checks::CheckRegistry;
     use tokio_util::sync::CancellationToken;
 
-    use super::execute;
     use super::testing::{
         accepted_job, delete_definition, optimization, optimization_command, optimization_with,
         proposer_file,
     };
+    use super::{execute, proposer_behavior_id, subject_preamble, TargetArg};
     use crate::cli::Cli;
     use crate::commands::eval::testing::{deps, eval, executor, Fixture, DEFINITION};
     use crate::commands::eval::UNCALIBRATED_BANNER;
 
     #[tokio::test]
-    async fn run_refuses_without_a_proposer_and_parses_only_the_scripted_one() {
+    async fn run_refuses_without_a_proposer_and_an_unknown_proposer_is_a_usage_error() {
         let fixture = Fixture::new().await;
         let pack = fixture.pack_arg();
         let error = optimization(&fixture, &["run", DEFINITION, "--subject", pack.as_str()])
@@ -424,7 +530,7 @@ mod tests {
             .unwrap_err();
         assert_eq!(
             error.to_string(),
-            "optimization run needs a proposer: no model-driven proposer is available yet; pass --proposer scripted:<file>"
+            "optimization run needs a proposer: pass --proposer scripted:<file> or --proposer behavior:<pack>[:<behavior>]"
         );
         let usage = match Cli::try_parse_from([
             "gents",
@@ -441,11 +547,89 @@ mod tests {
         };
         assert!(
             usage.to_string().contains(
-                "no model-driven proposer is available yet; pass --proposer scripted:<file>"
+                "pass --proposer scripted:<file> or --proposer behavior:<pack>[:<behavior>]"
             ),
             "{usage}"
         );
         assert_eq!(usage.exit_code(), 2);
+    }
+
+    #[test]
+    fn a_slot_with_several_behaviors_needs_the_behavior_named() {
+        let slot = gents::pack::PackInferenceSlot {
+            name: "proposer".to_owned(),
+            description: String::new(),
+            behaviors: vec!["terse".to_owned(), "verbose".to_owned()],
+        };
+        let error = proposer_behavior_id("p", &slot, None).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "pack p declares 2 inference-slot behaviors; pass --proposer behavior:p:<behavior> with one of [\"terse\", \"verbose\"]"
+        );
+        assert_eq!(
+            proposer_behavior_id("p", &slot, Some("verbose")).unwrap(),
+            "verbose"
+        );
+        let unknown = proposer_behavior_id("p", &slot, Some("other")).unwrap_err();
+        assert!(
+            unknown.to_string().contains("no inference-slot behavior"),
+            "{unknown}"
+        );
+        let one = gents::pack::PackInferenceSlot {
+            behaviors: vec!["terse".to_owned()],
+            ..slot
+        };
+        assert_eq!(proposer_behavior_id("p", &one, None).unwrap(), "terse");
+    }
+
+    #[test]
+    fn the_subject_preamble_is_the_dossier_naming_the_subject_tools() {
+        let pipeline =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
+        let preamble = subject_preamble(&pipeline, "exp-stage1", &TargetArg::Context).unwrap();
+        assert!(
+            preamble.starts_with("# Subject\n\n## Identity"),
+            "{preamble}"
+        );
+        assert_eq!(preamble.matches("# Subject").count(), 1, "{preamble}");
+        assert!(preamble.contains("write_experiment_finding"), "{preamble}");
+        assert!(
+            preamble.ends_with(
+                "The instruction you will rewrite is this behavior's system prompt. \
+                 Every later turn carries the current instruction and the training feedback."
+            ),
+            "{preamble}"
+        );
+        let task =
+            subject_preamble(&pipeline, "exp-stage1", &TargetArg::Task("plan".into())).unwrap();
+        assert!(
+            task.contains("the prompt template of its task \"plan\""),
+            "{task}"
+        );
+        assert!(task.contains("every {{ variable }}"), "{task}");
+    }
+
+    #[tokio::test]
+    async fn a_behavior_proposer_needs_a_served_home() {
+        let fixture = Fixture::new().await;
+        let pack = fixture.pack_arg();
+        let error = optimization(
+            &fixture,
+            &[
+                "run",
+                DEFINITION,
+                "--subject",
+                pack.as_str(),
+                "--proposer",
+                "behavior:prompt_proposer",
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("start `gents server`"),
+            "{error:#}"
+        );
     }
 
     #[tokio::test]

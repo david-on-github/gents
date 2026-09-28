@@ -1222,3 +1222,124 @@ fn subagent_target_entry_distinguishes_owner_from_destination() {
         _ => panic!("expected target document builder"),
     }
 }
+
+#[test]
+fn parse_target_accepts_context_and_a_named_task_and_rejects_the_rest() {
+    assert_eq!(parse_target("context").unwrap(), TargetArg::Context);
+    assert_eq!(
+        parse_target("task:plan").unwrap(),
+        TargetArg::Task("plan".into())
+    );
+    for bad in ["", "task", "task:", "task: ", "prompt", "context:x"] {
+        let error = parse_target(bad).unwrap_err();
+        assert!(error.contains("task:<task_id>"), "{bad}: {error}");
+    }
+    let cli = Cli::try_parse_from([
+        "gents",
+        "optimization",
+        "run",
+        "monitor-findings",
+        "--subject",
+        "monitor",
+        "--proposer",
+        "scripted:p.json",
+    ])
+    .unwrap();
+    let Command::Optimization {
+        command: OptimizationCommand::Run(args),
+    } = cli.command
+    else {
+        panic!("expected optimization run");
+    };
+    assert_eq!(
+        args.target,
+        TargetArg::Context,
+        "--target defaults to context"
+    );
+}
+
+#[test]
+fn parse_proposer_accepts_scripted_and_behavior_forms_and_rejects_the_rest() {
+    assert_eq!(
+        parse_proposer("scripted:proposals.json").unwrap(),
+        ProposerArg::Scripted(PathBuf::from("proposals.json"))
+    );
+    assert_eq!(
+        parse_proposer("behavior:prompt_proposer").unwrap(),
+        ProposerArg::Behavior {
+            pack: "prompt_proposer".into(),
+            behavior: None
+        }
+    );
+    assert_eq!(
+        parse_proposer("behavior:prompt_proposer:prompt-proposer").unwrap(),
+        ProposerArg::Behavior {
+            pack: "prompt_proposer".into(),
+            behavior: Some("prompt-proposer".into())
+        }
+    );
+    for bad in [
+        "garbage",
+        "scripted:",
+        "behavior:",
+        "behavior::x",
+        "llm:foo",
+    ] {
+        let error = parse_proposer(bad).unwrap_err();
+        assert!(
+            error.contains("behavior:<pack>[:<behavior>]"),
+            "{bad}: {error}"
+        );
+        assert!(!error.contains("no model-driven"), "{bad}: {error}");
+    }
+}
+
+#[test]
+fn optimization_run_takes_a_proposer_profile() {
+    let cli = Cli::try_parse_from([
+        "gents",
+        "optimization",
+        "run",
+        "quality",
+        "--subject",
+        "pipeline",
+        "--proposer",
+        "behavior:prompt_proposer",
+        "--proposer-profile",
+        "fast",
+    ])
+    .unwrap();
+    let Command::Optimization {
+        command: OptimizationCommand::Run(args),
+    } = cli.command
+    else {
+        panic!("expected optimization run");
+    };
+    assert_eq!(args.proposer_profile.as_deref(), Some("fast"));
+}
+
+#[test]
+fn optimization_run_takes_a_proposer_timeout() {
+    let parse = |extra: &[&str]| {
+        let mut argv = vec![
+            "gents",
+            "optimization",
+            "run",
+            "quality",
+            "--subject",
+            "pipeline",
+            "--proposer",
+            "behavior:prompt_proposer",
+        ];
+        argv.extend_from_slice(extra);
+        let Command::Optimization {
+            command: OptimizationCommand::Run(args),
+        } = Cli::try_parse_from(argv).unwrap().command
+        else {
+            panic!("expected optimization run");
+        };
+        args.proposer_timeout_secs
+    };
+    assert_eq!(parse(&[]), 600);
+    assert_eq!(parse(&["--proposer-timeout-secs", "30"]), 30);
+}

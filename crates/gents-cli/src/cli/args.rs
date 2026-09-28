@@ -4242,22 +4242,57 @@ pub(crate) fn parse_subject(raw: &str) -> Result<SubjectArg, String> {
     })
 }
 
-/// `--proposer scripted:<file>`: a script of proposals, the only proposer
-/// for now.
+/// `--target context` (the subject behavior's system prompt) or
+/// `--target task:<task_id>` (the prompt template of that task of the
+/// subject behavior).
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProposerArg {
-    pub(crate) script: PathBuf,
+pub(crate) enum TargetArg {
+    Context,
+    Task(String),
+}
+
+pub(crate) fn parse_target(raw: &str) -> Result<TargetArg, String> {
+    match raw.trim() {
+        "context" => Ok(TargetArg::Context),
+        other => match other.strip_prefix("task:").map(str::trim) {
+            Some(task_id) if !task_id.is_empty() => Ok(TargetArg::Task(task_id.to_owned())),
+            _ => Err(format!(
+                "unknown target {raw:?}; pass --target context or --target task:<task_id>"
+            )),
+        },
+    }
+}
+
+/// `--proposer scripted:<file>` or `--proposer behavior:<pack>[:<behavior>]`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProposerArg {
+    /// A script of proposals, one per round.
+    Scripted(PathBuf),
+    /// A behavior of a built-in pack asked once per round; without a
+    /// behavior, the pack's only inference-slot behavior.
+    Behavior {
+        pack: String,
+        behavior: Option<String>,
+    },
 }
 
 pub(crate) fn parse_proposer(raw: &str) -> Result<ProposerArg, String> {
-    match raw.strip_prefix("scripted:") {
-        Some(path) if !path.trim().is_empty() => Ok(ProposerArg {
-            script: PathBuf::from(path.trim()),
-        }),
-        _ => Err(format!(
-            "unknown proposer {raw:?}; no model-driven proposer is available yet; pass --proposer scripted:<file>"
-        )),
+    let usage = || {
+        format!(
+            "unknown proposer {raw:?}; pass --proposer scripted:<file> or --proposer behavior:<pack>[:<behavior>]"
+        )
+    };
+    if let Some(path) = raw.strip_prefix("scripted:") {
+        return match path.trim() {
+            "" => Err(usage()),
+            path => Ok(ProposerArg::Scripted(PathBuf::from(path))),
+        };
     }
+    let Some(target) = raw.strip_prefix("behavior:") else {
+        return Err(usage());
+    };
+    let SubjectArg { pack, behavior } = parse_subject(target).map_err(|_| usage())?;
+    Ok(ProposerArg::Behavior { pack, behavior })
 }
 
 /// `gents optimization run`'s exit statuses: scripts must not read a job left
@@ -4305,6 +4340,10 @@ pub(crate) struct OptimizationRunArgs {
     /// behavior, the pack's only inference-slot behavior.
     #[arg(long, value_parser = parse_subject)]
     pub(crate) subject: SubjectArg,
+    /// `context`: the behavior's system prompt; `task:<task_id>`: the prompt
+    /// template of that task of the behavior.
+    #[arg(long, value_parser = parse_target, default_value = "context")]
+    pub(crate) target: TargetArg,
     #[arg(long, default_value_t = 3)]
     pub(crate) rounds: u32,
     #[arg(long, default_value_t = 2)]
@@ -4321,9 +4360,18 @@ pub(crate) struct OptimizationRunArgs {
     pub(crate) job_id: Option<String>,
     /// `scripted:<file>`: a JSON array of `{"text", "rationale"}`, one per
     /// round; a file holding fewer than `--rounds` is refused before the job
-    /// is frozen.
+    /// is frozen. `behavior:<pack>[:<behavior>]`: a behavior of a pack
+    /// (`prompt_proposer` is built in), installed into the home and asked
+    /// once per round on the served home.
     #[arg(long, value_parser = parse_proposer)]
     pub(crate) proposer: Option<ProposerArg>,
+    /// The inference profile the proposer behavior runs on; the home's
+    /// default when absent.
+    #[arg(long)]
+    pub(crate) proposer_profile: Option<String>,
+    /// Seconds without progress before a proposer reply times out.
+    #[arg(long, default_value_t = 600)]
+    pub(crate) proposer_timeout_secs: u64,
     /// The inference profile both arms run on; the home's default when absent.
     #[arg(long)]
     pub(crate) profile: Option<String>,

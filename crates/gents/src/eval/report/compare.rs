@@ -65,21 +65,9 @@ pub struct GateView {
 pub struct PolicyOutcome {
     pub report: DecisionReport,
     pub gates: GateView,
-    /// False while the policy is the placeholder defaults ([`is_placeholder`]),
+    /// False while the policy is the placeholder defaults ([`PolicyV2::is_placeholder`]),
     /// which only the A/A calibration replaces.
     pub calibrated: bool,
-}
-
-/// Whether `policy` is the placeholder defaults: `PolicyV2::uncalibrated()`
-/// with the policy's own `max_rounds`. `max_rounds` sizes a job's budget (the
-/// Bonferroni divisor), not a calibrated value, so the defaults sized to any
-/// round count are still uncalibrated.
-pub fn is_placeholder(policy: &PolicyV2) -> bool {
-    *policy
-        == PolicyV2 {
-            max_rounds: policy.max_rounds,
-            ..PolicyV2::uncalibrated()
-        }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -255,7 +243,7 @@ impl Comparison {
         self.policy = Some(PolicyOutcome {
             report,
             gates,
-            calibrated: !is_placeholder(policy),
+            calibrated: !policy.is_placeholder(),
         });
         self
     }
@@ -798,11 +786,12 @@ mod tests {
             max_rounds: 2,
             ..PolicyV2::uncalibrated()
         };
-        assert!(super::is_placeholder(&policy));
-        assert!(!super::is_placeholder(&PolicyV2 {
+        assert!(policy.is_placeholder());
+        assert!(!PolicyV2 {
             min_pairs: 1,
             ..policy.clone()
-        }));
+        }
+        .is_placeholder());
         let (comparison, _) = against_the_optimizer(&SIX, 0, &policy);
         assert!(!comparison.policy.unwrap().calibrated);
     }

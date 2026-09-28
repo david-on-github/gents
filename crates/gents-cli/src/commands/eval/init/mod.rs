@@ -26,10 +26,10 @@ use super::{Deps, EvalContext};
 use crate::cli::EvalInitArgs;
 
 mod contract;
-mod dossier;
-mod draft;
+pub(crate) mod dossier;
+pub(crate) mod draft;
 mod pilot;
-mod turn;
+pub(crate) mod turn;
 mod validate;
 mod write;
 
@@ -321,7 +321,7 @@ pub(crate) async fn run(
             &ctx.owner,
         ))
     });
-    install_author(&ctx.access, &ctx.owner, &profile).await?;
+    install_pack_slot(&ctx.access, &ctx.owner, "eval_author", "author", &profile).await?;
 
     let init = InitContext {
         dossier,
@@ -341,9 +341,11 @@ pub(crate) async fn run(
     let mut turn = turn::LiveTurn {
         graphql: graphql.clone(),
         agent_did: ctx.owner.clone(),
+        behavior_id: turn::AUTHOR_BEHAVIOR.to_owned(),
         session_id: uuid::Uuid::new_v4().to_string(),
         timeout_secs: args.timeout_secs,
         poll_secs: args.poll_secs,
+        quiet: false,
     };
     let mut lines = operator_lines(|line| std::io::stdin().read_line(line));
     let result = async {
@@ -404,16 +406,18 @@ pub(crate) async fn run(
     result
 }
 
-/// Install the built-in `eval_author` pack into the home, its `author` slot
-/// bound to `profile`, through the owner `gents pack install` uses.
-/// Re-applying the same documents changes nothing. Returns the owner's
-/// apply counts (documents written, per collection).
-async fn install_author(
+/// Install the built-in pack `pack_name` into the home, its inference
+/// slot `slot` bound to `profile`, through the owner `gents pack install`
+/// uses. Re-applying the same documents changes nothing. Returns the
+/// owner's apply counts (documents written, per collection).
+pub(crate) async fn install_pack_slot(
     access: &gents::ConfigAccess,
     owner: &str,
+    pack_name: &str,
+    slot: &str,
     profile: &str,
 ) -> Result<gents::config_client::DesiredStateApplyCounts> {
-    let pack = gents::pack::resolve_pack("eval_author")?;
+    let pack = gents::pack::resolve_pack(pack_name)?;
     let config = gents::pack::load_pack_config(
         &pack.manifest,
         &gents::pack::PackInstallOptions {
@@ -422,14 +426,14 @@ async fn install_author(
         &|path| pack.asset(path).map(Vec::from),
         &|_name| None,
     )
-    .context("loading the eval_author pack")?;
-    let requested = std::collections::BTreeMap::from([("author".to_owned(), profile.to_owned())]);
+    .with_context(|| format!("loading the {pack_name} pack"))?;
+    let requested = std::collections::BTreeMap::from([(slot.to_owned(), profile.to_owned())]);
     let inference =
         gents::pack::preview_pack_inference_bindings(access, &pack.manifest, owner, &requested)
             .await?;
     let bound =
         gents::pack::bind_pack_install_config(&pack.manifest, &config, &inference.bindings)?;
-    // Re-installing the author pack replaces what an earlier run installed.
+    // Re-installing the pack replaces what an earlier run installed.
     let identity = gents::pack::PackIdentity::new(&pack.manifest, &pack.digest, Vec::new());
     gents::pack::install_pack_documents(
         access,
@@ -440,7 +444,7 @@ async fn install_author(
     )
     .await
     .map(|report| report.applied)
-    .context("installing the eval_author pack")
+    .with_context(|| format!("installing the {pack_name} pack"))
 }
 
 #[cfg(test)]
@@ -643,15 +647,11 @@ mod tests {
         let fixture = crate::commands::eval::testing::Fixture::new().await;
         let access = &fixture.ctx.access;
         let owner = fixture.ctx.owner.as_str();
-        // Each document the pack installs, as the home holds it: its
+        // Each document a pack installs, as the home holds it: its
         // DefraDB document id and its fields.
-        let installed = || async move {
+        let read = |ids: [(gents::Collection, &'static str); 3]| async move {
             let mut documents = Vec::new();
-            for (collection, id) in [
-                (gents::Collection::AgentBehavior, turn::AUTHOR_BEHAVIOR),
-                (gents::Collection::AgentContext, "eval-author-context"),
-                (gents::Collection::Tools, "eval-author-tools"),
-            ] {
+            for (collection, id) in ids {
                 let found = access
                     .transact("cli.eval.init.test_read_author", |txn| {
                         Box::pin(async move {
@@ -668,23 +668,46 @@ mod tests {
             }
             documents
         };
-        let first_counts = install_author(access, owner, "local").await.unwrap();
+        let installed = || {
+            read([
+                (gents::Collection::AgentBehavior, turn::AUTHOR_BEHAVIOR),
+                (gents::Collection::AgentContext, "eval-author-context"),
+                (gents::Collection::Tools, "eval-author-tools"),
+            ])
+        };
+        let first_counts = install_pack_slot(access, owner, "eval_author", "author", "local")
+            .await
+            .unwrap();
         assert_eq!(first_counts.get(gents::Collection::AgentBehavior), 1);
         let first = installed().await;
-        install_author(access, owner, "local").await.unwrap();
+        install_pack_slot(access, owner, "eval_author", "author", "local")
+            .await
+            .unwrap();
         // Re-applying rewrites each document in place with what it holds:
         // no new document, no changed field.
         assert_eq!(installed().await, first);
         let behavior = &first[0].1;
         assert_eq!(behavior["inference_profile_id"], "local");
 
-        let error = install_author(access, owner, "no-such-profile")
+        let error = install_pack_slot(access, owner, "eval_author", "author", "no-such-profile")
             .await
             .unwrap_err();
         assert!(
             format!("{error:#}").contains("no-such-profile"),
             "{error:#}"
         );
+
+        // The optimization proposer's pack installs through the same owner.
+        install_pack_slot(access, owner, "prompt_proposer", "proposer", "local")
+            .await
+            .unwrap();
+        let proposer = read([
+            (gents::Collection::AgentBehavior, "prompt-proposer"),
+            (gents::Collection::AgentContext, "prompt-proposer-context"),
+            (gents::Collection::Tools, "prompt-proposer-tools"),
+        ])
+        .await;
+        assert_eq!(proposer[0].1["inference_profile_id"], "local");
     }
 
     #[tokio::test]
@@ -783,7 +806,9 @@ mod tests {
         let profile = gents::default_inference_profile_id_for_behavior(
             &gents::default_behavior_id_for_agent(&owner),
         );
-        install_author(&access, &owner, &profile).await.unwrap();
+        install_pack_slot(&access, &owner, "eval_author", "author", &profile)
+            .await
+            .unwrap();
 
         let root = tempfile::tempdir().unwrap();
         let ctx = InitContext {
@@ -805,9 +830,11 @@ mod tests {
         let mut turn = turn::LiveTurn {
             graphql: state.graphql,
             agent_did: owner,
+            behavior_id: turn::AUTHOR_BEHAVIOR.to_owned(),
             session_id: uuid::Uuid::new_v4().to_string(),
             timeout_secs: 300,
             poll_secs: 1,
+            quiet: false,
         };
         // The author's first replies are questions; the operator asks for
         // the draft each time.

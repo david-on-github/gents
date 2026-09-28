@@ -173,7 +173,13 @@ impl EvalCapture {
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub struct EvalStage {
     pub stage_id: String,
+    #[serde(default)]
     pub prompt: String,
+    /// A document written instead of a prompt: the stage's request is whatever
+    /// the pack's own EventTrigger fires for it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
+    pub seed: Option<EvalFixtureDocument>,
     pub deadline_secs: u64,
     #[serde(
         default,
@@ -297,6 +303,16 @@ impl EvalDefinition {
                     stage.deadline_secs > 0,
                     "eval definition {id} case {case_id} stage {stage_id} deadline_secs must be positive"
                 );
+                ensure!(
+                    stage.seed.is_some() != !stage.prompt.trim().is_empty(),
+                    "eval definition {id} case {case_id} stage {stage_id} needs exactly one of seed or prompt"
+                );
+                if let Some(seed) = &stage.seed {
+                    ensure!(
+                        !seed.collection.trim().is_empty(),
+                        "eval definition {id} case {case_id} stage {stage_id} seed collection must be named"
+                    );
+                }
                 let mut check_names = BTreeSet::new();
                 for check in &stage.checks {
                     ensure!(
@@ -468,6 +484,44 @@ mod tests {
             },
             "duplicate stage_id",
         );
+    }
+
+    #[test]
+    fn a_stage_seeds_a_document_or_sends_a_prompt_never_both() {
+        let seed = json!({"collection": "Event", "document": {"kind": "signup"}});
+        invalid(
+            |v| v["cases"][0]["stages"][0]["seed"] = seed.clone(),
+            "exactly one of seed or prompt",
+        );
+        invalid(
+            |v| {
+                v["cases"][0]["stages"][0]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("prompt");
+            },
+            "exactly one of seed or prompt",
+        );
+        invalid(
+            |v| {
+                v["cases"][0]["stages"][0]["prompt"] = "".into();
+                v["cases"][0]["stages"][0]["seed"] = json!({"collection": " ", "document": {}});
+            },
+            "seed collection",
+        );
+
+        let mut value = definition();
+        let stage = value["cases"][0]["stages"][0].as_object_mut().unwrap();
+        stage.remove("prompt");
+        stage.insert("seed".into(), seed.clone());
+        let parsed = parse(value);
+        parsed.validate().unwrap();
+        let serialized = serde_json::to_value(&parsed.cases[0].stages[0]).unwrap();
+        assert_eq!(serialized["seed"], seed);
+        assert_eq!(serialized["prompt"], "");
+
+        let prompt_only = serde_json::to_value(&parse(definition()).cases[0].stages[0]).unwrap();
+        assert!(prompt_only.get("seed").is_none(), "{prompt_only}");
     }
 
     #[test]

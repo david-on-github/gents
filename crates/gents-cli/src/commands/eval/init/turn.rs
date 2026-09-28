@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 use crate::commands::chat::{
     chat_turn_text_content, load_existing_tool_call_keys, stream_turn_progress,
 };
+use crate::request_helpers::wait_for_terminal_response;
 use crate::{create_agent_request, RequestSubmitOptions};
 
 /// The behavior the `eval_author` pack installs.
@@ -23,43 +24,57 @@ pub(crate) trait Turn {
 }
 
 /// A turn on the served home, as `gents chat` sends one: submitted on the
-/// author's session with behavior `eval-author`, followed until the
-/// response lands. Its progress and the reply print as they arrive.
+/// session with `behavior_id`, followed until the response lands. Its
+/// progress and the reply print as they arrive, unless `quiet`: then the
+/// turn is followed without writing to stdout, as `gents chat --json` does.
 pub(crate) struct LiveTurn {
     pub(crate) graphql: String,
     pub(crate) agent_did: String,
+    pub(crate) behavior_id: String,
     pub(crate) session_id: String,
     pub(crate) timeout_secs: u64,
     pub(crate) poll_secs: u64,
+    pub(crate) quiet: bool,
 }
 
 #[async_trait::async_trait]
 impl Turn for LiveTurn {
     async fn send(&mut self, content: &str) -> Result<String> {
-        let known = load_existing_tool_call_keys(&self.graphql, &self.session_id).await?;
         let submitted = create_agent_request(
             &self.graphql,
             &self.agent_did,
             content,
             Some(&self.session_id),
-            Some(AUTHOR_BEHAVIOR),
+            Some(&self.behavior_id),
             RequestSubmitOptions::default(),
         )
         .await
-        .context("submitting the author's turn")?;
-        let response = stream_turn_progress(
-            &self.graphql,
-            &submitted,
-            known,
-            self.timeout_secs,
-            self.poll_secs,
-            false,
-        )
-        .await?;
+        .with_context(|| format!("submitting the {} turn", self.behavior_id))?;
+        let response = if self.quiet {
+            wait_for_terminal_response(
+                &self.graphql,
+                &submitted.request_id,
+                self.timeout_secs,
+                self.poll_secs,
+            )
+            .await?
+        } else {
+            let known = load_existing_tool_call_keys(&self.graphql, &self.session_id).await?;
+            stream_turn_progress(
+                &self.graphql,
+                &submitted,
+                known,
+                self.timeout_secs,
+                self.poll_secs,
+                false,
+            )
+            .await?
+        };
         let text = chat_turn_text_content(&response);
         anyhow::ensure!(
             !text.trim().is_empty(),
-            "the author's turn ended without a reply; `gents response show {}` shows why",
+            "the {} turn ended without a reply; `gents response show {}` shows why",
+            self.behavior_id,
             submitted.request_id
         );
         Ok(text.to_owned())
@@ -70,7 +85,7 @@ impl Turn for LiveTurn {
     }
 
     fn shows_replies(&self) -> bool {
-        true
+        !self.quiet
     }
 }
 
@@ -107,5 +122,28 @@ impl Turn for ScriptedTurn {
 
     fn shows_replies(&self) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LiveTurn, Turn};
+
+    fn live(quiet: bool) -> LiveTurn {
+        LiveTurn {
+            graphql: "http://localhost:0/graphql".to_owned(),
+            agent_did: "did:key:owner".to_owned(),
+            behavior_id: "prompt-proposer".to_owned(),
+            session_id: "session".to_owned(),
+            timeout_secs: 1,
+            poll_secs: 1,
+            quiet,
+        }
+    }
+
+    #[test]
+    fn a_quiet_live_turn_shows_no_replies() {
+        assert!(live(false).shows_replies());
+        assert!(!live(true).shows_replies());
     }
 }

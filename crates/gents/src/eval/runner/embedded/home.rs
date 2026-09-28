@@ -17,7 +17,7 @@ use crate::{ensure_runtime_schemas, AgentIdentity, DocumentRuntimeOptions, Gents
 // A full conformance run starts many embedded DefraDB nodes in parallel. On a
 // busy CI host, a healthy runtime can spend more than 60 seconds waiting for
 // startup and recovery I/O before it publishes its ready status row.
-const RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const RUNTIME_READY_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Node-owned services can hold `EmbeddedNode` handles briefly after shutdown.
 const NODE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);

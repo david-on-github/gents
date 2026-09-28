@@ -206,6 +206,7 @@ mod tests {
                 .map(|(id, checks)| EvalStage {
                     stage_id: id.to_string(),
                     prompt: "p".into(),
+                    seed: None,
                     deadline_secs: 60,
                     capture: vec![],
                     checks: checks
@@ -261,7 +262,7 @@ mod tests {
                 rows[0].weight,
                 rows[0].check_version.as_str()
             ),
-            (OutcomeKind::Passed, Some(10000), 2, "1")
+            (OutcomeKind::Passed, Some(10000), 2, "2")
         );
     }
 
