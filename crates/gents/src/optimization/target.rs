@@ -511,6 +511,28 @@ mod tests {
         assert_eq!(current_text(&after, &target()).unwrap(), "a");
     }
 
+    /// A job request names a target as one value: a context target carries
+    /// no task id to ignore, and a frozen target reads back as the request
+    /// that froze it.
+    #[test]
+    fn a_job_target_is_the_request_side_of_a_frozen_target() {
+        assert_eq!(
+            JobTarget::Context.field(),
+            TargetField::AgentContextSystemPrompt
+        );
+        assert_eq!(
+            JobTarget::Task("plan".into()).field(),
+            TargetField::TaskPromptTemplate
+        );
+        assert_eq!(target().job_target(), JobTarget::Context);
+        let task = Target {
+            field: TargetField::TaskPromptTemplate,
+            owner: OWNER.into(),
+            id: "plan".into(),
+        };
+        assert_eq!(task.job_target(), JobTarget::Task("plan".into()));
+    }
+
     /// Finding F5: a definition is frozen in `JobOrigin::definition`, never in
     /// the closure, so editing it is `definition_changed` and not drift.
     #[test]
