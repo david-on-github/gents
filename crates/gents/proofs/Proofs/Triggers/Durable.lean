@@ -37,6 +37,7 @@ structure Request where
   terminal : Bool := false
   goalStatus : Goals.Status := .active
   goalWrapupCompleted : Bool := false
+  goalAssignmentApplied : Bool := false
   deriving DecidableEq, Repr
 
 /-- Pending serial fires are ordinary persisted requests. The request claim
@@ -98,7 +99,8 @@ def canClaim (state : State) (id : Identity) : Bool :=
 def claim (state : State) (id : Identity) : State :=
   if canClaim state id then
     { state with requests := state.requests.map fun r =>
-      if r.fire.identity == id then { r with running := true } else r }
+      if r.fire.identity == id then
+        { r with running := true, goalAssignmentApplied := r.fire.goalBacked } else r }
   else state
 
 theorem blocked_claim_preserves_queue (state : State) (id : Identity)
@@ -130,7 +132,9 @@ def goalEnded (status : Goals.Status) (wrapupCompleted : Bool) : Bool :=
 
 def outcomeDue (request : Request) : Bool :=
   request.fire.emitOutcome &&
-    (if request.fire.goalBacked then goalEnded request.goalStatus request.goalWrapupCompleted else request.terminal)
+    (if request.fire.goalBacked then
+      request.goalAssignmentApplied && goalEnded request.goalStatus request.goalWrapupCompleted
+    else request.terminal)
 
 def publishOutcome (state : State) (request : Request) : State :=
   if outcomeDue request && !(decide (request.fire.identity ∈ state.outcomes)) then
@@ -154,6 +158,13 @@ theorem ordinary_goal_boundary_no_outcome (request : Request)
     (hg : request.fire.goalBacked = true) (ha : request.goalStatus = .active) :
     outcomeDue request = false := by
   simp [outcomeDue, hg, goalEnded, ha]
+
+/-- An earlier assignment's stopped Goal cannot terminate a Task still queued
+behind another request. Applying the assignment belongs to the winning claim. -/
+theorem queued_goal_no_outcome (request : Request)
+    (hg : request.fire.goalBacked = true) (hq : request.goalAssignmentApplied = false) :
+    outcomeDue request = false := by
+  simp [outcomeDue, hg, hq]
 
 theorem opted_out_no_outcome (request : Request)
     (h : request.fire.emitOutcome = false) : outcomeDue request = false := by
@@ -194,22 +205,38 @@ theorem foreign_session_rejected (id : Identity) (session : String) :
 structure GoalAssignment where
   state : Goals.State
   epoch : Nat
+  usageBaseline : Nat := 0
   deriving DecidableEq, Repr
 
 /-- An authenticated Task assignment advances the existing Goal controller
 epoch. Explicit task assignment may replace a completed or exhausted goal;
 model-facing create/update/resume retain their existing authority and rules.
 Prior assignment outcomes must be published before this operation commits. -/
-def assignGoal (previous : Option GoalAssignment) : GoalAssignment :=
-  { state := { status := .active, blockedAudits := 0,
-               wrapupRequested := false, wrapupCompleted := false }
-    epoch := previous.map (fun g => g.epoch + 1) |>.getD 0 }
+def assignGoal (previous : Option GoalAssignment) (sessionUsage : Nat) : GoalAssignment :=
+  let fresh : Goals.State := { status := .active, blockedAudits := 0, wrapupRequested := false, wrapupCompleted := false }
+  match previous with
+  | none => { state := fresh, epoch := 0, usageBaseline := sessionUsage }
+  | some old =>
+    { state := if old.state.status == .active then old.state else fresh
+      epoch := old.epoch + 1
+      usageBaseline := if old.state.status == .active then old.usageBaseline else sessionUsage }
 
-theorem task_assignment_active (previous : Option GoalAssignment) :
-    (assignGoal previous).state.status = .active := rfl
+theorem task_assignment_active (previous : Option GoalAssignment) (usage : Nat) :
+    (assignGoal previous usage).state.status = .active := by
+  cases previous with
+  | none => rfl
+  | some old =>
+    simp only [assignGoal]
+    split
+    · rename_i h
+      simpa using h
+    · rfl
 
-theorem task_assignment_invalidates_previous_controller (previous : GoalAssignment) :
-    (assignGoal (some previous)).epoch ≠ previous.epoch := by
+theorem task_assignment_invalidates_previous_controller (previous : GoalAssignment) (usage : Nat) :
+    (assignGoal (some previous) usage).epoch ≠ previous.epoch := by
   simp [assignGoal]
+
+theorem new_assignment_usage_baseline (usage : Nat) :
+    (assignGoal none usage).usageBaseline = usage := rfl
 
 end Triggers.Durable
