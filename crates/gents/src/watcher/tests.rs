@@ -665,6 +665,70 @@ async fn request_terminal_fields(
 }
 
 #[tokio::test]
+async fn native_arrival_head_is_delivered_despite_reverse_lexical_timestamp_tie() {
+    let node = test_node().await;
+    crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
+    let owner = "did:key:z-watcher-native-head";
+    let first = insert_agent_request_row(
+        node.as_ref(),
+        owner,
+        "z-first",
+        "same-session",
+        "pending",
+        "2026-03-12T00:00:00Z",
+    )
+    .await;
+    let later = insert_agent_request_row(
+        node.as_ref(),
+        owner,
+        "a-later",
+        "same-session",
+        "pending",
+        "2026-03-12T00:00:00Z",
+    )
+    .await;
+    let watcher = DefraWatcher::new(node.clone(), owner);
+    let pending = watcher.pending_requests().await.unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|row| row.request_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z-first"]
+    );
+    assert!(watcher.try_fetch_request(&later).await.unwrap().is_none());
+    assert_eq!(
+        watcher
+            .try_fetch_request(&first)
+            .await
+            .unwrap()
+            .unwrap()
+            .request_id,
+        "z-first"
+    );
+    set_request_terminal_completed(node.as_ref(), &first).await;
+    assert_eq!(
+        watcher
+            .pending_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.request_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-later"]
+    );
+    assert_eq!(
+        watcher
+            .try_fetch_request(&later)
+            .await
+            .unwrap()
+            .unwrap()
+            .request_id,
+        "a-later"
+    );
+}
+
+#[tokio::test]
 async fn pending_requests_skip_queued_same_session_rows_until_claimable() {
     let node = test_node().await;
     crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();

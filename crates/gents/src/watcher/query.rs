@@ -69,7 +69,7 @@ impl DefraWatcher {
             crate::graphql::graphql_with_transaction_retry(&self.node, &query, "watcher query")
                 .await?;
 
-        let (rows, malformed) = parse_active_runtime_rows(resp.data.as_ref())?;
+        let (mut rows, malformed) = parse_active_runtime_rows(resp.data.as_ref())?;
         for row in malformed {
             self.terminalize_malformed_pending_request(&row).await;
         }
@@ -134,6 +134,7 @@ impl DefraWatcher {
             }
         }
 
+        self.order_by_native_arrival(&mut rows).await?;
         prioritize_aged_background_wakes(claimable_pending_rows_from_rows(rows), chrono::Utc::now())
             .into_iter()
             .map(AgentRequest::try_from)
@@ -189,6 +190,39 @@ impl DefraWatcher {
             tracing::error!(doc_id = %row.doc_id, error = %error,
                 "failed to terminalize malformed AgentRequest");
         }
+    }
+
+    /// Candidate delivery must use the same native arrival order as the claim
+    /// owner; timestamp ties otherwise hide the only claimable session head.
+    /// Pre-journal rows retain their legacy order ahead of journaled requests.
+    async fn order_by_native_arrival(&self, rows: &mut [AgentRequestRow]) -> anyhow::Result<()> {
+        let doc_ids = rows
+            .iter()
+            .filter_map(|row| row.doc_id.clone())
+            .collect::<Vec<_>>();
+        let order = crate::config_client::ConfigAccess::transact_local(
+            self.node.as_ref(),
+            None,
+            "watcher.request_arrival_order",
+            |txn| {
+                let doc_ids = &doc_ids;
+                Box::pin(async move {
+                    crate::trigger_engine::durable::request_arrival_order(txn, doc_ids).await
+                })
+            },
+        )
+        .await?;
+        let positions = order
+            .iter()
+            .enumerate()
+            .map(|(index, doc_id)| (doc_id.as_str(), index))
+            .collect::<std::collections::HashMap<_, _>>();
+        rows.sort_by_key(|row| {
+            row.doc_id
+                .as_deref()
+                .and_then(|id| positions.get(id).copied())
+        });
+        Ok(())
     }
 
     async fn row_is_claimable(
@@ -247,7 +281,8 @@ impl DefraWatcher {
         )
         .await?;
 
-        let rows: Vec<AgentRequestRow> = crate::graphql::rows(&resp, "AgentRequest")?;
+        let mut rows: Vec<AgentRequestRow> = crate::graphql::rows(&resp, "AgentRequest")?;
+        self.order_by_native_arrival(&mut rows).await?;
 
         let active_blocker = rows.iter().any(|candidate| {
             candidate.doc_id.as_deref() != Some(row_doc_id) && !is_pending(candidate)
