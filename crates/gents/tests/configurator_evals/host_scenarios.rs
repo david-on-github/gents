@@ -1,5 +1,5 @@
 use super::{
-    host::{configuration_snapshot, input_document_id, Host},
+    host::{configuration_snapshot, input_document_id, retire_outcome, Host},
     reporting,
     stages::{self, CaseId},
 };
@@ -573,8 +573,7 @@ pub(super) async fn run_trial(
         Ok(())
     }
     .await;
-    let cleanup = host.close().await;
-    let result = result.and(cleanup.map_err(stages::infrastructure));
+    let result = retire_outcome(result, host.close().await);
     Ok(reporting::TrialResult {
         case_id: "host-steward",
         target: target.name.clone(),

@@ -162,7 +162,9 @@ pub(super) async fn evaluate(
     }
     .await;
     // Retire the candidate before resuming the same principal in the original.
-    candidate.close().await.map_err(stages::infrastructure)?;
+    if let Err(retired) = candidate.close().await {
+        return retire_outcome(result, Err(retired)).map(|_| ());
+    }
     original
         .resume(label)
         .await

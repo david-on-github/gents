@@ -1,5 +1,5 @@
 use super::{
-    host::{configuration_snapshot, Host},
+    host::{configuration_snapshot, retire_outcome, Host},
     host_scenarios, reporting,
     stages::{self, CaseId},
 };
@@ -255,7 +255,7 @@ pub(super) async fn run_trial(
         Ok(())
     }
     .await;
-    let result = result.and(host.close().await.map_err(stages::infrastructure));
+    let result = retire_outcome(result, host.close().await);
     Ok(reporting::TrialResult {
         case_id: "host-maintenance",
         target: target.name.clone(),
