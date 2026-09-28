@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 /// One source document delivered to one owner's trigger. Human-readable trigger
 /// IDs are unique only within an owner; source IDs are scoped by collection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct FireIdentity {
     pub owner_did: String,
     pub trigger_id: String,
@@ -11,8 +10,9 @@ pub struct FireIdentity {
     pub source_doc_id: String,
 }
 
-/// Admission identity is immutable and committed atomically with its AgentRequest.
-/// This records delivery, not a second execution lifecycle.
+/// Admission fields are immutable and committed atomically with their AgentRequest.
+/// The sole mutable claim marker is set with the deferred Goal assignment; it
+/// records which assignment owns the outcome, not a second execution lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerFire {
     pub fire_key: String,
@@ -38,7 +38,8 @@ pub struct TriggerFire {
 }
 
 /// Immutable terminal observation for an opted-in fire. A goal-backed fire
-/// observes its Goal assignment, never an ordinary continuing request.
+/// observes its Goal assignment after claim; before claim, request termination
+/// ends the handoff. Ordinary continuing request boundaries do not end a Goal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FireOutcome {
     pub handoff_id: String,
@@ -58,8 +59,8 @@ pub struct FireOutcome {
 }
 
 /// Position in DefraDB's receiving-node document-arrival journal. Each trigger
-/// checkpoints independently in a non-branchable runtime document; the cursor advances only after admission commits
-/// or a document is conclusively excluded by the configured filter.
+/// checkpoints independently in a non-branchable runtime document. Advancement
+/// requires a complete prefix of admitted or explicitly excluded arrivals.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventSourceCursor {

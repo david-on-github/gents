@@ -4,7 +4,6 @@ pub mod chatgpt_oauth;
 pub mod client_protocol;
 pub mod enrollment;
 pub mod event_delivery;
-pub mod trigger_delivery;
 pub mod graphql;
 pub mod message;
 pub mod network_token;
@@ -23,6 +22,7 @@ pub mod session_hydration;
 pub mod timeline;
 pub mod tool_service_health;
 pub mod transcript;
+pub mod trigger_delivery;
 
 /// Shared product instructions consumed by CLI, desktop, and live acceptance.
 pub const SETUP_STEWARD_PROMPT: &str = include_str!("../prompts/setup.md");
