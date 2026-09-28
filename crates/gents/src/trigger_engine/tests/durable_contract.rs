@@ -19,6 +19,7 @@ struct Request {
     terminal: bool,
     goal_status: String,
     goal_wrapup_completed: bool,
+    goal_assignment_applied: bool,
 }
 
 #[derive(Deserialize)]
@@ -47,6 +48,9 @@ fn receipt(fire: &Fire, index: usize) -> TriggerFire {
         request_id: format!("trigger-request:{key}"),
         session_id: fire.session.clone(),
         goal_id: fire.goal_backed.then(|| format!("goal:{}", fire.session)),
+        goal_objective: fire.goal_backed.then(|| "contract objective".into()),
+        goal_token_budget: None,
+        goal_assignment_applied: false,
         emit_outcome: fire.emit_outcome,
         queued_serial: fire.serial,
         source_handoff_id: Some(format!("source:{}", fire.identity.source_doc_id)),
@@ -88,7 +92,7 @@ fn durable_delivery_predicates_match_executable_lean_owners() {
     for case in cases["outcomes"].as_array().unwrap() {
         let state: State = decode(&case["pre"]);
         let r = &state.requests[0];
-        assert_eq!(durable::outcome_due(r.fire.emit_outcome, r.fire.goal_backed,
+        assert_eq!((!r.fire.goal_backed || r.goal_assignment_applied) && durable::outcome_due(r.fire.emit_outcome, r.fire.goal_backed,
             &r.goal_status, r.goal_wrapup_completed, r.terminal), case["due"].as_bool().unwrap(), "{}", case["name"]);
     }
     for case in cases["queues"].as_array().unwrap() {
@@ -152,7 +156,8 @@ async fn generated_terminal_outcomes_recover_once_without_chaining() {
         ensure_runtime_schemas(&node).await.unwrap();
         let pre: State = decode(&case["pre"]);
         let request = &pre.requests[0];
-        let fire = receipt(&request.fire, 0);
+        let mut fire = receipt(&request.fire, 0);
+        fire.goal_assignment_applied = request.goal_assignment_applied;
         let publish = || crate::config_client::ConfigAccess::transact_local(&node, None,
             "test.terminal_outcome", |txn| Box::pin(async {
                 durable::stage_outcome(txn, &fire, &request.goal_status, request.goal_wrapup_completed, request.terminal,

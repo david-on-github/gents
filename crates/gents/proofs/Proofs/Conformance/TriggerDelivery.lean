@@ -28,7 +28,8 @@ def fireJson (f : Fire) : String := object [
 def requestJson (r : Request) : String := object [
   ("fire", fireJson r.fire), ("running", toString r.running),
   ("terminal", toString r.terminal), ("goal_status", jsonString r.goalStatus.toDefraDB),
-  ("goal_wrapup_completed", toString r.goalWrapupCompleted)]
+  ("goal_wrapup_completed", toString r.goalWrapupCompleted),
+  ("goal_assignment_applied", toString r.goalAssignmentApplied)]
 
 def stateJson (s : State) : String := object [
   ("receipts", jsonArray (s.receipts.map identityJson)),
@@ -75,7 +76,7 @@ def outcomeCase (name : String) (r : Request) (already : Bool) : String :=
 
 def outcomeCases : List String :=
   let ordinary : Request := { fire := fire "a", terminal := true }
-  let goal : Request := { ordinary with fire := { ordinary.fire with goalBacked := true } }
+  let goal : Request := { ordinary with fire := { ordinary.fire with goalBacked := true }, goalAssignmentApplied := true }
   [outcomeCase "ordinary_terminal_outcome" ordinary false,
    outcomeCase "crash_after_terminal_before_outcome" ordinary false,
    outcomeCase "crash_after_outcome_retry" ordinary true,
@@ -83,6 +84,7 @@ def outcomeCases : List String :=
    outcomeCase "outcome_consumer_ends_chain"
      { ordinary with fire := { ordinary.fire with emitOutcome := false, identity := { ordinary.fire.identity with collection := "FireOutcome" } } } false,
    outcomeCase "continuing_goal_has_no_outcome" goal false,
+   outcomeCase "queued_goal_ignores_previous_complete" { goal with goalAssignmentApplied := false, goalStatus := .complete } false,
    outcomeCase "completed_goal" { goal with goalStatus := .complete } false,
    outcomeCase "blocked_goal" { goal with goalStatus := .blocked } false,
    outcomeCase "budget_wrapup_pending" { goal with goalStatus := .budgetLimited } false,
