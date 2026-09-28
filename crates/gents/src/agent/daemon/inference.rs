@@ -503,9 +503,27 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
                                     drop(stream);
                                     match tokio::time::timeout(
                                         crate::config_client::EMBEDDED_TRANSACTION_STORAGE_STEP_TIMEOUT,
-                                        processor.persist_received_partial_turn("persist received assistant turn during graceful shutdown"),
+                                        async {
+                                            match processor.validate_execution().await {
+                                                Ok(()) => {}
+                                                Err(error) if error.is::<crate::lifecycle::ExecutionOwnershipLost>() => {
+                                                    tracing::warn!(
+                                                        request_id = %request_id,
+                                                        session_id = %session_id,
+                                                        error = %error,
+                                                        "execution ownership lost before shutdown drain; received in-memory bytes, if any, were not committed by this drain; only durable output remains recoverable"
+                                                    );
+                                                    return Ok(false);
+                                                }
+                                                Err(error) => return Err(error),
+                                            }
+                                            processor.persist_received_partial_turn("persist received assistant turn during graceful shutdown").await?;
+                                            Ok(true)
+                                        },
                                     ).await {
-                                        Ok(Ok(_)) => return Err(anyhow!("shutdown requested during inference stream")),
+                                        Ok(Ok(false)) => return Err(anyhow::Error::new(crate::lifecycle::ExecutionOwnershipLost)
+                                            .context("shutdown drain was not attempted")),
+                                        Ok(Ok(true)) => return Err(anyhow!("shutdown requested during inference stream")),
                                         Ok(Err(error)) => return Err(ShutdownDrainFailure {
                                             reason: format!("partial-turn persistence failed: {error:#}"),
                                         }.into()),

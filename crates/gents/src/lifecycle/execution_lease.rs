@@ -9,6 +9,10 @@ use super::*;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExecutionGeneration(String);
 
+#[derive(Debug, thiserror::Error)]
+#[error("execution lease expired or ownership was revoked")]
+pub(crate) struct ExecutionOwnershipLost;
+
 impl Drop for RequestLifecycle {
     fn drop(&mut self) {
         self.renewal_task.take();
@@ -131,21 +135,20 @@ impl RequestLifecycle {
             .as_deref()
             .context("missing execution expiry")?;
         let deadline = DateTime::parse_from_rfc3339(expiry)?;
-        anyhow::ensure!(
-            super::execution_policy::authorize_producer_decision(
-                super::execution_policy::LeaseObservation {
-                    request: row.lifecycle_state.context("missing execution state")?,
-                    generation: row
-                        .execution_generation
-                        .as_deref()
-                        .context("missing execution generation")?,
-                    deadline_ms: deadline.timestamp_millis(),
-                },
-                self.execution_generation()?,
-                Utc::now().timestamp_millis(),
-            ),
-            "execution lease expired or ownership was revoked"
-        );
+        if !super::execution_policy::authorize_producer_decision(
+            super::execution_policy::LeaseObservation {
+                request: row.lifecycle_state.context("missing execution state")?,
+                generation: row
+                    .execution_generation
+                    .as_deref()
+                    .context("missing execution generation")?,
+                deadline_ms: deadline.timestamp_millis(),
+            },
+            self.execution_generation()?,
+            Utc::now().timestamp_millis(),
+        ) {
+            return Err(ExecutionOwnershipLost.into());
+        }
         Ok(())
     }
 
