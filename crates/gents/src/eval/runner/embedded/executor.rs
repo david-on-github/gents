@@ -63,8 +63,8 @@ const POLL: Duration = Duration::from_millis(250);
 pub struct EmbeddedExecutor {
     pub runtime_options: DocumentRuntimeOptions,
     /// A trial's home directory is `<runs_dir>/<run_id>/trials/<trial_id>`, so
-    /// a [`TrialLocator::home_hint`] is a path relative to this directory and
-    /// never an absolute path out of the run.
+    /// a [`TrialLocator::home_hint`] is a path relative to this directory;
+    /// `recollect` refuses one that resolves outside it.
     pub runs_dir: PathBuf,
     /// What [`TrialExecutor::provision`] created, until `execute` takes it.
     provisioned: Mutex<HashMap<String, Provisioned>>,
@@ -263,9 +263,45 @@ impl TrialExecutor for EmbeddedExecutor {
     /// positions onto the case first (M4). The home also does not record
     /// whether a request was interrupted on its stage's deadline, so nothing
     /// read back here is classified as a deadline.
+    ///
+    /// The hint is refused unless it is relative, has no `..`, and each of the
+    /// trial directory, its home and its workspace that exists resolves,
+    /// symlinks followed, under the resolved `runs_dir`. That is checked once,
+    /// before the home is opened; a link swapped in after the check is not
+    /// caught.
     async fn recollect(&self, at: &TrialLocator, captures: &[Capture]) -> Option<TrialEvidence> {
-        let trial_dir = self.runs_dir.join(at.home_hint.as_deref()?);
+        let hint = at.home_hint.as_deref()?;
+        let trial_dir = self.runs_dir.join(hint);
         let dir = trial_dir.join("home");
+        let workspace = workspace_dir(&trial_dir);
+        // Read back from the database, so it is checked the way `collect_files`
+        // checks a glob: lexically, then by where the trial directory, its home
+        // and its workspace resolve, since a symlink under `runs_dir` can lead
+        // out of it. A path that is not there resolves nowhere: a missing home
+        // is reported as unreadable when it is opened, and a missing workspace
+        // only leaves the file captures empty.
+        let resolved_runs = self.runs_dir.canonicalize();
+        let outside = |path: &Path| match path.canonicalize() {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+            resolved => !resolved.is_ok_and(|resolved| {
+                resolved_runs
+                    .as_ref()
+                    .is_ok_and(|runs| resolved.starts_with(runs))
+            }),
+        };
+        if !Path::new(hint)
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+            || outside(&trial_dir)
+            || outside(&dir)
+            || outside(&workspace)
+        {
+            tracing::warn!(
+                home_hint = hint,
+                "eval trial home hint does not resolve inside the runs directory"
+            );
+            return None;
+        }
         let home =
             match opened(move || async move { EmbeddedHome::open_retained(&dir).await }).await {
                 Ok(home) => home,
@@ -291,7 +327,6 @@ impl TrialExecutor for EmbeddedExecutor {
             }
         };
 
-        let workspace = workspace_dir(&trial_dir);
         let mut stages = Vec::new();
         for (index, request) in requests.into_iter().enumerate() {
             let evidence = collect_request_evidence(&home.node, &request.request_id)
@@ -480,7 +515,7 @@ async fn install(spec: &TrialSpec, home: &EmbeddedHome, workspace: &Path) -> Res
     .context("installing the trial pack")?;
 
     install_workspace_root(&home.node, workspace).await?;
-    install_fixtures(&access, &home.node, &spec.fixtures, workspace).await
+    install_fixtures(&access, &spec.fixtures, workspace).await
 }
 
 /// Bind every inference slot the pack declares to the profile the run froze.
@@ -627,12 +662,12 @@ async fn install_workspace_root(node: &EmbeddedNode, workspace: &Path) -> Result
 /// it puts in the workspace. Fixture paths are input, so they stay inside it.
 async fn install_fixtures(
     access: &ConfigAccess,
-    node: &EmbeddedNode,
     fixtures: &TrialFixtures,
     workspace: &Path,
 ) -> Result<()> {
     for sdl in &fixtures.schemas {
-        node.add_schema(sdl)
+        access
+            .add_schema(sdl)
             .await
             .context("adding a fixture schema")?;
     }
@@ -1790,6 +1825,73 @@ mod tests {
             .expect("the trial home survives the close");
         assert_eq!(reopened.did(), locator.trial_agent_did);
         reopened.node.shutdown().await;
+    }
+
+    /// `home_hint` is read back from the database, so a hint that leaves the
+    /// runs directory is refused before a home outside it is opened.
+    #[tokio::test]
+    async fn recollect_refuses_a_home_hint_outside_the_runs_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs_dir = dir.path().join("runs");
+        let outside = dir.path().join("outside");
+        close(
+            EmbeddedHome::create_retained(&outside.join("home"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        let executor = EmbeddedExecutor::new(DocumentRuntimeOptions::default(), runs_dir.clone());
+        let locator = |hint: &str| TrialLocator {
+            trial_agent_did: "did:key:zAny".to_string(),
+            session_id: "s-1".to_string(),
+            home_hint: Some(hint.to_string()),
+        };
+        for hint in ["../outside", outside.to_str().unwrap()] {
+            assert!(
+                executor.recollect(&locator(hint), &[]).await.is_none(),
+                "{hint}"
+            );
+        }
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        std::fs::rename(&outside, runs_dir.join("inside")).unwrap();
+        assert!(executor.recollect(&locator("inside"), &[]).await.is_some());
+    }
+
+    /// A hint made only of normal components still leaves the runs directory
+    /// through a symlink, whether the trial directory, its home or its
+    /// workspace is the link. The workspace fixture has a real home, so only
+    /// the workspace check refuses it.
+    #[tokio::test]
+    async fn recollect_refuses_a_home_hint_that_resolves_outside_the_runs_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let runs_dir = dir.path().join("runs");
+        let outside = dir.path().join("outside");
+        close(
+            EmbeddedHome::create_retained(&outside.join("home"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        std::fs::create_dir_all(runs_dir.join("real")).unwrap();
+        std::os::unix::fs::symlink(&outside, runs_dir.join("linked")).unwrap();
+        std::os::unix::fs::symlink(outside.join("home"), runs_dir.join("real").join("home"))
+            .unwrap();
+        close(
+            EmbeddedHome::create_retained(&runs_dir.join("ws").join("home"))
+                .await
+                .unwrap(),
+        )
+        .await;
+        std::os::unix::fs::symlink(&outside, runs_dir.join("ws").join("workspace")).unwrap();
+        let executor = EmbeddedExecutor::new(DocumentRuntimeOptions::default(), runs_dir);
+        for hint in ["linked", "real", "ws"] {
+            let locator = TrialLocator {
+                trial_agent_did: "did:key:zAny".to_string(),
+                session_id: "s-1".to_string(),
+                home_hint: Some(hint.to_string()),
+            };
+            assert!(executor.recollect(&locator, &[]).await.is_none(), "{hint}");
+        }
     }
 
     /// A provisioned home that will never run a trial has to be reclaimable, or

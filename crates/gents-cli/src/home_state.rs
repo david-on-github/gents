@@ -150,9 +150,10 @@ pub(crate) fn write_runtime_state(home_dir: &Path, state: &StoredRuntimeState) -
         .with_context(|| format!("creating home directory {}", home_dir.display()))?;
     let path = runtime_state_path(home_dir);
     let contents = serde_json::to_vec_pretty(state).context("encoding local runtime state JSON")?;
-    fs::write(&path, contents)
-        .with_context(|| format!("writing runtime state {}", path.display()))?;
-    Ok(())
+    // Replaced, never truncated in place: a server killed mid-write would
+    // otherwise leave an empty file every later command fails to decode.
+    crate::native_service::atomic_write(&path, &contents)
+        .with_context(|| format!("writing runtime state {}", path.display()))
 }
 
 pub(crate) fn read_runtime_state(home_dir: &Path) -> Result<Option<StoredRuntimeState>> {

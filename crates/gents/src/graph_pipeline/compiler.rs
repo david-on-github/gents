@@ -10,6 +10,7 @@ use super::types::{
     PortCardinality, PortRef, PortSpec, ResultCardinality, StageCapability, StageTarget,
     COMPILER_VERSION,
 };
+use crate::document_config::reject_protected_collection_name;
 use crate::graphql::{
     validate_collection_identifier, validate_graphql_filter_fragment, validate_graphql_name,
 };
@@ -182,7 +183,11 @@ fn validate_capability_ports(
                     ),
                 );
             }
-            if validate_collection_identifier(&port.collection).is_err() {
+            // Ports come from installed packs, registry packs included, so
+            // they are a datastore surface for the protected eval collections.
+            if validate_collection_identifier(&port.collection).is_err()
+                || reject_protected_collection_name(&port.collection).is_err()
+            {
                 diagnostic(
                     diagnostics,
                     DiagnosticCode::InvalidCollection,
