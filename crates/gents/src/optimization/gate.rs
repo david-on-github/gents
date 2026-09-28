@@ -22,6 +22,7 @@ use crate::config_client::DesiredStateApplyPlan;
 use crate::optimization::subject::{baseline_text, MaterializedPack};
 use crate::optimization::target::TargetField;
 use crate::pack::interpolate;
+use crate::template::catalog::{default_catalog, Site};
 use crate::template::parse_template_for_validation;
 use crate::{Collection, ConfigReferences};
 
@@ -29,7 +30,8 @@ const CONFIG_ASSET: &str = "pack_config.json";
 
 /// Why a candidate never reached a validation run. `reason` is a closed
 /// vocabulary for the journal — `empty_text`, `text_too_long`,
-/// `template_invalid`, `template_variables_dropped`, `unexpected_change`,
+/// `template_invalid`, `template_variables_dropped`,
+/// `template_variables_added`, `unexpected_change`,
 /// `text_mismatch` or `duplicate_candidate` — and `detail` is diagnostics for
 /// an operator.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -124,10 +126,8 @@ pub fn text_gate(
     if baseline.target == TargetField::TaskPromptTemplate {
         let current = baseline_text(baseline)
             .map_err(|error| reject("unexpected_change", format!("{error:#}")))?;
-        let dropped: Vec<String> = template_variables(&current)?
-            .difference(&template_variables(text)?)
-            .cloned()
-            .collect();
+        let (current, candidate) = (template_variables(&current)?, template_variables(text)?);
+        let dropped: Vec<&String> = current.difference(&candidate).collect();
         if !dropped.is_empty() {
             return Err(reject(
                 "template_variables_dropped",
@@ -135,6 +135,21 @@ pub fn text_gate(
             ));
         }
         owner_validation(baseline, text)?;
+        // Rendering is strict-undefined: a path the seed document may lack
+        // errors the fire. Only the baseline's paths and the runtime catalog
+        // are known to render. The owner's refusals above name the finer
+        // reason for a catalog or source violation.
+        let catalog = default_catalog();
+        let added: Vec<&String> = candidate
+            .difference(&current)
+            .filter(|path| !catalog.is_available_at(path, Site::Task))
+            .collect();
+        if !added.is_empty() {
+            return Err(reject(
+                "template_variables_added",
+                format!("the candidate template newly references {added:?}"),
+            ));
+        }
     }
     Ok(())
 }
