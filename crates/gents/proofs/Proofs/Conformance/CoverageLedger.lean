@@ -574,13 +574,18 @@ def caseCoverage : List CoverageEntry :=
   , tagged (consumerCoverage
       "trigger_delivery"
       "Triggers.Durable.Outcomes"
-      "trigger_engine::tests::durable_contract::generated_terminal_outcomes_recover_once_without_chaining")
+      "trigger_engine::tests::durable_contract::generated_terminal_outcome_action_traces_use_native_owners")
       "durable-goals" [Surface.runtimeInternal]
   , tagged (consumerCoverage
       "graph_session_continuation_cases"
       "GraphPipeline.WorkspaceLineage.SessionContinuation"
-      "graph_pipeline::session_continuation_contract_tests")
+      "graph_pipeline::session_continuation_contract_tests::session_selection_matches_executable_graph_owner")
       "triggers" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "graph_assignment_head_cases"
+      "GraphPipeline.LogicalInvocation.AssignmentHead"
+      "graph_pipeline::session_continuation_contract_tests::applied_assignment_heads_match_executable_graph_owner")
+      "durable-goals" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "trigger_cases"
       "TriggerDispatch"
