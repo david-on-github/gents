@@ -751,6 +751,8 @@ async fn submit_and_observe(
     stage: &StageSpec,
 ) -> ObservedStage {
     let request_id = uuid::Uuid::new_v4().to_string();
+    // Taken before anything the stage writes, so a trigger error the stage's
+    // own write causes is attributed to this stage by `trigger_failure`.
     let stage_started = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     if let Err(error) =
         submit_stage(&home.node, locator, &spec.behavior_id, stage, &request_id).await
@@ -933,29 +935,30 @@ async fn trigger_failure(
     let query = format!(
         r#"{{ Trigger(filter: {{ agent_did: {{ _eq: "{agent_did}" }}, last_status: {{ _eq: "error" }}, last_attempt_at: {{ _geq: "{since}" }} }}) {{ trigger_id last_attempt_at last_status last_error }} }}"#
     );
-    let errored =
-        match graphql_with_transaction_retry(node, &query, "eval trial trigger status").await {
-            Ok(response) => match errored_triggers(response.data.as_ref()) {
-                Some(errored) => errored,
-                None => {
-                    tracing::warn!(
-                        trial_id = %trial_id,
-                        stage_id = %stage_id,
-                        "eval trial trigger status read returned no Trigger list"
-                    );
-                    return Some(OutcomeKind::Infrastructure);
-                }
-            },
-            Err(error) => {
+    let errored = match graphql_with_transaction_retry(node, &query, "eval trial trigger status")
+        .await
+    {
+        Ok(response) => match errored_triggers(response.data.as_ref()) {
+            Some(errored) => errored,
+            None => {
                 tracing::warn!(
-                    error = %format!("{error:#}"),
                     trial_id = %trial_id,
                     stage_id = %stage_id,
-                    "eval trial trigger status could not be read"
+                    "eval trial trigger status read had no Trigger list or a row that did not parse"
                 );
                 return Some(OutcomeKind::Infrastructure);
             }
-        };
+        },
+        Err(error) => {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                trial_id = %trial_id,
+                stage_id = %stage_id,
+                "eval trial trigger status could not be read"
+            );
+            return Some(OutcomeKind::Infrastructure);
+        }
+    };
     if errored.is_empty() {
         return None;
     }
