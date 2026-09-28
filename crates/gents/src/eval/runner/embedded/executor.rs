@@ -1950,7 +1950,9 @@ mod tests {
 
     /// The request settled and then the runtime exited, both inside one poll
     /// of the stage's watch: the stage is what the request did, not a dead
-    /// runtime.
+    /// runtime. The runtime pauses the clock as it exits, so any bound on the
+    /// last read of the request expires while that read waits on the node, as
+    /// it would on a loaded host.
     #[tokio::test]
     async fn a_request_that_settled_before_its_runtime_exited_keeps_its_outcome() {
         let dir = tempfile::tempdir().unwrap();
@@ -1970,7 +1972,7 @@ mod tests {
             deadline_secs: 600,
             captures: Vec::new(),
         };
-        // Completes the request once it is written, then exits.
+        // Completes the request once it is written, pauses the clock, exits.
         let node = home.node.clone();
         let runtime = RunningRuntime {
             shutdown: tokio::sync::watch::channel(false).0,
@@ -1987,6 +1989,7 @@ mod tests {
                         .and_then(|data| data["update_AgentRequest"].as_array().map(Vec::len));
                     assert!(response.errors.is_empty(), "{:?}", response.errors);
                     if updated.unwrap_or(0) > 0 {
+                        tokio::time::pause();
                         return Ok(());
                     }
                     tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1995,23 +1998,21 @@ mod tests {
             agent_did: String::new(),
         };
 
-        let evidence = tokio::time::timeout(
-            Duration::from_secs(30),
-            run_stage(
-                &TrialSpec {
-                    behavior_id: "subject".to_string(),
-                    ..TrialSpec::empty_for_tests("t1")
-                },
-                &CancellationToken::new(),
-                &home,
-                &runtime,
-                &locator,
-                &workspace,
-                &stage,
-            ),
+        // No outer timeout: on the paused clock it would expire during the
+        // first node read after the runtime exits.
+        let evidence = run_stage(
+            &TrialSpec {
+                behavior_id: "subject".to_string(),
+                ..TrialSpec::empty_for_tests("t1")
+            },
+            &CancellationToken::new(),
+            &home,
+            &runtime,
+            &locator,
+            &workspace,
+            &stage,
         )
-        .await
-        .expect("the stage ends once its runtime has exited");
+        .await;
 
         assert_eq!(
             evidence.terminal_state,
