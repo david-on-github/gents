@@ -130,6 +130,7 @@ pub fn spawn_observer_with_selection(
                 dirty.clear();
                 redundant_fetches_pending.clear();
 
+                let captured = store.projection_revision();
                 let scope = selected_agent_did_rx.borrow().clone();
                 let peers = configured_peers.records();
                 let result = match scope {
@@ -149,11 +150,11 @@ pub fn spawn_observer_with_selection(
                 };
                 match result {
                     Ok(snapshot) => {
-                        resync_pending = false;
-                        match scope.as_deref() {
-                            Some(did) => store.replace_agent_snapshot(did, snapshot),
-                            None => store.replace_snapshot(snapshot),
-                        };
+                        resync_pending =
+                            !store.replace_reloaded_snapshot(captured, scope.as_deref(), snapshot);
+                        if resync_pending {
+                            continue;
+                        }
                         metrics_for_task
                             .scope_reloads
                             .fetch_add(1, Ordering::Relaxed);
@@ -225,6 +226,7 @@ pub fn spawn_observer_with_selection(
                         if row_count < id_refs.len() {
                             // Missing documents require replacement, including
                             // batches that also contain surviving rows.
+                            let captured = store.projection_revision();
                             let scope = selected_agent_did_rx.borrow().clone();
                             let peers = configured_peers.records();
                             let reload = match scope.as_deref() {
@@ -247,14 +249,19 @@ pub fn spawn_observer_with_selection(
                                 }
                             };
                             match reload {
-                                Ok(snapshot) => match scope.as_deref() {
-                                    Some(did) => {
-                                        store.replace_agent_snapshot(did, snapshot);
+                                Ok(snapshot) => {
+                                    if store.replace_reloaded_snapshot(
+                                        captured,
+                                        scope.as_deref(),
+                                        snapshot,
+                                    ) {
+                                        metrics_for_task
+                                            .scope_reloads
+                                            .fetch_add(1, Ordering::Relaxed);
+                                    } else {
+                                        resync_pending = true;
                                     }
-                                    None => {
-                                        store.replace_snapshot(snapshot);
-                                    }
-                                },
+                                }
                                 Err(error) => {
                                     resync_pending = true;
                                     tracing::warn!(
