@@ -446,8 +446,7 @@ async fn native_same_behavior_graph_continues_session_with_distinct_stage_roots(
         )
         .await
         .unwrap();
-        let source_id =
-            crate::graphql::created_doc_id(&created, &format!("create_{collection}")).unwrap();
+        let source_id = crate::graphql::created_doc_id(&created, collection).unwrap();
         let next = admit_session_graph_task(
             &node,
             &plan,

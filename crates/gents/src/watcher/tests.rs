@@ -1003,7 +1003,7 @@ fn canonical_request_conversion_rejects_negative_lease_duration() {
 }
 
 #[tokio::test]
-async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
+async fn later_request_cannot_overtake_delivered_native_session_head() {
     use crate::lifecycle::{ClaimOutcome, ExecutionOrigin, RequestLifecycle};
 
     let node = test_node().await;
@@ -1014,8 +1014,7 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
     let continuation_id = "goal-cont-00000000000000000003-requeue";
     let wake_id = "background-completion-sess-requeue-00000000000000000000";
     let deliver = Duration::from_secs(5);
-
-    insert_agent_request_row(
+    let continuation_doc = insert_agent_request_row(
         node.as_ref(),
         agent_did,
         continuation_id,
@@ -1032,15 +1031,16 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
         .expect("pending scan");
     assert_eq!(continuation.request_id, continuation_id);
 
-    let wake_doc_id = insert_agent_request_row(
+    insert_agent_request_row(
         node.as_ref(),
         agent_did,
         wake_id,
         session,
-        "processing",
+        "pending",
         second,
     )
     .await;
+    assert!(wake_id < continuation_id);
     let mut lifecycle = RequestLifecycle::new_with_execution_binding(
         node.clone(),
         "behavior",
@@ -1050,76 +1050,13 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
         ExecutionOrigin::Interactive,
         "backend",
     );
-    assert_eq!(lifecycle.claim().await.unwrap(), ClaimOutcome::Queued);
-    let queued = request_terminal_fields(node.as_ref(), continuation_id).await;
-    assert_eq!(
-        queued["lifecycle_state"], "pending",
-        "the blocked request stays pending"
-    );
-
-    set_request_terminal_completed(node.as_ref(), &wake_doc_id).await;
-
-    let started = Instant::now();
-    let redelivered = tokio::time::timeout(deliver, watcher.next_request())
+    assert_eq!(lifecycle.claim().await.unwrap(), ClaimOutcome::Claimed);
+    assert!(watcher.pending_requests().await.unwrap().is_empty());
+    set_request_terminal_completed(node.as_ref(), &continuation_doc).await;
+    let wake = tokio::time::timeout(deliver, watcher.next_request())
         .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "queued continuation was not redelivered within {deliver:?} of its blocker's \
-                 terminal transition (cooldown {PROCESSED_REQUEST_COOLDOWN:?})"
-            )
-        })
+        .expect("next native arrival")
         .expect("watcher open")
         .expect("pending scan");
-    assert_eq!(redelivered.request_id, continuation_id);
-    assert!(started.elapsed() < deliver);
-
-    // Releasing the mark admits a duplicate delivery: the stale, queued
-    // delivery's lifecycle and the redelivery race to claim one row. The claim
-    // is a CAS on the pending state, so exactly one wins and binds the row.
-    let mut redelivered_lifecycle = RequestLifecycle::new_with_execution_binding(
-        node.clone(),
-        "behavior",
-        agent_did,
-        redelivered,
-        60,
-        ExecutionOrigin::Interactive,
-        "backend",
-    );
-    let (stale, fresh) = tokio::join!(lifecycle.claim(), redelivered_lifecycle.claim());
-    let claimed =
-        |outcome: &anyhow::Result<ClaimOutcome>| matches!(outcome, Ok(ClaimOutcome::Claimed));
-    assert_eq!(
-        usize::from(claimed(&stale)) + usize::from(claimed(&fresh)),
-        1,
-        "exactly one delivery claims: stale={stale:?} fresh={fresh:?}"
-    );
-    for loser in [&stale, &fresh]
-        .into_iter()
-        .filter(|outcome| !claimed(outcome))
-    {
-        assert!(
-            matches!(loser, Ok(ClaimOutcome::Queued) | Err(_)),
-            "the losing delivery leaves the row to the winner: {loser:?}"
-        );
-    }
-    let winner = if claimed(&stale) {
-        &lifecycle
-    } else {
-        &redelivered_lifecycle
-    };
-    let generation = winner.execution_generation().unwrap().to_owned();
-    let response = node
-        .execute(&format!(
-            r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{continuation_id}" }} }}) {{
-                lifecycle_state execution_generation }} }}"#
-        ))
-        .await;
-    assert!(!response.has_errors(), "{:?}", response.errors);
-    let rows = response.data.as_ref().unwrap()["AgentRequest"]
-        .as_array()
-        .unwrap()
-        .clone();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["lifecycle_state"], "claimed");
-    assert_eq!(rows[0]["execution_generation"], generation.as_str());
+    assert_eq!(wake.request_id, wake_id);
 }
