@@ -1329,3 +1329,420 @@ async fn replacement_judges_the_count_field_of_the_update_payload() -> Result<()
     node.shutdown().await;
     Ok(())
 }
+
+async fn event_source_node() -> Result<Arc<EmbeddedNode>> {
+    let node = Arc::new(EmbeddedNode::builder().build().await?);
+    register_config_schemas(&node).await?;
+    node.add_schema(
+        "type EventProbeSource { batch: String required_batch: String! result: String flag: Boolean tags: [String] total: Int expected_total: Int! ratio: Float32 amount: Float64 payload: JSON observed_at: DateTime attachment: Blob marker: ID }",
+    )
+    .await?;
+    Ok(node)
+}
+
+fn event_source_document(
+    owner: &str,
+    id: &str,
+    collection: &str,
+    correlation_field: Option<&str>,
+    count_field: Option<&str>,
+) -> DesiredStateApplyDocument {
+    let mut source = json!({
+        "agent_did": owner,
+        "event_source_id": id,
+        "source_collection": collection,
+    });
+    if let Some(field) = correlation_field {
+        source["correlation_field"] = json!(field);
+    }
+    if let Some(field) = count_field {
+        source["group"] = json!({"expected_count": {"source_field": field}});
+    }
+    DesiredStateApplyDocument {
+        collection: Collection::EventSource,
+        add: source.clone(),
+        update: source,
+    }
+}
+
+/// A grouped source needs a correlation to be structurally valid; `batch` is
+/// the probe collection's nillable String field.
+fn grouped_event_source(
+    owner: &str,
+    id: &str,
+    collection: &str,
+    count_field: &str,
+) -> DesiredStateApplyDocument {
+    event_source_document(owner, id, collection, Some("batch"), Some(count_field))
+}
+
+fn correlated_event_source(
+    owner: &str,
+    id: &str,
+    collection: &str,
+    correlation_field: &str,
+) -> DesiredStateApplyDocument {
+    event_source_document(owner, id, collection, Some(correlation_field), None)
+}
+
+async fn published_event_sources(node: &EmbeddedNode) -> Result<Vec<Value>> {
+    let rows = node
+        .execute("{ EventSource { event_source_id correlation_field group } }")
+        .await;
+    assert!(!rows.has_errors());
+    Ok(rows.data.expect("EventSource rows")["EventSource"]
+        .as_array()
+        .expect("EventSource array")
+        .clone())
+}
+
+#[tokio::test]
+async fn event_source_count_field_must_hold_a_count_on_the_source_collection() -> Result<()> {
+    let node = event_source_node().await?;
+    let access = ConfigAccess::Local(node.clone());
+    let owner = "did:key:event-source-owner";
+
+    for (count_field, reported_type) in [("flag", "Boolean"), ("tags", "LIST")] {
+        let refused = apply(
+            &access,
+            vec![grouped_event_source(
+                owner,
+                "grouped",
+                "EventProbeSource",
+                count_field,
+            )],
+        )
+        .await
+        .err()
+        .expect("the field can never carry the expected count");
+        let diagnostic = format!("{refused:#}");
+        assert!(diagnostic.contains("expected_count_field"), "{diagnostic}");
+        assert!(diagnostic.contains(reported_type), "{diagnostic}");
+    }
+
+    let absent_field = apply(
+        &access,
+        vec![grouped_event_source(
+            owner,
+            "grouped",
+            "EventProbeSource",
+            "missing_total",
+        )],
+    )
+    .await
+    .err()
+    .expect("the count field must exist on the source collection");
+    assert!(
+        format!("{absent_field:#}").contains("does not exist on EventProbeSource"),
+        "{absent_field:#}"
+    );
+
+    // The read-only preflight refuses the same configuration, so a self-config
+    // preview reports it before anyone asks to publish.
+    let plan = DesiredStateApplyPlan::new(vec![grouped_event_source(
+        owner,
+        "grouped",
+        "EventProbeSource",
+        "flag",
+    )])?;
+    let previewed = access
+        .transact("test.event_source.preview", |txn| {
+            let plan = &plan;
+            Box::pin(async move { validate_desired_state_plan(txn, plan).await })
+        })
+        .await
+        .err()
+        .expect("preflight refuses the same event source");
+    assert!(
+        format!("{previewed:#}").contains("expected_count_field"),
+        "{previewed:#}"
+    );
+
+    assert!(
+        published_event_sources(&node).await?.is_empty(),
+        "a refused count field publishes no event source"
+    );
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_source_accepts_every_count_field_the_runtime_can_parse() -> Result<()> {
+    let node = event_source_node().await?;
+    let access = ConfigAccess::Local(node.clone());
+    let owner = "did:key:event-source-owner";
+
+    let mut refused = Vec::new();
+    for (id, count_field) in [
+        ("int-count", "total"),
+        ("non-null-int-count", "expected_total"),
+        ("string-count", "result"),
+        ("non-null-string-count", "required_batch"),
+        ("float32-count", "ratio"),
+        ("float64-count", "amount"),
+        ("json-count", "payload"),
+        ("datetime-count", "observed_at"),
+        ("blob-count", "attachment"),
+        ("id-count", "marker"),
+    ] {
+        if let Err(error) = apply(
+            &access,
+            vec![grouped_event_source(
+                owner,
+                id,
+                "EventProbeSource",
+                count_field,
+            )],
+        )
+        .await
+        {
+            refused.push(format!("{count_field}: {error:#}"));
+        }
+    }
+    for (id, correlation_field) in [
+        ("string-correlation", "batch"),
+        ("non-null-correlation", "required_batch"),
+    ] {
+        if let Err(error) = apply(
+            &access,
+            vec![correlated_event_source(
+                owner,
+                id,
+                "EventProbeSource",
+                correlation_field,
+            )],
+        )
+        .await
+        {
+            refused.push(format!("{correlation_field}: {error:#}"));
+        }
+    }
+    assert!(refused.is_empty(), "{refused:#?}");
+    // A collection that does not exist yet cannot refute the source.
+    apply(
+        &access,
+        vec![grouped_event_source(
+            owner,
+            "unregistered",
+            "EventProbeLater",
+            "total",
+        )],
+    )
+    .await?;
+
+    assert_eq!(published_event_sources(&node).await?.len(), 13);
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn event_source_correlation_field_must_be_a_string() -> Result<()> {
+    let node = event_source_node().await?;
+    let access = ConfigAccess::Local(node.clone());
+    let owner = "did:key:event-source-owner";
+
+    let mistyped = apply(
+        &access,
+        vec![correlated_event_source(
+            owner,
+            "correlated",
+            "EventProbeSource",
+            "expected_total",
+        )],
+    )
+    .await
+    .err()
+    .expect("a non-String correlation can never correlate");
+    let diagnostic = format!("{mistyped:#}");
+    assert!(
+        diagnostic.contains("correlation_field \"expected_total\" must be String, found Int"),
+        "{diagnostic}"
+    );
+
+    let absent = apply(
+        &access,
+        vec![correlated_event_source(
+            owner,
+            "correlated",
+            "EventProbeSource",
+            "missing",
+        )],
+    )
+    .await
+    .err()
+    .expect("the correlation field must exist on the source collection");
+    let diagnostic = format!("{absent:#}");
+    assert!(
+        diagnostic.contains("correlation_field \"missing\" does not exist on EventProbeSource"),
+        "{diagnostic}"
+    );
+
+    assert!(
+        published_event_sources(&node).await?.is_empty(),
+        "a refused correlation field publishes no event source"
+    );
+    node.shutdown().await;
+    Ok(())
+}
+
+/// A plan document whose create payload names `add_field` and whose replacement
+/// names `update_field`; the plan only requires the two to share an identity.
+fn event_source_payloads(
+    owner: &str,
+    id: &str,
+    collection: &str,
+    add_field: &str,
+    update_field: &str,
+) -> DesiredStateApplyDocument {
+    DesiredStateApplyDocument {
+        collection: Collection::EventSource,
+        add: grouped_event_source(owner, id, collection, add_field).add,
+        update: grouped_event_source(owner, id, collection, update_field).update,
+    }
+}
+
+async fn published_count_field_of(node: &EmbeddedNode, event_source_id: &str) -> Result<String> {
+    let source = published_event_sources(node)
+        .await?
+        .into_iter()
+        .find(|source| source["event_source_id"] == json!(event_source_id))
+        .expect("event source is published");
+    Ok(source["group"]["expected_count"]["source_field"]
+        .as_str()
+        .expect("group keeps its count field")
+        .to_owned())
+}
+
+#[tokio::test]
+async fn creation_judges_the_count_field_of_the_event_source_add_payload() -> Result<()> {
+    let node = event_source_node().await?;
+    let access = ConfigAccess::Local(node.clone());
+    let owner = "did:key:event-source-owner";
+
+    let refused = apply(
+        &access,
+        vec![event_source_payloads(
+            owner,
+            "created",
+            "EventProbeSource",
+            "flag",
+            "total",
+        )],
+    )
+    .await
+    .err()
+    .expect("a creation publishes the add payload, whose count field is a Boolean");
+    assert!(
+        format!("{refused:#}").contains("\"flag\" names a Boolean field"),
+        "{refused:#}"
+    );
+    let plan = DesiredStateApplyPlan::new(vec![event_source_payloads(
+        owner,
+        "created",
+        "EventProbeSource",
+        "flag",
+        "total",
+    )])?;
+    let previewed = access
+        .transact("test.event_source.preview.add", |txn| {
+            let plan = &plan;
+            Box::pin(async move { validate_desired_state_plan(txn, plan).await })
+        })
+        .await
+        .err()
+        .expect("preflight judges the same add payload");
+    assert!(
+        format!("{previewed:#}").contains("\"flag\" names a Boolean field"),
+        "{previewed:#}"
+    );
+    assert!(published_event_sources(&node).await?.is_empty());
+
+    apply(
+        &access,
+        vec![event_source_payloads(
+            owner,
+            "created",
+            "EventProbeSource",
+            "total",
+            "flag",
+        )],
+    )
+    .await?;
+    assert_eq!(published_count_field_of(&node, "created").await?, "total");
+    node.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn replacement_judges_the_count_field_of_the_event_source_update_payload() -> Result<()> {
+    let node = event_source_node().await?;
+    let access = ConfigAccess::Local(node.clone());
+    let owner = "did:key:event-source-owner";
+    apply(
+        &access,
+        vec![grouped_event_source(
+            owner,
+            "replaced",
+            "EventProbeSource",
+            "total",
+        )],
+    )
+    .await?;
+
+    let refused = apply(
+        &access,
+        vec![event_source_payloads(
+            owner,
+            "replaced",
+            "EventProbeSource",
+            "amount",
+            "flag",
+        )],
+    )
+    .await
+    .err()
+    .expect("a replacement publishes the update payload, whose count field is a Boolean");
+    assert!(
+        format!("{refused:#}").contains("\"flag\" names a Boolean field"),
+        "{refused:#}"
+    );
+    let plan = DesiredStateApplyPlan::new(vec![event_source_payloads(
+        owner,
+        "replaced",
+        "EventProbeSource",
+        "amount",
+        "flag",
+    )])?;
+    let previewed = access
+        .transact("test.event_source.preview.update", |txn| {
+            let plan = &plan;
+            Box::pin(async move { validate_desired_state_plan(txn, plan).await })
+        })
+        .await
+        .err()
+        .expect("preflight judges the same update payload");
+    assert!(
+        format!("{previewed:#}").contains("\"flag\" names a Boolean field"),
+        "{previewed:#}"
+    );
+    assert_eq!(
+        published_count_field_of(&node, "replaced").await?,
+        "total",
+        "a refused replacement leaves the published source unchanged"
+    );
+
+    apply(
+        &access,
+        vec![event_source_payloads(
+            owner,
+            "replaced",
+            "EventProbeSource",
+            "flag",
+            "amount",
+        )],
+    )
+    .await?;
+    assert_eq!(published_count_field_of(&node, "replaced").await?, "amount");
+    node.shutdown().await;
+    Ok(())
+}

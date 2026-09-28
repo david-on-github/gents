@@ -126,6 +126,14 @@ source consistency checks, not a separate runtime compatibility version.
   a false "does not exist", and accepts every field type a canonical count can
   come back through (`Float`, `JSON`, `ID`, `Blob`) instead of only `String` and
   `Int` (#1889).
+- An event source whose `correlation_field` is not a `String` on its source
+  collection, or whose group `expected_count` field names a type no count can
+  come back through — a boolean, a list, or a field the collection does not
+  have — is refused at publication instead of publishing it and leaving every
+  delivered document deferred or the group uncompletable. The rule moved from
+  the `gents config apply` pre-flight into the shared desired-state publication
+  owner, so the self-config automation tool, pack installs, graph
+  materialization and desktop writes refuse it too (#1955).
 
 - Title audits dispatch only through the runtime watcher, preventing duplicate
   claim attempts while retaining received reasoning (#1916).

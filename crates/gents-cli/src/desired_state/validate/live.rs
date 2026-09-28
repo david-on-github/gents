@@ -131,43 +131,6 @@ pub(crate) async fn validate_manifest_against_live(
             .iter()
             .map(|field| (field.name.as_str(), field))
             .collect();
-        if let Some(field) = source
-            .correlation_field
-            .as_deref()
-            .map(str::trim)
-            .filter(|field| !field.is_empty())
-        {
-            match declared.get(field) {
-                Some(declared) if declared.named_type() == "String" => {}
-                Some(declared) => errors.push(format!(
-                    "event source {} correlation_field {} must be String, found {}",
-                    source_id, field, declared.type_name
-                )),
-                None => errors.push(format!(
-                    "event source {} correlation_field {} does not exist on {}",
-                    source_id, field, source_collection
-                )),
-            }
-        }
-        if let Some(field) = expected_count_field
-            .map(str::trim)
-            .filter(|field| !field.is_empty())
-        {
-            match declared.get(field) {
-                Some(declared)
-                    if gents::defra_write::can_hold_canonical_count(declared.named_type()) => {}
-                Some(declared) => errors.push(format!(
-                    "event source {} expected_count_field {} names a {} field of {}, which cannot \
-                     carry the count; the runtime parses an integer or its canonical decimal \
-                     spelling out of the source document",
-                    source_id, field, declared.type_name, source_collection
-                )),
-                None => errors.push(format!(
-                    "event source {} expected_count_field {} does not exist on {}",
-                    source_id, field, source_collection
-                )),
-            }
-        }
         let mut reported: BTreeSet<String> = BTreeSet::new();
         for path in &doc_paths {
             let Some(first) = path.get(1).map(String::as_str) else {
@@ -202,21 +165,8 @@ mod tests {
     const OWNER: &str = "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK";
 
     const PROBE_SDL: &str = r#"
-        type CountProbeNonNull {
-            batch: String!
-            expected_total: Int!
-        }
-        type CountProbeNumeric {
+        type LiveProbe {
             batch: String
-            expected_total: Float
-        }
-        type CountProbeJson {
-            batch: String
-            expected_total: JSON
-        }
-        type CountProbeUncountable {
-            batch: String
-            expected_total: Boolean
         }
     "#;
 
@@ -232,80 +182,94 @@ mod tests {
         Ok(access)
     }
 
-    fn manifest(sources: serde_json::Value) -> Result<DesiredStateManifest> {
+    fn manifest(
+        sources: serde_json::Value,
+        tasks: serde_json::Value,
+        triggers: serde_json::Value,
+    ) -> Result<DesiredStateManifest> {
         Ok(serde_json::from_value(json!({
             "agent_principal": { "agent_did": OWNER },
             "event_sources": sources,
+            "tasks": tasks,
+            "triggers": triggers,
         }))?)
     }
 
-    fn grouped_source(id: &str, collection: &str, count_field: &str) -> serde_json::Value {
-        json!({
+    fn source(id: &str, extra: serde_json::Value) -> serde_json::Value {
+        let mut source = json!({
             "agent_did": OWNER,
             "event_source_id": id,
-            "source_collection": collection,
-            "correlation_field": "batch",
-            "group": { "expected_count": { "source_field": count_field } },
-        })
+            "source_collection": "LiveProbe",
+        });
+        let object = source.as_object_mut().expect("source object");
+        for (field, value) in extra.as_object().expect("source fields") {
+            object.insert(field.clone(), value.clone());
+        }
+        source
     }
 
     #[tokio::test]
-    async fn accepts_non_nillable_count_and_correlation_fields() -> Result<()> {
+    async fn refuses_a_filter_the_probe_query_cannot_execute() -> Result<()> {
         let tempdir = tempfile::tempdir()?;
         let access = probe_access(&tempdir).await?;
-        let manifest = manifest(json!([grouped_source(
-            "non-null",
-            "CountProbeNonNull",
-            "expected_total"
-        )]))?;
-        let errors = validate_manifest_against_live(&manifest, &access).await?;
-        assert!(errors.is_empty(), "{errors:?}");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn accepts_float_and_json_count_fields() -> Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let access = probe_access(&tempdir).await?;
-        let manifest = manifest(json!([
-            grouped_source("numeric", "CountProbeNumeric", "expected_total"),
-            grouped_source("json", "CountProbeJson", "expected_total"),
-        ]))?;
-        let errors = validate_manifest_against_live(&manifest, &access).await?;
-        assert!(errors.is_empty(), "{errors:?}");
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn refuses_a_count_field_no_count_can_come_back_through() -> Result<()> {
-        let tempdir = tempfile::tempdir()?;
-        let access = probe_access(&tempdir).await?;
-        let manifest = manifest(json!([grouped_source(
-            "uncountable",
-            "CountProbeUncountable",
-            "expected_total"
-        )]))?;
+        let manifest = manifest(
+            json!([source(
+                "filtered",
+                json!({"filter": "{undeclared: {_eq: \"x\"}}"})
+            )]),
+            json!([]),
+            json!([]),
+        )?;
         let errors = validate_manifest_against_live(&manifest, &access).await?;
         assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("expected_total"), "{errors:?}");
-        assert!(errors[0].contains("Boolean"), "{errors:?}");
-        assert!(!errors[0].contains("does not exist"), "{errors:?}");
+        assert!(
+            errors[0].contains("filter syntax error"),
+            "a filter that names no declared field must fail the probe: {errors:?}"
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn refuses_a_count_field_the_collection_does_not_declare() -> Result<()> {
+    async fn refuses_a_template_path_the_source_collection_does_not_declare() -> Result<()> {
         let tempdir = tempfile::tempdir()?;
         let access = probe_access(&tempdir).await?;
-        let manifest = manifest(json!([grouped_source(
-            "absent",
-            "CountProbeNonNull",
-            "missing_total"
-        )]))?;
+        let manifest = manifest(
+            json!([source("templated", json!({"correlation_field": "batch"}))]),
+            json!([{
+                "agent_did": OWNER,
+                "task_id": "summarize",
+                "behavior_id": "beh",
+                "prompt_template": "Summarize {{ doc.nope }}"
+            }]),
+            json!([{
+                "agent_did": OWNER,
+                "trigger_id": "on-templated",
+                "task_id": "summarize",
+                "source": {"kind": "event", "event_source_id": "templated"}
+            }]),
+        )?;
         let errors = validate_manifest_against_live(&manifest, &access).await?;
         assert_eq!(errors.len(), 1, "{errors:?}");
-        assert!(errors[0].contains("missing_total"), "{errors:?}");
-        assert!(errors[0].contains("does not exist"), "{errors:?}");
+        assert!(
+            errors[0].contains("template references doc.nope but LiveProbe has no such field"),
+            "{errors:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn refuses_a_source_collection_the_node_does_not_have() -> Result<()> {
+        let tempdir = tempfile::tempdir()?;
+        let access = probe_access(&tempdir).await?;
+        let mut missing = source("missing", json!({"correlation_field": "batch"}));
+        missing["source_collection"] = json!("LiveProbeLater");
+        let manifest = manifest(json!([missing]), json!([]), json!([]))?;
+        let errors = validate_manifest_against_live(&manifest, &access).await?;
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(
+            errors[0].contains("references unknown source_collection LiveProbeLater"),
+            "{errors:?}"
+        );
         Ok(())
     }
 }
