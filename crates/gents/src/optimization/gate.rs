@@ -135,10 +135,12 @@ pub fn text_gate(
             ));
         }
         owner_validation(baseline, text)?;
-        // Rendering is strict-undefined: a path the seed document may lack
-        // errors the fire. Only the baseline's paths and the runtime catalog
-        // are known to render. The owner's refusals above name the finer
-        // reason for a catalog or source violation.
+        // Every added path is refused, guarded or not: rendering is
+        // strict-undefined, so an unguarded path the seed document lacks
+        // errors the fire, and the gate does not parse guards. Only the
+        // baseline's paths and the runtime catalog are known to render. The
+        // owner's refusals above name the finer reason for a catalog or
+        // source violation.
         let catalog = default_catalog();
         let added: Vec<&String> = candidate
             .difference(&current)
