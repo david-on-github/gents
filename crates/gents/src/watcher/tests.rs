@@ -665,6 +665,95 @@ async fn request_terminal_fields(
 }
 
 #[tokio::test]
+async fn generated_release_cases_preserve_native_session_order() {
+    use crate::lean_vocab_test::{lean_event_delivery_transition_cases, LeanEventDeliveryAction};
+    let mut cases = 0;
+    for case in lean_event_delivery_transition_cases() {
+        let LeanEventDeliveryAction::Release { doc } = &case.action else {
+            continue;
+        };
+        cases += 1;
+        let node = test_node().await;
+        crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
+        let owner = "did:key:z-watcher-release";
+        let session = format!("session-{doc}");
+        let head = insert_agent_request_row(
+            node.as_ref(),
+            owner,
+            "native-head",
+            &session,
+            "pending",
+            "2026-03-12T00:00:00Z",
+        )
+        .await;
+        for request_id in &case.pre.persistent_set {
+            insert_agent_request_row(
+                node.as_ref(),
+                owner,
+                request_id,
+                &format!("session-{request_id}"),
+                "pending",
+                "2026-03-12T00:00:00Z",
+            )
+            .await;
+        }
+        let mut watcher = DefraWatcher::new(node.clone(), owner);
+        watcher.processed_request_ids = case
+            .pre
+            .processed_set
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    ProcessedMark {
+                        at: Instant::now(),
+                        queue_session: Some(format!("session-{id}")),
+                    },
+                )
+            })
+            .collect();
+        let selected =
+            tokio::time::timeout(std::time::Duration::from_secs(2), watcher.next_request())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert_eq!(selected.request_id, "native-head", "{}", case.name);
+        let mut retained = watcher
+            .processed_request_ids
+            .keys()
+            .filter(|id| id.as_str() != "native-head")
+            .cloned()
+            .collect::<Vec<_>>();
+        retained.sort();
+        let mut expected = case.post.processed_set.clone();
+        expected.sort();
+        assert_eq!(retained, expected, "{}", case.name);
+        set_request_terminal_completed(node.as_ref(), &head).await;
+        let released =
+            tokio::time::timeout(std::time::Duration::from_secs(2), watcher.next_request())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        let released_expected = case
+            .pre
+            .processed_set
+            .iter()
+            .filter(|id| !case.post.processed_set.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vec![released.request_id],
+            released_expected,
+            "{}",
+            case.name
+        );
+    }
+    assert_eq!(cases, 2);
+}
+
+#[tokio::test]
 async fn native_arrival_head_is_delivered_despite_reverse_lexical_timestamp_tie() {
     let node = test_node().await;
     crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
