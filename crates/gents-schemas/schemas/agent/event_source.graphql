@@ -10,6 +10,8 @@ type EventSource @branchable @index(fields: ["agent_did", "event_source_id"], un
     correlation_field: String
     group: JSON
     workspace_authority: String
+    # Runtime-owned, per-trigger delivery cursors; excluded from desired config.
+    delivery_cursors: JSON
     created_at: DateTime @index(direction: DESC)
     updated_at: DateTime @index(direction: DESC)
     tags: [String!]

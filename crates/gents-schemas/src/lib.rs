@@ -77,6 +77,10 @@ pub const WORKSPACE_BINDING_NAME: &str = "WorkspaceBinding";
 pub const WORKSPACE_BINDING: &str = include_str!("../schemas/agent/workspace_binding.graphql");
 pub const WORKSPACE_RECEIPT_NAME: &str = "WorkspaceReceipt";
 pub const WORKSPACE_RECEIPT: &str = include_str!("../schemas/agent/workspace_receipt.graphql");
+pub const TRIGGER_FIRE_NAME: &str = "TriggerFire";
+pub const TRIGGER_FIRE: &str = include_str!("../schemas/agent/trigger_fire.graphql");
+pub const FIRE_OUTCOME_NAME: &str = "FireOutcome";
+pub const FIRE_OUTCOME: &str = include_str!("../schemas/agent/fire_outcome.graphql");
 pub const TRIGGER_NAME: &str = "Trigger";
 pub const TRIGGER: &str = include_str!("../schemas/agent/trigger.graphql");
 pub const SUBAGENT_TARGET_NAME: &str = "SubagentTarget";
@@ -179,6 +183,8 @@ pub const ALL: &[&str] = &[
     CALLBACK,
     EVENT_SOURCE,
     TRIGGER,
+    TRIGGER_FIRE,
+    FIRE_OUTCOME,
     SUBAGENT_TARGET,
     CALLBACK_MODULE,
     CALLBACK_BINDING,
@@ -249,6 +255,8 @@ pub const ALL_COLLECTION_NAMES: &[&str] = &[
     CALLBACK_NAME,
     EVENT_SOURCE_NAME,
     TRIGGER_NAME,
+    TRIGGER_FIRE_NAME,
+    FIRE_OUTCOME_NAME,
     SUBAGENT_TARGET_NAME,
     CALLBACK_MODULE_NAME,
     CALLBACK_BINDING_NAME,

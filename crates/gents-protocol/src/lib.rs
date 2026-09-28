@@ -4,6 +4,7 @@ pub mod chatgpt_oauth;
 pub mod client_protocol;
 pub mod enrollment;
 pub mod event_delivery;
+pub mod trigger_delivery;
 pub mod graphql;
 pub mod message;
 pub mod network_token;
