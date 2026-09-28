@@ -502,3 +502,6 @@ async fn two_lead_sessions_route_64_real_worker_outcomes_without_chaining() -> R
 
 #[path = "trigger_delivery_live/process.rs"]
 mod process;
+
+#[path = "trigger_delivery_live/goal.rs"]
+mod goal;
