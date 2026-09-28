@@ -173,8 +173,36 @@ def sessionCases : List String :=
      ("identity", identityJson id), ("target", jsonOptionalString target),
      ("owned", toString owned), ("resolved", jsonOptionalString (resolveSession id target owned))]
 
+def claimObservationJson (row : ClaimObservation) : String := object [
+  ("document", jsonString row.document), ("owner", jsonString row.owner),
+  ("session", jsonString row.session), ("trigger", jsonString row.trigger),
+  ("serial", toString row.serial), ("receipt", toString row.receipt),
+  ("arrival", row.arrival.map toString |>.getD "null"),
+  ("running", toString row.running), ("terminal", toString row.terminal)]
+
+def observedClaimCases : List String :=
+  let old : ClaimObservation := { document := "old", owner := "owner", session := "session" }
+  let next : ClaimObservation := { old with document := "new", arrival := some 1, receipt := true }
+  let cases : List (String × ClaimObservation × List ClaimObservation) := [
+    ("historical_pending_unordered", old, [{ old with document := "older" }]),
+    ("historical_running_blocks", old, [{ old with document := "older", running := true }]),
+    ("historical_precedes_journal", next, [old]),
+    ("journal_does_not_precede_historical", old, [next]),
+    ("journal_running_blocks_historical", old, [{ next with running := true }]),
+    ("unrelated_historical_does_not_block", next, [{ old with session := "elsewhere" }]),
+    ("foreign_owner_does_not_block", next, [{ old with owner := "other" }]),
+    ("receipt_missing_position_rejected", { next with arrival := none }, []),
+    ("receipt_conflict_missing_position_rejected", old, [{ next with arrival := none }]),
+    ("native_pending_fifo", { next with arrival := some 2 }, [{ next with document := "prior" }]),
+    ("terminal_historical_does_not_block", next, [{ old with terminal := true }])]
+  cases.map fun (name, candidate, rows) => object [
+    ("name", jsonString name), ("candidate", claimObservationJson candidate),
+    ("rows", jsonArray (rows.map claimObservationJson)),
+    ("allowed", toString (observedClaimAllowed candidate rows))]
+
 def casesJson : String := object [
   ("admissions", jsonArray admissionCases), ("queues", jsonArray queueCases),
+  ("observed_claims", jsonArray observedClaimCases),
   ("outcomes", jsonArray outcomeCases), ("cursors", jsonArray cursorCases),
   ("identities", jsonArray identityCases), ("sessions", jsonArray sessionCases)]
 

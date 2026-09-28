@@ -416,3 +416,23 @@ async fn generated_arrival_checkpoints_preserve_committed_delivery_across_crashe
         );
     }
 }
+
+#[test]
+fn observed_claim_cohorts_match_lean() {
+    let contract = gents_lean_contract::load_contract_snapshot::<serde_json::Value>().unwrap();
+    for case in contract["trigger_delivery"]["observed_claims"]
+        .as_array()
+        .unwrap()
+    {
+        let candidate: durable::ClaimObservation =
+            serde_json::from_value(case["candidate"].clone()).unwrap();
+        let rows: Vec<durable::ClaimObservation> =
+            serde_json::from_value(case["rows"].clone()).unwrap();
+        assert_eq!(
+            durable::observed_claim_allowed(&candidate, &rows),
+            case["allowed"].as_bool().unwrap(),
+            "{}",
+            case["name"]
+        );
+    }
+}
