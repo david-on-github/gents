@@ -634,7 +634,7 @@ impl MaterializerHandle for ProductionMaterializer {
         Box::pin(async move {
             let key = crate::trigger_engine::durable::fire_key(&identity);
             crate::config_client::ConfigAccess::transact_local(
-                self.node.as_ref(), Some(self.runtime_actor()?), "recover admitted event fire",
+                self.node.as_ref(), Some(self.runtime_actor()?), "trigger.recover_admitted_fire",
                 |txn| { let key = key.clone(); let identity = identity.clone(); Box::pin(async move {
                     let result = txn.execute(&format!(
                         "{{ TriggerFire(filter: {{fire_key: {{_eq: \"{}\"}}}}, limit: 2) {{request_id}} }}",
@@ -644,7 +644,7 @@ impl MaterializerHandle for ProductionMaterializer {
                         .context("event recovery omitted receipt rows")?;
                     anyhow::ensure!(receipts.len() <= 1, "event fire receipt is not unique");
                     let Some(receipt) = receipts.first() else { return Ok(None); };
-                    let request_id = format!("trigger-request:{key}");
+                    let request_id = identity.request_id();
                     anyhow::ensure!(receipt["request_id"].as_str() == Some(request_id.as_str()), "event receipt request identity mismatch");
                     let result = txn.execute(&format!(
                         "{{ AgentRequest(filter: {{agent_did: {{_eq: \"{}\"}}, request_id: {{_eq: \"{}\"}}}}, limit: 2) {{_docID}} }}",

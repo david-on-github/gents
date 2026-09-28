@@ -273,7 +273,7 @@ pub(super) async fn load(
             // Keep invocation ancestry and other authenticated Goal chains as
             // association evidence. Ordinary interactive rows cannot erase an
             // obligation; a replacement Goal on another chain cannot acquire it.
-            let invocation_rows = requests
+            let mut invocation_rows = requests
                 .iter()
                 .filter(|row| {
                     if row.doc_id.as_ref().is_some_and(|id| members.contains(id)) {
@@ -308,7 +308,27 @@ pub(super) async fn load(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            open && crate::goal::latest_goal_request(goal, &invocation_rows).is_some_and(|head| {
+            if let Some(assigned_root) = goal.assignment_root_request_doc_id.as_deref() {
+                let Ok(assigned) = crate::goal::authenticated_goal_request_members(
+                    owner,
+                    session,
+                    assigned_root,
+                    requests,
+                ) else {
+                    return false;
+                };
+                invocation_rows.retain(|row| {
+                    row.doc_id
+                        .as_ref()
+                        .is_some_and(|doc| assigned.member_doc_ids.contains(doc))
+                });
+            }
+            open && crate::goal::latest_authenticated_session_request(
+                owner,
+                session,
+                &invocation_rows,
+            )
+            .is_some_and(|head| {
                 let root_applied = assignments
                     .get(&root.request_id)
                     .is_none_or(|(id, applied)| id.is_none() || *applied);

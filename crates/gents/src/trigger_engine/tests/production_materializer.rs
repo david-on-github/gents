@@ -1108,9 +1108,9 @@ async fn admitted_event_replay_precedes_render_and_latest_only_supersession() {
     let key = crate::trigger_engine::durable::fire_key(&identity);
     let fire = gents_protocol::trigger_delivery::TriggerFire {
         fire_key: key.clone(),
+        request_id: identity.request_id(),
         identity,
         task_id: "replay-task".into(),
-        request_id: format!("trigger-request:{key}"),
         session_id: "original-session".into(),
         goal_id: None,
         goal_objective: None,
@@ -1124,7 +1124,7 @@ async fn admitted_event_replay_precedes_render_and_latest_only_supersession() {
         attempt: None,
         created_at: "2030-01-01T00:00:00Z".into(),
     };
-    crate::config_client::ConfigAccess::transact_local(node.as_ref(), None, "seed committed replay", |txn| {
+    crate::config_client::ConfigAccess::transact_local(node.as_ref(), None, "test.seed_committed_replay", |txn| {
         let fire = fire.clone();
         Box::pin(async move {
             assert!(crate::trigger_engine::durable::stage_fire_receipt(txn, &fire).await?);

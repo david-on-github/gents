@@ -259,7 +259,7 @@ async fn admit_session_graph_task(
     let fire_key = crate::lifecycle::task_fire_key(&fire_identity);
     let session_id = session
         .map(str::to_owned)
-        .unwrap_or_else(|| format!("trigger-session:{fire_key}"));
+        .unwrap_or_else(|| fire_identity.session_id());
     let task = plan
         .nodes
         .iter()
@@ -269,10 +269,10 @@ async fn admit_session_graph_task(
         .task_id()
         .unwrap();
     let fire = gents_protocol::trigger_delivery::TriggerFire {
+        request_id: fire_identity.request_id(),
         identity: fire_identity,
         fire_key: fire_key.clone(),
         task_id: task.into(),
-        request_id: format!("trigger-request:{fire_key}"),
         session_id: session_id.clone(),
         goal_id: None,
         goal_objective: None,
@@ -284,7 +284,7 @@ async fn admit_session_graph_task(
         reply_session_id: None,
         shard_id: None,
         attempt: None,
-        created_at: chrono::Utc::now().to_rfc3339(),
+        created_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
     };
     let access = ConfigAccess::Local(node.clone());
     let triggers = access

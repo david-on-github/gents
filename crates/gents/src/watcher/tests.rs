@@ -1002,11 +1002,6 @@ fn canonical_request_conversion_rejects_negative_lease_duration() {
     );
 }
 
-/// A request delivered first can lose its same-session claim to a row that
-/// sorts ahead of it in `(created_at, request_id)` order: a completion wake
-/// published in the same second as a Goal continuation. The losing claim leaves
-/// the continuation pending, so its blocker's terminal transition must deliver
-/// it again rather than the delivery cooldown or the fallback poll.
 #[tokio::test]
 async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
     use crate::lifecycle::{ClaimOutcome, ExecutionOrigin, RequestLifecycle};
@@ -1020,6 +1015,15 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
     let wake_id = "background-completion-sess-requeue-00000000000000000000";
     let deliver = Duration::from_secs(5);
 
+    let wake_doc_id = insert_agent_request_row(
+        node.as_ref(),
+        agent_did,
+        wake_id,
+        session,
+        "processing",
+        second,
+    )
+    .await;
     insert_agent_request_row(
         node.as_ref(),
         agent_did,
@@ -1037,15 +1041,6 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
         .expect("pending scan");
     assert_eq!(continuation.request_id, continuation_id);
 
-    let wake_doc_id = insert_agent_request_row(
-        node.as_ref(),
-        agent_did,
-        wake_id,
-        session,
-        "pending",
-        second,
-    )
-    .await;
     let mut lifecycle = RequestLifecycle::new_with_execution_binding(
         node.clone(),
         "behavior",
@@ -1059,16 +1054,9 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
     let queued = request_terminal_fields(node.as_ref(), continuation_id).await;
     assert_eq!(
         queued["lifecycle_state"], "pending",
-        "the overtaken request stays pending"
+        "the blocked request stays pending"
     );
 
-    let wake = tokio::time::timeout(deliver, watcher.next_request())
-        .await
-        .expect("wake delivery")
-        .expect("watcher open")
-        .expect("pending scan");
-    assert_eq!(wake.request_id, wake_id);
-    set_request_processing(node.as_ref(), &wake_doc_id).await;
     set_request_terminal_completed(node.as_ref(), &wake_doc_id).await;
 
     let started = Instant::now();

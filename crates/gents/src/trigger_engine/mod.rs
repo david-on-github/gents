@@ -568,7 +568,7 @@ impl TriggerEngine {
                     }
                     None => graph_session_id
                         .clone()
-                        .unwrap_or_else(|| format!("trigger-session:{key}")),
+                        .unwrap_or_else(|| identity.session_id()),
                 };
                 let source_string = |field: &str| {
                     intent
@@ -579,7 +579,7 @@ impl TriggerEngine {
                         .map(str::to_owned)
                 };
                 let fire = gents_protocol::trigger_delivery::TriggerFire {
-                    request_id: format!("trigger-request:{key}"),
+                    request_id: identity.request_id(),
                     fire_key: key,
                     identity,
                     goal_id: intent.task.goal_objective_template.as_ref().map(|_| {
