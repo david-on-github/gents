@@ -922,6 +922,7 @@ async fn installed_review_area_handoff_materializes_bound_goal_scanner() {
             Some("Close this review area set"),
             &format!("event:{}:doc:{}", routes["recon"].0, fx.run.seed_doc_id),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -999,6 +1000,7 @@ async fn installed_review_area_handoff_materializes_bound_goal_scanner() {
             "Scan the emitted area",
             Some("Publish the required scan sentinel"),
             &fire.durable_fire_key,
+            None,
             None,
         )
         .await

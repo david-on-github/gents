@@ -158,6 +158,7 @@ async fn production_materializer_persists_event_source_document_lineage() {
             None,
             "event-test-fire",
             None,
+            None,
         )
         .await
         .expect("Event materialize should succeed");
@@ -267,6 +268,7 @@ async fn production_schedule_materialization_passes_final_exact_config_admission
             None,
             "schedule-test-fire",
             None,
+            None,
         )
         .await
         .unwrap();
@@ -321,6 +323,7 @@ async fn production_materializer_rejects_incoherent_source_document_lineage() {
             None,
             "invalid-event-test-fire",
             None,
+            None,
         )
         .await
         .expect_err("Event materialization without a source document must fail closed");
@@ -338,6 +341,7 @@ async fn production_materializer_rejects_incoherent_source_document_lineage() {
             "body",
             None,
             "invalid-schedule-test-fire",
+            None,
             None,
         )
         .await
@@ -365,6 +369,7 @@ async fn production_materializer_rejects_manual_lineage_with_trigger_id() {
             "manual body",
             None,
             "invalid-manual-test-fire",
+            None,
             None,
         )
         .await
