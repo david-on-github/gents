@@ -1,5 +1,11 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+/// glibc per-thread arenas retained DefraDB query churn at about 2.5x the live
+/// heap and memcg-OOM-killed the runtime at 512 MiB (#2034).
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 fn main() {
     let mut args = std::env::args();
     let _program = args.next();

@@ -111,6 +111,11 @@ afterburner-cloud = { git = "https://github.com/afterburner-sh/afterburner.git",
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL"] }
 
+# Only the native `gents` binary installs mimalloc. The iOS shell links this
+# crate as a library through the bridge and keeps the system allocator.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+mimalloc.workspace = true
+
 # `pack build` points stdout at stderr while the plugin compiler runs, so
 # stdout carries only the JSON report.
 [target.'cfg(unix)'.dependencies]
