@@ -14,7 +14,6 @@ use super::query::{
     load_agent_scoped_snapshot_with_peer_records, load_full_snapshot_with_peer_records,
     supports_doc_patch_collection,
 };
-use super::store::ClientStore;
 
 mod projection_store;
 pub use projection_store::{
@@ -218,6 +217,11 @@ pub fn spawn_observer_with_selection(
                 match fetch_doc_patch(node.as_ref(), collection_name, &id_refs).await {
                     Ok(patch) => {
                         let row_count = patch.observed_documents;
+                        // A scoped deletion reload cannot recover surviving rows
+                        // for other agents in this same update batch.
+                        if patch.store.row_count() > 0 {
+                            store.merge_observer_patch_with_outcome(patch.store);
+                        }
                         if row_count < id_refs.len() {
                             // Missing documents require replacement, including
                             // batches that also contain surviving rows.
@@ -260,9 +264,6 @@ pub fn spawn_observer_with_selection(
                                     );
                                 }
                             }
-                        } else if patch.store.row_count() > 0 {
-                            let rows = patch.store.to_rows();
-                            store.merge_observer_patch_with_outcome(ClientStore::from_rows(rows));
                         }
                         metrics_for_task
                             .docs_fetched
