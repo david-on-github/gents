@@ -40,6 +40,10 @@ const MAX_CANCEL_REASON_BYTES: usize = 1_024;
 mod workspace_lineage_contract_tests;
 
 #[cfg(test)]
+#[path = "session_continuation_contract_tests.rs"]
+mod session_continuation_contract_tests;
+
+#[cfg(test)]
 #[path = "attribution_contract_tests.rs"]
 mod attribution_contract_tests;
 

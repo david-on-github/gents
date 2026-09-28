@@ -281,6 +281,8 @@ def snapshotJson : String :=
       ++ boundariesJson ++ ","
     ++ "\"deviations\":"
       ++ deviationsJson ++ ","
+    ++ "\"graph_session_continuation_cases\":" ++ Conformance.GraphWorkspaceLineageContracts.SessionCases.casesJson ++ ","
+    ++ "\"graph_assignment_head_cases\":" ++ Conformance.GraphLogicalInvocationContracts.AssignmentCases.casesJson ++ ","
     ++ "\"graph_workspace_lineage_cases\":" ++ Conformance.GraphWorkspaceLineageContracts.casesJson ++ ","
     ++ "\"artifact_mode_meet_cases\":" ++ artifactModeMeetCasesJson ++ ","
     ++ "\"artifact_admission_cases\":" ++ artifactAdmissionCasesJson ++ ","
