@@ -322,6 +322,9 @@ enum RollbackOnDrop {
     },
     Embedded {
         runner: Arc<dyn query::QueryExecutor>,
+        /// DefraDB binds a transaction to the effective identity that began it,
+        /// so the detached rollback runs under the same node identity.
+        node_identity: Option<String>,
         handle: Option<TransactionHandle>,
         write_guard: Option<MutationWriteGuard>,
         armed: bool,
@@ -369,6 +372,7 @@ impl Drop for RollbackOnDrop {
             }
             Self::Embedded {
                 runner,
+                node_identity,
                 handle,
                 write_guard,
                 armed,
@@ -380,11 +384,15 @@ impl Drop for RollbackOnDrop {
                     return;
                 };
                 let runner = runner.clone();
+                let node_identity = node_identity.clone();
                 let write_guard = write_guard.take();
                 runtime.spawn(async move {
                     match cleanup_while_holding_write_gate(
                         write_guard,
-                        runner.rollback_txn(&handle),
+                        defra_core::current_identity::with_scoped_identity(
+                            node_identity,
+                            runner.rollback_txn(&handle),
+                        ),
                     )
                     .await {
                         Ok(Ok(())) => {}
@@ -406,6 +414,7 @@ impl Drop for RollbackOnDrop {
 
 async fn begin_embedded_owned<F, Fut>(
     runner: Arc<dyn query::QueryExecutor>,
+    node_identity: Option<String>,
     write_guard: MutationWriteGuard,
     cancellation_rollback_scheduled: Arc<AtomicBool>,
     after_begin: F,
@@ -420,13 +429,14 @@ where
     // and rolls back the handle before releasing the write gate.
     let mut rollback = RollbackOnDrop::Embedded {
         runner: Arc::clone(&runner),
+        node_identity: node_identity.clone(),
         handle: None,
         write_guard: Some(write_guard),
         armed: true,
     };
     let handle = tokio::time::timeout(
         EMBEDDED_TRANSACTION_STORAGE_STEP_TIMEOUT,
-        runner.begin_txn(false),
+        defra_core::current_identity::with_scoped_identity(node_identity, runner.begin_txn(false)),
     )
     .await
     .map_err(|_| embedded_phase_timeout("begin", EMBEDDED_TRANSACTION_STORAGE_STEP_TIMEOUT))?
@@ -703,6 +713,7 @@ impl<'a> ConfigApplyTxn<'a> {
         let runner = node.runner().clone();
         let (rollback_on_drop, handle) = tokio::spawn(begin_embedded_owned(
             runner,
+            node.node_identity_did().map(str::to_owned),
             write_guard,
             cancellation_rollback_scheduled,
             |_| std::future::ready(()),
@@ -931,7 +942,7 @@ impl<'a> ConfigApplyTxn<'a> {
             TxnBackend::Embedded { node, handle, .. } => {
                 match tokio::time::timeout(
                     EMBEDDED_TRANSACTION_STORAGE_STEP_TIMEOUT,
-                    node.runner().commit_txn(handle),
+                    node.commit_transaction(handle),
                 )
                 .await
                 {
@@ -993,7 +1004,7 @@ impl<'a> ConfigApplyTxn<'a> {
             TxnBackend::Embedded { node, handle, .. } => {
                 match tokio::time::timeout(
                     EMBEDDED_TRANSACTION_ROLLBACK_TIMEOUT,
-                    node.runner().rollback_txn(handle),
+                    node.rollback_transaction(handle),
                 )
                 .await
                 {
