@@ -150,9 +150,9 @@ async fn wait_deliveries(access: &ConfigAccess, owner: &str, labels: &[&str]) ->
             source_collection: string(fire, "source_collection")?.into(),
             source_doc_id: string(fire, "source_doc_id")?.into(),
         };
-        let key = gents::lifecycle::task_fire_key(&identity);
+        let key = identity.fire_key();
         ensure!(
-            fire["fire_key"] == key && fire["request_id"] == format!("trigger-request:{key}"),
+            fire["fire_key"] == key && fire["request_id"] == identity.request_id(),
             "noncanonical admitted identity: {fire}"
         );
         ensure!(
@@ -172,7 +172,7 @@ async fn wait_deliveries(access: &ConfigAccess, owner: &str, labels: &[&str]) ->
             .find(|row| row["fire_key"] == key)
             .context("missing outcome")?;
         ensure!(
-            output["handoff_id"] == format!("outcome:{key}")
+            output["handoff_id"] == identity.outcome_id()
                 && output["request_id"] == fire["request_id"]
                 && output["source_doc_id"] == fire["source_doc_id"]
                 && output["terminal_state"] == "completed",
