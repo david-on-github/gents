@@ -849,3 +849,164 @@ async fn completed_terminalization_scans_request_output_once_for_many_tools() {
     assert_eq!(scans, 1, "request output scanned once per accepted tool");
     node.shutdown().await;
 }
+
+/// Time the terminalization of one request with `turns` tool turns whose
+/// outputs are `output_bytes` long, after `noise` replicas of its canonical
+/// output were written under the same principal in other sessions.
+async fn terminalization_with_principal_output(turns: usize, output_bytes: usize, noise: usize) -> std::time::Duration {
+    let (node, hook, writer, mut lifecycle) = owned_test_hook().await;
+    let mut script = (0..turns)
+        .map(|turn| {
+            vec![
+                RawStreamingChoice::ToolCall(RawStreamingToolCall::new(
+                    format!("call-{turn}"),
+                    "echo".into(),
+                    serde_json::json!({}),
+                )),
+                RawStreamingChoice::FinalResponse(()),
+            ]
+        })
+        .collect::<Vec<_>>();
+    script.push(vec![
+        RawStreamingChoice::Message("done".into()),
+        RawStreamingChoice::FinalResponse(()),
+    ]);
+    let tools: Vec<Box<dyn ToolDyn>> = vec![Box::new(FixedTool {
+        name: "echo".into(),
+        output: "o".repeat(output_bytes),
+    })];
+    let stream = run_loop_stream(
+        ScriptedModel::new_turns(script),
+        Some(hook.clone()),
+        TaggedMessage::unassociated(Message::user("run echo")),
+        Vec::new(),
+        Arc::new(tools),
+        owned_config(turns + 2),
+    );
+    let collected = collect_owned_scripted_stream(
+        stream,
+        &hook,
+        &writer,
+        &mut lifecycle,
+        gents_loop::provider_input::ProviderInputProfile::OpenAiChatCompletions,
+    )
+    .await;
+    assert!(collected.error.is_none(), "{:?}", collected.error);
+    assert_eq!(collected.tool_results.len(), turns);
+    // Writing the surrounding output outlasts the lease; decide at the
+    // instant the loop finished.
+    let finished_at = chrono::Utc::now();
+    let generation = lifecycle.execution_generation().unwrap().to_owned();
+    let request_doc_id = lifecycle.request().doc_id.clone();
+    let segments = node
+        .execute(&format!(
+            r#"{{ AgentOutputSegment(filter: {{ request_doc_id: {{ _eq: "{request_doc_id}" }} }}) {{ {} }} }}"#,
+            crate::session::canonical_rows::AGENT_OUTPUT_SEGMENT_FIELDS
+        ))
+        .await;
+    let segments = segments.data.as_ref().unwrap()["AgentOutputSegment"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| crate::session::canonical_rows::decode_output_segment_row(row).unwrap())
+        .collect::<Vec<_>>();
+    let messages = node
+        .execute(&format!(
+            r#"{{ AgentMessage(filter: {{ request_doc_id: {{ _eq: "{request_doc_id}" }} }}) {{ {} }} }}"#,
+            crate::session::canonical_rows::AGENT_MESSAGE_FIELDS
+        ))
+        .await;
+    let messages = messages.data.as_ref().unwrap()["AgentMessage"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| crate::session::canonical_rows::decode_transcript_message_row(row).unwrap())
+        .collect::<Vec<_>>();
+    for replica in 0..noise {
+        let other_request = format!("bae-noise-request-{replica}");
+        let other_session = format!("noise-session-{replica}");
+        for row in &segments {
+            let mut segment = row.segment.clone();
+            segment.request_doc_id = other_request.clone();
+            segment.session_id = other_session.clone();
+            let response = node
+                .execute_request_with_retry(
+                    defra_node::QueryRequest::new(
+                        crate::session::canonical_rows::CREATE_AGENT_OUTPUT_SEGMENT_MUTATION,
+                    )
+                    .with_variables(
+                        crate::session::canonical_rows::output_segment_create_variables(&segment)
+                            .unwrap(),
+                    ),
+                    defra_node::ExecuteRetryPolicy::default(),
+                )
+                .await;
+            assert!(!response.has_errors(), "{:?}", response.errors);
+        }
+        for row in &messages {
+            let mut message = row.message.clone();
+            message.request_doc_id = Some(other_request.clone());
+            message.session_id = other_session.clone();
+            message.message_key = format!("{}:{replica}", message.message_key);
+            let response = node
+                .execute_request_with_retry(
+                    defra_node::QueryRequest::new(
+                        crate::session::canonical_rows::CREATE_AGENT_MESSAGE_MUTATION,
+                    )
+                    .with_variables(
+                        crate::session::canonical_rows::transcript_message_create_variables(&message)
+                            .unwrap(),
+                    ),
+                    defra_node::ExecuteRetryPolicy::default(),
+                )
+                .await;
+            assert!(!response.has_errors(), "{:?}", response.errors);
+        }
+    }
+    let selection = writer.terminal_output(&request_doc_id).await;
+    let started = std::time::Instant::now();
+    let result = crate::lifecycle::terminalize_owned_at(
+        &node,
+        &request_doc_id,
+        &generation,
+        crate::lifecycle::RequestTerminalOutcome::Completed,
+        selection,
+        finished_at,
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(result.unwrap(), crate::lifecycle::TerminalizeResult::Won);
+    drop(lifecycle);
+    eprintln!(
+        "terminalization turns={turns} bytes={output_bytes} noise={noise} segments={} messages={} terminalize_ms={}",
+        segments.len(),
+        messages.len(),
+        elapsed.as_millis()
+    );
+    node.shutdown().await;
+    elapsed
+}
+
+/// Terminalization holds the process-wide write gate, so its reads must be
+/// bounded by the request, not by everything its principal ever wrote: a
+/// fan-out of long requests otherwise starves lease renewal behind it.
+#[tokio::test]
+async fn terminalization_cost_is_independent_of_principal_output() {
+    let alone = terminalization_with_principal_output(24, 4096, 0).await;
+    let surrounded = terminalization_with_principal_output(24, 4096, 40).await;
+    assert!(
+        surrounded <= alone * 2 + std::time::Duration::from_millis(200),
+        "terminalization grew with unrelated principal output: {alone:?} alone, {surrounded:?} beside 40 requests"
+    );
+}
+
+/// Manual scale grid: `TERMINALIZE_SCALE=turns:bytes:noise,...`.
+#[tokio::test]
+#[ignore = "manual terminalization scale measurement"]
+async fn terminalization_scale_grid() {
+    let grid = std::env::var("TERMINALIZE_SCALE").unwrap_or_else(|_| "24:4096:0,24:4096:40".into());
+    for point in grid.split(',') {
+        let values = point.split(':').map(|v| v.parse::<usize>().unwrap()).collect::<Vec<_>>();
+        terminalization_with_principal_output(values[0], values[1], values[2]).await;
+    }
+}
