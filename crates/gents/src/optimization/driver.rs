@@ -45,7 +45,7 @@ use crate::optimization::subject::{
 };
 use crate::optimization::target::{
     baseline_equivalence, capture_closure, closure_digests, current_text, BaselineMismatch,
-    Closure, Target, TargetField,
+    Closure, JobTarget, Target,
 };
 
 /// Everything an operator chose about a job. Read in full only when the job
@@ -60,9 +60,7 @@ pub struct JobRequest {
     /// The DID of the home that launched the job, recorded on every run.
     pub evaluator_did: String,
     pub behavior_id: String,
-    pub target_field: TargetField,
-    /// The task a `TaskPromptTemplate` target names; ignored otherwise.
-    pub task_id: Option<String>,
+    pub target: JobTarget,
     pub definition_id: String,
     pub inference_profile_id: String,
     /// The operator-supplied baseline subject pack (ruling R5). Copied into the
@@ -651,11 +649,7 @@ pub(crate) fn check_resume(
     if origin.subject.behavior_id != request.behavior_id {
         differs.push("behavior_id");
     }
-    let task_id = request
-        .task_id
-        .as_deref()
-        .filter(|_| request.target_field == TargetField::TaskPromptTemplate);
-    if origin.target.field != request.target_field || origin.target.task_id() != task_id {
+    if origin.target.job_target() != request.target {
         differs.push("target");
     }
     if origin.definition.definition_id != request.definition_id {
@@ -925,8 +919,7 @@ fn proposed_candidate(
         &final_dir,
         &origin.owner,
         &origin.subject.behavior_id,
-        origin.target.field,
-        origin.target.task_id(),
+        &origin.target.job_target(),
     )?;
     anyhow::ensure!(
         candidate.digest == digest,
@@ -991,14 +984,13 @@ async fn freeze_job(
         &request.baseline_pack,
         owner,
         &request.behavior_id,
-        request.target_field,
-        request.task_id.as_deref(),
+        &request.target,
     )?;
     let pack_text = baseline_text(&source)?;
     // Ruling R5, before anything is written: the pack must be the live one.
     let closure = read_closure(access, owner).await?;
     let target = Target {
-        field: request.target_field,
+        field: request.target.field(),
         owner: request.owner.clone(),
         id: source.target_id.clone(),
     };
@@ -1201,8 +1193,7 @@ pub async fn run_job(
         &baseline_path,
         owner,
         &origin.subject.behavior_id,
-        origin.target.field,
-        origin.target.task_id(),
+        &origin.target.job_target(),
     )?;
     if baseline.digest != origin.subject.pack_digest {
         return Err(refused(format!(
@@ -1532,8 +1523,7 @@ pub(crate) fn verified_checkpoint(
         &path,
         &origin.owner,
         &origin.subject.behavior_id,
-        origin.target.field,
-        origin.target.task_id(),
+        &origin.target.job_target(),
     )?;
     anyhow::ensure!(
         pack.digest == held.pack_digest,
@@ -1638,8 +1628,7 @@ mod tests {
             owner: "did:key:o".into(),
             evaluator_did: "did:key:home".into(),
             behavior_id: "monitor".into(),
-            target_field: TargetField::AgentContextSystemPrompt,
-            task_id: None,
+            target: JobTarget::Context,
             definition_id: "monitor-findings".into(),
             inference_profile_id: "local".into(),
             baseline_pack: PathBuf::from("/tmp/baseline"),

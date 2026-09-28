@@ -14,7 +14,7 @@ use gents::eval::checks::CheckRegistry;
 use gents::eval::documents::default_breaker_threshold;
 use gents::eval::runner::embedded::EmbeddedExecutor;
 use gents::eval::runner::RunOptions;
-use gents::optimization::target::TargetField;
+use gents::optimization::target::JobTarget;
 use gents::optimization::{
     derive_state, job_dir, job_refused, load_job, promote_refused, removable, run_job,
     show as show_job, validate_job_id, Budgets, JobOutcome, JobRequest, JobState, PolicyV2,
@@ -25,7 +25,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cli::{
     OptimizationCommand, OptimizationDigestArgs, OptimizationRmArgs, OptimizationRunArgs,
-    OptimizationShowArgs, PolicyArg, ProposerArg, TargetArg,
+    OptimizationShowArgs, PolicyArg, ProposerArg,
 };
 use crate::commands::eval::init::install_pack_slot;
 use crate::commands::eval::init::turn::LiveTurn;
@@ -264,11 +264,11 @@ fn ensure_tool_less(
 
 /// The session's first user turn: the subject's dossier, so a proposal
 /// names the subject's real tools and surfaces rather than guessing them.
-fn subject_preamble(subject_dir: &Path, behavior_id: &str, target: &TargetArg) -> Result<String> {
+fn subject_preamble(subject_dir: &Path, behavior_id: &str, target: &JobTarget) -> Result<String> {
     let dossier = crate::commands::eval::init::dossier::render(subject_dir, Some(behavior_id))?;
     let instruction = match target {
-        TargetArg::Context => "this behavior's system prompt".to_owned(),
-        TargetArg::Task(task_id) => format!(
+        JobTarget::Context => "this behavior's system prompt".to_owned(),
+        JobTarget::Task(task_id) => format!(
             "the prompt template of its task {task_id:?}, rendered when the task fires; \
              every {{{{ variable }}}} of the current template must stay in the new one"
         ),
@@ -347,17 +347,12 @@ async fn run(
         .job_id
         .clone()
         .unwrap_or_else(|| default_id(&args.definition_id));
-    let (target_field, task_id) = match &args.target {
-        TargetArg::Context => (TargetField::AgentContextSystemPrompt, None),
-        TargetArg::Task(task_id) => (TargetField::TaskPromptTemplate, Some(task_id.clone())),
-    };
     let request = JobRequest {
         job_id: job_id.clone(),
         owner: ctx.owner.clone(),
         evaluator_did: ctx.owner.clone(),
         behavior_id,
-        target_field,
-        task_id,
+        target: args.target.clone(),
         definition_id: args.definition_id.clone(),
         inference_profile_id: args.profile.clone().unwrap_or_else(|| {
             default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
@@ -615,7 +610,7 @@ mod tests {
         proposer_file,
     };
     use super::{
-        ensure_tool_less, execute, pack_config, proposer_behavior_id, subject_preamble, TargetArg,
+        ensure_tool_less, execute, pack_config, proposer_behavior_id, subject_preamble, JobTarget,
     };
     use crate::cli::Cli;
     use crate::commands::eval::testing::{deps, eval, executor, Fixture, DEFINITION};
@@ -686,7 +681,7 @@ mod tests {
     fn the_subject_preamble_is_the_dossier_naming_the_subject_tools() {
         let pipeline =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
-        let preamble = subject_preamble(&pipeline, "exp-stage1", &TargetArg::Context).unwrap();
+        let preamble = subject_preamble(&pipeline, "exp-stage1", &JobTarget::Context).unwrap();
         assert!(
             preamble.starts_with("# Subject\n\n## Identity"),
             "{preamble}"
@@ -701,7 +696,7 @@ mod tests {
             "{preamble}"
         );
         let task =
-            subject_preamble(&pipeline, "exp-stage1", &TargetArg::Task("plan".into())).unwrap();
+            subject_preamble(&pipeline, "exp-stage1", &JobTarget::Task("plan".into())).unwrap();
         assert!(
             task.contains("the prompt template of its task \"plan\""),
             "{task}"

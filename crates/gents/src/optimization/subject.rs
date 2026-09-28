@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::document_config::PackConfig;
 use crate::eval::runner::freeze::{load_pack, write_pack_files};
 use crate::eval::runner::CellSource;
-use crate::optimization::target::TargetField;
+use crate::optimization::target::{JobTarget, TargetField};
 use crate::pack::{declared_paths, interpolate, PackManifest};
 
 /// The canonical config bundle a sidecar reference or an inline prompt lives in.
@@ -47,19 +47,21 @@ pub struct MaterializedPack {
 }
 
 impl MaterializedPack {
-    fn task_id(&self) -> Option<&str> {
-        (self.target == TargetField::TaskPromptTemplate).then_some(self.target_id.as_str())
+    fn job_target(&self) -> JobTarget {
+        match self.target {
+            TargetField::AgentContextSystemPrompt => JobTarget::Context,
+            TargetField::TaskPromptTemplate => JobTarget::Task(self.target_id.clone()),
+        }
     }
 }
 
 /// Read the pack at `dir` as the subject of `behavior_id`, optimizing the
-/// behavior's context or, for a task target, the task `task_id`.
+/// behavior's context or, for a task target, that task.
 pub fn materialize_pack(
     dir: &Path,
     owner: &str,
     behavior_id: &str,
-    target: TargetField,
-    task_id: Option<&str>,
+    target: &JobTarget,
 ) -> Result<MaterializedPack> {
     let pack = load_pack(&CellSource::Directory(dir.to_path_buf()), owner)
         .with_context(|| format!("loading pack {}", dir.display()))?;
@@ -71,22 +73,22 @@ pub fn materialize_pack(
         .find(|behavior| behavior.behavior_id == behavior_id)
         .with_context(|| format!("pack declares no behavior {behavior_id:?}"))?;
     let target_id = match target {
-        TargetField::AgentContextSystemPrompt => behavior
+        JobTarget::Context => behavior
             .context_id
             .clone()
             .with_context(|| format!("behavior {behavior_id:?} names no context to optimize"))?,
-        TargetField::TaskPromptTemplate => {
-            let task_id = task_id.context("a task prompt template target names a task")?;
+        JobTarget::Task(task_id) => {
             pack.config
                 .tasks
                 .iter()
-                .find(|task| task.task_id == task_id && task.behavior_id == behavior_id)
+                .find(|task| &task.task_id == task_id && task.behavior_id == behavior_id)
                 .with_context(|| {
                     format!("pack declares no task {task_id:?} of behavior {behavior_id:?}")
                 })?;
-            task_id.to_owned()
+            task_id.clone()
         }
     };
+    let target = target.field();
 
     reject_shared_sidecars(&pack.files)?;
     let prompt_asset = sidecar_prompt_asset(&pack.manifest, &pack.files, target, &target_id)?;
@@ -245,19 +247,12 @@ pub fn materialize_candidate(
         }
     }
     write_pack_files(dir, &files)?;
-    materialize_pack(
-        dir,
-        owner,
-        &baseline.behavior_id,
-        baseline.target,
-        baseline.task_id(),
-    )
+    materialize_pack(dir, owner, &baseline.behavior_id, &baseline.job_target())
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::optimization::target::TargetField;
     use serde_json::json;
 
     const OWNER: &str = "did:key:subject-owner";
@@ -270,13 +265,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn context_pack(dir: &Path) -> Result<MaterializedPack> {
-        materialize_pack(
-            dir,
-            OWNER,
-            "monitor",
-            TargetField::AgentContextSystemPrompt,
-            None,
-        )
+        materialize_pack(dir, OWNER, "monitor", &JobTarget::Context)
     }
 
     pub(crate) const FIXTURE_TEMPLATE: &str = "Plan {{ doc.goal }} for {{ doc.owner }}.\n";
@@ -326,13 +315,7 @@ pub(crate) mod tests {
     }
 
     fn task_pack(dir: &Path) -> Result<MaterializedPack> {
-        materialize_pack(
-            dir,
-            OWNER,
-            "monitor",
-            TargetField::TaskPromptTemplate,
-            Some("plan"),
-        )
+        materialize_pack(dir, OWNER, "monitor", &JobTarget::Task("plan".into()))
     }
 
     #[test]
@@ -414,20 +397,11 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_task_the_pack_does_not_declare_or_name_is_an_error() {
+    fn a_task_the_pack_does_not_declare_is_an_error() {
         let dirs = tempfile::tempdir().unwrap();
         write_fixture_pack(&dirs.path().join("baseline"));
         let error = task_pack(&dirs.path().join("baseline")).unwrap_err();
         assert!(format!("{error:#}").contains("plan"), "{error:#}");
-        let error = materialize_pack(
-            &dirs.path().join("baseline"),
-            OWNER,
-            "monitor",
-            TargetField::TaskPromptTemplate,
-            None,
-        )
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("task"), "{error:#}");
     }
 
     #[test]
@@ -511,8 +485,7 @@ pub(crate) mod tests {
             &baseline_dir,
             OWNER,
             "no-such-behavior",
-            TargetField::AgentContextSystemPrompt,
-            None,
+            &JobTarget::Context,
         )
         .unwrap_err();
         assert!(

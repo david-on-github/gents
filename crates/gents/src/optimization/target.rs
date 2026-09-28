@@ -55,9 +55,29 @@ pub struct Target {
 }
 
 impl Target {
-    /// The task a task prompt template target names.
-    pub fn task_id(&self) -> Option<&str> {
-        (self.field == TargetField::TaskPromptTemplate).then_some(self.id.as_str())
+    /// The request that names this target.
+    pub fn job_target(&self) -> JobTarget {
+        match self.field {
+            TargetField::AgentContextSystemPrompt => JobTarget::Context,
+            TargetField::TaskPromptTemplate => JobTarget::Task(self.id.clone()),
+        }
+    }
+}
+
+/// What an operator asks a job to change: the system prompt of the context the
+/// subject behavior names, or the prompt template of one of its tasks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobTarget {
+    Context,
+    Task(String),
+}
+
+impl JobTarget {
+    pub fn field(&self) -> TargetField {
+        match self {
+            Self::Context => TargetField::AgentContextSystemPrompt,
+            Self::Task(_) => TargetField::TaskPromptTemplate,
+        }
     }
 }
 

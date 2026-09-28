@@ -52,7 +52,7 @@ use gents::document_config::{EvalDefinition, EvalSplit, InferenceBackend, Infere
 use gents::eval::checks::CheckRegistry;
 use gents::eval::runner::embedded::{EmbeddedExecutor, EmbeddedHome};
 use gents::eval::runner::{Capture, RunOptions};
-use gents::optimization::target::TargetField;
+use gents::optimization::target::JobTarget;
 use gents::optimization::{
     materialize_pack, run_cost, run_job, show, Budgets, Decision, JobOutcome, JobRequest, JobState,
     JobView, Mode, PolicyV2, ScriptedProposer,
@@ -213,8 +213,7 @@ impl Fixture {
             &pack,
             &owner,
             &behavior,
-            TargetField::AgentContextSystemPrompt,
-            None,
+            &JobTarget::Context,
         )
         .unwrap_or_else(|error| {
             panic!("assumption failed: the M3 pack loads as the subject of behavior {behavior:?}: {error:#}")
@@ -282,8 +281,7 @@ impl Fixture {
             owner: owner.clone(),
             evaluator_did: owner,
             behavior_id: behavior,
-            target_field: TargetField::AgentContextSystemPrompt,
-            task_id: None,
+            target: JobTarget::Context,
             definition_id,
             inference_profile_id: "live".into(),
             baseline_pack,
@@ -392,14 +390,7 @@ async fn install(access: &ConfigAccess, documents: Vec<(Collection, Value)>) {
 /// live configuration (ruling R5 and baseline equivalence). The definition is
 /// installed on its own.
 fn live_subject(pack: &Path, owner: &str, behavior: &str) -> Vec<(Collection, Value)> {
-    let subject = materialize_pack(
-        pack,
-        owner,
-        behavior,
-        TargetField::AgentContextSystemPrompt,
-        None,
-    )
-    .unwrap();
+    let subject = materialize_pack(pack, owner, behavior, &JobTarget::Context).unwrap();
     let bindings = subject
         .manifest
         .metadata

@@ -323,7 +323,7 @@ mod tests {
         FIXTURE_TEMPLATE,
     };
     use crate::optimization::subject::{materialize_candidate, materialize_pack};
-    use crate::optimization::target::TargetField;
+    use crate::optimization::target::JobTarget;
 
     const OWNER: &str = "did:key:gate-owner";
     const TEXT: &str = "Watch the mailbox, and say why.\n";
@@ -346,8 +346,7 @@ mod tests {
             &root.join("baseline"),
             OWNER,
             "monitor",
-            TargetField::AgentContextSystemPrompt,
-            None,
+            &JobTarget::Context,
         )
         .unwrap();
         Fixture {
@@ -383,8 +382,7 @@ mod tests {
             &root.join("baseline"),
             OWNER,
             "monitor",
-            TargetField::TaskPromptTemplate,
-            Some("plan"),
+            &JobTarget::Task("plan".into()),
         )
         .unwrap();
         Fixture {
