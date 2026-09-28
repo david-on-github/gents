@@ -588,9 +588,7 @@ pub(crate) fn check_policy(
     policy: &PolicyV2,
     definition: &EvalDefinition,
 ) -> Result<()> {
-    if policy.min_pairs == 0 {
-        return Err(refused("policy min_pairs must be at least 1"));
-    }
+    check_policy_shape(request, policy)?;
     // Above the exact limit the p-value is sampled at a resolution of
     // 1e6 / (samples + 1) ppm; the model's own bound (`1000000 <= alphaEff *
     // 2^n`) applied to that resolution says whether alpha is reachable at all.
@@ -604,6 +602,15 @@ pub(crate) fn check_policy(
             alpha_effective_ppm(policy)
         )));
     }
+    Ok(())
+}
+
+/// The policy checks that need no definition, so a caller can refuse a job
+/// before it loads or writes anything.
+pub(crate) fn check_policy_shape(request: &JobRequest, policy: &PolicyV2) -> Result<()> {
+    if policy.min_pairs == 0 {
+        return Err(refused("policy min_pairs must be at least 1"));
+    }
     if policy.max_rounds == request.budgets.max_rounds {
         return Ok(());
     }
@@ -611,6 +618,14 @@ pub(crate) fn check_policy(
         "policy max_rounds {} does not match the budget's max_rounds {}; the Bonferroni divisor must be the number of candidates the job may try",
         policy.max_rounds, request.budgets.max_rounds
     )))
+}
+
+/// The checks of a request and policy alone that a new job is frozen after,
+/// so a caller can refuse the job before it writes anything of its own.
+pub fn check_request(request: &JobRequest, policy: &PolicyV2) -> Result<()> {
+    validate_job_id(&request.job_id)?;
+    check_policy_shape(request, policy)?;
+    check_seed_spacing(request, policy)
 }
 
 /// Finding F2: a resume must repeat the request the job was frozen from. The
@@ -965,8 +980,7 @@ async fn freeze_job(
     request: &JobRequest,
     policy: &PolicyV2,
 ) -> Result<JobRecord> {
-    validate_job_id(&request.job_id)?;
-    check_seed_spacing(request, policy)?;
+    check_request(request, policy)?;
     let owner = request.owner.as_str();
     let definition = load_definition(access, owner, &request.definition_id)
         .await

@@ -302,21 +302,6 @@ async fn run(
         Some(behavior) => behavior.clone(),
         None => subject.default_behavior()?,
     };
-    let proposer: Box<dyn Proposer> = match proposer_arg {
-        ProposerArg::Scripted(script) => Box::new(scripted_proposer(script, args.rounds)?),
-        ProposerArg::Behavior { pack, behavior } => {
-            let proposer = behavior_proposer(
-                ctx,
-                args,
-                pack,
-                behavior.as_deref(),
-                &baseline_pack,
-                &behavior_id,
-            )
-            .await?;
-            Box::new(proposer)
-        }
-    };
     // Bonferroni: the divisor must be the number of candidates the budget
     // allows, and the driver refuses a policy that disagrees.
     // `defaults` is the uncalibrated policy sized to `--rounds`; a policy
@@ -370,6 +355,24 @@ async fn run(
         // fallback, so a resume repeats the frozen origin exactly.
         captures: Vec::new(),
         run_options: deps.options.clone(),
+    };
+    // A behavior proposer installs its pack, so a job refused on its request
+    // or policy is refused first and writes nothing.
+    gents::optimization::check_request(&request, &policy)?;
+    let proposer: Box<dyn Proposer> = match proposer_arg {
+        ProposerArg::Scripted(script) => Box::new(scripted_proposer(script, args.rounds)?),
+        ProposerArg::Behavior { pack, behavior } => {
+            let proposer = behavior_proposer(
+                ctx,
+                args,
+                pack,
+                behavior.as_deref(),
+                &request.baseline_pack,
+                &request.behavior_id,
+            )
+            .await?;
+            Box::new(proposer)
+        }
     };
     let outcome = follow(
         ctx,
