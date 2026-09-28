@@ -200,9 +200,16 @@ def observedClaimCases : List String :=
     ("rows", jsonArray (rows.map claimObservationJson)),
     ("allowed", toString (observedClaimAllowed candidate rows))]
 
+def assignmentRootCases : List String :=
+  [(none, none), (none, some "ordinary"), (some "new", none),
+   (some "new", some "new"), (some "new", some "old")].map fun (assigned, observed) => object [
+    ("assigned", jsonOptionalString assigned), ("observed", jsonOptionalString observed),
+    ("allowed", toString (Goals.assignmentAllows assigned observed))]
+
 def casesJson : String := object [
   ("admissions", jsonArray admissionCases), ("queues", jsonArray queueCases),
   ("observed_claims", jsonArray observedClaimCases),
+  ("assignment_roots", jsonArray assignmentRootCases),
   ("outcomes", jsonArray outcomeCases), ("cursors", jsonArray cursorCases),
   ("identities", jsonArray identityCases), ("sessions", jsonArray sessionCases)]
 
