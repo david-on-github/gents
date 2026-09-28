@@ -57,6 +57,7 @@ export function TaskEditor({
     enabled: task.enabled ?? true,
     description: task.description ?? "",
     promptTemplate: task.promptTemplate ?? "",
+    emitOutcome: task.emitOutcome ?? false,
     goalObjectiveTemplate: task.goalObjectiveTemplate ?? "",
     goalTokenBudget: str(task.goalTokenBudget),
     outputSchemaRef: task.outputSchemaRef ?? "",
@@ -82,6 +83,7 @@ export function TaskEditor({
           description: n.description || null,
           behavior_id: n.behaviorId,
           prompt_template: n.promptTemplate,
+          emit_outcome: n.emitOutcome,
           goal_objective_template: n.goalObjectiveTemplate || null,
           goal_token_budget: optionalInteger("Goal token budget", n.goalTokenBudget, {
             min: 1,
@@ -207,6 +209,7 @@ export function TaskEditor({
         <AreaRow
           id={id("prompt")}
           label="Prompt template"
+          description="Use {{ session.session_id }} and {{ request.request_id }} for this invocation’s identity."
           value={d.draft.promptTemplate}
           onChange={(v) => d.set("promptTemplate", v)}
           onCommit={d.commit}
@@ -216,7 +219,7 @@ export function TaskEditor({
         <AreaRow
           id={id("goal")}
           label="Durable goal objective"
-          description="Optional. Provisions this goal before the first request becomes runnable."
+          description="Optional. Applies this goal when the queued request starts."
           value={d.draft.goalObjectiveTemplate}
           onChange={(v) => d.set("goalObjectiveTemplate", v)}
           onCommit={d.commit}
@@ -226,12 +229,19 @@ export function TaskEditor({
         <NumberRow
           id={id("budget")}
           label="Goal token budget"
-          description="A positive whole number, or blank; needs an objective."
+          description="Optional positive whole number; blank leaves the goal unlimited. Needs an objective."
           value={d.draft.goalTokenBudget}
           onChange={(v) => d.set("goalTokenBudget", v)}
           onCommit={d.commit}
           onEnter={d.onEnter}
           placeholder="Optional"
+        />
+        <SwitchRow
+          id={id("outcome")}
+          label="Emit outcome"
+          description="Publish one FireOutcome when the request finishes, or when its goal completes, blocks or exhausts its budget. Leave off for tasks that consume outcomes."
+          checked={d.draft.emitOutcome}
+          onChange={(v) => d.choose("emitOutcome", v)}
         />
         <TextRow
           id={id("schema")}
@@ -441,6 +451,7 @@ function taskDocument(deployment: DeploymentView, t: TaskView) {
     description: t.description,
     behavior_id: t.behaviorId ?? "",
     prompt_template: t.promptTemplate ?? "",
+    emit_outcome: t.emitOutcome,
     goal_objective_template: t.goalObjectiveTemplate,
     goal_token_budget: t.goalTokenBudget,
     hooks: t.hooks.length ? t.hooks : null,

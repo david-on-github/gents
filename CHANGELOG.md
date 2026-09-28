@@ -61,6 +61,19 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Added
 
+- Document-triggered Tasks support durable `queued_serial` delivery, atomic
+  fire deduplication, restart catch-up and delivery after re-enabling a trigger
+  (#2041). Existing `serial` retains its skip-when-busy behavior.
+  `Trigger.session_id_template` and `gents config task run --continue-session`
+  target an existing session and queue behind its current request (#1445).
+  Task templates expose `session.session_id` and `request.request_id`; the
+  sessions tool marks the caller's session with `is_current`.
+  `Task.emit_outcome` opts into one `FireOutcome` when its request finishes,
+  or when its Goal completes, blocks or exhausts its budget. Temporary pauses,
+  usage limits and continuing Goal requests do not emit an outcome.
+- The desktop sessions list nests work under the session that started it,
+  including after that parent advances to another request (#2042).
+
 - Tools documents can set file tool limits: `host.files.max_read_chars`
   (default 32,000 bytes, allowed 1 to 1,000,000) for `read_file`, and
   `host.files.max_list_entries` and `host.files.max_matches` (default 200,

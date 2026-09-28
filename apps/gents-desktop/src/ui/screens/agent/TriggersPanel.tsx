@@ -65,6 +65,7 @@ export function TriggerEditor({
     taskId: cfg.task_id,
     enabled: cfg.enabled ?? true,
     concurrency: cfg.concurrency ?? "",
+    sessionIdTemplate: cfg.session_id_template ?? "",
     sourceKind: cfg.source.kind,
     sourceId:
       cfg.source.kind === "schedule"
@@ -109,8 +110,8 @@ export function TriggerEditor({
       description: next.description.trim() || null,
       task_id: next.taskId,
       enabled: next.enabled,
-      concurrency: (next.concurrency || null) as
-        "parallel" | "serial" | "latest_only" | null,
+      concurrency: (next.concurrency || null) as Trigger["concurrency"],
+      session_id_template: next.sessionIdTemplate.trim() || null,
       source:
         next.sourceKind === "schedule"
           ? { kind: "schedule", schedule_id: next.sourceId }
@@ -351,6 +352,16 @@ export function TriggerEditor({
           checked={d.draft.enabled}
           onChange={(v) => d.choose("enabled", v)}
         />
+        <TextRow
+          id={id("session")}
+          label="Existing session template"
+          description="Optional session ID or template such as {{ doc.lead_session_id }}. Busy sessions queue the request. Blank starts a new session."
+          value={d.draft.sessionIdTemplate}
+          onChange={(v) => d.set("sessionIdTemplate", v)}
+          onCommit={d.commit}
+          onEnter={d.onEnter}
+          mono
+        />
         <ChoiceRow
           id={id("concurrency")}
           label="Concurrency"
@@ -358,7 +369,8 @@ export function TriggerEditor({
           onChange={(v) => d.choose("concurrency", v)}
           items={[
             { value: "parallel", label: "Parallel" },
-            { value: "serial", label: "Serial" },
+            { value: "serial", label: "Serial (skip when busy)" },
+            { value: "queued_serial", label: "Queued serial" },
             { value: "latest_only", label: "Latest only" },
           ]}
           none="Default (parallel)"

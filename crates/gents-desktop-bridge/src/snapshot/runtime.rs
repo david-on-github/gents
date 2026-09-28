@@ -488,6 +488,7 @@ fn project_task_view(
     run_history: Vec<TaskRunSummaryView>,
 ) -> TaskView {
     TaskView {
+        emit_outcome: task.emit_outcome,
         task_id: task.task_id.clone(),
         name: normalize_optional(task.display_name.as_deref()),
         description: normalize_optional(task.description.as_deref()),
@@ -516,6 +517,7 @@ mod task_view_tests {
             "display_name": "Release",
             "behavior_id": "operator",
             "prompt_template": "Ship it",
+            "emit_outcome": true,
             "output_schema_ref": "schemas/release-result.json",
             "hooks": [
                 {
@@ -547,6 +549,7 @@ mod task_view_tests {
         );
 
         assert_eq!(view.hooks, task.hooks);
+        assert!(view.emit_outcome);
         assert_eq!(view.output_schema_ref, task.output_schema_ref);
         assert_eq!(view.tags, ["release", "operator"]);
         let wire = serde_json::to_value(view).expect("TaskView wire value");

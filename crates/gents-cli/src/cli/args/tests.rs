@@ -1343,3 +1343,27 @@ fn optimization_run_takes_a_proposer_timeout() {
     assert_eq!(parse(&[]), 600);
     assert_eq!(parse(&["--proposer-timeout-secs", "30"]), 30);
 }
+
+#[test]
+fn task_run_separates_invocation_identity_from_continued_session() {
+    let cli = Cli::try_parse_from([
+        "gents",
+        "task",
+        "run",
+        "worker",
+        "--session-id",
+        "run-42",
+        "--continue-session",
+        "existing-lead",
+    ])
+    .expect("continued Task run");
+    match cli.command {
+        Command::Task {
+            command: TaskCommand::Run(args),
+        } => {
+            assert_eq!(args.session_id.as_deref(), Some("run-42"));
+            assert_eq!(args.continue_session.as_deref(), Some("existing-lead"));
+        }
+        _ => panic!("expected Task run"),
+    }
+}

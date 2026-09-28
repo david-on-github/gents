@@ -249,6 +249,7 @@ pub use gents::document_config::{
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
+    pub emit_outcome: bool,
     pub task_id: String,
     pub name: Option<String>,
     pub description: Option<String>,
