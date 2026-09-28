@@ -96,6 +96,15 @@ async fn shared_snapshot_keeps_previous_accounting_until_new_request_dispatches(
         core.refresh_local_request(agent_did, request_id)
             .await
             .expect("refresh request");
+        assert!(
+            core.store()
+                .snapshot()
+                .requests
+                .iter()
+                .any(|row| row.request_id == request_id),
+            "refreshed request {request_id} missing from store: {:?}",
+            core.store().snapshot().requests
+        );
     }
 
     let accounted_json = gents::graphql::escape_graphql_string(&accounting_json(2_500));
@@ -127,6 +136,15 @@ async fn shared_snapshot_keeps_previous_accounting_until_new_request_dispatches(
         response.errors
     );
 
+    assert!(
+        core.store()
+            .snapshot()
+            .requests
+            .iter()
+            .any(|row| row.request_id == "request-pending"),
+        "pending request lost before snapshot: {:?}",
+        core.store().snapshot().requests
+    );
     let snapshot = build_session_snapshot_for_agent(
         core.as_ref(),
         Some(agent_did),

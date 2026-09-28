@@ -28,6 +28,7 @@ fn valid_fixture() -> (GraphIntent, Vec<StageCapability>) {
         agent_did: CALLER_DID.to_owned(),
         graph_id: "lean-validation-fixture".to_owned(),
         nodes: vec![GraphNode {
+            session: None,
             node_id: "worker".to_owned(),
             capability_id: "approved-worker".to_owned(),
             capability_revision: "v1".to_owned(),

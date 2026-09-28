@@ -276,4 +276,24 @@ theorem cached_reads_are_not_charged
   simp only [chargedTokens]
   omega
 
+/-- A Task assignment binds its physical root when it wins request claim.
+The existing authenticated continuation ancestry owner supplies observedRoot;
+this predicate grants no signature or ancestry authority. A missing assignment
+root retains ordinary tool-created Goal semantics. Rebinding leaves old signed
+ancestry intact but excludes it from current heads and queued continuation claims. -/
+def assignmentAllows (assignmentRoot observedRoot : Option String) : Bool :=
+  match assignmentRoot with
+  | none => true
+  | some root => observedRoot == some root
+
+theorem unbound_assignment_preserves_heads (observed : Option String) :
+    assignmentAllows none observed = true := rfl
+
+theorem bound_assignment_rejects_missing (root : String) :
+    assignmentAllows (some root) none = false := by simp [assignmentAllows]
+
+theorem reassignment_rejects_old_root (old next : String) (different : old ≠ next) :
+    assignmentAllows (some next) (some old) = false := by
+  simp [assignmentAllows, different]
+
 end Goals

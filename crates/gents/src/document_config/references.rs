@@ -406,6 +406,15 @@ impl ConfigReferences {
                                 .get(&(Collection::EventSource, event_source_id.clone()))
                                 .context("trigger event source missing")?,
                         )?;
+                        ensure!(
+                            crate::trigger_engine::durable::outcome_source_allowed(
+                                &source.source_collection,
+                                task.emit_outcome,
+                            ),
+                            "trigger {} sources FireOutcome but task {} enables emit_outcome",
+                            doc.trigger_id,
+                            task.task_id
+                        );
                         if source.group.is_some() {
                             &["args"]
                         } else {

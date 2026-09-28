@@ -1,7 +1,10 @@
 use super::*;
+use crate::client::store::ClientStore;
 
 #[path = "tests/backpressure.rs"]
 mod backpressure;
+#[path = "tests/mixed_batch.rs"]
+mod mixed_batch;
 #[path = "tests/overflow.rs"]
 mod overflow;
 

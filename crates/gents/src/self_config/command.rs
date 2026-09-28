@@ -447,8 +447,10 @@ The service must already exist under this principal."#
   edit KIND ID [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
 Tasks belong to the selected behavior. Triggers may reference only its tasks. Schedules and event sources are included only through those trigger links.
 For automation only, preview/edit are exact-ID upserts: a missing ID is previewed or created with the supplied fields; an existing ID is patched. Use target_id in native calls to supply ID and options.behavior to select the working behavior. The --set/--clear forms above are CLI argv notation; native calls use set/clear.
-For per-document triggers, parallel (default) allows independent invocations; serial skips a fire while prior work is active (it is not a queue); latest_only supersedes prior active work. Use parallel when every input must produce an output, including inputs arriving before the previous request finishes.
-Task templates use MiniJinja: {{ doc.message }} reads a source document field; {{ args.name }} reads an invocation argument. Missing values fail rendering; use an explicit default filter for optional fields. Go-style {{.message}} is invalid. Syntax is checked before publication, while available document fields depend on the linked source schema.
+For per-document triggers, parallel (default) allows independent invocations; queued_serial durably queues each fire behind prior work; serial skips a fire while prior work is active (it is not a queue); latest_only supersedes prior active work. Use queued_serial for ordered handoffs. Disabling a document trigger pauses delivery; re-enabling catches up its documents.
+Trigger session_id_template targets an existing session, for example {{ doc.lead_session_id }}; a busy target queues the request. Leave it absent to start a new session.
+Task templates use MiniJinja: {{ doc.message }} reads a source document field; {{ args.name }} reads an invocation argument; {{ session.session_id }} and {{ request.request_id }} identify the receiving session and request, including in goal_objective_template. Missing values fail rendering; use an explicit default filter for optional fields. Go-style {{.message}} is invalid. Syntax is checked before publication, while available document fields depend on the linked source schema.
+Task emit_outcome defaults to false. Opt in for one FireOutcome at request completion, or for a goal-backed task when its Goal completes, blocks or exhausts its budget. Paused or usage-limited Goals and continuing requests do not emit outcomes. Outcome-consuming inbox Tasks must leave emit_outcome false.
 Render every source field the behavior needs into the prompt, or grant an explicit scoped read tool. For example, passing only {{ doc.correlation }} does not give the behavior the message to transform.
 Delimit source values separately from instructions and metadata. Appending punctuation or a correlation ID beside a value can change what the model treats as input; specify the exact output contract and verify it with representative documents.
 Document automation: define the input collection's schema, connect an event source to a task through a trigger, and template source fields into the task prompt. Grant datastore reads/writes to behaviors that consume or publish documents. An external client may submit the input instead. Inspect available schema/datastore authoring tools; these automation commands do not create schemas or datastore tools.
@@ -1705,7 +1707,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
             patch_contract(
                 SelfConfigTarget::Task,
                 json!({
-                    "display_name":"string|null","description":"string|null","prompt_template":"string; rendered per invocation","goal_objective_template":"string|null","goal_token_budget":"positive integer|null","hooks":"array<{hook_id:string,phase:before|after_success|after_failure|finally,command:nonempty array<string>,timeout_secs?:positive integer}>; default []","enabled":"boolean; default true","output_schema_ref":"string|null","tags":"array<string>; default []"
+                    "display_name":"string|null","description":"string|null","prompt_template":"string; rendered per invocation","emit_outcome":"boolean; default false; leave false for outcome consumers","goal_objective_template":"string|null","goal_token_budget":"positive integer|null; absent means unlimited","hooks":"array<{hook_id:string,phase:before|after_success|after_failure|finally,command:nonempty array<string>,timeout_secs?:positive integer}>; default []","enabled":"boolean; default true","output_schema_ref":"string|null","tags":"array<string>; default []"
                 }),
             ),
             patch_contract(
@@ -1717,7 +1719,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
             patch_contract(
                 SelfConfigTarget::Trigger,
                 json!({
-                    "display_name":"string|null","description":"string|null","task_id":"existing task ID owned by selected behavior","source":"{kind:schedule,schedule_id:string}|{kind:event,event_source_id:string}","enabled":"boolean; default true","concurrency":"parallel|serial|latest_only|null; default parallel","tags":"array<string>; default []"
+                    "display_name":"string|null","description":"string|null","task_id":"existing task ID owned by selected behavior","source":"{kind:schedule,schedule_id:string}|{kind:event,event_source_id:string}","enabled":"boolean; default true","concurrency":"parallel|queued_serial|serial|latest_only|null; default parallel","session_id_template":"string|null; render an existing target session ID","tags":"array<string>; default []"
                 }),
             ),
             patch_contract(

@@ -22,8 +22,9 @@ pub use readiness_gate::{
     GoalGatedDecision, ObservedGoalBehavior, GOAL_READINESS_WAIT_PREFIX,
 };
 pub(crate) use request_head::{
-    authenticated_goal_request_members, goal_session_is_idle, latest_authenticated_session_request,
-    latest_goal_request, verify_goal_continuation_edge,
+    assignment_allows, assignment_request_id_in_txn, authenticated_goal_request_members,
+    goal_session_is_idle, latest_authenticated_session_request, latest_goal_request,
+    verify_goal_continuation_edge,
 };
 
 pub const GOAL_TRIGGER_KIND: &str = "goal";
@@ -193,6 +194,8 @@ pub const GOAL_FIELDS: &str = r#"
     status
     token_budget
     tokens_used
+    token_usage_baseline
+    assignment_root_request_doc_id
     active_time_seconds
     active_started_at
     consecutive_blocked_audits
@@ -537,7 +540,11 @@ pub struct GoalDocument {
     #[serde(default)]
     pub token_budget: Option<i64>,
     #[serde(default)]
+    pub assignment_root_request_doc_id: Option<String>,
+    #[serde(default)]
     pub tokens_used: Option<i64>,
+    #[serde(default)]
+    pub token_usage_baseline: Option<i64>,
     #[serde(default)]
     pub active_time_seconds: Option<i64>,
     #[serde(default)]
@@ -944,9 +951,7 @@ async fn fence_opened_graph_goal_in_txn(
             .cloned()
             .context("Goal opening request query omitted rows")?,
     )?;
-    let Some(head) =
-        latest_authenticated_session_request(&goal.agent_did, &goal.session_id, &requests)
-    else {
+    let Some(head) = latest_goal_request(goal, &requests) else {
         return Ok(());
     };
     if head.caused_by_trigger_kind.as_deref() == Some(GOAL_TRIGGER_KIND)
@@ -1126,6 +1131,8 @@ async fn stage_goal_and_claim(
             status: status.as_str().to_string(),
             token_budget,
             tokens_used: Some(0),
+            token_usage_baseline: Some(0),
+            assignment_root_request_doc_id: None,
             active_time_seconds: Some(0),
             active_started_at: status.accrues_active_time().then(|| now.to_string()),
             consecutive_blocked_audits: Some(initial_state.blocked_audits),
@@ -2109,6 +2116,169 @@ pub(crate) async fn load_canonical_goal_in_txn(
     Ok(goals.into_iter().next())
 }
 
+/// Trusted Task assignment runs only in the transaction that wins its request's
+/// claim. Ordinary Goal tools retain their explicit resume authority checks.
+pub(crate) async fn apply_claimed_task_goal_in_txn(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    request: &crate::watcher::AgentRequest,
+    now: &str,
+) -> Result<()> {
+    let owner = escape_graphql_string(&request.agent_did);
+    let request_id = escape_graphql_string(&request.request_id);
+    let response = txn.execute_local_response(&format!(
+        r#"{{ TriggerFire(filter: {{owner_did: {{_eq: "{owner}"}}, request_id: {{_eq: "{request_id}"}}}}) {{
+            _docID session_id goal_id goal_objective goal_token_budget goal_assignment_applied
+        }} }}"#,
+    )).await?;
+    #[derive(Deserialize)]
+    struct Assignment {
+        #[serde(rename = "_docID")]
+        doc_id: String,
+        session_id: String,
+        goal_id: Option<String>,
+        goal_objective: Option<String>,
+        goal_token_budget: Option<i64>,
+        #[serde(default)]
+        goal_assignment_applied: bool,
+    }
+    let assignments: Vec<Assignment> = rows(&response, "TriggerFire")?;
+    anyhow::ensure!(
+        assignments.len() <= 1,
+        "request has multiple Task fire receipts"
+    );
+    let Some(assignment) = assignments.into_iter().next() else {
+        return Ok(());
+    };
+    if assignment.goal_id.is_none() || assignment.goal_assignment_applied {
+        return Ok(());
+    }
+    anyhow::ensure!(
+        assignment.session_id == request.session_id,
+        "Task receipt session differs from claimed request"
+    );
+    anyhow::ensure!(
+        assignment.goal_id.as_deref()
+            == Some(deterministic_goal_id(&request.agent_did, &request.session_id).as_str()),
+        "Task receipt has a noncanonical Goal identity"
+    );
+    let objective = assignment
+        .goal_objective
+        .as_deref()
+        .map(str::trim)
+        .filter(|objective| !objective.is_empty())
+        .context("Goal-backed Task has no objective")?;
+    anyhow::ensure!(
+        assignment.goal_token_budget.is_none_or(|budget| budget > 0),
+        "Task Goal budget must be positive"
+    );
+    let previous = load_canonical_goal_in_txn(txn, &request.agent_did, &request.session_id).await?;
+    if let Some(goal) = &previous {
+        anyhow::ensure!(
+            goal.parsed_status().is_some(),
+            "existing Task Goal has an unknown status"
+        );
+        crate::trigger_engine::durable::publish_goal_outcomes(
+            txn,
+            &goal.agent_did,
+            &goal.goal_id,
+            goal.last_blocked_reason.as_deref().unwrap_or(&goal.status),
+            now,
+        )
+        .await?;
+    }
+    let was_active = previous
+        .as_ref()
+        .is_some_and(|goal| goal.parsed_status() == Some(GoalStatus::Active));
+    let next_sequence = previous
+        .as_ref()
+        .map(|goal| {
+            goal.continuation_sequence()
+                .checked_add(1)
+                .context("Task Goal continuation sequence exhausted")
+        })
+        .transpose()?
+        .unwrap_or(0);
+    if previous.is_none() || was_active {
+        set_goal_in_txn(
+            txn,
+            &request.agent_did,
+            &request.session_id,
+            Some(objective),
+            Some(GoalStatus::Active),
+            Some(assignment.goal_token_budget),
+        )
+        .await?;
+    }
+    let goal = load_canonical_goal_in_txn(txn, &request.agent_did, &request.session_id)
+        .await?
+        .context("Task Goal assignment has no canonical row")?;
+    let goal_doc_id = escape_graphql_string(&goal.doc_id);
+    let expected_sequence = goal.continuation_sequence();
+    let objective = escape_graphql_string(objective);
+    let budget = optional_int_graphql_field("token_budget", assignment.goal_token_budget);
+    let timestamp = escape_graphql_string(now);
+    let assignment_root = escape_graphql_string(&request.doc_id);
+    let reset = if was_active {
+        String::new()
+    } else {
+        let baseline =
+            session_token_usage_in_txn(txn, &request.agent_did, &request.session_id).await?;
+        format!(
+            r#"tokens_used: 0, token_usage_baseline: {baseline},
+            active_time_seconds: 0, active_started_at: "{timestamp}",
+            consecutive_blocked_audits: 0, last_blocked_request_id: null,
+            last_blocked_reason: null, last_continued_from_request_id: null,
+            wrapup_requested: false, wrapup_completed: false,
+            infrastructure_retry_count: 0, last_failure: null, completion_evidence: null,"#
+        )
+    };
+    let response = txn
+        .execute_local_response(&format!(
+            r#"mutation {{
+        update_Goal(filter: {{_docID: {{_eq: "{goal_doc_id}"}}, agent_did: {{_eq: "{owner}"}},
+            continuation_sequence: {{_eq: {expected_sequence}}}}}, input: {{
+            objective: "{objective}", status: "active", {budget}
+            assignment_root_request_doc_id: "{assignment_root}",
+            continuation_sequence: {next_sequence}, {reset} updated_at: "{timestamp}"
+        }}) {{_docID}}
+    }}"#
+        ))
+        .await?;
+    anyhow::ensure!(
+        response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("update_Goal"))
+            .is_some_and(mutation_returned_rows),
+        "Task Goal assignment lost its continuation fence"
+    );
+    let updated = load_canonical_goal_in_txn(txn, &request.agent_did, &request.session_id)
+        .await?
+        .context("assigned Task Goal disappeared")?;
+    request_head::retire_stale_assignment_continuations_in_txn(txn, &updated, None, now).await?;
+    fence_opened_graph_goal_in_txn(
+        txn,
+        previous.as_ref().and_then(GoalDocument::state),
+        &updated,
+    )
+    .await?;
+    let receipt_doc_id = escape_graphql_string(&assignment.doc_id);
+    txn.execute(&format!(
+        r#"mutation {{ update_TriggerFire(filter: {{_docID: {{_eq: "{receipt_doc_id}"}}}},
+        input: {{goal_assignment_applied: true}}) {{_docID}} }}"#
+    ))
+    .await?;
+    crate::trigger_engine::durable::publish_goal_outcomes(
+        txn,
+        &updated.agent_did,
+        &updated.goal_id,
+        "Task Goal assignment replaced",
+        now,
+    )
+    .await?;
+    Ok(())
+}
+
 async fn set_goal_in_txn(
     txn: &crate::config_client::ConfigApplyTxn<'_>,
     agent_did: &str,
@@ -2188,6 +2358,17 @@ async fn set_goal_in_txn(
             .await?
             .context("updated Goal row disappeared")?;
         fence_opened_graph_goal_in_txn(txn, Some(pre), &updated).await?;
+        crate::trigger_engine::durable::publish_goal_outcomes(
+            txn,
+            agent_did,
+            &updated.goal_id,
+            updated
+                .last_blocked_reason
+                .as_deref()
+                .unwrap_or(&updated.status),
+            &now_string,
+        )
+        .await?;
         return Ok(updated);
     }
 
@@ -2343,13 +2524,38 @@ pub async fn update_goal_fields_if_status(
             ) {{ _docID }}
         }}"#
     );
-    let response =
-        execute_goal_mutation_response(node, &mutation, "goal.update_controller_fields").await?;
-    Ok(response
-        .data
-        .as_ref()
-        .and_then(|data| data.get("update_Goal"))
-        .is_some_and(mutation_returned_rows))
+    crate::config_client::ConfigAccess::transact_local(
+        node,
+        None,
+        "goal.update_controller_fields",
+        |txn| {
+            Box::pin(async {
+                let response = txn.execute(&mutation).await?;
+                let won = response
+                    .pointer("/data/update_Goal")
+                    .is_some_and(mutation_returned_rows);
+                if won {
+                    let updated =
+                        load_canonical_goal_in_txn(txn, &goal.agent_did, &goal.session_id)
+                            .await?
+                            .context("updated Goal row disappeared")?;
+                    crate::trigger_engine::durable::publish_goal_outcomes(
+                        txn,
+                        &updated.agent_did,
+                        &updated.goal_id,
+                        updated
+                            .last_blocked_reason
+                            .as_deref()
+                            .unwrap_or(&updated.status),
+                        &Utc::now().to_rfc3339(),
+                    )
+                    .await?;
+                }
+                Ok(won)
+            })
+        },
+    )
+    .await
 }
 
 pub async fn claim_continuation(
@@ -2447,6 +2653,17 @@ pub async fn session_token_usage(
     agent_did: &str,
     session_id: &str,
 ) -> Result<i64> {
+    crate::config_client::ConfigAccess::transact_local(node, None, "goal.session_usage", |txn| {
+        Box::pin(async move { session_token_usage_in_txn(txn, agent_did, session_id).await })
+    })
+    .await
+}
+
+async fn session_token_usage_in_txn(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    agent_did: &str,
+    session_id: &str,
+) -> Result<i64> {
     let agent_did = escape_graphql_string(agent_did);
     let session_id = escape_graphql_string(session_id);
     let request_query = format!(
@@ -2454,8 +2671,7 @@ pub async fn session_token_usage(
             AgentRequest(filter: {{ purpose: {{ _eq: "normal" }}, agent_did: {{ _eq: "{agent_did}" }}, session_id: {{ _eq: "{session_id}" }} }}) {{ request_id }}
         }}"#
     );
-    let response =
-        graphql_with_transaction_retry(node, &request_query, "query goal session requests").await?;
+    let response = txn.execute_local_response(&request_query).await?;
     let mut request_ids = rows::<serde_json::Value>(&response, "AgentRequest")?
         .into_iter()
         .filter_map(|row| {
@@ -2488,8 +2704,7 @@ pub async fn session_token_usage(
         #[serde(default)]
         completion_tokens: Option<i64>,
     }
-    let response =
-        graphql_with_transaction_retry(node, &query, "query goal inference usage").await?;
+    let response = txn.execute_local_response(&query).await?;
     let usage_rows: Vec<UsageRow> =
         rows(&response, "InferenceCall").context("decoding goal inference usage")?;
     let charged = crate::provider_usage::sum_charged_from_persisted_parts(
@@ -2502,7 +2717,10 @@ pub async fn session_token_usage(
 }
 
 pub async fn refresh_goal_usage(node: &EmbeddedNode, goal: &GoalDocument) -> Result<i64> {
-    let tokens = session_token_usage(node, &goal.agent_did, &goal.session_id).await?;
+    let tokens = session_token_usage(node, &goal.agent_did, &goal.session_id)
+        .await?
+        .saturating_sub(goal.token_usage_baseline.unwrap_or_default().max(0))
+        .max(0);
     let now = Utc::now();
     let now_string = now.to_rfc3339();
     let active_time = goal.current_active_time_seconds(now);
@@ -2759,4 +2977,26 @@ mod tests {
         );
         assert_eq!((changed, accepted), (1, false));
     }
+}
+
+pub(crate) async fn fence_goal_continuation_claim_in_txn(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    request: &crate::watcher::AgentRequest,
+    now: &str,
+) -> Result<bool> {
+    if request.caused_by_trigger_kind.as_deref() != Some(GOAL_TRIGGER_KIND) {
+        return Ok(true);
+    }
+    let Some(goal) =
+        load_canonical_goal_in_txn(txn, &request.agent_did, &request.session_id).await?
+    else {
+        return Ok(true);
+    };
+    request_head::retire_stale_assignment_continuations_in_txn(
+        txn,
+        &goal,
+        Some(&request.doc_id),
+        now,
+    )
+    .await
 }

@@ -8,6 +8,11 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- Durable trigger delivery (#2041) adds non-branchable `TriggerFire`,
+  `EventSourceCursor`, and `FireOutcome` collections and updates the canonical
+  schema baseline. v0.20 still requires a fresh home; this does not provide an
+  additive migration for existing pre-0.20 stores.
+
 - Sub-agents are ordinary sessions, and 0.20.0 requires a fresh home (#1937).
   `spawn_subagent`, `wait_subagent`, `read_subagent`, `list_subagents` and
   `cancel_subagent` are replaced by the agents tool group
@@ -60,6 +65,23 @@ source consistency checks, not a separate runtime compatibility version.
   and paired runtimes together. Existing stores are not migrated (#1603).
 
 ### Added
+
+- Document-triggered Tasks support durable `queued_serial` delivery, atomic
+  fire deduplication, restart catch-up and delivery after re-enabling a trigger
+  (#2041). Delivery follows receiving-node arrival order, including replicated
+  arrivals. Existing `serial` retains its skip-when-busy behavior.
+  `Trigger.session_id_template` and `gents config task run --continue-session`
+  target an existing session and queue behind its current request (#1445).
+  Task templates expose `session.session_id` and `request.request_id`; the
+  sessions tool marks the caller's session with `is_current`.
+  `Task.emit_outcome` opts into one `FireOutcome` when its request finishes,
+  or when its Goal completes, blocks or exhausts its budget. Temporary pauses,
+  usage limits and continuing Goal requests do not emit an outcome. A request
+  ending before its Goal assignment is applied emits its request outcome; a
+  replaced active assignment emits `superseded`. Tasks consuming `FireOutcome`
+  cannot emit another outcome. Goal token budgets are off unless configured.
+- The desktop sessions list nests work under the session that started it,
+  including after that parent advances to another request (#2042).
 
 - Tools documents can set file tool limits: `host.files.max_read_chars`
   (default 32,000 bytes, allowed 1 to 1,000,000) for `read_file`, and
@@ -150,6 +172,9 @@ source consistency checks, not a separate runtime compatibility version.
   but rejects every all-digit value (#1735).
 
 ### Fixed
+
+- Desktop observation retains other agents when a document is deleted and prevents
+  an older reload from replacing a freshly observed request (#1960, #2054).
 
 - `config apply` no longer refuses an event source whose `correlation_field` or
   group `expected_count` field is declared non-nillable (`String!`, `Int!`) with

@@ -20,6 +20,10 @@ theorem T2_serial_at_most_one
       have h_monotone :=
         dispatchStep_parallel_count_eq s' snap intent t h_conc h_hyp_post
       exact Nat.le_trans h_monotone h_before
+    | queuedSerial =>
+      have h_monotone :=
+        dispatchStep_queuedSerial_count_eq s' snap intent t h_conc h_hyp_post
+      exact Nat.le_trans h_monotone h_before
     | latestOnly =>
       have h_monotone :=
         dispatchStep_latestOnly_count_le s' snap intent t h_conc h_hyp_post

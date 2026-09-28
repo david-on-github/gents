@@ -457,7 +457,7 @@ async fn agent_scope_isolation_under_drop_recovery() -> Result<()> {
 
     core.set_selected_agent_did(Some("did:alpha".to_string()));
 
-    timeout(Duration::from_secs(5), async {
+    let observed = timeout(Duration::from_secs(5), async {
         loop {
             let snap = core.store().snapshot();
             let dids: Vec<&str> = snap
@@ -471,8 +471,22 @@ async fn agent_scope_isolation_under_drop_recovery() -> Result<()> {
             sleep(Duration::from_millis(50)).await;
         }
     })
-    .await
-    .context("timed out waiting for both agents in store")??;
+    .await;
+    if observed.is_err() {
+        let durable = gents::graphql::graphql_with_transaction_retry(
+            core.node(),
+            "{ AgentPrincipal { agent_did } }",
+            "test.scope_timeout",
+        )
+        .await?;
+        anyhow::bail!(
+            "timed out waiting for both agents in store: snapshot={:?}, metrics={:?}, durable={:?}",
+            core.store().snapshot().agent_principals,
+            core.observer_metrics().await,
+            durable.data,
+        );
+    }
+    observed??;
 
     let snap = core.store().snapshot();
     let dids: Vec<&str> = snap

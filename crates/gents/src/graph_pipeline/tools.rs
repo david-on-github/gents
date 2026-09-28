@@ -212,6 +212,7 @@ mod tests {
             tags: vec![],
             graph_id: "model-pipeline".to_owned(),
             nodes: vec![GraphNode {
+                session: None,
                 node_id: "worker".to_owned(),
                 capability_id: capability_id.to_owned(),
                 capability_revision: "v1".to_owned(),

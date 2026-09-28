@@ -30,8 +30,27 @@ end TriggerKind
 inductive ConcurrencyMode where
   | parallel
   | serial
+  | queuedSerial
   | latestOnly
   deriving DecidableEq, Repr
+
+namespace Triggers
+
+/-- An outcome consumer cannot opt into publishing another outcome, even when
+its Task is also referenced by another source. Both configuration admission
+and request admission enforce this rule. -/
+def outcomeSourceAllowed (sourceCollection : String) (emitOutcome : Bool) : Bool :=
+  sourceCollection != "FireOutcome" || !emitOutcome
+
+theorem outcome_consumer_cannot_emit (emit : Bool)
+    (h : outcomeSourceAllowed "FireOutcome" emit = true) : emit = false := by
+  simpa [outcomeSourceAllowed] using h
+
+theorem ordinary_source_allows_outcome (source : String) (emit : Bool)
+    (h : source ≠ "FireOutcome") : outcomeSourceAllowed source emit = true := by
+  simp [outcomeSourceAllowed, h]
+
+end Triggers
 
 /-- Omission uses one source-independent default, including graph delivery. -/
 def resolveConcurrency (_source : TriggerKind) (configured : Option ConcurrencyMode) :

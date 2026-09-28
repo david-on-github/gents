@@ -84,6 +84,7 @@ fn configuration_fingerprint_reflects_schedule_set() {
     let baseline = base.configuration_fingerprint();
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "t1".to_string(),
         name: None,
         behavior_id: "general".to_string(),
@@ -97,6 +98,7 @@ fn configuration_fingerprint_reflects_schedule_set() {
         schedules: HashMap::from([(
             "s1".to_string(),
             ResolvedSchedule {
+                session_id_template: None,
                 trigger_doc_id: "s1-doc".to_string(),
                 schedule_id: "s1".to_string(),
                 task_id: "t1".to_string(),

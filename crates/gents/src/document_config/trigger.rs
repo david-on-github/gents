@@ -19,6 +19,11 @@ pub struct Trigger {
     pub description: Option<String>,
     pub task_id: String,
     pub source: TriggerSource,
+    /// Render an existing session ID from the fire scope. Missing/null creates
+    /// a session; a configured template must render a nonempty owned session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
+    pub session_id_template: Option<String>,
     #[serde(
         default = "super::serde_helpers::default_enabled",
         deserialize_with = "super::serde_helpers::deserialize_enabled",
@@ -80,9 +85,16 @@ pub enum ConcurrencyMode {
     #[default]
     Parallel,
     Serial,
+    /// Persist every fire and admit one request at a time in source order.
+    QueuedSerial,
     LatestOnly,
 }
 
 impl ConcurrencyMode {
-    pub const ALL: [Self; 3] = [Self::Parallel, Self::Serial, Self::LatestOnly];
+    pub const ALL: [Self; 4] = [
+        Self::Parallel,
+        Self::Serial,
+        Self::QueuedSerial,
+        Self::LatestOnly,
+    ];
 }

@@ -359,3 +359,24 @@ fn task_recent_runs_view_consumes_generated_trigger_dispatch_lineage_contract_ca
         );
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn summary_starter_resolves_physical_cause_outside_latest_request_cache() {
+    let (core, _tmp, parent_doc_id) = crate::tests::support::seed_provenance_fixture().await;
+    let access = gents::config_client::ConfigAccess::Local(core.node_arc());
+    assert_ne!(parent_doc_id, "req_parent");
+    let child = gents::session_origin::load_session(
+        &access,
+        "sess_child",
+        Some(crate::tests::support::OPERATOR),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut summaries = session_summaries(&[child], &[], crate::tests::support::OPERATOR, &[], &[]);
+    super::super::runtime_tasks::resolve_summary_starters(&access, &mut summaries).await;
+    let starter = summaries[0].started_by.as_ref().unwrap();
+    assert_eq!(starter.session_id, "sess_parent");
+    assert_eq!(starter.cause_request_doc_id, parent_doc_id);
+    assert_eq!(starter.agent_did, crate::tests::support::OPERATOR);
+}

@@ -214,6 +214,8 @@ impl MaterializerHandle for ProductionMaterializer {
         rendered_prompt: &str,
         rendered_goal_objective: Option<&str>,
         durable_fire_key: &str,
+        delivery: Option<&crate::trigger_engine::durable::PreparedFire>,
+        prepared_ids: Option<(&str, &str)>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<String>> + Send + '_>> {
         if matches!(trigger_kind, TriggerKind::Manual)
             && (trigger_id.is_some() || trigger_doc_id.is_some())
@@ -225,6 +227,9 @@ impl MaterializerHandle for ProductionMaterializer {
             });
         }
 
+        let prepared_ids =
+            prepared_ids.map(|(request, session)| (request.to_owned(), session.to_owned()));
+        let delivery = delivery.cloned();
         let resolved = self.resolve_behavior(task);
         let runtime_actor = self.runtime_actor();
         let node = self.node.clone();
@@ -281,9 +286,30 @@ impl MaterializerHandle for ProductionMaterializer {
                 trigger_context,
             };
             let workspace_ref = workspace.is_bound().then_some(&workspace);
-            let (enqueued, conversation_title) = if let Some(objective) =
-                rendered_goal_objective.as_deref()
-            {
+            let mut duplicate = false;
+            let (enqueued, conversation_title) = if let Some(prepared) = &delivery {
+                let fire = &prepared.receipt;
+                let title = task_session_title(&task_label);
+                let retry_key = if super::event_delivery::is_group_fire_key(&durable_fire_key) {
+                    &durable_fire_key
+                } else {
+                    &fire.fire_key
+                };
+                let create = build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title(
+                    &behavior_did, &behavior_name, &rendered_prompt, execution_origin, lineage,
+                    Some(&title), workspace_ref, &fire.request_id, &fire.session_id,
+                    Some(retry_key), requester_did, trigger_doc_id.as_deref(),
+                ).await?;
+                let admission = crate::lifecycle::write_trigger_delivery(
+                    node.as_ref(),
+                    runtime_actor,
+                    prepared,
+                    &create,
+                )
+                .await?;
+                duplicate = admission.duplicate;
+                (admission.request, title)
+            } else if let Some(objective) = rendered_goal_objective.as_deref() {
                 let identity = crate::goal::task_goal_fire_identity(
                     &behavior_did,
                     &task_id,
@@ -321,11 +347,16 @@ impl MaterializerHandle for ProductionMaterializer {
                     goal_token_budget.is_none(),
                     "goal token budget requires a goal objective template"
                 );
-                let request_id = if super::event_delivery::is_group_fire_key(&durable_fire_key) {
-                    durable_fire_key.clone()
-                } else {
-                    uuid::Uuid::new_v4().to_string()
-                };
+                let request_id = prepared_ids
+                    .as_ref()
+                    .map(|(request, _)| request.clone())
+                    .unwrap_or_else(|| {
+                        if super::event_delivery::is_group_fire_key(&durable_fire_key) {
+                            durable_fire_key.clone()
+                        } else {
+                            uuid::Uuid::new_v4().to_string()
+                        }
+                    });
                 let conversation_title = task_session_title(&task_label);
                 let enqueued =
                     write_pending_agent_request_with_lineage_workspace_and_conversation_title(
@@ -341,7 +372,7 @@ impl MaterializerHandle for ProductionMaterializer {
                         Some(&request_id),
                         requester_did,
                         trigger_doc_id.as_deref(),
-                        None,
+                        prepared_ids.as_ref().map(|(_, session)| session.as_str()),
                     )
                     .await?;
                 (enqueued, conversation_title)
@@ -366,7 +397,36 @@ impl MaterializerHandle for ProductionMaterializer {
                 conversation_title = %conversation_title,
                 "enqueued AgentRequest for trigger fire"
             );
-            Ok(enqueued.request_id)
+            if duplicate {
+                Err(super::MaterializeDuplicate {
+                    request_id: enqueued.request_id,
+                }
+                .into())
+            } else {
+                Ok(enqueued.request_id)
+            }
+        })
+    }
+
+    fn resolve_graph_session(
+        &self,
+        task: &crate::runtime_snapshot::ResolvedTask,
+        trigger_id: &str,
+        correlation: Option<&str>,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Option<String>>> + Send + '_>> {
+        let node = self.node.clone();
+        let resolved = self.resolve_behavior(task);
+        let trigger_id = trigger_id.to_owned();
+        let correlation = correlation.map(str::to_owned);
+        Box::pin(async move {
+            let (_, owner, _, _) = resolved?;
+            crate::graph_pipeline::resolve_graph_session(
+                node.as_ref(),
+                &trigger_id,
+                correlation.as_deref(),
+                &owner,
+            )
+            .await
         })
     }
 
@@ -435,6 +495,7 @@ impl MaterializerHandle for ProductionMaterializer {
         excluded_request_id: Option<&str>,
     ) -> Pin<Box<dyn std::future::Future<Output = Result<usize>> + Send + '_>> {
         let node = self.node.clone();
+        let owner = agent_did.to_owned();
         let escaped_agent_did = escape_graphql_string(agent_did);
         let escaped_trigger_id = escape_graphql_string(trigger_id);
         let request_exclusion_filter = excluded_request_id
@@ -442,7 +503,8 @@ impl MaterializerHandle for ProductionMaterializer {
             .map(|value| format!(r#", request_id: {{ _neq: "{value}" }}"#))
             .unwrap_or_default();
         Box::pin(async move {
-            let terminalized_at = escape_graphql_string(&chrono::Utc::now().to_rfc3339());
+            let now = chrono::Utc::now().to_rfc3339();
+            let terminalized_at = escape_graphql_string(&now);
             let mutation = format!(
                 r#"mutation {{
                     update_AgentRequest(
@@ -456,16 +518,44 @@ impl MaterializerHandle for ProductionMaterializer {
                             terminalized_at: "{terminalized_at}",
                             terminal_redrive_attempts: 0
                         }}
-                    ) {{ _docID }}
+                    ) {{ _docID request_id }}
                 }}"#,
                 agent_did = escaped_agent_did,
                 trigger_id = escaped_trigger_id,
                 request_exclusion_filter = request_exclusion_filter,
             );
-            let resp = crate::config_client::ConfigAccess::write_local_idempotent_update_response(
+            let resp = crate::config_client::ConfigAccess::transact_local(
                 node.as_ref(),
+                None,
                 "supersede_active_runtime_requests_for_trigger",
-                &mutation,
+                |txn| {
+                    let mutation = &mutation;
+                    let owner = &owner;
+                    let now = &now;
+                    Box::pin(async move {
+                        let response = txn.execute_local_response(mutation).await?;
+                        if let Some(rows) = response
+                            .data
+                            .as_ref()
+                            .and_then(|data| data["update_AgentRequest"].as_array())
+                        {
+                            for row in rows {
+                                if let Some(request_id) = row["request_id"].as_str() {
+                                    crate::trigger_engine::durable::publish_request_outcome(
+                                        txn,
+                                        owner,
+                                        request_id,
+                                        "superseded",
+                                        "newer trigger fire",
+                                        now,
+                                    )
+                                    .await?;
+                                }
+                            }
+                        }
+                        Ok(response)
+                    })
+                },
             )
             .await?;
             let mut count = resp
@@ -533,6 +623,37 @@ impl MaterializerHandle for ProductionMaterializer {
                 );
             }
             Ok(count)
+        })
+    }
+
+    fn recover_event_fire(
+        &self,
+        identity: &gents_protocol::trigger_delivery::FireIdentity,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<Option<String>>> + Send + '_>> {
+        let identity = identity.clone();
+        Box::pin(async move {
+            let key = crate::trigger_engine::durable::fire_key(&identity);
+            crate::config_client::ConfigAccess::transact_local(
+                self.node.as_ref(), Some(self.runtime_actor()?), "trigger.recover_admitted_fire",
+                |txn| { let key = key.clone(); let identity = identity.clone(); Box::pin(async move {
+                    let result = txn.execute(&format!(
+                        "{{ TriggerFire(filter: {{fire_key: {{_eq: \"{}\"}}}}, limit: 2) {{request_id}} }}",
+                        escape_graphql_string(&key),
+                    )).await?;
+                    let receipts = result["data"]["TriggerFire"].as_array()
+                        .context("event recovery omitted receipt rows")?;
+                    anyhow::ensure!(receipts.len() <= 1, "event fire receipt is not unique");
+                    let Some(receipt) = receipts.first() else { return Ok(None); };
+                    let request_id = identity.request_id();
+                    anyhow::ensure!(receipt["request_id"].as_str() == Some(request_id.as_str()), "event receipt request identity mismatch");
+                    let result = txn.execute(&format!(
+                        "{{ AgentRequest(filter: {{agent_did: {{_eq: \"{}\"}}, request_id: {{_eq: \"{}\"}}}}, limit: 2) {{_docID}} }}",
+                        escape_graphql_string(&identity.owner_did), escape_graphql_string(&request_id),
+                    )).await?;
+                    anyhow::ensure!(result["data"]["AgentRequest"].as_array().is_some_and(|rows| rows.len() == 1), "event receipt has no unique admitted request");
+                    Ok(Some(request_id))
+                }) },
+            ).await
         })
     }
 
@@ -620,7 +741,7 @@ impl MaterializerHandle for ProductionMaterializer {
                             agent_did: {{ _eq: "{agent_did}" }},
                             caused_by_trigger_id: {{ _eq: "{trigger_id}" }}
                         }}
-                    ) {{ _docID request_id }}
+                    ) {{ _docID request_id retry_key }}
                 }}"#,
             );
             let response = graphql_with_transaction_retry(
@@ -636,15 +757,17 @@ impl MaterializerHandle for ProductionMaterializer {
                 .and_then(serde_json::Value::as_array)
                 .is_some_and(|rows| {
                     rows.iter().any(|row| {
-                        row.get("request_id")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|request_id| {
-                                super::event_delivery::request_matches_fire_key(
-                                    &owner,
-                                    request_id,
-                                    &durable_fire_key,
-                                )
-                            })
+                        row["retry_key"].as_str() == Some(durable_fire_key.as_str())
+                            || row
+                                .get("request_id")
+                                .and_then(serde_json::Value::as_str)
+                                .is_some_and(|request_id| {
+                                    super::event_delivery::request_matches_fire_key(
+                                        &owner,
+                                        request_id,
+                                        &durable_fire_key,
+                                    )
+                                })
                     })
                 }))
         })

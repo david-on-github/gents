@@ -25,6 +25,8 @@ fn task_with_template(template: &str) -> Task {
 fn fire_scope(behavior_id: &str, now: &str, args: serde_json::Value) -> TemplateScope {
     let (node, ctx) = task_node_ctx("did:key:zPRINCIPAL", behavior_id, now);
     TemplateScope {
+        session: None,
+        request: None,
         event: serde_json::json!({}),
         doc: None,
         args: Some(args),
@@ -116,6 +118,8 @@ fn task_render_depends_only_on_read_variables() {
 
     let (node, ctx_a) = task_node_ctx("did:key:zPRINCIPAL", "fence", "T1");
     let a = TemplateScope {
+        session: None,
+        request: None,
         event: serde_json::json!({}),
         doc: None,
         args: Some(serde_json::json!({"task": "triage"})),
@@ -125,6 +129,8 @@ fn task_render_depends_only_on_read_variables() {
     };
     let (node_b, ctx_b) = task_node_ctx("did:key:zPRINCIPAL", "fence", "T2");
     let b = TemplateScope {
+        session: None,
+        request: None,
         event: serde_json::json!({"unrelated": 1}),
         doc: Some(serde_json::json!({"also": "unrelated"})),
         args: Some(serde_json::json!({"task": "triage"})),

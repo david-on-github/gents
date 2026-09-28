@@ -17,6 +17,15 @@ use crate::graphql::{escape_graphql_string, graphql_with_transaction_retry};
 
 pub const SESSION_HISTORY_TOOL_NAME: &str = "sessions";
 
+pub(crate) fn is_current_session(
+    caller_owner: &str,
+    caller_session: &str,
+    listed_owner: &str,
+    listed_session: &str,
+) -> bool {
+    caller_owner == listed_owner && caller_session == listed_session
+}
+
 const DEFAULT_LIMIT: usize = 10;
 const MAX_LIMIT: usize = 1000;
 const REQUEST_SCAN_LIMIT: usize = 5000;
@@ -46,6 +55,8 @@ pub struct SessionHistorySnapshot {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionHistoryRow {
     pub session_id: String,
+    #[serde(default)]
+    pub is_current: bool,
     pub behavior_id: Option<String>,
     pub title: Option<gents_protocol::session::SessionTitle>,
     pub tags: Vec<String>,
@@ -563,9 +574,28 @@ impl Tool for SessionHistoryTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let action = validate_action(args.action.as_deref())?;
         let output = match action {
-            SessionHistoryAction::List => serde_json::to_value(
-                load_session_history_snapshot(&self.node, &self.agent_did, args.limit).await?,
-            ),
+            SessionHistoryAction::List => {
+                let mut snapshot =
+                    load_session_history_snapshot(&self.node, &self.agent_did, args.limit).await?;
+                let current = crate::tool_call_lifecycle::runtime::current_tool_runtime_context();
+                for row in &mut snapshot.sessions {
+                    row.is_current = current.as_ref().is_some_and(|context| {
+                        context
+                            .agent_did
+                            .as_deref()
+                            .zip(context.session_id.as_deref())
+                            .is_some_and(|(owner, session)| {
+                                is_current_session(
+                                    owner,
+                                    session,
+                                    &snapshot.agent_did,
+                                    &row.session_id,
+                                )
+                            })
+                    });
+                }
+                serde_json::to_value(snapshot)
+            }
             SessionHistoryAction::Get => {
                 let session_id = args
                     .session_id
@@ -1216,6 +1246,7 @@ fn build_session_rows(
                 latest_request.and_then(|row| clean(row.created_at.as_ref()));
 
             Some(SessionHistoryRow {
+                is_current: false,
                 session_id: session_id.clone(),
                 behavior_id: clean(session.behavior_id.as_ref()),
                 title: session.title.clone(),
@@ -2036,6 +2067,114 @@ mod tests {
         .await
         .unwrap()
         .is_none());
+    }
+
+    #[tokio::test]
+    async fn sessions_marks_only_the_callers_own_session_in_concurrent_tool_scopes() {
+        use crate::config_client::ConfigAccess;
+        use crate::tool_call_lifecycle::runtime::{
+            scope_request_tool_execution_with_session, scope_tool_request_identity,
+        };
+
+        let node = Arc::new(EmbeddedNode::builder().build().await.unwrap());
+        crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
+        let identities = tempfile::tempdir().unwrap();
+        let owner = pin_fixed_signing_identity(identities.path());
+        let other = KeyIdentity::load_or_create(identities.path().join("other.key"), None).unwrap();
+        for (identity, session_id, request_id) in [
+            (&owner, "session-a", "latest-request-a"),
+            (&owner, "session-b", "latest-request-b"),
+            (&other, "session-a", "foreign-latest-request"),
+        ] {
+            let mutation = format!(
+                r#"mutation {{ create_AgentSession(input: {{
+                    agent_did: "{}", requester_did: "{}", session_id: "{}",
+                    behavior_id: "shared-behavior", created_at: "2026-09-01T00:00:00Z"
+                }}) {{ _docID }} }}"#,
+                escape_graphql_string(identity.did()),
+                escape_graphql_string(identity.did()),
+                escape_graphql_string(session_id),
+            );
+            ConfigAccess::write_local(&node, "test.sessions.current.session", &mutation)
+                .await
+                .unwrap();
+            let mut request = gents_protocol::request_admission::AgentRequestCreate::base(
+                gents_protocol::request_admission::RequestPurpose::Normal,
+                request_id,
+                identity.did(),
+                identity.did(),
+                "shared-behavior",
+                session_id,
+                "sessions current caller fixture",
+                "interactive",
+                "2026-09-01T00:00:00Z",
+                gents_protocol::request_admission::AgentRequestAdmissionRecord::local_self(
+                    identity.did(),
+                ),
+            );
+            crate::sign_agent_request_create(identity, &mut request)
+                .await
+                .unwrap();
+            ConfigAccess::write_local(
+                &node,
+                "test.sessions.current.request",
+                &request.graphql_mutation().unwrap(),
+            )
+            .await
+            .unwrap();
+        }
+        let tool = SessionHistoryTool::new(node, owner.did());
+        let list = || async {
+            let output = Tool::call(
+                &tool,
+                SessionHistoryParams {
+                    action: Some("list".into()),
+                    limit: Some(10),
+                    session_id: None,
+                },
+            )
+            .await
+            .unwrap();
+            let snapshot: SessionHistorySnapshot = serde_json::from_str(&output).unwrap();
+            assert_eq!(snapshot.agent_did, owner.did());
+            assert_eq!(snapshot.sessions.len(), 2);
+            assert!(snapshot.sessions.iter().all(|row| {
+                row.behavior_id.as_deref() == Some("shared-behavior")
+                    && row.latest_request_id.as_deref() != Some("foreign-latest-request")
+            }));
+            snapshot
+                .sessions
+                .into_iter()
+                .filter(|row| row.is_current)
+                .map(|row| row.session_id)
+                .collect::<Vec<_>>()
+        };
+        let scoped_list = |agent_did: String, session_id: &str| {
+            scope_tool_request_identity(
+                Some(agent_did.clone()),
+                Some(agent_did),
+                Some("shared-behavior".into()),
+                Some("caller-request-not-the-latest-request".into()),
+                scope_request_tool_execution_with_session(
+                    None,
+                    tokio_util::sync::CancellationToken::new(),
+                    None,
+                    None,
+                    Some(session_id.to_owned()),
+                    list(),
+                ),
+            )
+        };
+        let (a, b) = tokio::join!(
+            scoped_list(owner.did().to_owned(), "session-a"),
+            scoped_list(owner.did().to_owned(), "session-b"),
+        );
+        assert_eq!(a, vec!["session-a"]);
+        assert_eq!(b, vec!["session-b"]);
+        assert!(scoped_list(other.did().to_owned(), "session-a")
+            .await
+            .is_empty());
+        assert!(list().await.is_empty());
     }
 
     #[tokio::test]

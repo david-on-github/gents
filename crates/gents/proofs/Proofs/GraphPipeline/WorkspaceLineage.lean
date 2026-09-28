@@ -234,4 +234,82 @@ theorem captured_cause_no_publication (state : LogicalInvocation.PublicationStat
     publish state expected context source explicit = state := by
   simp [publish, LogicalInvocation.captured_failure_blocks_publication state expected h]
 
+namespace SessionContinuation
+
+inductive RouteKind where
+  | selectedEntry | grouped | perDocument
+  deriving DecidableEq, Repr
+
+structure Eligibility where
+  sourceIsTask : Bool
+  targetExists : Bool
+  targetIsTask : Bool
+  routeCount : Nat
+  routeKind : RouteKind
+  deriving DecidableEq, Repr
+
+/-- A selected entry has one immutable run seed. A grouped route has one
+EventGroupState per pinned consumer/configuration/correlation. These native
+publication premises, not the concurrency setting, establish singleton identity. -/
+def eligible (e : Eligibility) : Bool :=
+  e.sourceIsTask && e.targetExists && e.targetIsTask && e.routeCount == 1 &&
+    e.routeKind != .perDocument
+
+structure Candidate where
+  root : Root
+  owner : Nat
+  session : Nat
+  deriving DecidableEq, Repr
+
+structure Selection where
+  session : Nat
+  rootDoc : Nat
+  firingNode : Nat
+  deriving DecidableEq, Repr
+
+def candidateMatches (context : Context) (owner : Nat) (candidate : Candidate) : Bool :=
+  candidate.owner == owner && rootMatches context candidate.root
+
+def resolve (e : Eligibility) (context : Context) (owner firingNode targetNode : Nat)
+    (candidates : List Candidate) : Option Selection :=
+  if eligible e && context.runAndPlanVerified && context.destinationRouteVerified &&
+      firingNode != targetNode then
+    match candidates.filter (candidateMatches context owner) with
+    | [candidate] => some ⟨candidate.session, candidate.root.docId, firingNode⟩
+    | _ => none
+  else none
+
+theorem fanout_denied (e : Eligibility) (h : e.routeKind = .perDocument) :
+    eligible e = false := by simp [eligible, h]
+
+theorem multiple_routes_denied (e : Eligibility) (h : e.routeCount ≠ 1) :
+    eligible e = false := by simp [eligible, h]
+
+theorem missing_root_denied (e : Eligibility) (context : Context) (owner firing target : Nat)
+    (candidates : List Candidate) (h : candidates.filter (candidateMatches context owner) = []) :
+    resolve e context owner firing target candidates = none := by simp [resolve, h]
+
+theorem ambiguous_root_denied (e : Eligibility) (context : Context) (owner firing target : Nat)
+    (candidates : List Candidate) (a b : Candidate) (rest : List Candidate)
+    (h : candidates.filter (candidateMatches context owner) = a :: b :: rest) :
+    resolve e context owner firing target candidates = none := by simp [resolve, h]
+
+theorem firing_attribution_preserved (e : Eligibility) (context : Context)
+    (owner firing target : Nat) (candidates : List Candidate) (selected : Selection)
+    (h : resolve e context owner firing target candidates = some selected) :
+    selected.firingNode = firing := by
+  unfold resolve at h
+  split at h
+  · split at h
+    · cases Option.some.inj h
+      rfl
+    · contradiction
+  · contradiction
+
+theorem foreign_owner_denied (context : Context) (owner : Nat) (candidate : Candidate)
+    (h : candidate.owner ≠ owner) : candidateMatches context owner candidate = false := by
+  simp [candidateMatches, h]
+
+end SessionContinuation
+
 end GraphPipeline.WorkspaceLineage

@@ -51,8 +51,12 @@ pub(crate) struct TaskRunOutput {
     pub(crate) request_doc_id: String,
     pub(crate) input: RequestInput,
     pub(crate) status: &'static str,
+    pub(crate) duplicate: bool,
 }
 
+/// Manual invocations use the loaded Task document as their source identity.
+/// The invocation key distinguishes their synthetic trigger identities; request
+/// provenance remains manual because no persisted Trigger fired this request.
 pub(crate) async fn enqueue_task_run(args: &ConfigTaskRunArgs) -> Result<TaskRunOutput> {
     let task_id =
         resolve_task_id_for("run", args.task_id.as_deref(), args.task_id_flag.as_deref())?;
@@ -67,12 +71,12 @@ pub(crate) async fn enqueue_task_run(args: &ConfigTaskRunArgs) -> Result<TaskRun
 
     let agent_did = crate::resolve_agent_did(args.home.as_deref(), None)?;
     ensure_local_request_signer(args.home.as_deref(), &agent_did)?;
-    let task = access
+    let (task_doc_id, task) = access
         .transact("cli.task_run.read", |txn| {
             let agent_did = &agent_did;
             let task_id = &task_id;
             Box::pin(async move {
-                let (_, value) = gents::config_client::read_desired_state_record_in_txn(
+                let (task_doc_id, value) = gents::config_client::read_desired_state_record_in_txn(
                     txn,
                     gents::Collection::Task,
                     agent_did,
@@ -97,10 +101,11 @@ pub(crate) async fn enqueue_task_run(args: &ConfigTaskRunArgs) -> Result<TaskRun
                     "AgentBehavior {} is disabled",
                     behavior.behavior_id
                 );
-                Ok(task)
+                Ok((task_doc_id, task))
             })
         })
         .await?;
+    let emit_outcome = task.emit_outcome;
     let behavior_id = task.behavior_id;
     let prompt_template = task.prompt_template;
     let goal_objective_template = task.goal_objective_template;
@@ -110,35 +115,56 @@ pub(crate) async fn enqueue_task_run(args: &ConfigTaskRunArgs) -> Result<TaskRun
         goal_token_budget,
     )?;
 
-    let goal_identity = resolve_task_goal_identity(
-        &agent_did,
+    let invocation_key = resolve_invocation_key(
         &task_id,
-        goal_objective_template.as_deref(),
-        args.session_id.as_deref(),
+        goal_objective_template.is_some(),
+        goal_objective_template
+            .as_ref()
+            .and(args.session_id.as_deref()),
     )?;
-    let prior_created_at = if let Some(identity) = &goal_identity {
-        match lookup_request_by_retry_key(&access, &agent_did, &identity.retry_key).await? {
-            Some(request) => {
-                anyhow::ensure!(
-                    request.request_id == identity.request_id,
-                    "goal-backed task retry_key conflicts with request_id {}",
-                    request.request_id
-                );
-                Some(
-                    request
-                        .created_at
-                        .context("goal-backed task request is missing created_at")?,
-                )
-            }
-            None => None,
-        }
-    } else {
-        None
+    let identity = gents_protocol::trigger_delivery::FireIdentity {
+        owner_did: agent_did.clone(),
+        trigger_id: format!("manual:{task_id}:{invocation_key}"),
+        source_collection: "Task".into(),
+        source_doc_id: task_doc_id,
     };
+    let fire_key = gents::lifecycle::task_fire_key(&identity);
+    let request_id = format!("trigger-request:{fire_key}");
+    anyhow::ensure!(goal_objective_template.is_some() || args.session_id.is_none() || args.continue_session.is_none(),
+        "ordinary Tasks accept either --session-id for a session label or --continue-session for an existing session, not both");
+    let session_id = match args.continue_session.as_deref() {
+        Some(id) => {
+            anyhow::ensure!(
+                !id.trim().is_empty(),
+                "--continue-session must not be empty"
+            );
+            id.to_owned()
+        }
+        None => args
+            .session_id
+            .as_ref()
+            .filter(|id| goal_objective_template.is_none() && !id.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("trigger-session:{fire_key}")),
+    };
+    let prior_created_at = lookup_request_by_retry_key(&access, &agent_did, &fire_key)
+        .await?
+        .map(|request| {
+            anyhow::ensure!(
+                request.request_id == request_id,
+                "Task fire identity conflicts with request ID"
+            );
+            request
+                .created_at
+                .context("Task fire request is missing created_at")
+        })
+        .transpose()?;
     let now = prior_created_at
         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     let (node_scope, ctx_scope) = task_node_ctx(&agent_did, &behavior_id, &now);
     let scope = TemplateScope {
+        session: Some(serde_json::json!({"session_id": session_id})),
+        request: Some(serde_json::json!({"request_id": request_id})),
         event: serde_json::json!({
             "fired_at": now,
             "trigger_id": serde_json::Value::Null,
@@ -166,20 +192,6 @@ pub(crate) async fn enqueue_task_run(args: &ConfigTaskRunArgs) -> Result<TaskRun
         anyhow::bail!("Task {} rendered an empty goal objective", task_id);
     }
 
-    let request_id = goal_identity
-        .as_ref()
-        .map(|identity| identity.request_id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let session_id = goal_identity
-        .as_ref()
-        .map(|identity| identity.session_id.clone())
-        .or_else(|| {
-            args.session_id
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     let (content, input) = content_and_input_with_prompt_selected_skill_ids(None, &content);
     let admission =
         gents_protocol::request_admission::AgentRequestAdmissionRecord::local_self(&agent_did);
@@ -190,9 +202,7 @@ pub(crate) async fn enqueue_task_run(args: &ConfigTaskRunArgs) -> Result<TaskRun
                 trigger_kind: Some("manual".to_string()),
                 ..Default::default()
             },
-            retry_key: goal_identity
-                .as_ref()
-                .map(|identity| identity.retry_key.clone()),
+            retry_key: Some(fire_key.clone()),
             ..gents::RequestSpec::new(
                 gents_protocol::request_admission::RequestPurpose::Normal,
                 gents::RequestIdentity {
@@ -211,93 +221,81 @@ pub(crate) async fn enqueue_task_run(args: &ConfigTaskRunArgs) -> Result<TaskRun
         gents::RequestSigner::RegisteredTarget,
     )
     .await?;
-    let doc_id = if let Some(objective) = rendered_goal_objective.as_deref() {
-        gents::goal::submit_goal_backed_request(
-            &access,
-            &agent_did,
-            &session_id,
-            objective,
-            goal_token_budget,
-            &create,
-        )
-        .await?;
-        lookup_request_by_retry_key(
-            &access,
-            &agent_did,
-            goal_identity
-                .as_ref()
-                .expect("rendered goal has deterministic identity")
-                .retry_key
-                .as_str(),
-        )
-            .await?
-            .map(|request| {
-                request
-                    .doc_id
-                    .context("goal-backed task request is missing _docID")
-            })
-            .transpose()?
-            .ok_or_else(|| {
-                anyhow!(
-                    "goal-backed AgentRequest for task {} committed but lookup by retry_key returned nothing",
-                    task_id
-                )
-            })?
-    } else {
-        let mutation = create.graphql_mutation().map_err(anyhow::Error::msg)?;
-        let response = access.write("cli.task_run.request", &mutation).await?;
-        if let Some(errs) = response.get("errors").and_then(|v| v.as_array()) {
-            if !errs.is_empty() {
-                anyhow::bail!("create manual AgentRequest failed: {errs:?}");
-            }
-        }
-        match extract_doc_id(&response) {
-            Some(doc_id) => doc_id,
-            None => lookup_doc_id_by_request_id(&access, &agent_did, &request_id)
-                .await?
-                .ok_or_else(|| {
-                    anyhow!(
-                        "manual AgentRequest for task {} persisted but _docID lookup by request_id returned nothing",
-                        task_id
-                    )
-                })?,
-        }
+    let fire = gents_protocol::trigger_delivery::TriggerFire {
+        fire_key,
+        identity,
+        task_id: task_id.clone(),
+        request_id: request_id.clone(),
+        session_id: session_id.clone(),
+        goal_id: rendered_goal_objective
+            .as_ref()
+            .map(|_| gents::goal::deterministic_goal_id(&agent_did, &session_id)),
+        goal_objective: rendered_goal_objective,
+        goal_token_budget,
+        goal_assignment_applied: false,
+        emit_outcome,
+        queued_serial: false,
+        source_handoff_id: Some(invocation_key),
+        reply_session_id: None,
+        shard_id: None,
+        attempt: None,
+        created_at: now,
     };
+    let admitted = gents::lifecycle::write_task_delivery(
+        &access,
+        &fire,
+        args.continue_session.is_some(),
+        &create,
+    )
+    .await?;
 
+    let (behavior_id, input) = if admitted.duplicate {
+        let persisted = lookup_request_by_retry_key(&access, &agent_did, &fire.fire_key)
+            .await?
+            .context("duplicate Task fire is missing its admitted request")?;
+        (
+            persisted
+                .behavior_id
+                .context("admitted Task request lacks behavior_id")?,
+            persisted.input.unwrap_or_default(),
+        )
+    } else {
+        (behavior_id, input)
+    };
     Ok(TaskRunOutput {
         task_id,
         behavior_id,
         agent_did,
-        request_id,
-        session_id,
-        request_doc_id: doc_id,
+        request_id: admitted.request.request_id,
+        session_id: admitted.request.session_id,
+        request_doc_id: admitted.request.doc_id,
         input,
-        status: "pending",
+        status: if admitted.duplicate {
+            "duplicate"
+        } else {
+            "pending"
+        },
+        duplicate: admitted.duplicate,
     })
 }
 
-fn resolve_task_goal_identity(
-    agent_did: &str,
+/// Goal invocations use the explicit stable key. Ordinary calls retain their
+/// fresh-invocation behavior even when --session-id supplies a session label.
+fn resolve_invocation_key(
     task_id: &str,
-    goal_objective_template: Option<&str>,
-    session_id: Option<&str>,
-) -> Result<Option<gents::goal::TaskGoalFireIdentity>> {
-    let Some(_) = goal_objective_template else {
-        return Ok(None);
-    };
-    let session_id = session_id
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| {
-            anyhow!(
-                "Task {} declares a durable goal; pass --session-id with a stable invocation identity so retries converge",
-                task_id
-            )
-    })?;
-    Ok(Some(gents::goal::task_goal_fire_identity(
-        agent_did,
-        task_id,
-        &format!("cli:{session_id}"),
-    )))
+    goal_backed: bool,
+    stable_key: Option<&str>,
+) -> Result<String> {
+    match stable_key {
+        Some(key) => {
+            anyhow::ensure!(!key.trim().is_empty(), "--session-id must not be empty");
+            Ok(key.to_owned())
+        }
+        None if goal_backed => anyhow::bail!(
+            "Task {task_id} declares a durable goal; pass --session-id with a stable invocation identity so retries converge"
+        ),
+        None => Ok(uuid::Uuid::new_v4().to_string()),
+    }
 }
 
 async fn lookup_request_by_retry_key(
@@ -310,6 +308,8 @@ async fn lookup_request_by_retry_key(
             AgentRequest(filter: {{ agent_did: {{ _eq: "{owner}" }}, requester_did: {{ _eq: "{owner}" }}, retry_key: {{ _eq: "{key}" }} }}, limit: 2) {{
                 _docID
                 request_id
+                behavior_id
+                input
                 created_at
             }}
         }}"#,
@@ -319,7 +319,7 @@ async fn lookup_request_by_retry_key(
     let response = access.execute(&query).await?;
     if let Some(errors) = response.get("errors").and_then(Value::as_array) {
         if !errors.is_empty() {
-            anyhow::bail!("lookup goal-backed task request failed: {errors:?}");
+            anyhow::bail!("lookup Task fire request failed: {errors:?}");
         }
     }
     let rows = response
@@ -329,51 +329,14 @@ async fn lookup_request_by_retry_key(
         .cloned()
         .unwrap_or_default();
     if rows.len() > 1 {
-        anyhow::bail!("goal-backed task retry_key resolved to multiple AgentRequest rows");
+        anyhow::bail!("Task fire retry_key resolved to multiple AgentRequest rows");
     }
     rows.first()
         .cloned()
         .map(|row| {
-            serde_json::from_value(row)
-                .context("decoding goal-backed task canonical AgentRequest row")
+            serde_json::from_value(row).context("decoding Task fire canonical AgentRequest row")
         })
         .transpose()
-}
-
-#[cfg(test)]
-mod goal_identity_tests {
-    use super::resolve_task_goal_identity;
-
-    #[test]
-    fn ordinary_task_run_needs_no_stable_session() {
-        assert!(
-            resolve_task_goal_identity("did:test:one", "task", None, None)
-                .expect("ordinary identity")
-                .is_none()
-        );
-    }
-
-    #[test]
-    fn durable_task_run_requires_stable_session() {
-        let error = resolve_task_goal_identity("did:test:one", "task", Some("objective"), None)
-            .expect_err("durable task must require session");
-        assert!(error.to_string().contains("--session-id"));
-    }
-
-    #[test]
-    fn durable_task_retry_identity_is_deterministic() {
-        let first =
-            resolve_task_goal_identity("did:test:one", "task", Some("objective"), Some("run-42"))
-                .expect("first identity")
-                .expect("goal identity");
-        let retry =
-            resolve_task_goal_identity("did:test:one", "task", Some("objective"), Some("run-42"))
-                .expect("retry identity")
-                .expect("goal identity");
-        assert_eq!(first, retry);
-        assert_ne!(first.session_id, "run-42");
-        assert!(first.session_id.contains("task-goal-session"));
-    }
 }
 
 pub(crate) fn resolve_task_id_for(
@@ -396,67 +359,6 @@ pub(crate) fn resolve_task_id_for(
             "missing task id\nNext:\n  1. Pass it positionally: `gents task {command} TASK_ID`\n  2. Or use `--task-id TASK_ID`"
         ),
     }
-}
-
-async fn lookup_doc_id_by_request_id(
-    access: &ConfigAccess,
-    agent_did: &str,
-    request_id: &str,
-) -> Result<Option<String>> {
-    let query = format!(
-        r#"query {{
-            AgentRequest(filter: {{ agent_did: {{ _eq: "{owner}" }}, requester_did: {{ _eq: "{owner}" }}, request_id: {{ _eq: "{id}" }} }}, limit: 2) {{
-                _docID
-            }}
-        }}"#,
-        id = escape_graphql_string(request_id),
-        owner = escape_graphql_string(agent_did),
-    );
-    let response = access.execute(&query).await?;
-    if let Some(errs) = response.get("errors").and_then(|v| v.as_array()) {
-        if !errs.is_empty() {
-            anyhow::bail!("lookup AgentRequest by request_id {request_id} failed: {errs:?}");
-        }
-    }
-    let rows = response
-        .get("data")
-        .and_then(|d| d.get("AgentRequest"))
-        .and_then(|arr| arr.as_array())
-        .cloned()
-        .unwrap_or_default();
-    if rows.len() > 1 {
-        anyhow::bail!(
-            "lookup AgentRequest by request_id {request_id} is ambiguous across {} documents",
-            rows.len()
-        );
-    }
-    Ok(rows
-        .first()
-        .and_then(|row| row.get("_docID"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string()))
-}
-
-fn extract_doc_id(response: &Value) -> Option<String> {
-    let data = response.get("data")?;
-    let candidates = [
-        data.get("create_AgentRequest"),
-        data.get("add_AgentRequest"),
-    ];
-    for value in candidates.into_iter().flatten() {
-        if let Some(doc_id) = value.get("_docID").and_then(|v| v.as_str()) {
-            return Some(doc_id.to_string());
-        }
-        if let Some(doc_id) = value
-            .as_array()
-            .and_then(|rows| rows.first())
-            .and_then(|row| row.get("_docID"))
-            .and_then(|v| v.as_str())
-        {
-            return Some(doc_id.to_string());
-        }
-    }
-    None
 }
 
 #[cfg(test)]
@@ -510,50 +412,14 @@ mod tests {
     }
 
     #[test]
-    fn extract_doc_id_handles_object_and_array_shapes() {
-        let object_shape = serde_json::json!({
-            "data": { "create_AgentRequest": { "_docID": "doc-1" } }
-        });
-        assert_eq!(extract_doc_id(&object_shape), Some("doc-1".to_string()));
-
-        let array_shape = serde_json::json!({
-            "data": { "create_AgentRequest": [ { "_docID": "doc-2" } ] }
-        });
-        assert_eq!(extract_doc_id(&array_shape), Some("doc-2".to_string()));
-
-        let empty = serde_json::json!({
-            "data": { "create_AgentRequest": [] }
-        });
-        assert_eq!(extract_doc_id(&empty), None);
-    }
-
-    #[test]
-    fn extract_doc_id_returns_none_when_response_omits_doc_id_entirely() {
-        let object_without_doc_id = serde_json::json!({
-            "data": { "create_AgentRequest": {} }
-        });
-        assert_eq!(extract_doc_id(&object_without_doc_id), None);
-
-        let array_without_doc_id = serde_json::json!({
-            "data": { "create_AgentRequest": [ {} ] }
-        });
-        assert_eq!(extract_doc_id(&array_without_doc_id), None);
-
-        let missing_field = serde_json::json!({ "data": {} });
-        assert_eq!(extract_doc_id(&missing_field), None);
-    }
-
-    #[test]
-    fn extract_doc_id_handles_add_alias_response() {
-        let add_object = serde_json::json!({
-            "data": { "add_AgentRequest": { "_docID": "doc-3" } }
-        });
-        assert_eq!(extract_doc_id(&add_object), Some("doc-3".to_string()));
-
-        let add_array = serde_json::json!({
-            "data": { "add_AgentRequest": [ { "_docID": "doc-4" } ] }
-        });
-        assert_eq!(extract_doc_id(&add_array), Some("doc-4".to_string()));
+    fn goal_task_requires_a_stable_invocation_key() {
+        assert!(resolve_invocation_key("task", true, None).is_err());
+        assert_eq!(
+            resolve_invocation_key("task", true, Some("invocation-1")).unwrap(),
+            "invocation-1"
+        );
+        assert!(resolve_invocation_key("task", false, None).is_ok());
+        assert!(resolve_invocation_key("task", false, Some(" ")).is_err());
     }
 
     #[test]

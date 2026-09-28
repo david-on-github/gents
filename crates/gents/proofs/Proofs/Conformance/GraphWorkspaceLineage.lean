@@ -117,4 +117,67 @@ def caseJson (c : Case) : String :=
   ",\"published\":" ++ boolString c.published ++ "}"
 
 def casesJson : String := jsonArray (cases.map caseJson)
+namespace SessionCases
+open GraphPipeline.WorkspaceLineage.SessionContinuation
+
+structure SessionCase where
+  name : String
+  eligibility : Eligibility := ⟨true,true,true,1,.selectedEntry⟩
+  ctx : Context := context
+  owner : Nat := 21
+  firingNode : Nat := 9
+  targetNode : Nat := 3
+  candidates : List Candidate := [⟨root,21,51⟩]
+  deriving DecidableEq, Repr
+
+def cases : List SessionCase :=
+  [ {name := "selected_entry_parallel_is_singleton"}
+  , {name := "unique_group_parallel_is_singleton", eligibility := ⟨true,true,true,1,.grouped⟩}
+  , {name := "per_document_serial_is_not_singleton", eligibility := ⟨true,true,true,1,.perDocument⟩}
+  , {name := "multiple_routes_are_not_singleton", eligibility := ⟨true,true,true,2,.grouped⟩}
+  , {name := "target_missing", eligibility := ⟨true,false,true,1,.selectedEntry⟩}
+  , {name := "target_is_plugin", eligibility := ⟨true,true,false,1,.selectedEntry⟩}
+  , {name := "source_is_plugin", eligibility := ⟨false,true,true,1,.selectedEntry⟩}
+  , {name := "self_continue_rejected", targetNode := 9}
+  , {name := "root_missing", candidates := []}
+  , {name := "two_authentic_roots_rejected", candidates := [⟨root,21,51⟩,⟨{root with docId := 42},21,52⟩]}
+  , {name := "foreign_owner_rejected", candidates := [⟨root,99,51⟩]}
+  , {name := "unsigned_root_rejected", candidates := [⟨{root with authenticatedTarget := false},21,51⟩]}
+  , {name := "unsigned_lookalike_ignored", candidates := [⟨root,21,51⟩,⟨{root with authenticatedTarget := false},21,52⟩]}
+  , {name := "wrong_correlation_rejected", candidates := [⟨{root with correlation := 99},21,51⟩]}
+  , {name := "wrong_revision_rejected", candidates := [⟨{root with revision := 99},21,51⟩]}
+  , {name := "wrong_target_route_rejected", candidates := [⟨{root with entryRoute := 99},21,51⟩]}
+  , {name := "unverified_run_rejected", ctx := {context with runAndPlanVerified := false}}
+  , {name := "unverified_destination_rejected", ctx := {context with destinationRouteVerified := false}}
+  ]
+
+private def object (fields : List (String × String)) : String :=
+  "{" ++ String.intercalate "," (fields.map fun (key,value) => jsonString key ++ ":" ++ value) ++ "}"
+private def routeName : RouteKind → String
+  | .selectedEntry => "selected_entry" | .grouped => "grouped" | .perDocument => "per_document"
+private def candidateJson (c : Candidate) : String := object [
+  ("root", rootJson c.root), ("owner", toString c.owner), ("session", toString c.session)]
+private def selectionJson : Option Selection → String
+  | none => "null"
+  | some selected => object [("session",toString selected.session), ("root_doc",toString selected.rootDoc),
+      ("firing_node",toString selected.firingNode)]
+private def caseJson (c : SessionCase) : String := object [
+  ("name",jsonString c.name),
+  ("eligibility", object [("source_is_task",boolString c.eligibility.sourceIsTask),
+    ("target_exists",boolString c.eligibility.targetExists), ("target_is_task",boolString c.eligibility.targetIsTask),
+    ("route_count",toString c.eligibility.routeCount), ("route_kind",jsonString (routeName c.eligibility.routeKind))]),
+  ("context", object [("correlation",toString c.ctx.correlation), ("revision",toString c.ctx.revision),
+    ("target_route",toString c.ctx.entryRoute), ("run_and_plan_verified",boolString c.ctx.runAndPlanVerified),
+    ("destination_route_verified",boolString c.ctx.destinationRouteVerified)]),
+  ("owner",toString c.owner), ("firing_node",toString c.firingNode), ("target_node",toString c.targetNode),
+  ("candidates",jsonArray (c.candidates.map candidateJson)), ("eligible",boolString (eligible c.eligibility)),
+  ("expected",selectionJson (SessionContinuation.resolve c.eligibility c.ctx c.owner c.firingNode c.targetNode c.candidates))]
+
+def casesJson : String := jsonArray (cases.map caseJson)
+example : SessionContinuation.resolve ⟨true,true,true,1,.selectedEntry⟩ context 21 9 3 [⟨root,21,51⟩] =
+    some ⟨51,41,9⟩ := by decide
+example : SessionContinuation.resolve ⟨true,true,true,1,.grouped⟩ context 21 9 3 [⟨root,21,51⟩] =
+    some ⟨51,41,9⟩ := by decide
+end SessionCases
+
 end Conformance.GraphWorkspaceLineageContracts

@@ -24,11 +24,11 @@ use super::{
 };
 
 #[path = "workspace_lineage.rs"]
-mod workspace_lineage;
+pub(super) mod workspace_lineage;
 #[cfg(test)]
 pub(crate) use workspace_lineage::derive_graph_workspace;
 pub(super) use workspace_lineage::fence_root_workspace_in_txn;
-pub(crate) use workspace_lineage::resolve_graph_workspace;
+pub(crate) use workspace_lineage::{resolve_graph_session, resolve_graph_workspace};
 
 const GRAPH_RUN_VIEW_VERSION: u32 = 1;
 
@@ -38,6 +38,10 @@ const MAX_CANCEL_REASON_BYTES: usize = 1_024;
 #[cfg(test)]
 #[path = "workspace_lineage_contract_tests.rs"]
 mod workspace_lineage_contract_tests;
+
+#[cfg(test)]
+#[path = "session_continuation_contract_tests.rs"]
+mod session_continuation_contract_tests;
 
 #[cfg(test)]
 #[path = "attribution_contract_tests.rs"]
@@ -191,10 +195,9 @@ pub(crate) trait GraphRunQuery: Sync {
 #[async_trait::async_trait]
 impl GraphRunQuery for EmbeddedNode {
     async fn execute_graph_query(&self, query: &str) -> Result<Value> {
-        let response = self.execute(query).await;
-        if response.has_errors() {
-            anyhow::bail!("query graph run view failed: {:?}", response.errors);
-        }
+        let response =
+            crate::graphql::graphql_with_transaction_retry(self, query, "query graph run view")
+                .await?;
         Ok(json!({ "data": response.data.unwrap_or(Value::Null) }))
     }
 }

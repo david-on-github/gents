@@ -350,7 +350,22 @@ pub static DEFAULT_BASELINE: &[BaselineCollection<'static>] = &[
     baseline_entry!(
         gents_protocol::schemas::TRIGGER_NAME,
         gents_protocol::schemas::TRIGGER,
-        "bafyreicfvlbhf6qaqirppdspitoe6fm35kjrnxk7tutaqozx7hdp6jxv64"
+        "bafyreigxvrbi7f7ecbotknp62p4bkhjb5j67cb4h7o4k7hfrxsxasrybsa"
+    ),
+    baseline_entry!(
+        gents_protocol::schemas::EVENT_SOURCE_CURSOR_NAME,
+        gents_protocol::schemas::EVENT_SOURCE_CURSOR,
+        "bafyreibmj2c3mvftyp3zj6te24ql5grwbzoxiztuvpxz7idukpoxytvo24"
+    ),
+    baseline_entry!(
+        gents_protocol::schemas::TRIGGER_FIRE_NAME,
+        gents_protocol::schemas::TRIGGER_FIRE,
+        "bafyreibgl6fpygvxtcgwmdk2wgufhmujonq4p7e2muvy23f6nadeyolzle"
+    ),
+    baseline_entry!(
+        gents_protocol::schemas::FIRE_OUTCOME_NAME,
+        gents_protocol::schemas::FIRE_OUTCOME,
+        "bafyreiebsekkoog62amjydsetyiky2rgiritfyphcqn7mvgskjaylw2h5m"
     ),
     baseline_entry!(
         gents_protocol::schemas::SUBAGENT_TARGET_NAME,
@@ -425,7 +440,7 @@ pub static DEFAULT_BASELINE: &[BaselineCollection<'static>] = &[
     baseline_entry!(
         gents_protocol::schemas::GOAL_NAME,
         gents_protocol::schemas::GOAL,
-        "bafyreibftdbl5ykoxainbguuhspcchp5aevzrsbbcpnwdqyb6ngsqknyie"
+        "bafyreib7xrvv4razwfdgso4ef5xhqqk2s53c37oszc75ireafycm7bwk3y"
     ),
     baseline_entry!(
         gents_protocol::schemas::GOAL_CREATION_CLAIM_NAME,
@@ -470,7 +485,7 @@ pub static DEFAULT_BASELINE: &[BaselineCollection<'static>] = &[
     baseline_entry!(
         gents_protocol::schemas::TASK_NAME,
         gents_protocol::schemas::TASK,
-        "bafyreidl57hmgc7us47tmtdzo3r4ehpfcjsnhfhf5cumsckgia73uxqmxy"
+        "bafyreifhllogllatiuixwqdm5x4qilhqmptsqbzrb6icpdayml7r62r5xq"
     ),
     baseline_entry!(
         gents_protocol::schemas::SCHEDULE_NAME,

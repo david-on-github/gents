@@ -665,6 +665,159 @@ async fn request_terminal_fields(
 }
 
 #[tokio::test]
+async fn generated_release_cases_preserve_native_session_order() {
+    use crate::lean_vocab_test::{lean_event_delivery_transition_cases, LeanEventDeliveryAction};
+    let mut cases = 0;
+    for case in lean_event_delivery_transition_cases() {
+        let LeanEventDeliveryAction::Release { doc } = &case.action else {
+            continue;
+        };
+        cases += 1;
+        let node = test_node().await;
+        crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
+        let owner = "did:key:z-watcher-release";
+        let session = format!("session-{doc}");
+        let head = insert_agent_request_row(
+            node.as_ref(),
+            owner,
+            "native-head",
+            &session,
+            "pending",
+            "2026-03-12T00:00:00Z",
+        )
+        .await;
+        for request_id in &case.pre.persistent_set {
+            insert_agent_request_row(
+                node.as_ref(),
+                owner,
+                request_id,
+                &format!("session-{request_id}"),
+                "pending",
+                "2026-03-12T00:00:00Z",
+            )
+            .await;
+        }
+        let mut watcher = DefraWatcher::new(node.clone(), owner);
+        watcher.processed_request_ids = case
+            .pre
+            .processed_set
+            .iter()
+            .map(|id| {
+                (
+                    id.clone(),
+                    ProcessedMark {
+                        at: Instant::now(),
+                        queue_session: Some(format!("session-{id}")),
+                    },
+                )
+            })
+            .collect();
+        let selected =
+            tokio::time::timeout(std::time::Duration::from_secs(2), watcher.next_request())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        assert_eq!(selected.request_id, "native-head", "{}", case.name);
+        let mut retained = watcher
+            .processed_request_ids
+            .keys()
+            .filter(|id| id.as_str() != "native-head")
+            .cloned()
+            .collect::<Vec<_>>();
+        retained.sort();
+        let mut expected = case.post.processed_set.clone();
+        expected.sort();
+        assert_eq!(retained, expected, "{}", case.name);
+        set_request_terminal_completed(node.as_ref(), &head).await;
+        let released =
+            tokio::time::timeout(std::time::Duration::from_secs(2), watcher.next_request())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        let released_expected = case
+            .pre
+            .processed_set
+            .iter()
+            .filter(|id| !case.post.processed_set.contains(id))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert_eq!(
+            vec![released.request_id],
+            released_expected,
+            "{}",
+            case.name
+        );
+    }
+    assert_eq!(cases, 2);
+}
+
+#[tokio::test]
+async fn native_arrival_head_is_delivered_despite_reverse_lexical_timestamp_tie() {
+    let node = test_node().await;
+    crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
+    let owner = "did:key:z-watcher-native-head";
+    let first = insert_agent_request_row(
+        node.as_ref(),
+        owner,
+        "z-first",
+        "same-session",
+        "pending",
+        "2026-03-12T00:00:00Z",
+    )
+    .await;
+    let later = insert_agent_request_row(
+        node.as_ref(),
+        owner,
+        "a-later",
+        "same-session",
+        "pending",
+        "2026-03-12T00:00:00Z",
+    )
+    .await;
+    let watcher = DefraWatcher::new(node.clone(), owner);
+    let pending = watcher.pending_requests().await.unwrap();
+    assert_eq!(
+        pending
+            .iter()
+            .map(|row| row.request_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["z-first"]
+    );
+    assert!(watcher.try_fetch_request(&later).await.unwrap().is_none());
+    assert_eq!(
+        watcher
+            .try_fetch_request(&first)
+            .await
+            .unwrap()
+            .unwrap()
+            .request_id,
+        "z-first"
+    );
+    set_request_terminal_completed(node.as_ref(), &first).await;
+    assert_eq!(
+        watcher
+            .pending_requests()
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.request_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["a-later"]
+    );
+    assert_eq!(
+        watcher
+            .try_fetch_request(&later)
+            .await
+            .unwrap()
+            .unwrap()
+            .request_id,
+        "a-later"
+    );
+}
+
+#[tokio::test]
 async fn pending_requests_skip_queued_same_session_rows_until_claimable() {
     let node = test_node().await;
     crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
@@ -1002,13 +1155,8 @@ fn canonical_request_conversion_rejects_negative_lease_duration() {
     );
 }
 
-/// A request delivered first can lose its same-session claim to a row that
-/// sorts ahead of it in `(created_at, request_id)` order: a completion wake
-/// published in the same second as a Goal continuation. The losing claim leaves
-/// the continuation pending, so its blocker's terminal transition must deliver
-/// it again rather than the delivery cooldown or the fallback poll.
 #[tokio::test]
-async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
+async fn later_request_cannot_overtake_delivered_native_session_head() {
     use crate::lifecycle::{ClaimOutcome, ExecutionOrigin, RequestLifecycle};
 
     let node = test_node().await;
@@ -1019,8 +1167,7 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
     let continuation_id = "goal-cont-00000000000000000003-requeue";
     let wake_id = "background-completion-sess-requeue-00000000000000000000";
     let deliver = Duration::from_secs(5);
-
-    insert_agent_request_row(
+    let continuation_doc = insert_agent_request_row(
         node.as_ref(),
         agent_did,
         continuation_id,
@@ -1037,7 +1184,7 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
         .expect("pending scan");
     assert_eq!(continuation.request_id, continuation_id);
 
-    let wake_doc_id = insert_agent_request_row(
+    insert_agent_request_row(
         node.as_ref(),
         agent_did,
         wake_id,
@@ -1046,6 +1193,7 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
         second,
     )
     .await;
+    assert!(wake_id < continuation_id);
     let mut lifecycle = RequestLifecycle::new_with_execution_binding(
         node.clone(),
         "behavior",
@@ -1055,83 +1203,13 @@ async fn queued_request_is_redelivered_when_its_session_blocker_terminalizes() {
         ExecutionOrigin::Interactive,
         "backend",
     );
-    assert_eq!(lifecycle.claim().await.unwrap(), ClaimOutcome::Queued);
-    let queued = request_terminal_fields(node.as_ref(), continuation_id).await;
-    assert_eq!(
-        queued["lifecycle_state"], "pending",
-        "the overtaken request stays pending"
-    );
-
+    assert_eq!(lifecycle.claim().await.unwrap(), ClaimOutcome::Claimed);
+    assert!(watcher.pending_requests().await.unwrap().is_empty());
+    set_request_terminal_completed(node.as_ref(), &continuation_doc).await;
     let wake = tokio::time::timeout(deliver, watcher.next_request())
         .await
-        .expect("wake delivery")
+        .expect("next native arrival")
         .expect("watcher open")
         .expect("pending scan");
     assert_eq!(wake.request_id, wake_id);
-    set_request_processing(node.as_ref(), &wake_doc_id).await;
-    set_request_terminal_completed(node.as_ref(), &wake_doc_id).await;
-
-    let started = Instant::now();
-    let redelivered = tokio::time::timeout(deliver, watcher.next_request())
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "queued continuation was not redelivered within {deliver:?} of its blocker's \
-                 terminal transition (cooldown {PROCESSED_REQUEST_COOLDOWN:?})"
-            )
-        })
-        .expect("watcher open")
-        .expect("pending scan");
-    assert_eq!(redelivered.request_id, continuation_id);
-    assert!(started.elapsed() < deliver);
-
-    // Releasing the mark admits a duplicate delivery: the stale, queued
-    // delivery's lifecycle and the redelivery race to claim one row. The claim
-    // is a CAS on the pending state, so exactly one wins and binds the row.
-    let mut redelivered_lifecycle = RequestLifecycle::new_with_execution_binding(
-        node.clone(),
-        "behavior",
-        agent_did,
-        redelivered,
-        60,
-        ExecutionOrigin::Interactive,
-        "backend",
-    );
-    let (stale, fresh) = tokio::join!(lifecycle.claim(), redelivered_lifecycle.claim());
-    let claimed =
-        |outcome: &anyhow::Result<ClaimOutcome>| matches!(outcome, Ok(ClaimOutcome::Claimed));
-    assert_eq!(
-        usize::from(claimed(&stale)) + usize::from(claimed(&fresh)),
-        1,
-        "exactly one delivery claims: stale={stale:?} fresh={fresh:?}"
-    );
-    for loser in [&stale, &fresh]
-        .into_iter()
-        .filter(|outcome| !claimed(outcome))
-    {
-        assert!(
-            matches!(loser, Ok(ClaimOutcome::Queued) | Err(_)),
-            "the losing delivery leaves the row to the winner: {loser:?}"
-        );
-    }
-    let winner = if claimed(&stale) {
-        &lifecycle
-    } else {
-        &redelivered_lifecycle
-    };
-    let generation = winner.execution_generation().unwrap().to_owned();
-    let response = node
-        .execute(&format!(
-            r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{continuation_id}" }} }}) {{
-                lifecycle_state execution_generation }} }}"#
-        ))
-        .await;
-    assert!(!response.has_errors(), "{:?}", response.errors);
-    let rows = response.data.as_ref().unwrap()["AgentRequest"]
-        .as_array()
-        .unwrap()
-        .clone();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["lifecycle_state"], "claimed");
-    assert_eq!(rows[0]["execution_generation"], generation.as_str());
 }

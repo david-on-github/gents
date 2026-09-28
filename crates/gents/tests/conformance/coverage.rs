@@ -596,6 +596,16 @@ fn lean_contract_coverage_ledger_accounts_for_every_emitted_domain() {
             &snapshot.artifact_spawn_cases,
         ),
         (
+            "graph_session_continuation_cases",
+            "GraphPipeline.WorkspaceLineage.SessionContinuation",
+            &snapshot.graph_session_continuation_cases,
+        ),
+        (
+            "graph_assignment_head_cases",
+            "GraphPipeline.LogicalInvocation.AssignmentHead",
+            &snapshot.graph_assignment_head_cases,
+        ),
+        (
             "graph_workspace_lineage_cases",
             "GraphWorkspaceLineageCases",
             &snapshot.graph_workspace_lineage_cases,
@@ -704,6 +714,28 @@ fn lean_contract_coverage_ledger_accounts_for_every_emitted_domain() {
         snapshot.trigger_dispatch_cases.len(),
         "Lean trigger dispatch case count drifted from emitted cases"
     );
+    for (domain, families) in [
+        (
+            "Triggers.Durable",
+            &["admissions", "identities", "sessions", "self_sessions"][..],
+        ),
+        ("Triggers.Queue", &["queues", "observed_claims"][..]),
+        ("EventDelivery.Durable", &["cursors"][..]),
+        (
+            "Triggers.Durable.Outcomes",
+            &["outcomes", "outcome_traces", "assignment_roots"][..],
+        ),
+    ] {
+        for family in families {
+            assert!(
+                snapshot.trigger_delivery[*family]
+                    .as_array()
+                    .is_some_and(|cases| !cases.is_empty()),
+                "trigger_delivery must emit nonempty {family} cases"
+            );
+        }
+        emitted.insert(("trigger_delivery".into(), domain.into()));
+    }
     if !snapshot.trigger_dispatch_cases.is_empty() {
         emitted.insert(("trigger_cases".to_string(), "TriggerDispatch".to_string()));
     }

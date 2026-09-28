@@ -102,6 +102,38 @@ def associatedGoal (goal : Option GoalEvidence) (headBindingMatches : Bool) : Op
 theorem replaced_goal_does_not_grant_obligation (g : GoalEvidence) :
     associatedGoal (some g) false = none := rfl
 
+structure AssignmentHead where
+  doc : Doc
+  member : Bool
+  authenticRoot : Bool
+  assignmentApplied : Bool
+  authenticatedContinuation : Bool
+  deriving DecidableEq, Repr
+
+def AssignmentHead.eligible (head : AssignmentHead) : Bool :=
+  head.member || head.authenticatedContinuation || (head.authenticRoot && head.assignmentApplied)
+
+/-- The existing signed session-head owner supplies committed request order.
+A queued Task root does not supersede the running Goal assignment. Other
+applied authentic graph roots participate only as head evidence, never ancestry. -/
+def assignmentOwnsGoal (rootAssignmentApplied : Bool) (heads : List AssignmentHead) : Bool :=
+  rootAssignmentApplied && (heads.reverse.find? AssignmentHead.eligible).any AssignmentHead.member
+
+theorem queued_root_has_no_goal_obligation (heads : List AssignmentHead) :
+    assignmentOwnsGoal false heads = false := by simp [assignmentOwnsGoal]
+
+theorem unapplied_other_root_is_not_head (doc : Doc) :
+    AssignmentHead.eligible ⟨doc, false, true, false, false⟩ = false := rfl
+
+theorem unrelated_chat_is_not_head (doc : Doc) :
+    AssignmentHead.eligible ⟨doc, false, false, false, false⟩ = false := rfl
+
+theorem applied_other_root_replaces_goal_head :
+    assignmentOwnsGoal true [⟨10,true,true,true,false⟩, ⟨20,false,true,true,false⟩] = false := by decide
+
+theorem pending_other_root_preserves_goal_head :
+    assignmentOwnsGoal true [⟨10,true,true,true,false⟩, ⟨20,false,true,false,false⟩] = true := by decide
+
 /-- Limits count physical members, never logical chains. -/
 def projectLimited (rows : List Attempt) (edges : List Edge) (root : Doc)
     (goal : Option GoalEvidence) (resultSatisfied : Bool) (maximum : Nat) : Outcome :=

@@ -33,6 +33,7 @@ use atomic_inputs::steering_transaction_attempt;
 use atomic_inputs::transaction_created_doc_id;
 pub(crate) use atomic_inputs::ToolNotificationPublication;
 pub use coalescing::reconcile_coalesced_pending_request;
+pub(crate) use coalescing::supersede_pending_mutation;
 use coalescing::{
     parent_behavior_id, queue_row_to_enqueued_request, row_matches_coalesced_source_and_key,
 };

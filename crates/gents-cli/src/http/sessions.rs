@@ -235,6 +235,7 @@ fn build_session_history_snapshot(
                 compactions.get(&session_id).cloned().unwrap_or_default();
 
             Some(SessionHistoryRow {
+                is_current: false,
                 session_id: session_id.clone(),
                 behavior_id: clean(Some(&session.behavior_id)),
                 title: session.title.clone(),

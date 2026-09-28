@@ -208,6 +208,14 @@ impl TriggerSource for ScheduleSource {
                                         fire_count_delta: Some(1),
                                     }
                                 }
+                                FireResult::Duplicate { .. } => TriggerRuntimeUpdate {
+                                    last_fired_source_doc_id: None,
+                                    next_run_at: Some(advanced_next_run_at_str.clone()),
+                                    last_attempt_at: Some(last_attempt_at.clone()),
+                                    last_status: Some("duplicate".to_string()),
+                                    last_error: None,
+                                    fire_count_delta: None,
+                                },
                                 FireResult::Skipped { .. } => TriggerRuntimeUpdate {
                                     last_fired_source_doc_id: None,
                                     next_run_at: Some(advanced_next_run_at_str.clone()),

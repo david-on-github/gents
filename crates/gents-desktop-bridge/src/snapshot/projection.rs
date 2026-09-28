@@ -416,6 +416,7 @@ mod tests {
                     event_sources: vec![],
                     triggers: vec![],
                     sessions: vec![SessionSummary {
+            started_by: None,
                         agent_did: "did:test:agent".into(), requester_did: None,
                         latest_request_doc_id: None, closed_at: None, tags: vec![], provenance: None,
                         session_id: "sess_1".into(),

@@ -120,6 +120,12 @@ pub(super) fn resolve_automation(
                 );
             }
         }
+        if let Some(schedule) = schedules.get_mut(&trigger_id) {
+            schedule.session_id_template = trigger.session_id_template.clone();
+        }
+        if let Some(event) = event_triggers.get_mut(&trigger_id) {
+            event.session_id_template = trigger.session_id_template.clone();
+        }
     }
 
     ResolvedAutomation {
@@ -133,6 +139,7 @@ pub(super) fn resolve_automation(
 
 fn resolved_task_from(task: &crate::document_config::Task) -> ResolvedTask {
     ResolvedTask {
+        emit_outcome: task.emit_outcome,
         task_id: task.task_id.clone(),
         name: task.display_name.clone(),
         behavior_id: task.behavior_id.clone(),
@@ -227,6 +234,7 @@ fn resolve_schedule_trigger(
     active_schedules.insert(
         trigger_id.to_string(),
         ResolvedSchedule {
+            session_id_template: None,
             trigger_doc_id: trigger_doc_id.to_string(),
             schedule_id: schedule.schedule_id.clone(),
             task_id: task.task_id.clone(),
@@ -303,6 +311,7 @@ fn resolve_event_trigger(
     active_event_triggers.insert(
         trigger_id.to_string(),
         ResolvedEventTrigger {
+            session_id_template: None,
             trigger_doc_id: trigger_doc_id.to_string(),
             trigger_id: trigger_id.to_string(),
             task_id: task.task_id.clone(),
