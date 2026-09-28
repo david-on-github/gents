@@ -1,27 +1,8 @@
+import Proofs.Triggers.Identity
 import Proofs.Triggers.Types
 import Proofs.Goals
 
 namespace Triggers.Durable
-
-/-- Trigger IDs are only unique within their owner. Source document identity
-is scoped by collection, including when two sources share a trigger name. -/
-structure Identity where
-  owner : String
-  trigger : String
-  collection : String
-  document : String
-  deriving DecidableEq, Repr
-
-def component (value : String) : String := s!"{value.length}:{value}"
-
-def Identity.key (id : Identity) : String :=
-  component id.owner ++ component id.trigger ++ component id.collection ++ component id.document
-
-def Identity.requestId (id : Identity) : String := "trigger-request:" ++ id.key
-
-def Identity.sessionId (id : Identity) : String := "trigger-session:" ++ id.key
-
-def Identity.outcomeId (id : Identity) : String := "outcome:" ++ id.key
 
 structure Fire where
   identity : Identity
