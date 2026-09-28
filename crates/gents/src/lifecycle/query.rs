@@ -1,72 +1,8 @@
-use super::rows::DedupPlan;
 use super::*;
 use gents_protocol::request_lifecycle::RequestLifecycleState;
 use gents_protocol::row::AgentRequestRow;
 
 impl RequestLifecycle {
-    pub(super) async fn check_deduplication(&self) -> Result<DedupPlan> {
-        let escaped_session_id = escape_graphql_string(&self.request.session_id);
-        let active_runtime_states = RequestLifecycleState::active_runtime_graphql_list();
-        let query = format!(
-            r#"{{
-                AgentRequest(
-                    filter: {{
-                        session_id: {{ _eq: "{escaped_session_id}" }},
-                        purpose: {{ _eq: "normal" }},
-                        lifecycle_state: {{ _in: {active_runtime_states} }}
-                    }},
-                    order: [{{ created_at: ASC }}, {{ request_id: ASC }}]
-                ) {{
-                    _docID
-                    request_id
-                    lifecycle_state
-                    created_at
-                }}
-            }}"#
-        );
-
-        let resp = self.node.execute(&query).await;
-        if resp.has_errors() {
-            anyhow::bail!("deduplication check failed: {:?}", resp.errors);
-        }
-
-        let rows: Vec<AgentRequestRow> = crate::graphql::rows(&resp, "AgentRequest")?;
-
-        let active_blocker = rows.iter().find(|row| {
-            row.doc_id.as_deref() != Some(self.request.doc_id.as_str())
-                && row.lifecycle_state != Some(RequestLifecycleState::Pending)
-        });
-        let first_pending = rows
-            .iter()
-            .find(|row| row.lifecycle_state == Some(RequestLifecycleState::Pending));
-        let is_earliest = active_blocker.is_none()
-            && first_pending
-                .is_some_and(|row| row.doc_id.as_deref() == Some(self.request.doc_id.as_str()));
-        let blocking_request_id = active_blocker
-            .or_else(|| {
-                first_pending.and_then(|row| {
-                    (row.doc_id.as_deref() != Some(self.request.doc_id.as_str())).then_some(row)
-                })
-            })
-            .map(|row| row.request_id.clone());
-
-        if rows.len() > 1 {
-            tracing::info!(
-                request_id = %self.request.request_id,
-                session_id = %self.request.session_id,
-                is_earliest,
-                same_session_runtime_count = rows.len(),
-                blocking_request_id = blocking_request_id.as_deref().unwrap_or(""),
-                "same-session request queue check found pending or active requests"
-            );
-        }
-
-        Ok(DedupPlan {
-            is_earliest,
-            blocking_request_id,
-        })
-    }
-
     pub(super) async fn request_view(&self) -> Result<Option<AgentRequestRow>> {
         let doc_id = escape_graphql_string(&self.request.doc_id);
         let query = format!(
@@ -87,13 +23,109 @@ impl RequestLifecycle {
             }}"#,
         );
 
-        let resp = self.node.execute(&query).await;
-        if resp.has_errors() {
-            anyhow::bail!("request status query failed: {:?}", resp.errors);
-        }
+        let resp = crate::graphql::graphql_with_transaction_retry(
+            &self.node,
+            &query,
+            "request status query",
+        )
+        .await?;
 
         let rows: Vec<AgentRequestRow> = crate::graphql::rows(&resp, "AgentRequest")?;
 
         Ok(rows.into_iter().next())
     }
+}
+
+/// ConfigAccess holds the node's mutation gate from transaction creation through
+/// commit. This read and the winning request CAS must stay inside that boundary.
+pub(super) async fn claim_queue_allows(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    request: &AgentRequest,
+) -> Result<bool> {
+    let owner = escape_graphql_string(&request.agent_did);
+    let nonterminal = RequestLifecycleState::graphql_list(
+        RequestLifecycleState::ALL
+            .into_iter()
+            .filter(|state| !state.is_terminal()),
+    );
+    let response = txn
+        .execute_local_response(&format!(
+            r#"{{ AgentRequest(filter: {{ agent_did: {{ _eq: "{owner}" }},
+            purpose: {{ _eq: "normal" }}, lifecycle_state: {{ _in: {nonterminal} }} }}) {{
+            _docID request_id session_id lifecycle_state
+        }} }}"#,
+        ))
+        .await?;
+    let requests: Vec<AgentRequestRow> = crate::graphql::rows(&response, "AgentRequest")?;
+    let response = txn.execute_local_response(&format!(
+        r#"{{ TriggerFire(filter: {{owner_did: {{_eq: "{owner}"}}}}) {{request_id trigger_id queued_serial}} }}"#
+    )).await?;
+    #[derive(serde::Deserialize)]
+    struct QueueReceipt {
+        request_id: String,
+        trigger_id: String,
+        queued_serial: bool,
+    }
+    let receipts: Vec<QueueReceipt> = crate::graphql::rows(&response, "TriggerFire")?;
+    let by_request: std::collections::HashMap<_, _> = receipts
+        .iter()
+        .map(|receipt| (receipt.request_id.as_str(), receipt))
+        .collect();
+    let mut observations = requests
+        .iter()
+        .map(|row| {
+            let receipt = by_request.get(row.request_id.as_str());
+            crate::trigger_engine::durable::ClaimObservation {
+                document: row.doc_id.clone().unwrap_or_default(),
+                owner: request.agent_did.clone(),
+                session: row.session_id.clone().unwrap_or_default(),
+                trigger: receipt.map(|r| r.trigger_id.clone()).unwrap_or_default(),
+                serial: receipt.is_some_and(|r| r.queued_serial),
+                receipt: receipt.is_some(),
+                arrival: None,
+                running: matches!(
+                    row.lifecycle_state,
+                    Some(RequestLifecycleState::Claimed | RequestLifecycleState::Processing)
+                ),
+                terminal: row
+                    .lifecycle_state
+                    .is_none_or(RequestLifecycleState::is_terminal),
+            }
+        })
+        .collect::<Vec<_>>();
+    let Some(candidate) = observations
+        .iter()
+        .find(|row| row.document == request.doc_id)
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    if !requests.iter().any(|row| {
+        row.doc_id.as_deref() == Some(request.doc_id.as_str())
+            && row.lifecycle_state == Some(RequestLifecycleState::Pending)
+    }) {
+        return Ok(false);
+    }
+    observations.retain(|row| crate::trigger_engine::durable::claim_conflict(&candidate, row));
+    let doc_ids = observations
+        .iter()
+        .map(|row| row.document.clone())
+        .collect::<Vec<_>>();
+    let order = crate::trigger_engine::durable::request_arrival_order(txn, &doc_ids).await?;
+    let positions = order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id.as_str(), index as u64))
+        .collect::<std::collections::HashMap<_, _>>();
+    for row in &mut observations {
+        row.arrival = positions.get(row.document.as_str()).copied();
+    }
+    let candidate = observations
+        .iter()
+        .find(|row| row.document == request.doc_id)
+        .unwrap();
+    Ok(crate::trigger_engine::durable::observed_claim_allowed(
+        candidate,
+        &observations,
+    ))
 }

@@ -20,6 +20,7 @@ async fn goal_task_materialization_is_atomic_and_idempotent_for_one_durable_fire
     let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
     let materializer = ProductionMaterializer::new(node.clone(), snapshot_rx);
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-goal-release".to_string(),
         name: Some("release task".to_string()),
         behavior_id: "general".to_string(),
@@ -44,6 +45,8 @@ async fn goal_task_materialization_is_atomic_and_idempotent_for_one_durable_fire
             "implement release",
             Some("   "),
             fire_key,
+            None,
+            None,
         )
         .await
         .expect_err("an invalid declaration must roll back before publication");
@@ -68,6 +71,8 @@ async fn goal_task_materialization_is_atomic_and_idempotent_for_one_durable_fire
             "implement release",
             Some("ship release"),
             fire_key,
+            None,
+            None,
         )
         .await
         .expect("goal-backed Task fire");
@@ -83,6 +88,8 @@ async fn goal_task_materialization_is_atomic_and_idempotent_for_one_durable_fire
             "implement release",
             Some("ship release"),
             fire_key,
+            None,
+            None,
         )
         .await
         .expect("exact fire retry");
@@ -213,6 +220,7 @@ async fn goal_task_identity_and_recovery_are_scoped_by_agent_did() {
     let (_second_tx, second_rx) = watch::channel(second_snapshot);
     let second_materializer = ProductionMaterializer::new(node, second_rx);
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "shared-task-id".to_string(),
         name: None,
         behavior_id: "general".to_string(),
@@ -236,6 +244,8 @@ async fn goal_task_identity_and_recovery_are_scoped_by_agent_did() {
             "shared prompt",
             Some("shared objective"),
             fire_key,
+            None,
+            None,
         )
         .await
         .expect("first DID materialization");
@@ -251,6 +261,8 @@ async fn goal_task_identity_and_recovery_are_scoped_by_agent_did() {
             "shared prompt",
             Some("shared objective"),
             fire_key,
+            None,
+            None,
         )
         .await
         .expect("second DID materialization");
@@ -283,6 +295,7 @@ async fn goal_task_recovery_rejects_foreign_principal_using_expected_request_id(
     let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot);
     let materializer = ProductionMaterializer::new(node.clone(), snapshot_rx);
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "foreign-collision-task".to_string(),
         name: None,
         behavior_id: "general".to_string(),
@@ -469,6 +482,8 @@ async fn materializer_rejects_workspace_from_different_explicit_owner() {
             "prompt",
             None,
             "test-fire",
+            None,
+            None,
         )
         .await
         .unwrap_err();
@@ -588,6 +603,7 @@ async fn trigger_wide_gate_and_supersede_survive_kind_change_and_preserve_exclus
 
 fn workspace_writer_task() -> ResolvedTask {
     ResolvedTask {
+        emit_outcome: false,
         task_id: "task-ws".to_string(),
         name: None,
         behavior_id: "general".to_string(),
@@ -700,6 +716,8 @@ async fn materializer_rejects_missing_workspace_owner_without_actor_fallback() {
             "prompt",
             None,
             "test-fire",
+            None,
+            None,
         )
         .await
         .unwrap_err();
@@ -742,6 +760,8 @@ async fn materializer_preserves_explicit_workspace_owner_distinct_from_executor(
             "prompt",
             None,
             "test-fire",
+            None,
+            None,
         )
         .await
         .expect("explicit workspace owner survives request publication");
@@ -790,6 +810,8 @@ async fn goal_task_workspace_activation_retry_is_idempotent() {
             "prompt",
             Some("finish workspace change"),
             fire_key,
+            None,
+            None,
         )
         .await
         .expect("first goal-backed workspace fire");
@@ -805,6 +827,8 @@ async fn goal_task_workspace_activation_retry_is_idempotent() {
             "prompt",
             Some("finish workspace change"),
             fire_key,
+            None,
+            None,
         )
         .await
         .expect("activation acknowledgement retry");
@@ -847,6 +871,8 @@ async fn unique_read_write_denial_does_not_leave_claimable_request() {
             "prompt",
             None,
             "test-fire-1",
+            None,
+            None,
         )
         .await
         .expect("first writer");
@@ -862,6 +888,8 @@ async fn unique_read_write_denial_does_not_leave_claimable_request() {
             "prompt",
             None,
             "test-fire-2",
+            None,
+            None,
         )
         .await
         .expect_err("second writer must not enqueue");
@@ -1061,4 +1089,82 @@ async fn latest_only_revokes_live_execution_and_terminalizes_response_atomically
             0
         );
     }
+}
+
+#[tokio::test]
+async fn admitted_event_replay_precedes_render_and_latest_only_supersession() {
+    let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
+    ensure_runtime_schemas(node.as_ref()).await.unwrap();
+    let snapshot =
+        snapshot_with_behavior_and_schedules(integration_test_behavior("general"), HashMap::new());
+    let (_snapshot_tx, snapshot_rx) = watch::channel(snapshot.clone());
+    let materializer = ProductionMaterializer::new(node.clone(), snapshot_rx);
+    let identity = gents_protocol::trigger_delivery::FireIdentity {
+        owner_did: snapshot.local_did.clone(),
+        trigger_id: "replay-trigger".into(),
+        source_collection: "ReplayWork".into(),
+        source_doc_id: "physical-source".into(),
+    };
+    let key = crate::trigger_engine::durable::fire_key(&identity);
+    let fire = gents_protocol::trigger_delivery::TriggerFire {
+        fire_key: key.clone(),
+        identity,
+        task_id: "replay-task".into(),
+        request_id: format!("trigger-request:{key}"),
+        session_id: "original-session".into(),
+        goal_id: None,
+        goal_objective: None,
+        goal_token_budget: None,
+        goal_assignment_applied: false,
+        emit_outcome: false,
+        queued_serial: false,
+        source_handoff_id: None,
+        reply_session_id: None,
+        shard_id: None,
+        attempt: None,
+        created_at: "2030-01-01T00:00:00Z".into(),
+    };
+    crate::config_client::ConfigAccess::transact_local(node.as_ref(), None, "seed committed replay", |txn| {
+        let fire = fire.clone();
+        Box::pin(async move {
+            assert!(crate::trigger_engine::durable::stage_fire_receipt(txn, &fire).await?);
+            txn.execute_with_variables("mutation($input: AgentRequestMutationInputArg!) {create_AgentRequest(input: $input) {_docID}}", &serde_json::json!({"input": {
+                "request_id": fire.request_id, "agent_did": fire.identity.owner_did,
+                "session_id": fire.session_id, "behavior_id": "general", "purpose": "normal",
+                "lifecycle_state": "processing", "caused_by_trigger_id": "replay-trigger",
+                "created_at": fire.created_at
+            }})).await?;
+            Ok(())
+        })
+    }).await.unwrap();
+    let (_, rx) = watch::channel(snapshot);
+    let engine = TriggerEngine::new(rx, Arc::new(materializer));
+    let mut task = resolved_task("{{ doc.field_added_after_admission }}");
+    task.task_id = "replay-task".into();
+    task.behavior_id = "general".into();
+    let result = engine.dispatch(FireIntent {
+        trigger_id: Some("replay-trigger".into()), trigger_kind: TriggerKind::Event,
+        task, concurrency: ConcurrencyMode::LatestOnly,
+        event_vars: serde_json::json!({"source_collection":"ReplayWork", "source_doc_id":"physical-source"}),
+        doc_vars: None, correlation: None, group_vars: None, trigger_context: None, args_vars: None,
+        durable_fire_key: "replayed-arrival".into(), pre_materialized_request_id: None,
+        on_result: Box::new(|_| {}),
+    }).await;
+    assert!(
+        matches!(result, FireResult::Duplicate { request_id } if request_id == fire.request_id)
+    );
+    let response = crate::graphql::graphql_with_transaction_retry(
+        node.as_ref(),
+        &format!(
+            "{{ AgentRequest(filter: {{request_id: {{_eq: \"{}\"}}}}) {{lifecycle_state}} }}",
+            escape_graphql_string(&fire.request_id)
+        ),
+        "check replay did not supersede",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        response.data.unwrap()["AgentRequest"][0]["lifecycle_state"],
+        "processing"
+    );
 }

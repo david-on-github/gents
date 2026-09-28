@@ -21,6 +21,7 @@
 //! - `Option` fields omitted from an `update:` clause preserve the stored
 //!   value; explicit clearing requires `field: null`.
 
+pub(crate) mod event_source_cursor;
 mod agent_behavior;
 mod common;
 mod desired_state;

@@ -273,6 +273,8 @@ impl MaterializerHandle for SpyMaterializer {
         rendered_prompt: &str,
         rendered_goal_objective: Option<&str>,
         durable_fire_key: &str,
+        delivery: Option<&crate::trigger_engine::durable::PreparedFire>,
+        _prepared_ids: Option<(&str, &str)>,
     ) -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send + '_>> {
         let entry = (
             trigger_id.map(str::to_owned),
@@ -444,6 +446,7 @@ fn snapshot_with_schedules(
 
 fn resolved_task(prompt_template: &str) -> ResolvedTask {
     ResolvedTask {
+        emit_outcome: false,
         task_id: "t1".to_string(),
         name: None,
         behavior_id: "general".to_string(),
@@ -457,6 +460,7 @@ fn resolved_task(prompt_template: &str) -> ResolvedTask {
 
 fn resolved_schedule(schedule_id: &str, task: ResolvedTask) -> ResolvedSchedule {
     ResolvedSchedule {
+        session_id_template: None,
         trigger_doc_id: format!("{schedule_id}-doc"),
         schedule_id: schedule_id.to_string(),
         task_id: task.task_id.clone(),
@@ -473,6 +477,7 @@ fn resolved_schedule_with_concurrency(
     concurrency: ConcurrencyMode,
 ) -> ResolvedSchedule {
     ResolvedSchedule {
+        session_id_template: None,
         trigger_doc_id: format!("{schedule_id}-doc"),
         schedule_id: schedule_id.to_string(),
         task_id: task.task_id.clone(),
@@ -489,6 +494,7 @@ fn resolved_event_trigger_with_concurrency(
     concurrency: ConcurrencyMode,
 ) -> ResolvedEventTrigger {
     ResolvedEventTrigger {
+        session_id_template: None,
         trigger_doc_id: format!("{trigger_id}-doc"),
         trigger_id: trigger_id.to_string(),
         task_id: task.task_id.clone(),
@@ -655,4 +661,24 @@ async fn trigger_engine_dispatch_matches_lean_generated_contract_cases() {
 #[tokio::test]
 async fn event_group_eligibility_matches_lean_generated_contract_cases() {
     dispatch_contract::event_group_eligibility_matches_lean_generated_contract_cases().await;
+}
+
+#[test]
+fn nondocument_task_options_fail_explicitly() {
+    assert!(validate_non_document_task_options(false, ConcurrencyMode::Parallel, false).is_ok());
+    for (emit, mode, target, expected) in [
+        (true, ConcurrencyMode::Parallel, false, "emit_outcome"),
+        (false, ConcurrencyMode::QueuedSerial, false, "queued_serial"),
+        (
+            false,
+            ConcurrencyMode::Parallel,
+            true,
+            "session_id_template",
+        ),
+    ] {
+        assert!(validate_non_document_task_options(emit, mode, target)
+            .unwrap_err()
+            .to_string()
+            .contains(expected));
+    }
 }

@@ -1701,6 +1701,7 @@ mod tests {
                 tags: vec![],
                 graph_id: "pipeline".to_owned(),
                 nodes: vec![GraphNode {
+                    session: None,
                     node_id: "worker".to_owned(),
                     capability_id: "worker".to_owned(),
                     capability_revision: "v1".to_owned(),
@@ -1782,11 +1783,13 @@ mod tests {
                 graph_id: "grouped-pipeline".to_owned(),
                 nodes: vec![
                     GraphNode {
+                        session: None,
                         node_id: "producer".to_owned(),
                         capability_id: "producer".to_owned(),
                         capability_revision: "v1".to_owned(),
                     },
                     GraphNode {
+                        session: None,
                         node_id: "consumer".to_owned(),
                         capability_id: "consumer".to_owned(),
                         capability_revision: "v1".to_owned(),
@@ -1898,6 +1901,7 @@ mod tests {
                 tags: vec![],
                 graph_id: "result-pipeline".to_owned(),
                 nodes: vec![GraphNode {
+                    session: None,
                     node_id: "worker".to_owned(),
                     capability_id: "worker".to_owned(),
                     capability_revision: "v1".to_owned(),

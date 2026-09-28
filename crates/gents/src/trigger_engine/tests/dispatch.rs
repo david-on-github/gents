@@ -325,6 +325,7 @@ async fn dispatch_parallel_group_materializes_once_for_the_same_correlation() {
         doc_vars: Some(serde_json::json!({"_docID": "result-1"})),
         correlation: Some("run-42".to_string()),
         group_vars: Some(serde_json::json!({
+            "state_doc_id": "physical-group-run-42",
             "correlation_value": "run-42",
             "count": 2,
         })),
@@ -461,6 +462,7 @@ async fn dispatch_serial_per_group_separates_correlation_and_membership_generati
         doc_vars: Some(serde_json::json!({"run_id": correlation})),
         correlation: Some(correlation.to_string()),
         group_vars: Some(serde_json::json!({
+            "state_doc_id": format!("physical-group-{correlation}"),
             "correlation_value": correlation,
             "count": 2,
             "docs": [],

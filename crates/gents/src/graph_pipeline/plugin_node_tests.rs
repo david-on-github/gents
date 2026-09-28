@@ -33,6 +33,7 @@ fn echo_plan(digest: &str, max_attempts: Option<u32>) -> GraphPlan {
             tags: vec![],
             graph_id: "echo-pipeline".to_owned(),
             nodes: vec![GraphNode {
+                session: None,
                 node_id: "echo".to_owned(),
                 capability_id: "echo".to_owned(),
                 capability_revision: "v1".to_owned(),

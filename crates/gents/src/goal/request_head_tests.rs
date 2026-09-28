@@ -288,3 +288,118 @@ async fn generated_goal_request_head_cases_drive_signed_row_selector() {
         );
     }
 }
+
+#[tokio::test]
+async fn task_assignment_root_fences_older_chain_even_when_its_child_is_newer() {
+    use crate::config_client::ConfigAccess;
+    let temp = tempfile::tempdir().unwrap();
+    let identity = KeyIdentity::load_or_create(temp.path().join("owner.key"), None).unwrap();
+    let node = std::sync::Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
+    crate::ensure_runtime_schemas(&node).await.unwrap();
+    let access = ConfigAccess::Local(node.clone());
+    let mut goal = set_goal(
+        &node,
+        identity.did(),
+        "bound-session",
+        Some("next assignment"),
+        Some(GoalStatus::Active),
+        Some(None),
+    )
+    .await
+    .unwrap();
+    for (id, created) in [
+        ("old-root", "2026-01-01T00:00:00Z"),
+        ("new-root", "2026-01-01T00:00:01Z"),
+    ] {
+        let mut create = AgentRequestCreate::base(
+            RequestPurpose::Normal,
+            id,
+            identity.did(),
+            identity.did(),
+            "head-behavior",
+            "bound-session",
+            "root",
+            "interactive",
+            created,
+            AgentRequestAdmissionRecord::local_self(identity.did()),
+        );
+        crate::sign_agent_request_create(&identity, &mut create)
+            .await
+            .unwrap();
+        access
+            .write("test.assignment_root", &create.graphql_mutation().unwrap())
+            .await
+            .unwrap();
+    }
+    let query = format!(
+        "{{AgentRequest(order: {{created_at: DESC}}) {{{}}}}}",
+        crate::request_admission::SIGNED_REQUEST_FIELDS
+    );
+    let response = access.execute(&query).await.unwrap();
+    let rows: Vec<AgentRequestRow> =
+        serde_json::from_value(response["data"]["AgentRequest"].clone()).unwrap();
+    let old = rows
+        .iter()
+        .find(|row| row.request_id == "old-root")
+        .unwrap();
+    let new = rows
+        .iter()
+        .find(|row| row.request_id == "new-root")
+        .unwrap();
+    let new_doc = new.doc_id.as_deref().unwrap();
+    goal.assignment_root_request_doc_id = Some(new_doc.into());
+    access.write("test.assignment_binding", &format!("mutation {{update_Goal(filter: {{_docID: {{_eq: \"{}\"}}}}, input: {{assignment_root_request_doc_id: \"{}\"}}) {{_docID}}}}",
+        escape_graphql_string(&goal.doc_id), escape_graphql_string(new_doc))).await.unwrap();
+    let parent = crate::watcher::AgentRequest::try_from(old.clone()).unwrap();
+    for sequence in [1, 2] {
+        let mut child = prepare_goal_continuation(
+            &parent,
+            "head-behavior".into(),
+            &goal.goal_id,
+            "old continuation",
+            sequence,
+            false,
+            "2026-01-01T00:00:02Z",
+            parent.subagent_depth,
+        )
+        .unwrap();
+        crate::sign_agent_request_create(&identity, &mut child)
+            .await
+            .unwrap();
+        access
+            .write("test.old_continuation", &child.graphql_mutation().unwrap())
+            .await
+            .unwrap();
+        let response = access.execute(&query).await.unwrap();
+        let rows: Vec<AgentRequestRow> =
+            serde_json::from_value(response["data"]["AgentRequest"].clone()).unwrap();
+        assert_eq!(
+            latest_goal_request(&goal, &rows).unwrap().request_id,
+            "new-root"
+        );
+        let old_child = rows
+            .iter()
+            .find(|row| row.request_id == child.request_id)
+            .unwrap();
+        let request = crate::watcher::AgentRequest::try_from(old_child.clone()).unwrap();
+        let allowed = ConfigAccess::transact_local(&node, None, "test.late_goal_claim", |txn| {
+            let request = &request;
+            Box::pin(async move {
+                fence_goal_continuation_claim_in_txn(txn, request, "2026-01-01T00:00:03Z").await
+            })
+        })
+        .await
+        .unwrap();
+        assert!(!allowed);
+        let response = access.execute(&query).await.unwrap();
+        let rows: Vec<AgentRequestRow> =
+            serde_json::from_value(response["data"]["AgentRequest"].clone()).unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.request_id == child.request_id)
+                .unwrap()
+                .lifecycle_state,
+            Some(RequestLifecycleState::Superseded)
+        );
+    }
+}

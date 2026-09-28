@@ -556,6 +556,7 @@ impl GoalSource {
             return Ok(None);
         };
         let task = ResolvedTask {
+            emit_outcome: false,
             task_id: format!("goal:{}", goal.goal_id),
             name: Some("Durable goal continuation".to_string()),
             behavior_id: parent.behavior_id.clone(),
@@ -589,12 +590,14 @@ impl GoalSource {
             ),
             pre_materialized_request_id: Some(child.request_id),
             on_result: Box::new(move |result| match result {
-                FireResult::Fired { request_id } => tracing::info!(
-                    %request_id,
-                    %goal_id,
-                    %parent_request_id,
-                    "durable goal continuation fired"
-                ),
+                FireResult::Fired { request_id } | FireResult::Duplicate { request_id } => {
+                    tracing::info!(
+                        %request_id,
+                        %goal_id,
+                        %parent_request_id,
+                        "durable goal continuation fired"
+                    )
+                }
                 FireResult::Skipped { reason } => tracing::warn!(
                     %reason,
                     %goal_id,

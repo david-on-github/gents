@@ -1,5 +1,6 @@
 //! Child of graph_pipeline::run: one derived workspace observation for both
 //! preflight and the existing native request publication transaction.
+use super::super::StageTarget;
 use super::*;
 use crate::lifecycle::WorkspaceLineage;
 use crate::request_admission::SIGNED_REQUEST_FIELDS;
@@ -94,14 +95,19 @@ async fn stamp_from_workspace_owner(
     crate::workspace::apply_workspace_lineage_stamp(lineage, &workspace)
 }
 
-pub(crate) async fn derive_graph_workspace(
+struct VerifiedGraphContext {
+    run: Value,
+    plan: GraphPlan,
+    digest: String,
+    node_id: String,
+}
+
+async fn load_verified_graph_context(
     executor: &(impl GraphRunQuery + ?Sized),
     trigger_id: &str,
     correlation: Option<&str>,
     target_did: &str,
-    source_doc_id: Option<&str>,
-    explicit: &WorkspaceLineage,
-) -> Result<Option<GraphWorkspaceResolution>> {
+) -> Result<Option<VerifiedGraphContext>> {
     let Some(digest) = super::super::runtime::graph_artifact_revision_digest(trigger_id) else {
         anyhow::ensure!(
             !super::super::runtime::graph_artifact_is_reserved(trigger_id),
@@ -138,8 +144,36 @@ pub(crate) async fn derive_graph_workspace(
     let routes = planned_trigger_nodes(&plan)?;
     let node_id = routes
         .get(trigger_id)
-        .context("graph request trigger is not a pinned route")?;
-    let authority = super::super::runtime::planned_workspace_authority(&plan, node_id);
+        .context("graph request trigger is not a pinned route")?
+        .clone();
+    Ok(Some(VerifiedGraphContext {
+        run,
+        plan,
+        digest,
+        node_id,
+    }))
+}
+
+pub(crate) async fn derive_graph_workspace(
+    executor: &(impl GraphRunQuery + ?Sized),
+    trigger_id: &str,
+    correlation: Option<&str>,
+    target_did: &str,
+    source_doc_id: Option<&str>,
+    explicit: &WorkspaceLineage,
+) -> Result<Option<GraphWorkspaceResolution>> {
+    let Some(VerifiedGraphContext {
+        run,
+        plan,
+        digest,
+        node_id,
+    }) = load_verified_graph_context(executor, trigger_id, correlation, target_did).await?
+    else {
+        return Ok(None);
+    };
+    let run_id = required_string(&run, "correlation")?;
+    let owner = required_string(&run, "owner_did")?;
+    let authority = super::super::runtime::planned_workspace_authority(&plan, &node_id);
     let entry = plan
         .entries
         .iter()
@@ -307,6 +341,19 @@ pub(crate) async fn fence_root_workspace_in_txn(
     else {
         return Ok(());
     };
+    if let Some(session_id) = resolve_graph_session(
+        txn,
+        trigger,
+        request.caused_by_correlation.as_deref(),
+        &request.agent_did,
+    )
+    .await?
+    {
+        anyhow::ensure!(
+            request.session_id == session_id,
+            "signed graph session differs from resolved continuation target"
+        );
+    }
     // Planned authority without a workspace is projection evidence only;
     // RequestSpec's workspace_ref(None) serializes the unbound physical tuple.
     let expected = if resolved.lineage.workspace_id.is_some() {
@@ -327,4 +374,205 @@ pub(crate) async fn fence_root_workspace_in_txn(
         &resolved.digest,
     )
     .await
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionTargetRoute {
+    SelectedEntry,
+    Grouped,
+    PerDocument,
+}
+
+pub(crate) struct SessionTargetEligibility {
+    pub source_is_task: bool,
+    pub target_exists: bool,
+    pub target_is_task: bool,
+    pub route_count: usize,
+    pub route_kind: SessionTargetRoute,
+}
+
+pub(crate) fn session_target_eligible(eligibility: &SessionTargetEligibility) -> bool {
+    eligibility.source_is_task
+        && eligibility.target_exists
+        && eligibility.target_is_task
+        && eligibility.route_count == 1
+        && eligibility.route_kind != SessionTargetRoute::PerDocument
+}
+
+pub(crate) struct SessionContinuationContext {
+    pub owner: String,
+    pub firing_node: String,
+    pub target_node: String,
+    pub correlation: String,
+    pub revision: String,
+    pub target_route: String,
+    pub run_and_plan_verified: bool,
+    pub destination_route_verified: bool,
+}
+
+pub(crate) struct SessionRootCandidate {
+    pub root_doc_id: String,
+    pub session_id: String,
+    pub owner: String,
+    pub correlation: String,
+    pub revision: String,
+    pub target_route: String,
+    pub authenticated: bool,
+}
+
+pub(crate) struct SessionSelection {
+    pub session_id: String,
+    pub root_doc_id: String,
+    pub firing_node: String,
+}
+
+pub(crate) fn select_graph_session(
+    eligibility: &SessionTargetEligibility,
+    context: &SessionContinuationContext,
+    candidates: &[SessionRootCandidate],
+) -> Option<SessionSelection> {
+    if !session_target_eligible(eligibility)
+        || !context.run_and_plan_verified
+        || !context.destination_route_verified
+        || context.firing_node == context.target_node
+    {
+        return None;
+    }
+    let mut matching = candidates.iter().filter(|candidate| {
+        candidate.authenticated
+            && candidate.owner == context.owner
+            && candidate.correlation == context.correlation
+            && candidate.revision == context.revision
+            && candidate.target_route == context.target_route
+    });
+    let candidate = matching.next()?;
+    if matching.next().is_some() {
+        return None;
+    }
+    Some(SessionSelection {
+        session_id: candidate.session_id.clone(),
+        root_doc_id: candidate.root_doc_id.clone(),
+        firing_node: context.firing_node.clone(),
+    })
+}
+
+pub(crate) async fn resolve_graph_session(
+    executor: &(impl GraphRunQuery + ?Sized),
+    trigger_id: &str,
+    correlation: Option<&str>,
+    target_did: &str,
+) -> Result<Option<String>> {
+    let Some(verified) =
+        load_verified_graph_context(executor, trigger_id, correlation, target_did).await?
+    else {
+        return Ok(None);
+    };
+    let node = verified
+        .plan
+        .nodes
+        .iter()
+        .find(|node| node.node_id == verified.node_id)
+        .context("pinned firing node is absent from its graph plan")?;
+    let Some(selection) = &node.session else {
+        return Ok(None);
+    };
+    let target_node = verified
+        .plan
+        .nodes
+        .iter()
+        .find(|node| node.node_id == selection.continue_node_id)
+        .context("graph session target is absent from its pinned plan")?;
+    let entry_name = required_string(&verified.run, "entry_name")?;
+    let entry = verified
+        .plan
+        .entries
+        .iter()
+        .find(|entry| entry.name == entry_name);
+    let selected_entry = entry.filter(|entry| entry.to.node_id == target_node.node_id);
+    let incoming = verified
+        .plan
+        .edges
+        .iter()
+        .enumerate()
+        .filter(|(_, edge)| edge.to.node_id == target_node.node_id)
+        .collect::<Vec<_>>();
+    let target_route = if let Some(entry) = selected_entry {
+        anyhow::ensure!(
+            incoming.is_empty(),
+            "graph session entry target has additional routes"
+        );
+        graph_trigger_id(
+            &verified.digest,
+            &format!(
+                "entry:{}:{}:{}",
+                entry.name, entry.to.node_id, entry.to.port
+            ),
+        )?
+    } else {
+        let [(index, edge)] = incoming.as_slice() else {
+            anyhow::bail!("graph session target is not singleton")
+        };
+        anyhow::ensure!(
+            edge.delivery.is_some(),
+            "graph session target is per-document fan-out"
+        );
+        graph_trigger_id(
+            &verified.digest,
+            &format!(
+                "edge:{index}:{}:{}:{}:{}",
+                edge.from.node_id, edge.from.port, edge.to.node_id, edge.to.port
+            ),
+        )?
+    };
+    let eligibility = SessionTargetEligibility {
+        source_is_task: matches!(node.target, StageTarget::Task { .. }),
+        target_exists: true,
+        target_is_task: matches!(target_node.target, StageTarget::Task { .. }),
+        route_count: 1,
+        route_kind: if selected_entry.is_some() {
+            SessionTargetRoute::SelectedEntry
+        } else {
+            SessionTargetRoute::Grouped
+        },
+    };
+    let context = SessionContinuationContext {
+        owner: target_did.into(),
+        firing_node: node.node_id.clone(),
+        target_node: target_node.node_id.clone(),
+        correlation: required_string(&verified.run, "correlation")?.into(),
+        revision: verified.digest,
+        target_route,
+        run_and_plan_verified: true,
+        destination_route_verified: true,
+    };
+    let response = executor
+        .execute_graph_query(&format!(
+            r#"{{AgentRequest(filter: {{
+        caused_by_correlation: {{_eq: "{}"}}, caused_by_trigger_id: {{_eq: "{}"}}
+    }}) {{ {SIGNED_REQUEST_FIELDS} }} }}"#,
+            escape_graphql_string(&context.correlation),
+            escape_graphql_string(&context.target_route)
+        ))
+        .await?;
+    let rows: Vec<AgentRequestRow> =
+        serde_json::from_value(Value::Array(rows(&response, "AgentRequest").to_vec()))?;
+    let candidates = rows
+        .iter()
+        .map(|row| SessionRootCandidate {
+            root_doc_id: row.doc_id.clone().unwrap_or_default(),
+            session_id: row.session_id.clone().unwrap_or_default(),
+            owner: row.agent_did.clone().unwrap_or_default(),
+            correlation: row.caused_by_correlation.clone().unwrap_or_default(),
+            revision: row
+                .caused_by_trigger_id
+                .as_deref()
+                .and_then(super::super::runtime::graph_artifact_revision_digest)
+                .unwrap_or_default(),
+            target_route: row.caused_by_trigger_id.clone().unwrap_or_default(),
+            authenticated: super::logical_invocation::authentic_root(row, target_did),
+        })
+        .collect::<Vec<_>>();
+    let selected = select_graph_session(&eligibility, &context, &candidates)
+        .context("graph session continuation requires exactly one authenticated singleton root")?;
+    Ok(Some(selected.session_id))
 }

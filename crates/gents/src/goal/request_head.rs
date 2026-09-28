@@ -106,7 +106,23 @@ pub(crate) fn latest_goal_request<'a>(
     goal: &GoalDocument,
     rows: &'a [AgentRequestRow],
 ) -> Option<&'a AgentRequestRow> {
-    latest_scoped_request(&goal.agent_did, &goal.session_id, Some(&goal.goal_id), rows)
+    let members = goal
+        .assignment_root_request_doc_id
+        .as_deref()
+        .map(|root| {
+            authenticated_goal_request_members(&goal.agent_did, &goal.session_id, root, rows)
+        })
+        .transpose()
+        .ok()?;
+    latest_scoped_request(
+        &goal.agent_did,
+        &goal.session_id,
+        Some(&goal.goal_id),
+        rows,
+        members
+            .as_ref()
+            .map(|membership| membership.member_doc_ids.as_slice()),
+    )
 }
 
 /// Preserve original signed physical ancestry across canonical Goal replacement.
@@ -116,7 +132,7 @@ pub(crate) fn latest_authenticated_session_request<'a>(
     session_id: &str,
     rows: &'a [AgentRequestRow],
 ) -> Option<&'a AgentRequestRow> {
-    latest_scoped_request(agent_did, session_id, None, rows)
+    latest_scoped_request(agent_did, session_id, None, rows, None)
 }
 
 fn latest_scoped_request<'a>(
@@ -124,9 +140,11 @@ fn latest_scoped_request<'a>(
     session_id: &str,
     goal_id: Option<&str>,
     rows: &'a [AgentRequestRow],
+    allowed_docs: Option<&[String]>,
 ) -> Option<&'a AgentRequestRow> {
     let in_scope = |row: &&AgentRequestRow| {
-        row.purpose == Some(RequestPurpose::Normal)
+        allowed_docs.is_none_or(|docs| row.doc_id.as_ref().is_some_and(|doc| docs.contains(doc)))
+            && row.purpose == Some(RequestPurpose::Normal)
             && row.agent_did.as_deref() == Some(agent_did)
             && row.session_id.as_deref() == Some(session_id)
     };
@@ -268,3 +286,81 @@ pub(crate) fn goal_session_is_idle(rows: &[AgentRequestRow]) -> bool {
 #[cfg(test)]
 #[path = "request_head_tests.rs"]
 mod tests;
+
+pub(crate) fn assignment_allows(assigned: Option<&str>, observed: Option<&str>) -> bool {
+    assigned.is_none_or(|root| observed == Some(root))
+}
+
+pub(super) async fn retire_stale_assignment_continuations_in_txn(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    goal: &GoalDocument,
+    only_doc: Option<&str>,
+    now: &str,
+) -> Result<bool> {
+    let Some(root) = goal.assignment_root_request_doc_id.as_deref() else {
+        return Ok(true);
+    };
+    let owner = escape_graphql_string(&goal.agent_did);
+    let session = escape_graphql_string(&goal.session_id);
+    let response = txn.execute_local_response(&format!(
+        r#"{{AgentRequest(filter: {{agent_did: {{_eq: "{owner}"}}, session_id: {{_eq: "{session}"}}}}) {{{}}}}}"#,
+        crate::request_admission::SIGNED_REQUEST_FIELDS
+    )).await?;
+    let requests: Vec<AgentRequestRow> = crate::graphql::rows(&response, "AgentRequest")?;
+    let pending = requests
+        .iter()
+        .filter(|row| {
+            row.caused_by_trigger_kind.as_deref() == Some(GOAL_TRIGGER_KIND)
+                && row.lifecycle_state == Some(RequestLifecycleState::Pending)
+                && only_doc.is_none_or(|doc| row.doc_id.as_deref() == Some(doc))
+        })
+        .collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(true);
+    }
+    let binding =
+        authenticated_goal_request_members(&goal.agent_did, &goal.session_id, root, &requests)?;
+    anyhow::ensure!(
+        binding.entry.doc_id.as_deref() == Some(root),
+        "Task assignment root is a continuation"
+    );
+    let mut allowed = true;
+    for row in pending {
+        let doc = row
+            .doc_id
+            .as_deref()
+            .context("Goal continuation has no document ID")?;
+        let members =
+            authenticated_goal_request_members(&goal.agent_did, &goal.session_id, doc, &requests)?;
+        if assignment_allows(Some(root), members.entry.doc_id.as_deref()) {
+            continue;
+        }
+        allowed = false;
+        let reason = "superseded by a newer Task Goal assignment";
+        let mutation = crate::lifecycle::queue::supersede_pending_mutation(
+            doc,
+            &goal.agent_did,
+            &binding.entry.request_id,
+            root,
+            reason,
+        );
+        let response = txn.execute_local_response(&mutation).await?;
+        if response
+            .data
+            .as_ref()
+            .and_then(|data| data.get("update_AgentRequest"))
+            .is_some_and(crate::graphql::response_has_documents)
+        {
+            crate::trigger_engine::durable::publish_request_outcome(
+                txn,
+                &goal.agent_did,
+                &row.request_id,
+                "superseded",
+                reason,
+                now,
+            )
+            .await?;
+        }
+    }
+    Ok(allowed)
+}

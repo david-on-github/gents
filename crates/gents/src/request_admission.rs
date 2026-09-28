@@ -217,10 +217,12 @@ pub(crate) async fn terminalize_pending_request_rejection(
     reason: &str,
     operation: &'static str,
 ) -> Result<()> {
+    let owner = agent_did.to_owned();
+    let now = Utc::now().to_rfc3339();
     let doc_id = escape_graphql_string(doc_id);
     let agent_did = escape_graphql_string(agent_did);
     let failure_reason = escape_graphql_string(reason);
-    let terminalized_at = escape_graphql_string(&Utc::now().to_rfc3339());
+    let terminalized_at = escape_graphql_string(&now);
     let mutation = format!(
         r#"mutation($terminal_output: JSON) {{
             update_AgentRequest(
@@ -236,7 +238,7 @@ pub(crate) async fn terminalize_pending_request_rejection(
                     terminal_redrive_attempts: 0,
                     terminal_output: $terminal_output
                 }}
-            ) {{ _docID }}
+            ) {{ _docID request_id }}
         }}"#
     );
     let mutation = &mutation;
@@ -245,15 +247,32 @@ pub(crate) async fn terminalize_pending_request_rejection(
         None,
         crate::config_client::IdempotentTransactionRetry::Standard,
         operation,
-        move |txn| {
+        |txn| {
+            let owner = &owner;
+            let now = &now;
             Box::pin(async move {
-                txn.execute_with_variables(
-                    &mutation,
-                    &serde_json::json!({
-                        "terminal_output": gents_protocol::output::TerminalOutput::NoMessage
-                    }),
-                )
-                .await
+                let response = txn
+                    .execute_with_variables(
+                        &mutation,
+                        &serde_json::json!({
+                            "terminal_output": gents_protocol::output::TerminalOutput::NoMessage
+                        }),
+                    )
+                    .await?;
+                if let Some(rows) = response
+                    .pointer("/data/update_AgentRequest")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for row in rows {
+                        if let Some(request_id) = row["request_id"].as_str() {
+                            crate::trigger_engine::durable::publish_request_outcome(
+                                txn, owner, request_id, "failed", reason, now,
+                            )
+                            .await?;
+                        }
+                    }
+                }
+                Ok(response)
             })
         },
     )

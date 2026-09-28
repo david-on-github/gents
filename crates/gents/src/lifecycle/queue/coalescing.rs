@@ -49,10 +49,34 @@ pub async fn reconcile_coalesced_pending_request(
             &survivor.doc_id,
             "coalesced into earlier queued request",
         );
-        crate::config_client::ConfigAccess::write_local_idempotent_update_response(
+        crate::config_client::ConfigAccess::transact_local_idempotent(
             node,
+            None,
+            crate::config_client::IdempotentTransactionRetry::Standard,
             "reconcile_coalesced_pending_request",
-            &mutation,
+            |txn| {
+                let mutation = &mutation;
+                Box::pin(async move {
+                    let response = txn.execute_local_response(mutation).await?;
+                    if response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("update_AgentRequest"))
+                        .is_some_and(crate::graphql::response_has_documents)
+                    {
+                        crate::trigger_engine::durable::publish_request_outcome(
+                            txn,
+                            agent_did,
+                            &duplicate.request_id,
+                            "superseded",
+                            "coalesced into earlier queued request",
+                            &chrono::Utc::now().to_rfc3339(),
+                        )
+                        .await?;
+                    }
+                    Ok(())
+                })
+            },
         )
         .await?;
     }
@@ -61,7 +85,7 @@ pub async fn reconcile_coalesced_pending_request(
 }
 
 /// Supersede one still-pending request of `agent_did` by the survivor.
-pub(super) fn supersede_pending_mutation(
+pub(crate) fn supersede_pending_mutation(
     doc_id: &str,
     agent_did: &str,
     survivor_request_id: &str,

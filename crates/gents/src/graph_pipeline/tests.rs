@@ -69,11 +69,13 @@ fn linear_intent() -> GraphIntent {
         graph_id: "review-pipeline".to_owned(),
         nodes: vec![
             GraphNode {
+                session: None,
                 node_id: "extract".to_owned(),
                 capability_id: "extract".to_owned(),
                 capability_revision: "v1".to_owned(),
             },
             GraphNode {
+                session: None,
                 node_id: "review".to_owned(),
                 capability_id: "review".to_owned(),
                 capability_revision: "v1".to_owned(),

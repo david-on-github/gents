@@ -131,6 +131,29 @@ pub(super) fn authentic_root(row: &AgentRequestRow, owner_did: &str) -> bool {
         && row.caused_by_trigger_doc_id.as_deref().is_some_and(|id| !id.is_empty())
 }
 
+pub(super) struct AssignmentHead {
+    pub member: bool,
+    pub authentic_root: bool,
+    pub assignment_applied: bool,
+    pub authenticated_continuation: bool,
+}
+
+pub(super) fn assignment_owns_goal(
+    root_assignment_applied: bool,
+    heads: &[AssignmentHead],
+) -> bool {
+    root_assignment_applied
+        && heads
+            .iter()
+            .rev()
+            .find(|head| {
+                head.member
+                    || head.authenticated_continuation
+                    || (head.authentic_root && head.assignment_applied)
+            })
+            .is_some_and(|head| head.member)
+}
+
 pub(super) async fn load(
     executor: &(impl GraphRunQuery + ?Sized),
     correlation: &str,
@@ -178,9 +201,37 @@ pub(super) async fn load(
             let mut goals: Vec<GoalDocument> =
                 serde_json::from_value(Value::Array(rows(&response, "Goal").to_vec()))?;
             crate::goal::sort_goals_canonical(&mut goals);
-            sessions.insert(key.clone(), (requests, goals.into_iter().next()));
+            let response = executor
+                .execute_graph_query(&format!(
+                    r#"{{ TriggerFire(filter: {{
+                owner_did: {{_eq: "{}"}}, session_id: {{_eq: "{}"}}
+            }}) {{request_id goal_id goal_assignment_applied}} }}"#,
+                    escape_graphql_string(owner),
+                    escape_graphql_string(session)
+                ))
+                .await?;
+            let assignments = rows(&response, "TriggerFire")
+                .iter()
+                .filter_map(|row| {
+                    Some((
+                        row.get("request_id")?.as_str()?.to_owned(),
+                        (
+                            row.get("goal_id")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned),
+                            row.get("goal_assignment_applied")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        ),
+                    ))
+                })
+                .collect::<BTreeMap<_, _>>();
+            sessions.insert(
+                key.clone(),
+                (requests, goals.into_iter().next(), assignments),
+            );
         }
-        let (requests, goal) = &sessions[&key];
+        let (requests, goal, assignments) = &sessions[&key];
         let root_doc = root.doc_id.as_deref().unwrap();
         let ancestry =
             crate::goal::authenticated_goal_request_members(owner, session, root_doc, requests)?;
@@ -228,6 +279,17 @@ pub(super) async fn load(
                     if row.doc_id.as_ref().is_some_and(|id| members.contains(id)) {
                         return true;
                     }
+                    if assignments
+                        .get(&row.request_id)
+                        .is_some_and(|(id, applied)| {
+                            *applied && id.as_deref() == Some(goal.goal_id.as_str())
+                        })
+                        && root_rows.iter().any(|candidate| {
+                            candidate.doc_id == row.doc_id && authentic_root(candidate, owner)
+                        })
+                    {
+                        return true;
+                    }
                     let Some(goal_id) = row
                         .caused_by_trigger_id
                         .as_deref()
@@ -246,15 +308,24 @@ pub(super) async fn load(
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            open && crate::goal::latest_authenticated_session_request(
-                owner,
-                session,
-                &invocation_rows,
-            )
-            .is_some_and(|head| {
-                head.doc_id.as_ref().is_some_and(|id| members.contains(id))
-                    && (head.caused_by_trigger_kind.as_deref() != Some("goal")
-                        || head.caused_by_trigger_id.as_deref() == Some(goal.goal_id.as_str()))
+            open && crate::goal::latest_goal_request(goal, &invocation_rows).is_some_and(|head| {
+                let root_applied = assignments
+                    .get(&root.request_id)
+                    .is_none_or(|(id, applied)| id.is_none() || *applied);
+                let head = AssignmentHead {
+                    member: head.doc_id.as_ref().is_some_and(|id| members.contains(id))
+                        && (head.caused_by_trigger_kind.as_deref() != Some("goal")
+                            || head.caused_by_trigger_id.as_deref() == Some(goal.goal_id.as_str())),
+                    authentic_root: root_rows.iter().any(|candidate| {
+                        candidate.doc_id == head.doc_id && authentic_root(candidate, owner)
+                    }),
+                    assignment_applied: assignments.get(&head.request_id).is_some_and(
+                        |(id, applied)| *applied && id.as_deref() == Some(goal.goal_id.as_str()),
+                    ),
+                    authenticated_continuation: head.caused_by_trigger_kind.as_deref()
+                        == Some("goal"),
+                };
+                assignment_owns_goal(root_applied, &[head])
             })
         });
         let outstanding = obligation || physically_active;

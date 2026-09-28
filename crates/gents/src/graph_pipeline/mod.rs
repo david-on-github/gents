@@ -18,6 +18,7 @@ pub use compiler::{
 pub(crate) use live::{is_live_for, live_run_correlations};
 #[cfg(test)]
 pub(crate) use run::derive_graph_workspace;
+pub(crate) use run::resolve_graph_session;
 pub(crate) use run::{
     graph_binding_for_request_in_txn, resolve_graph_workspace, run_graph_run_reconciler,
 };

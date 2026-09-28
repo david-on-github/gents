@@ -57,6 +57,7 @@ async fn a_collection_level_update_with_an_empty_doc_id_fires_nothing_but_a_real
         .unwrap();
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-branchable".to_string(),
         ..resolved_task("go")
     };
@@ -317,6 +318,7 @@ fn resolved_event_trigger(
     task: ResolvedTask,
 ) -> ResolvedEventTrigger {
     ResolvedEventTrigger {
+        session_id_template: None,
         trigger_doc_id: format!("{trigger_id}-doc"),
         trigger_id: trigger_id.to_string(),
         task_id: task.task_id.clone(),
@@ -346,6 +348,7 @@ fn resolved_event_trigger_with_filter(
     filter: &str,
 ) -> ResolvedEventTrigger {
     ResolvedEventTrigger {
+        session_id_template: None,
         trigger_doc_id: format!("{trigger_id}-doc"),
         trigger_id: trigger_id.to_string(),
         task_id: task.task_id.clone(),
@@ -494,6 +497,7 @@ async fn event_source_next_fire_emits_intent_on_matching_real_event() {
     // Build a snapshot with exactly one active event-source trigger on WebhookEvent.
     // The trigger_id is what the returned FireIntent should carry.
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-webhook".to_string(),
         ..resolved_task("handle webhook")
     };
@@ -593,6 +597,7 @@ async fn a_callback_result_fires_its_bindings_event_source_once() {
     ensure_runtime_schemas(node.as_ref()).await.unwrap();
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-after-callback".to_string(),
         ..resolved_task("continue after the callback")
     };
@@ -682,6 +687,7 @@ async fn per_group_startup_recovery_uses_filtered_membership_and_deterministic_s
     }
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "group-task".to_string(),
         ..resolved_task("{{ group.correlation_value }} {{ group.count }}")
     };
@@ -1284,6 +1290,7 @@ async fn event_source_filter_probe_gates_fire_on_operator_filter() {
         .expect("add_schema for WebhookEvent");
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-webhook".to_string(),
         ..resolved_task("handle webhook")
     };
@@ -1403,6 +1410,7 @@ async fn event_source_hydrates_doc_vars_from_source_doc_fields() {
         .expect("add_schema for WebhookEvent");
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-webhook".to_string(),
         ..resolved_task("handle webhook")
     };
@@ -1546,6 +1554,7 @@ async fn event_source_on_result_writes_runtime_fields_on_fired() {
     .await;
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-webhook".to_string(),
         ..resolved_task("handle webhook")
     };
@@ -1670,6 +1679,7 @@ async fn event_source_on_result_writes_runtime_fields_on_skipped_or_errored() {
     .await;
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-webhook".to_string(),
         ..resolved_task("handle webhook")
     };

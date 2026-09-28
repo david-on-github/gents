@@ -629,6 +629,7 @@ async fn install_event_delivery_source_schema(node: &EmbeddedNode) {
 
 fn active_snapshot_with_event_trigger() -> Arc<ActiveRuntimeSnapshot> {
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: EVENT_SOURCE_TASK_ID.to_string(),
         name: Some(EVENT_SOURCE_TASK_ID.to_string()),
         behavior_id: AGENT_NAME.to_string(),
@@ -639,6 +640,7 @@ fn active_snapshot_with_event_trigger() -> Arc<ActiveRuntimeSnapshot> {
         hooks: Vec::new(),
     };
     let trigger = ResolvedEventTrigger {
+        session_id_template: None,
         trigger_doc_id: "event-source-trigger-doc".to_string(),
         trigger_id: EVENT_SOURCE_TRIGGER_ID.to_string(),
         task_id: task.task_id.clone(),

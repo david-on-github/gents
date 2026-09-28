@@ -486,6 +486,9 @@ pub(crate) async fn recover_expired_generation_with_facts(
             if !response.get("data").and_then(|data| data.get("update_AgentRequest")).is_some_and(response_has_documents) {
                 anyhow::bail!("expired-generation recovery lost request CAS");
             }
+            crate::trigger_engine::durable::publish_request_outcome(
+                txn, agent, &row.request_id, &target, "execution lease expired", &timestamp,
+            ).await?;
             if !is_title {
                 session::refresh_session_request_observation_in_txn(txn, agent, row.requester_did.as_deref(), session_id, &request_doc_id, &row.request_id, &timestamp).await?;
             }

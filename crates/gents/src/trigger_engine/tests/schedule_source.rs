@@ -203,6 +203,7 @@ async fn schedule_source_next_fire_emits_intent_when_schedule_is_due() {
         .unwrap();
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-1".to_string(),
         name: None,
         behavior_id: "general".to_string(),
@@ -213,6 +214,7 @@ async fn schedule_source_next_fire_emits_intent_when_schedule_is_due() {
         hooks: Vec::new(),
     };
     let schedule = ResolvedSchedule {
+        session_id_template: None,
         trigger_doc_id,
         schedule_id: "sched-1".to_string(),
         task_id: task.task_id.clone(),
@@ -289,6 +291,7 @@ async fn schedule_source_on_result_writes_runtime_fields_on_fired_and_skipped() 
     .await;
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-1".to_string(),
         name: None,
         behavior_id: "general".to_string(),
@@ -299,6 +302,7 @@ async fn schedule_source_on_result_writes_runtime_fields_on_fired_and_skipped() 
         hooks: Vec::new(),
     };
     let schedule = ResolvedSchedule {
+        session_id_template: None,
         trigger_doc_id,
         schedule_id: "sched-1".to_string(),
         task_id: task.task_id.clone(),
@@ -546,6 +550,7 @@ async fn trigger_engine_enqueues_agent_request_for_due_schedule_e2e() {
     // Build the snapshot: one behavior loaded ("general"), one active
     // schedule trigger pointing at a task bound to that behavior.
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-e2e".to_string(),
         name: Some("Mini Host Health".to_string()),
         behavior_id: behavior.behavior_id.clone(),
@@ -556,6 +561,7 @@ async fn trigger_engine_enqueues_agent_request_for_due_schedule_e2e() {
         hooks: Vec::new(),
     };
     let schedule = ResolvedSchedule {
+        session_id_template: None,
         trigger_doc_id,
         schedule_id: "sched-e2e".to_string(),
         task_id: task.task_id.clone(),
@@ -726,6 +732,7 @@ async fn schedule_source_seeds_null_next_run_at_and_fires_on_first_tick() {
     );
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-null".to_string(),
         name: None,
         behavior_id: "general".to_string(),
@@ -736,6 +743,7 @@ async fn schedule_source_seeds_null_next_run_at_and_fires_on_first_tick() {
         hooks: Vec::new(),
     };
     let schedule = ResolvedSchedule {
+        session_id_template: None,
         trigger_doc_id,
         schedule_id: "sched-null".to_string(),
         task_id: task.task_id.clone(),
@@ -813,6 +821,7 @@ async fn schedule_source_seeds_cron_next_run_at_without_immediate_fire() {
     .await;
 
     let task = ResolvedTask {
+        emit_outcome: false,
         task_id: "task-cron".to_string(),
         name: None,
         behavior_id: "general".to_string(),
@@ -823,6 +832,7 @@ async fn schedule_source_seeds_cron_next_run_at_without_immediate_fire() {
         hooks: Vec::new(),
     };
     let schedule = ResolvedSchedule {
+        session_id_template: None,
         trigger_doc_id,
         schedule_id: "sched-cron-null".to_string(),
         task_id: task.task_id.clone(),
