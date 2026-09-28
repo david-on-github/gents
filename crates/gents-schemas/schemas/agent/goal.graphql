@@ -9,6 +9,7 @@ type Goal @branchable {
     status: String @index
     token_budget: Int
     tokens_used: Int
+    token_usage_baseline: Int
     active_time_seconds: Int
     active_started_at: String
     consecutive_blocked_audits: Int
