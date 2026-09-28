@@ -422,7 +422,8 @@ async fn generated_terminal_outcome_action_traces_use_native_owners() {
                     row.lifecycle_state.is_some_and(|state| state.is_terminal()),
                     expected_request.terminal,
                     "{} step {index}: request {} terminal state",
-                    trace["name"], row.request_id
+                    trace["name"],
+                    row.request_id
                 );
                 assert_eq!(
                     row.lifecycle_state.is_some_and(|state| matches!(
@@ -432,7 +433,8 @@ async fn generated_terminal_outcome_action_traces_use_native_owners() {
                     )),
                     expected_request.running,
                     "{} step {index}: request {} running state",
-                    trace["name"], row.request_id
+                    trace["name"],
+                    row.request_id
                 );
                 let receipts = response["data"]["TriggerFire"].as_array().unwrap();
                 let receipt = receipts
@@ -445,7 +447,8 @@ async fn generated_terminal_outcome_action_traces_use_native_owners() {
                         .unwrap_or(false),
                     expected_request.goal_assignment_applied,
                     "{} step {index}: request {} Goal assignment",
-                    trace["name"], row.request_id
+                    trace["name"],
+                    row.request_id
                 );
             }
             let goals = response["data"]["Goal"].as_array().unwrap();
