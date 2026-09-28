@@ -163,7 +163,7 @@ async fn canonical_manage_document_saves_refresh_store() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn desktop_task_run_atomically_provisions_declared_goal() -> Result<()> {
+async fn desktop_task_run_defers_declared_goal_until_claim() -> Result<()> {
     let tempdir = tempfile::tempdir()?;
     let core = ClientCore::start_with_paths_and_options(
         DesktopPaths::from_root(tempdir.path()),
@@ -213,36 +213,72 @@ async fn desktop_task_run_atomically_provisions_declared_goal() -> Result<()> {
         .fire_task_now(&task, json!({"item": "release"}))
         .await?;
 
-    let response = core
-        .node()
-        .execute(&format!(
-            r#"{{
-                AgentRequest(filter: {{ _docID: {{ _eq: "{request_doc_id}" }} }}) {{
-                    session_id retry_key content lifecycle_state
-                }}
-                Goal(filter: {{ agent_did: {{ _eq: "{agent_did}" }} }}) {{
-                    session_id objective status token_budget
-                }}
-            }}"#,
-        ))
-        .await;
-    assert!(
-        !response.has_errors(),
-        "query task run: {:?}",
-        response.errors
+    let request_doc_id = gents::graphql::escape_graphql_string(&request_doc_id);
+    let owner = gents::graphql::escape_graphql_string(&agent_did);
+    let query = format!(
+        r#"{{
+            AgentRequest(filter: {{ _docID: {{ _eq: "{request_doc_id}" }} }} ) {{
+                _docID request_id purpose agent_did requester_did behavior_id
+                session_id retry_key content input lifecycle_state created_at execution_origin
+            }}
+            Goal(filter: {{ agent_did: {{ _eq: "{owner}" }} }}) {{
+                session_id objective status token_budget
+            }}
+            TriggerFire(filter: {{ owner_did: {{ _eq: "{owner}" }} }}) {{
+                goal_assignment_applied goal_objective goal_token_budget
+            }}
+        }}"#,
     );
+    let response = gents::graphql::graphql_with_transaction_retry(
+        core.node(),
+        &query,
+        "test.desktop_task_before_claim",
+    )
+    .await?;
     let data = response.data.as_ref().expect("query data");
     let requests = data["AgentRequest"].as_array().expect("request rows");
-    let goals = data["Goal"].as_array().expect("goal rows");
     assert_eq!(requests.len(), 1);
-    assert_eq!(goals.len(), 1);
+    assert!(data["Goal"].as_array().unwrap().is_empty());
     assert_eq!(requests[0]["content"], "Handle release");
     assert_eq!(requests[0]["lifecycle_state"], "pending");
     assert!(requests[0]["retry_key"].as_str().is_some());
-    assert_eq!(goals[0]["session_id"], requests[0]["session_id"]);
+    let fires = data["TriggerFire"].as_array().unwrap();
+    assert_eq!(fires.len(), 1);
+    assert_eq!(fires[0]["goal_assignment_applied"], false);
+    assert_eq!(fires[0]["goal_objective"], "Finish release");
+    assert_eq!(fires[0]["goal_token_budget"], 10_000);
+    let row: gents_protocol::row::AgentRequestRow = serde_json::from_value(requests[0].clone())?;
+    let request = gents::watcher::AgentRequest::try_from(row)?;
+    let session_id = request.session_id.clone();
+    let mut lifecycle = gents::lifecycle::RequestLifecycle::new_with_execution_binding(
+        core.node_arc(),
+        "durable",
+        &agent_did,
+        request,
+        60,
+        gents::lifecycle::ExecutionOrigin::Interactive,
+        "local",
+    );
+    assert_eq!(
+        lifecycle.claim().await?,
+        gents::lifecycle::ClaimOutcome::Claimed
+    );
+    let response = gents::graphql::graphql_with_transaction_retry(
+        core.node(),
+        &query,
+        "test.desktop_task_after_claim",
+    )
+    .await?;
+    let data = response.data.as_ref().expect("query data");
+    assert_eq!(data["AgentRequest"][0]["lifecycle_state"], "claimed");
+    assert_eq!(data["TriggerFire"][0]["goal_assignment_applied"], true);
+    let goals = data["Goal"].as_array().expect("goal rows");
+    assert_eq!(goals.len(), 1);
+    assert_eq!(goals[0]["session_id"], session_id);
     assert_eq!(goals[0]["objective"], "Finish release");
     assert_eq!(goals[0]["status"], "active");
     assert_eq!(goals[0]["token_budget"], 10_000);
+    drop(lifecycle);
 
     core.shutdown().await?;
     Ok(())
