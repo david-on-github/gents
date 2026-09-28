@@ -132,6 +132,11 @@ source consistency checks, not a separate runtime compatibility version.
 - A command that hits its own timeout no longer reports a duration shorter
   than that timeout: one arming instant now both sets the deadline and starts
   the measurement (#1929).
+- `gents session fork` no longer opens the home's store without the claim
+  every other opener takes: `gents init --overwrite` cannot wipe a store
+  mid-fork, and a fork against a running runtime is refused with the holder
+  diagnostic and the `--graphql` escape instead of the backend's own lock
+  error (#1904).
 
 - Stateless (`store:false`) Responses requests to xAI/Grok and ChatGPT Codex
   now always request `include: ["reasoning.encrypted_content"]`, even with no
