@@ -11,7 +11,7 @@ pub struct FireIdentity {
     pub source_doc_id: String,
 }
 
-/// Immutable admission receipt, committed atomically with its AgentRequest.
+/// Admission identity is immutable and committed atomically with its AgentRequest.
 /// This records delivery, not a second execution lifecycle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TriggerFire {
@@ -22,6 +22,12 @@ pub struct TriggerFire {
     pub request_id: String,
     pub session_id: String,
     pub goal_id: Option<String>,
+    pub goal_objective: Option<String>,
+    pub goal_token_budget: Option<i64>,
+    /// Only the winning request claim may mark the queued assignment applied,
+    /// in the transaction that updates its Goal and acquires execution.
+    #[serde(default)]
+    pub goal_assignment_applied: bool,
     pub emit_outcome: bool,
     pub queued_serial: bool,
     pub source_handoff_id: Option<String>,

@@ -8,6 +8,9 @@ type TriggerFire @index(fields: ["fire_key"], unique: true) {
     request_id: String @index @immutable
     session_id: String @index @immutable
     goal_id: String @index @immutable
+    goal_objective: String @immutable
+    goal_token_budget: Int @immutable
+    goal_assignment_applied: Boolean
     emit_outcome: Boolean @index @immutable
     queued_serial: Boolean @immutable
     source_handoff_id: String @immutable
