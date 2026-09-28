@@ -1065,6 +1065,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_failure_before_the_freeze_does_not_say_resume() {
+        let fixture = Fixture::new().await;
+        let subject = format!("{}:no-such-behavior", fixture.pack_arg());
+        let proposer = proposer_file(&fixture);
+        let error = optimization(
+            &fixture,
+            &[
+                "run",
+                DEFINITION,
+                "--subject",
+                subject.as_str(),
+                "--profile",
+                "local",
+                "--proposer",
+                proposer.as_str(),
+                "--job-id",
+                "pre-freeze",
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert!(!format!("{error:#}").contains("resume"), "{error:#}");
+        assert!(gents::optimization::load_job(
+            &fixture.ctx.access,
+            &fixture.ctx.owner,
+            "pre-freeze"
+        )
+        .await
+        .unwrap()
+        .is_none());
+    }
+
+    #[tokio::test]
     async fn a_script_with_fewer_proposals_than_rounds_is_refused_before_the_freeze() {
         let fixture = Fixture::new().await;
         let pack = fixture.pack_arg();
