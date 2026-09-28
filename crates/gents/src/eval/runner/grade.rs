@@ -15,7 +15,7 @@
 use serde_json::{json, Value};
 
 use crate::document_config::{EvalCase, EvalCheckRef, EvalStage, EvalTier};
-use crate::eval::checks::CheckRegistry;
+use crate::eval::checks::{failure_feedback, CheckRegistry};
 use crate::eval::runner::executor::{StageEvidence, TrialEvidence};
 use crate::eval::{classify, EvidenceClass, OutcomeKind, ProviderReason};
 
@@ -38,9 +38,10 @@ pub struct VerdictRow {
 
 /// One row per (stage, check) of `case`, in case order.
 ///
-/// `feedback` is passed through from the check unchanged; whether it may be
-/// written is the caller's decision, and `documents::append_verdict` refuses
-/// it off the train split.
+/// `feedback` is passed through from the check unchanged, except on
+/// `stage_failed` rows, where [`failed`] writes it; whether it may be written
+/// is the caller's decision, and `documents::append_verdict` refuses it off the
+/// train split.
 pub fn grade(
     case: &EvalCase,
     evidence: &TrialEvidence,
@@ -55,7 +56,12 @@ pub fn grade(
             .stages
             .iter()
             .find(|candidate| candidate.stage_id == stage.stage_id);
-        for check in &stage.checks {
+        // The proposer reads acceptance rows only: a failure is named there, once.
+        let feedback_row = stage
+            .checks
+            .iter()
+            .position(|check| check.tier == EvalTier::Acceptance);
+        for (index, check) in stage.checks.iter().enumerate() {
             rows.push(match observed {
                 None if observed_nothing => synthetic(
                     stage,
@@ -74,7 +80,7 @@ pub fn grade(
                     "skipped_prerequisite",
                 ),
                 Some(observed) => match observed.failure_kind {
-                    Some(kind) => failed(stage, check, kind, observed.provider_reason),
+                    Some(kind) => failed(stage, check, kind, observed, Some(index) == feedback_row),
                     None => checked(stage, check, observed, registry),
                 },
             });
@@ -87,6 +93,9 @@ pub fn grade(
 /// evidence of anything: it is recorded as [`OutcomeKind::Unknown`], which is
 /// how the "no provider outcome without a reason" constraint is enforced.
 ///
+/// The `stage_failed` row with `names_failure` carries [`failure_feedback`]: no
+/// check ran, so it is the only place the proposer learns why the stage failed.
+///
 /// A `failure_kind` that does not classify as a failure is malformed evidence:
 /// an executor that reports one is claiming a stage both failed and passed.
 /// Read literally the row would carry no score and
@@ -96,8 +105,10 @@ fn failed(
     stage: &EvalStage,
     check: &EvalCheckRef,
     kind: OutcomeKind,
-    provider_reason: Option<ProviderReason>,
+    observed: &StageEvidence,
+    names_failure: bool,
 ) -> VerdictRow {
+    let provider_reason = observed.provider_reason;
     if classify(kind, provider_reason) == EvidenceClass::Pass {
         return synthetic(
             stage,
@@ -119,14 +130,17 @@ fn failed(
         );
     }
     let score_bp = (classify(kind, provider_reason) == EvidenceClass::Fail).then_some(0);
-    synthetic(
-        stage,
-        check,
-        kind,
-        provider_reason,
-        score_bp,
-        "stage_failed",
-    )
+    VerdictRow {
+        feedback: names_failure.then(|| failure_feedback(observed)),
+        ..synthetic(
+            stage,
+            check,
+            kind,
+            provider_reason,
+            score_bp,
+            "stage_failed",
+        )
+    }
 }
 
 /// A stage that ran to completion: the named check reads its evidence.
@@ -161,7 +175,9 @@ fn checked(
     }
 }
 
-/// A row no check produced: its version is `"0"` and it carries no feedback.
+/// A row no check produced: its version is `"0"`. Only a `stage_failed` row
+/// carries feedback, attached by [`failed`] to the first acceptance row of its
+/// stage.
 fn synthetic(
     stage: &EvalStage,
     check: &EvalCheckRef,
@@ -291,6 +307,57 @@ mod tests {
         assert!(rows[1..]
             .iter()
             .all(|r| r.kind == OutcomeKind::SkippedPrerequisite && r.score_bp == Some(0)));
+    }
+
+    /// The proposer reads feedback only; a failed stage runs no check, so its
+    /// synthetic row is where the failure is named.
+    #[test]
+    fn a_failed_stage_row_carries_feedback_naming_the_failure() {
+        let ev = ScriptedExecutor::failed_evidence("did:x", "s1", OutcomeKind::Deadline, None);
+        let rows = grade(
+            &case(&[(
+                "s1",
+                &[("captured_rows_count", json!({"name":"items","min":1}))],
+            )]),
+            &ev,
+            &CheckRegistry::builtin(),
+        );
+        assert_eq!(
+            (rows[0].kind, rows[0].score_bp, rows[0].tier),
+            (OutcomeKind::Deadline, Some(0), EvalTier::Acceptance)
+        );
+        assert_eq!(rows[0].raw["reason_code"], "stage_failed");
+        let feedback = rows[0].feedback.as_deref().unwrap_or_default();
+        assert!(feedback.contains("failure_kind deadline"), "{feedback}");
+    }
+
+    /// A failed stage yields one row per check but names its failure once, on
+    /// the first acceptance row, since the proposer reads only acceptance rows.
+    /// A stage with no acceptance row names it nowhere.
+    #[test]
+    fn a_failed_stage_names_its_failure_on_one_acceptance_row_only() {
+        let ev = ScriptedExecutor::failed_evidence("did:x", "s1", OutcomeKind::Deadline, None);
+        let mut case = case(&[(
+            "s1",
+            &[
+                ("captured_rows_count", json!({"name":"items","min":1})),
+                ("captured_rows_count", json!({"name":"other","min":1})),
+            ],
+        )]);
+        let with_feedback = |case: &EvalCase| -> Vec<bool> {
+            grade(case, &ev, &CheckRegistry::builtin())
+                .iter()
+                .map(|row| {
+                    assert_eq!(row.raw["reason_code"], "stage_failed");
+                    row.feedback.is_some()
+                })
+                .collect()
+        };
+        assert_eq!(with_feedback(&case), [true, false]);
+        case.stages[0].checks[0].tier = EvalTier::Development;
+        assert_eq!(with_feedback(&case), [false, true]);
+        case.stages[0].checks[1].tier = EvalTier::Development;
+        assert_eq!(with_feedback(&case), [false, false]);
     }
 
     #[test]

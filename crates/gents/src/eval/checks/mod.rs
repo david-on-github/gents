@@ -5,20 +5,26 @@
 //! [`CheckVerdict`], so grading a trial is reproducible from its evidence
 //! alone.
 
+pub mod captured_fields_match;
 pub mod captured_rows_count;
+pub mod final_message_matches;
+pub mod tool_calls_expected;
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{json, Value};
 
+use crate::eval::checks::captured_fields_match::CapturedFieldsMatch;
 use crate::eval::checks::captured_rows_count::CapturedRowsCount;
+use crate::eval::checks::final_message_matches::FinalMessageMatches;
+use crate::eval::checks::tool_calls_expected::ToolCallsExpected;
 use crate::eval::runner::executor::StageEvidence;
 use crate::eval::OutcomeKind;
 
 /// Bumped when the builtin set changes in a way that could move a score.
 /// Frozen into every run's origin.
-pub const CHECK_REGISTRY_VERSION: &str = "1";
+pub const CHECK_REGISTRY_VERSION: &str = "2";
 
 /// What one check concluded about one stage. `score_bp` is `None` when the
 /// verdict is not evidence about the subject, such as a grader fault.
@@ -72,7 +78,10 @@ impl CheckRegistry {
         let mut registry = Self {
             checks: BTreeMap::new(),
         };
+        registry.register(Box::new(CapturedFieldsMatch));
         registry.register(Box::new(CapturedRowsCount));
+        registry.register(Box::new(FinalMessageMatches));
+        registry.register(Box::new(ToolCallsExpected));
         registry
     }
 
@@ -110,6 +119,113 @@ impl Default for CheckRegistry {
     }
 }
 
+/// The longest excerpt of evidence a check quotes, in chars.
+const EXCERPT_CHARS: usize = 120;
+
+/// Feedback is rendered into the proposer's prompt once per verdict, so each
+/// is capped.
+const FEEDBACK_BYTES: usize = 2048;
+
+/// `text` cut to `max` chars, marked when cut.
+fn excerpt(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_string(),
+    }
+}
+
+/// `satisfied` of `total` requirements held, scored in proportion. `total`
+/// is never zero: a check with nothing to require rejects its params.
+fn graded(satisfied: usize, total: usize, feedback: Option<String>) -> CheckVerdict {
+    let met = satisfied == total;
+    CheckVerdict {
+        kind: if met {
+            OutcomeKind::Passed
+        } else {
+            OutcomeKind::ModelAcceptance
+        },
+        score_bp: Some((satisfied * 10_000 / total) as u32),
+        raw: json!({
+            "reason_code": if met { "met" } else { "unmet" },
+            "satisfied": satisfied,
+            "total": total,
+        }),
+        feedback: feedback.map(bounded),
+    }
+}
+
+fn bounded(mut text: String) -> String {
+    if text.len() > FEEDBACK_BYTES {
+        text.truncate(text.floor_char_boundary(FEEDBACK_BYTES - "…".len()));
+        text.push('…');
+    }
+    text
+}
+
+/// Why `stage` did not complete: its end state, failure kind, provider
+/// reason and last tool error, bounded like any check's feedback.
+pub(crate) fn failure_feedback(stage: &StageEvidence) -> String {
+    let mut text = format!(
+        "stage ended {}",
+        stage
+            .terminal_state
+            .map_or("unknown", |state| state.as_str())
+    );
+    if let Some(kind) = stage.failure_kind {
+        text.push_str(&format!("; failure_kind {}", kind.as_str()));
+    }
+    if let Some(reason) = stage.provider_reason {
+        text.push_str(&format!("; provider_reason {}", reason.as_str()));
+    }
+    let last_error =
+        stage.tool_calls.iter().rev().find(|call| {
+            call.status.as_deref() == Some("failed") || call.tool_failure_class.is_some()
+        });
+    if let Some(call) = last_error {
+        let message = match &call.result {
+            Value::String(result) => result.clone(),
+            Value::Null => call.tool_failure_class.clone().unwrap_or_default(),
+            result => result.to_string(),
+        };
+        text.push_str(&format!(
+            "; last tool error: {}: {}",
+            call.tool_name,
+            excerpt(&message, EXCERPT_CHARS)
+        ));
+    }
+    bounded(text)
+}
+
+/// The check could not reach a verdict, which is no evidence about the
+/// subject.
+fn grader(reason_code: &str, detail: impl Into<String>) -> CheckVerdict {
+    CheckVerdict {
+        kind: OutcomeKind::Grader,
+        score_bp: None,
+        raw: json!({ "reason_code": reason_code, "detail": detail.into() }),
+        feedback: None,
+    }
+}
+
+/// The reason codes every graded check shares.
+fn graded_reason_codes(extra: &[(&str, &str)]) -> Vec<(String, String)> {
+    [
+        ("met", "every requirement held; score 10000"),
+        (
+            "unmet",
+            "some requirement failed; score is satisfied / total in basis points",
+        ),
+        (
+            "bad_params",
+            "grader: params did not parse or require nothing",
+        ),
+    ]
+    .iter()
+    .chain(extra)
+    .map(|(code, line)| (code.to_string(), line.to_string()))
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -117,13 +233,67 @@ mod tests {
     #[test]
     fn the_builtin_registry_holds_the_seed_check_under_its_own_name() {
         let registry = CheckRegistry::builtin();
-        assert_eq!(registry.names(), vec!["captured_rows_count"]);
+        assert_eq!(
+            registry.names(),
+            vec![
+                "captured_fields_match",
+                "captured_rows_count",
+                "final_message_matches",
+                "tool_calls_expected"
+            ]
+        );
         let check = registry.get("captured_rows_count").expect("the seed check");
         assert_eq!(
             (check.name(), check.version()),
             ("captured_rows_count", "2")
         );
         assert!(registry.get("no_such_check").is_none());
+    }
+
+    #[test]
+    fn failure_feedback_names_the_failure_and_quotes_the_last_tool_error_bounded() {
+        use crate::eval::runner::embedded::observe::ToolCallEvidence;
+        use crate::eval::runner::scripted::ScriptedExecutor;
+        use crate::eval::ProviderReason;
+
+        let call = |name: &str, status: &str, result: String| ToolCallEvidence {
+            tool_name: name.into(),
+            status: Some(status.into()),
+            lifecycle_state: None,
+            tool_failure_class: None,
+            started_at: None,
+            completed_at: None,
+            args: Value::Null,
+            result: Value::String(result),
+        };
+        let mut stage = ScriptedExecutor::failed_evidence(
+            "did:x",
+            "s1",
+            OutcomeKind::Provider,
+            Some(ProviderReason::Rejected),
+        )
+        .stages
+        .remove(0);
+        stage.tool_calls = vec![
+            call("read", "failed", "first error".into()),
+            call(
+                "write",
+                "failed",
+                format!("permission denied {}", "x".repeat(5_000)),
+            ),
+            call("list", "completed", "ok".into()),
+        ];
+        let text = failure_feedback(&stage);
+        assert!(
+            text.starts_with("stage ended failed; failure_kind provider; provider_reason rejected"),
+            "{text}"
+        );
+        assert!(
+            text.contains("last tool error: write: permission denied"),
+            "{text}"
+        );
+        assert!(!text.contains("first error"), "{text}");
+        assert!(text.len() < 400, "{}", text.len());
     }
 }
 
