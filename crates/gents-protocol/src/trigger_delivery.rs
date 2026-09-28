@@ -23,6 +23,7 @@ pub struct TriggerFire {
     pub session_id: String,
     pub goal_id: Option<String>,
     pub emit_outcome: bool,
+    pub queued_serial: bool,
     pub source_handoff_id: Option<String>,
     pub reply_session_id: Option<String>,
     pub shard_id: Option<String>,
