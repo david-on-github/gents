@@ -1,9 +1,12 @@
 use super::*;
+use crate::client::store::ClientStore;
 
 #[path = "tests/backpressure.rs"]
 mod backpressure;
 #[path = "tests/overflow.rs"]
 mod overflow;
+#[path = "tests/mixed_batch.rs"]
+mod mixed_batch;
 
 #[test]
 fn projection_invalidation_reuses_the_observed_snapshot_allocation() {
