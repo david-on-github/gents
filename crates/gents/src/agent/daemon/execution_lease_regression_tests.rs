@@ -67,7 +67,7 @@ impl CompletionModel for BufferedReasoningShutdownProvider {
     }
 }
 
-async fn graceful_shutdown_reasoning_case(fail_drain: bool) {
+async fn graceful_shutdown_reasoning_case(fail_drain: bool, prior_ownership_loss: Option<&str>) {
     use crate::session::canonical_rows::{decode_output_segment_row, AGENT_OUTPUT_SEGMENT_FIELDS};
     use gents_protocol::output::reconstruction::{reconstruct_stream, ObservedSegment};
     use gents_protocol::output::{OutputOutcome, PayloadRef, SourceClose, StreamPayload};
@@ -171,6 +171,79 @@ async fn graceful_shutdown_reasoning_case(fail_drain: bool) {
             .contains(" second"),
         "second received chunk must still be buffered before shutdown"
     );
+
+    if let Some(loss) = prior_ownership_loss {
+        let input = match loss {
+            "generation" => r#"execution_generation: "replacement-generation""#.to_owned(),
+            "expired" => r#"execution_lease_expires_at: "2000-01-01T00:00:00Z""#.to_owned(),
+            "completed" | "failed" | "dead" => {
+                format!(
+                    "lifecycle_state: \"{}\"",
+                    crate::graphql::escape_graphql_string(loss)
+                )
+            }
+            _ => panic!("unsupported ownership-loss fixture"),
+        };
+        let access = crate::config_client::ConfigAccess::Local(node.clone());
+        access
+            .write(
+                "test.shutdown_prior_ownership_loss",
+                &format!(r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{escaped}" }} }}, input: {{ {input} }}) {{ _docID }} }}"#),
+            )
+            .await
+            .unwrap();
+        let authority_query = format!(
+            r#"{{ AgentRequest(filter: {{ _docID: {{ _eq: "{escaped}" }} }}) {{ _docID lifecycle_state execution_generation execution_lease_expires_at terminal_output failure_reason }} }}"#
+        );
+        let authority_before = access.execute(&authority_query).await.unwrap();
+        let authority = &authority_before["data"]["AgentRequest"][0];
+        if loss == "generation" {
+            assert_eq!(authority["lifecycle_state"], "processing");
+            assert_eq!(authority["execution_generation"], "replacement-generation");
+        } else if loss == "expired" {
+            assert_eq!(authority["lifecycle_state"], "processing");
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(
+                    authority["execution_lease_expires_at"].as_str().unwrap()
+                )
+                .unwrap()
+                    < chrono::Utc::now()
+            );
+        } else {
+            assert_eq!(authority["lifecycle_state"], loss);
+        }
+
+        shutdown_tx.send_replace(true);
+        tokio::time::timeout(Duration::from_secs(10), &mut process)
+            .await
+            .expect("already-lost execution must exit promptly")
+            .expect("already-lost ownership is not a still-owned drain failure");
+        assert_eq!(
+            access.execute(&authority_query).await.unwrap(),
+            authority_before,
+            "old execution changed the authoritative request during shutdown"
+        );
+        let after = access.execute(&query).await.unwrap();
+        let mut before_rows = before.data.as_ref().unwrap()["AgentOutputSegment"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let mut after_rows = after["data"]["AgentOutputSegment"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let by_doc_id = |left: &serde_json::Value, right: &serde_json::Value| {
+            left["_docID"].as_str().cmp(&right["_docID"].as_str())
+        };
+        before_rows.sort_by(by_doc_id);
+        after_rows.sort_by(by_doc_id);
+        assert_eq!(
+            after_rows, before_rows,
+            "old execution must neither retain its buffered chunk nor claim a new close"
+        );
+        node.shutdown().await;
+        return;
+    }
 
     if fail_drain {
         let (result, injected_writes) =
@@ -315,12 +388,29 @@ async fn graceful_shutdown_reasoning_case(fail_drain: bool) {
 
 #[tokio::test]
 async fn graceful_shutdown_closes_all_received_buffered_reasoning() {
-    graceful_shutdown_reasoning_case(false).await;
+    graceful_shutdown_reasoning_case(false, None).await;
 }
 
 #[tokio::test]
 async fn failed_graceful_shutdown_drain_reports_error_without_terminal_claim() {
-    graceful_shutdown_reasoning_case(true).await;
+    graceful_shutdown_reasoning_case(true, None).await;
+}
+
+#[tokio::test]
+async fn graceful_shutdown_after_authoritative_terminal_does_not_claim_lost_output() {
+    for state in ["completed", "failed", "dead"] {
+        graceful_shutdown_reasoning_case(false, Some(state)).await;
+    }
+}
+
+#[tokio::test]
+async fn graceful_shutdown_after_generation_replacement_does_not_claim_lost_output() {
+    graceful_shutdown_reasoning_case(false, Some("generation")).await;
+}
+
+#[tokio::test]
+async fn graceful_shutdown_after_lease_expiry_does_not_claim_lost_output() {
+    graceful_shutdown_reasoning_case(false, Some("expired")).await;
 }
 
 #[allow(refining_impl_trait)]

@@ -24,7 +24,9 @@ mod terminal_tools;
 pub(crate) use execution_lease::revoke_execution_preserving_output_at;
 #[cfg(test)]
 pub(crate) use execution_lease::terminalize_owned_at;
-pub(crate) use execution_lease::{revoke_execution_preserving_output, RequestExecutionLease};
+pub(crate) use execution_lease::{
+    revoke_execution_preserving_output, ExecutionOwnershipLost, RequestExecutionLease,
+};
 pub use execution_lease::{RequestTerminalOutcome, TerminalizeResult};
 pub(crate) use gents_loop::execution_policy;
 #[cfg(test)]
