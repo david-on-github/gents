@@ -10,6 +10,34 @@ pub struct FireIdentity {
     pub source_doc_id: String,
 }
 
+impl FireIdentity {
+    /// Character-count framing is shared with `Triggers.Durable.Identity`.
+    /// Every component, including the owner, participates in admission identity.
+    pub fn fire_key(&self) -> String {
+        [
+            &self.owner_did,
+            &self.trigger_id,
+            &self.source_collection,
+            &self.source_doc_id,
+        ]
+        .into_iter()
+        .map(|value| format!("{}:{value}", value.chars().count()))
+        .collect()
+    }
+
+    pub fn request_id(&self) -> String {
+        format!("trigger-request:{}", self.fire_key())
+    }
+
+    pub fn session_id(&self) -> String {
+        format!("trigger-session:{}", self.fire_key())
+    }
+
+    pub fn outcome_id(&self) -> String {
+        format!("outcome:{}", self.fire_key())
+    }
+}
+
 /// Admission fields are immutable and committed atomically with their AgentRequest.
 /// The sole mutable claim marker is set with the deferred Goal assignment; it
 /// records which assignment owns the outcome, not a second execution lifecycle.
