@@ -986,9 +986,12 @@ pub(crate) fn print_json(value: &Value) -> Result<()> {
     {
         return Ok(());
     }
-    println!("{}", serde_json::to_string_pretty(value)?);
-    io::stdout().flush()?;
-    Ok(())
+    // `println!` panics on a closed stdout; a report that cannot be written is
+    // an ordinary error so long-running callers can still shut down in order.
+    let mut stdout = io::stdout().lock();
+    writeln!(stdout, "{}", serde_json::to_string_pretty(value)?)
+        .and_then(|()| stdout.flush())
+        .context("writing JSON report to stdout")
 }
 
 /// Runs `command` and returns the report it would have printed; the last
