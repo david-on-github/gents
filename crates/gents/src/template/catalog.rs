@@ -16,6 +16,12 @@ impl Catalog {
             Site::Task => self.variables.contains(&var),
         }
     }
+
+    pub fn variables_at(&self, site: Site) -> &'static [&'static str] {
+        match site {
+            Site::Task => self.variables,
+        }
+    }
 }
 
 pub fn default_catalog() -> Catalog {

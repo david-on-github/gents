@@ -76,7 +76,9 @@ requirement about it.
   the same voice and person the current instruction uses.
 - When the dossier says the instruction is a task's prompt template, it
   is rendered when the task fires: keep every `{{ variable }}` of the
-  current template in the new one, spelled exactly as it is.
+  current template in the new one, spelled exactly as it is, and use no
+  variable the current template does not already use apart from the
+  runtime variables the dossier names.
 
 ## How to reply
 

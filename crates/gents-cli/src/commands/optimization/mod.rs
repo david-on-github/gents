@@ -20,6 +20,7 @@ use gents::optimization::{
     show as show_job, validate_job_id, Budgets, JobOutcome, JobRequest, JobState, PolicyV2,
     Proposal, Proposer, ScriptedProposer,
 };
+use gents::template::catalog::{default_catalog, Site};
 use gents::{default_behavior_id_for_agent, default_inference_profile_id_for_behavior};
 use tokio_util::sync::CancellationToken;
 
@@ -270,7 +271,10 @@ fn subject_preamble(subject_dir: &Path, behavior_id: &str, target: &JobTarget) -
         JobTarget::Context => "this behavior's system prompt".to_owned(),
         JobTarget::Task(task_id) => format!(
             "the prompt template of its task {task_id:?}, rendered when the task fires; \
-             every {{{{ variable }}}} of the current template must stay in the new one"
+             every {{{{ variable }}}} of the current template must stay in the new one, \
+             and use no {{{{ variable }}}} the current template does not already use \
+             apart from the runtime's own: {}",
+            default_catalog().variables_at(Site::Task).join(", ")
         ),
     };
     Ok(format!(
