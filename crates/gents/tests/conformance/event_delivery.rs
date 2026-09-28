@@ -600,12 +600,12 @@ async fn spawn_event_source_runner(
             .with_rescan_interval(RESCAN_TEST_INTERVAL);
     let (tx, rx) = mpsc::channel(16);
     let runner = tokio::spawn(async move {
-        while let Some(intent) = source.next_fire().await {
+        while let Some(mut intent) = source.next_fire().await {
             let doc_id = intent.event_vars["source_doc_id"]
                 .as_str()
                 .expect("source document identity")
                 .to_owned();
-            let admission = admit_event_delivery(&access, &intent, &trigger_doc_id, &doc_id)
+            let admission = admit_event_delivery(&access, &mut intent, &trigger_doc_id, &doc_id)
                 .await
                 .expect("admit source fire through Task delivery owner");
             let result = if admission.duplicate {
@@ -659,7 +659,7 @@ async fn install_event_delivery_config(access: &gents::config_client::ConfigAcce
 
 async fn admit_event_delivery(
     access: &gents::config_client::ConfigAccess,
-    intent: &gents::FireIntent,
+    intent: &mut gents::FireIntent,
     trigger_doc_id: &str,
     doc_id: &str,
 ) -> anyhow::Result<gents::lifecycle::TaskDeliveryAdmission> {
