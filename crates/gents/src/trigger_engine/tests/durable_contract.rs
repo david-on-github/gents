@@ -398,9 +398,9 @@ async fn generated_terminal_outcome_action_traces_use_native_owners() {
                 assert_eq!(
                     outcome["terminal_state"],
                     if reason == "request_terminal" {
-                        &terminal_states[&id.request_id()]
+                        terminal_states[&id.request_id()].as_str()
                     } else {
-                        reason
+                        reason.as_str()
                     },
                     "{} step {index}",
                     trace["name"]
