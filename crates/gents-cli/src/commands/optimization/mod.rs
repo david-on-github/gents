@@ -185,9 +185,11 @@ fn pack_config(
 
 /// A proposer is tool-less, so a proposal draws only on the turns it is
 /// sent: the behavior's tool surface, resolved from the pack's documents by
-/// the runtime's owner, names no tool. The readonly ceiling narrows a host
-/// tool without removing it and needs no root, so the answer does not depend
-/// on how the server was started.
+/// the runtime's owner, names no tool, and its context names no skill (the
+/// runtime adds `load_skill` for those). The readonly ceiling narrows a host
+/// tool without removing it and needs no root; the CLI tools it filters out
+/// are counted anyway, since a server started with `--cli-tool` adds them
+/// back; and a subagent target counts whichever home behavior it names.
 fn ensure_tool_less(
     config: &gents::document_config::PackConfig,
     owner: &str,
@@ -198,13 +200,13 @@ fn ensure_tool_less(
         .iter()
         .find(|behavior| behavior.behavior_id == behavior_id)
         .with_context(|| format!("the proposer pack has no behavior {behavior_id}"))?;
-    let tools_id = behavior.context_id.as_deref().and_then(|id| {
+    let context = behavior.context_id.as_deref().and_then(|id| {
         config
             .contexts
             .iter()
             .find(|context| context.context_id == id)
-            .and_then(|context| context.tools_id.as_deref())
     });
+    let tools_id = context.and_then(|context| context.tools_id.as_deref());
     let no_tools = gents::document_config::Tools::default();
     let tools = match tools_id {
         Some(id) => config
@@ -217,9 +219,16 @@ fn ensure_tool_less(
     let active = config
         .agent_behaviors
         .iter()
-        .map(|behavior| behavior.behavior_id.clone())
+        .map(|behavior| &behavior.behavior_id)
+        .chain(
+            config
+                .subagent_targets
+                .iter()
+                .map(|target| &target.behavior_id),
+        )
+        .cloned()
         .collect();
-    let names = gents::BehaviorToolConfig::from_tools_documents(
+    let mut names = gents::BehaviorToolConfig::from_tools_documents(
         behavior_id,
         tools,
         &config.datastore_tool_surfaces,
@@ -234,9 +243,21 @@ fn ensure_tool_less(
         &active,
     )
     .tool_names;
+    names.extend(
+        tools
+            .host
+            .iter()
+            .flat_map(|host| &host.cli)
+            .map(|cli| cli.name.clone()),
+    );
     anyhow::ensure!(
         names.is_empty(),
         "proposer behavior {behavior_id} has tools {names:?}; a proposer must be tool-less"
+    );
+    let skills = context.map_or(&[][..], |context| &context.skill_ids[..]);
+    anyhow::ensure!(
+        skills.is_empty(),
+        "proposer behavior {behavior_id} has skills {skills:?}; a proposer must be tool-less"
     );
     Ok(())
 }
