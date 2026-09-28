@@ -1225,10 +1225,10 @@ fn subagent_target_entry_distinguishes_owner_from_destination() {
 
 #[test]
 fn parse_target_accepts_context_and_a_named_task_and_rejects_the_rest() {
-    assert_eq!(parse_target("context").unwrap(), TargetArg::Context);
+    assert_eq!(parse_target("context").unwrap(), JobTarget::Context);
     assert_eq!(
         parse_target("task:plan").unwrap(),
-        TargetArg::Task("plan".into())
+        JobTarget::Task("plan".into())
     );
     for bad in ["", "task", "task:", "task: ", "prompt", "context:x"] {
         let error = parse_target(bad).unwrap_err();
@@ -1253,7 +1253,7 @@ fn parse_target_accepts_context_and_a_named_task_and_rejects_the_rest() {
     };
     assert_eq!(
         args.target,
-        TargetArg::Context,
+        JobTarget::Context,
         "--target defaults to context"
     );
 }

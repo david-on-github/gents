@@ -14,18 +14,19 @@ use gents::eval::checks::CheckRegistry;
 use gents::eval::documents::default_breaker_threshold;
 use gents::eval::runner::embedded::EmbeddedExecutor;
 use gents::eval::runner::RunOptions;
-use gents::optimization::target::TargetField;
+use gents::optimization::target::JobTarget;
 use gents::optimization::{
     derive_state, job_dir, job_refused, load_job, promote_refused, removable, run_job,
     show as show_job, validate_job_id, Budgets, JobOutcome, JobRequest, JobState, PolicyV2,
     Proposal, Proposer, ScriptedProposer,
 };
+use gents::template::catalog::{default_catalog, Site};
 use gents::{default_behavior_id_for_agent, default_inference_profile_id_for_behavior};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::{
     OptimizationCommand, OptimizationDigestArgs, OptimizationRmArgs, OptimizationRunArgs,
-    OptimizationShowArgs, PolicyArg, ProposerArg, TargetArg,
+    OptimizationShowArgs, PolicyArg, ProposerArg,
 };
 use crate::commands::eval::init::install_pack_slot;
 use crate::commands::eval::init::turn::LiveTurn;
@@ -131,14 +132,8 @@ async fn behavior_proposer(
     subject_dir: &Path,
     subject_behavior: &str,
 ) -> Result<BehaviorProposer<LiveTurn>> {
-    let gents::ConfigAccess::Graphql(graphql) = &*ctx.access else {
-        anyhow::bail!(
-            "start `gents server` for this home and retry: a behavior proposer runs on a served home"
-        );
-    };
-    crate::request_helpers::ensure_local_request_signer(args.scope.home.as_deref(), &ctx.owner)?;
-    let preamble = subject_preamble(subject_dir, subject_behavior, &args.target)?;
-    let manifest = gents::pack::resolve_pack(pack)?.manifest;
+    let resolved = gents::pack::resolve_pack(pack)?;
+    let manifest = &resolved.manifest;
     let [slot] = manifest.metadata.inference_slots.as_slice() else {
         anyhow::bail!(
             "pack {pack} declares {} inference slots; a proposer pack declares one",
@@ -146,6 +141,15 @@ async fn behavior_proposer(
         );
     };
     let behavior_id = proposer_behavior_id(pack, slot, behavior)?;
+    let config = pack_config(&resolved, &ctx.owner)?;
+    ensure_tool_less(&config, &ctx.owner, &behavior_id)?;
+    let gents::ConfigAccess::Graphql(graphql) = &*ctx.access else {
+        anyhow::bail!(
+            "start `gents server` for this home and retry: a behavior proposer runs on a served home"
+        );
+    };
+    crate::request_helpers::ensure_local_request_signer(args.scope.home.as_deref(), &ctx.owner)?;
+    let preamble = subject_preamble(subject_dir, subject_behavior, &args.target)?;
     let profile = args.proposer_profile.clone().unwrap_or_else(|| {
         default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
     });
@@ -164,15 +168,113 @@ async fn behavior_proposer(
     ))
 }
 
+/// The documents `install_pack_slot` installs for `owner`, before binding.
+fn pack_config(
+    pack: &gents::pack::ResolvedPack,
+    owner: &str,
+) -> Result<gents::document_config::PackConfig> {
+    gents::pack::load_pack_config(
+        &pack.manifest,
+        &gents::pack::PackInstallOptions {
+            agent_did: owner.to_owned(),
+        },
+        &|path| pack.asset(path).map(Vec::from),
+        &|_name| None,
+    )
+    .with_context(|| format!("loading the {} pack", pack.manifest.name))
+}
+
+/// A proposer is tool-less, so a proposal draws only on the turns it is
+/// sent: the behavior's tool surface, resolved from the pack's documents by
+/// the runtime's owner, names no tool, and its context names no skill (the
+/// runtime adds `load_skill` for those). The readonly ceiling narrows a host
+/// tool without removing it and needs no root; the CLI tools it filters out
+/// are counted anyway, since a server started with `--cli-tool` adds them
+/// back; and a subagent target counts whichever home behavior it names.
+fn ensure_tool_less(
+    config: &gents::document_config::PackConfig,
+    owner: &str,
+    behavior_id: &str,
+) -> Result<()> {
+    let behavior = config
+        .agent_behaviors
+        .iter()
+        .find(|behavior| behavior.behavior_id == behavior_id)
+        .with_context(|| format!("the proposer pack has no behavior {behavior_id}"))?;
+    let context = behavior.context_id.as_deref().and_then(|id| {
+        config
+            .contexts
+            .iter()
+            .find(|context| context.context_id == id)
+    });
+    let tools_id = context.and_then(|context| context.tools_id.as_deref());
+    let no_tools = gents::document_config::Tools::default();
+    let tools = match tools_id {
+        Some(id) => config
+            .tools
+            .iter()
+            .find(|tools| tools.tools_id == id)
+            .with_context(|| format!("behavior {behavior_id} names unknown tools {id}"))?,
+        None => &no_tools,
+    };
+    let active = config
+        .agent_behaviors
+        .iter()
+        .map(|behavior| &behavior.behavior_id)
+        .chain(
+            config
+                .subagent_targets
+                .iter()
+                .map(|target| &target.behavior_id),
+        )
+        .cloned()
+        .collect();
+    let mut names = gents::BehaviorToolConfig::from_tools_documents(
+        behavior_id,
+        tools,
+        &config.datastore_tool_surfaces,
+        &config.eth_tools,
+        &config.subagent_targets,
+        &gents::ToolCeiling::readonly(),
+        Vec::new(),
+    )?
+    .explain_with_runtime_availability(
+        gents::tool_surface::RuntimeToolAvailability::all(),
+        owner,
+        &active,
+    )
+    .tool_names;
+    names.extend(
+        tools
+            .host
+            .iter()
+            .flat_map(|host| &host.cli)
+            .map(|cli| cli.name.clone()),
+    );
+    anyhow::ensure!(
+        names.is_empty(),
+        "proposer behavior {behavior_id} has tools {names:?}; a proposer must be tool-less"
+    );
+    let skills = context.map_or(&[][..], |context| &context.skill_ids[..]);
+    anyhow::ensure!(
+        skills.is_empty(),
+        "proposer behavior {behavior_id} has skills {skills:?}; a proposer must be tool-less"
+    );
+    Ok(())
+}
+
 /// The session's first user turn: the subject's dossier, so a proposal
 /// names the subject's real tools and surfaces rather than guessing them.
-fn subject_preamble(subject_dir: &Path, behavior_id: &str, target: &TargetArg) -> Result<String> {
+fn subject_preamble(subject_dir: &Path, behavior_id: &str, target: &JobTarget) -> Result<String> {
     let dossier = crate::commands::eval::init::dossier::render(subject_dir, Some(behavior_id))?;
     let instruction = match target {
-        TargetArg::Context => "this behavior's system prompt".to_owned(),
-        TargetArg::Task(task_id) => format!(
+        JobTarget::Context => "this behavior's system prompt".to_owned(),
+        JobTarget::Task(task_id) => format!(
             "the prompt template of its task {task_id:?}, rendered when the task fires; \
-             every {{{{ variable }}}} of the current template must stay in the new one"
+             every {{{{ variable }}}} of the current template must stay in the new one, \
+             and use no {{{{ variable }}}} the current template does not already use \
+             apart from the runtime's own: {}",
+            default_catalog().variables_at(Site::Task).join(", ")
         ),
     };
     Ok(format!(
@@ -233,21 +335,6 @@ async fn run(
         Some(behavior) => behavior.clone(),
         None => subject.default_behavior()?,
     };
-    let proposer: Box<dyn Proposer> = match proposer_arg {
-        ProposerArg::Scripted(script) => Box::new(scripted_proposer(script, args.rounds)?),
-        ProposerArg::Behavior { pack, behavior } => {
-            let proposer = behavior_proposer(
-                ctx,
-                args,
-                pack,
-                behavior.as_deref(),
-                &baseline_pack,
-                &behavior_id,
-            )
-            .await?;
-            Box::new(proposer)
-        }
-    };
     // Bonferroni: the divisor must be the number of candidates the budget
     // allows, and the driver refuses a policy that disagrees.
     // `defaults` is the uncalibrated policy sized to `--rounds`; a policy
@@ -264,17 +351,12 @@ async fn run(
         .job_id
         .clone()
         .unwrap_or_else(|| default_id(&args.definition_id));
-    let (target_field, task_id) = match &args.target {
-        TargetArg::Context => (TargetField::AgentContextSystemPrompt, None),
-        TargetArg::Task(task_id) => (TargetField::TaskPromptTemplate, Some(task_id.clone())),
-    };
     let request = JobRequest {
         job_id: job_id.clone(),
         owner: ctx.owner.clone(),
         evaluator_did: ctx.owner.clone(),
         behavior_id,
-        target_field,
-        task_id,
+        target: args.target.clone(),
         definition_id: args.definition_id.clone(),
         inference_profile_id: args.profile.clone().unwrap_or_else(|| {
             default_inference_profile_id_for_behavior(&default_behavior_id_for_agent(&ctx.owner))
@@ -302,32 +384,47 @@ async fn run(
         captures: Vec::new(),
         run_options: deps.options.clone(),
     };
-    let outcome = follow(
-        ctx,
-        &job_id,
-        !args.json,
-        out,
-        run_job(
-            &ctx.access,
-            &request,
-            deps.executor,
-            proposer.as_ref(),
-            deps.registry,
-            &policy,
-            deps.cancel.clone(),
-        ),
-    )
-    .await
-    .with_context(|| {
-        format!("job {job_id} stopped before it finished; run the same command with --job-id {job_id} to resume it")
-    })?;
+    // A behavior proposer installs its pack, so a job refused on its request
+    // or policy is refused first and writes nothing.
+    gents::optimization::check_request(&request, &policy)?;
+    let proposer: Box<dyn Proposer> = match proposer_arg {
+        ProposerArg::Scripted(script) => Box::new(scripted_proposer(script, args.rounds)?),
+        ProposerArg::Behavior { pack, behavior } => {
+            let proposer = behavior_proposer(
+                ctx,
+                args,
+                pack,
+                behavior.as_deref(),
+                &request.baseline_pack,
+                &request.behavior_id,
+            )
+            .await?;
+            Box::new(proposer)
+        }
+    };
+    let resume = format!(
+        "job {job_id} stopped before it finished; run the same command with --job-id {job_id} to resume it"
+    );
+    let running = run_job(
+        &ctx.access,
+        &request,
+        deps.executor,
+        proposer.as_ref(),
+        deps.registry,
+        &policy,
+        deps.cancel.clone(),
+    );
+    let outcome = match follow(ctx, &job_id, !args.json, out, running).await {
+        Ok(outcome) => outcome,
+        // Only a job that was created can be resumed.
+        Err(error) => match load_job(&ctx.access, &ctx.owner, &job_id).await {
+            Ok(Some(_)) => return Err(error.context(resume)),
+            _ => return Err(error),
+        },
+    };
     // A job left running is not a success: the view still renders, then the
     // command fails with the resume note, so a script never reads it as done.
-    let stopped = (outcome.state == JobState::Running).then(|| {
-        format!(
-            "job {job_id} stopped before it finished; run the same command with --job-id {job_id} to resume it"
-        )
-    });
+    let stopped = (outcome.state == JobState::Running).then_some(resume);
     let view = show_job(&ctx.access, &ctx.owner, &job_id).await?;
     if args.json {
         write_json(out, &view)?;
@@ -516,7 +613,9 @@ mod tests {
         accepted_job, delete_definition, optimization, optimization_command, optimization_with,
         proposer_file,
     };
-    use super::{execute, proposer_behavior_id, subject_preamble, TargetArg};
+    use super::{
+        ensure_tool_less, execute, pack_config, proposer_behavior_id, subject_preamble, JobTarget,
+    };
     use crate::cli::Cli;
     use crate::commands::eval::testing::{deps, eval, executor, Fixture, DEFINITION};
     use crate::commands::eval::UNCALIBRATED_BANNER;
@@ -586,7 +685,7 @@ mod tests {
     fn the_subject_preamble_is_the_dossier_naming_the_subject_tools() {
         let pipeline =
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
-        let preamble = subject_preamble(&pipeline, "exp-stage1", &TargetArg::Context).unwrap();
+        let preamble = subject_preamble(&pipeline, "exp-stage1", &JobTarget::Context).unwrap();
         assert!(
             preamble.starts_with("# Subject\n\n## Identity"),
             "{preamble}"
@@ -601,14 +700,99 @@ mod tests {
             "{preamble}"
         );
         let task =
-            subject_preamble(&pipeline, "exp-stage1", &TargetArg::Task("plan".into())).unwrap();
+            subject_preamble(&pipeline, "exp-stage1", &JobTarget::Task("plan".into())).unwrap();
         assert!(
             task.contains("the prompt template of its task \"plan\""),
             "{task}"
         );
         assert!(task.contains("every {{ variable }}"), "{task}");
+        assert!(
+            task.contains("use no {{ variable }} the current template does not already use"),
+            "{task}"
+        );
+        assert!(
+            task.contains("node.node_did, node.behavior_id, ctx.now"),
+            "{task}"
+        );
     }
 
+    #[tokio::test]
+    async fn a_proposer_behavior_with_tools_is_refused_before_anything_runs() {
+        let fixture = Fixture::new().await;
+        let pack = fixture.pack_arg();
+        let error = optimization(
+            &fixture,
+            &[
+                "run",
+                DEFINITION,
+                "--subject",
+                pack.as_str(),
+                "--proposer",
+                "behavior:lsp_rust",
+            ],
+        )
+        .await
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(
+            message.starts_with("proposer behavior lsp-coder has tools [")
+                && message.ends_with("]; a proposer must be tool-less"),
+            "{error:#}"
+        );
+        assert!(message.contains("\"lsp\""), "{message}");
+    }
+
+    /// What the resolved surface alone would miss: CLI tools a server started
+    /// with `--cli-tool` adds, a subagent target outside the pack, and skills.
+    #[test]
+    fn cli_tools_a_target_outside_the_pack_or_skills_are_refused() {
+        use serde_json::json;
+        const OWNER: &str = "did:key:z6MkproposerOwner";
+        let pack = gents::pack::resolve_pack("prompt_proposer").unwrap();
+        let base = pack_config(&pack, OWNER).unwrap();
+        ensure_tool_less(&base, OWNER, "prompt-proposer").unwrap();
+
+        let mut cli = base.clone();
+        cli.tools[0]
+            .host
+            .as_mut()
+            .unwrap()
+            .cli
+            .push(serde_json::from_value(json!({"name": "rg"})).unwrap());
+        let mut subagent = base.clone();
+        subagent.tools[0].subagents = Some(
+            serde_json::from_value(json!({"enabled": true, "target_ids": ["helper"]})).unwrap(),
+        );
+        subagent.subagent_targets.push(
+            serde_json::from_value(json!({
+                "target_id": "helper",
+                "agent_did": OWNER,
+                "target_agent_did": OWNER,
+                "behavior_id": "home-default",
+                "name": "helper",
+            }))
+            .unwrap(),
+        );
+        let mut skills = base.clone();
+        skills.contexts[0].skill_ids = vec!["review".to_owned()];
+        for (config, offending) in [
+            (cli, "\"rg\""),
+            (subagent, "\"agent_new\""),
+            (skills, "has skills [\"review\"]"),
+        ] {
+            let error = ensure_tool_less(&config, OWNER, "prompt-proposer")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.starts_with("proposer behavior prompt-proposer has ")
+                    && error.contains(offending)
+                    && error.ends_with("; a proposer must be tool-less"),
+                "{error}"
+            );
+        }
+    }
+
+    /// `prompt_proposer` passes the tool-less check and reaches the next one.
     #[tokio::test]
     async fn a_behavior_proposer_needs_a_served_home() {
         let fixture = Fixture::new().await;
@@ -630,6 +814,54 @@ mod tests {
             error.to_string().contains("start `gents server`"),
             "{error:#}"
         );
+    }
+
+    /// The pack install writes documents, so a job the request or policy
+    /// refuses never reaches the proposer (here, the served-home check
+    /// before the install).
+    #[tokio::test]
+    async fn a_refused_job_is_refused_before_the_proposer_is_built() {
+        let fixture = Fixture::new().await;
+        let pack = fixture.pack_arg();
+        std::fs::create_dir_all(&fixture.ctx.home_dir).unwrap();
+        let policy = fixture.ctx.home_dir.join("policy.json");
+        std::fs::write(
+            &policy,
+            serde_json::to_vec(&gents::optimization::PolicyV2::uncalibrated()).unwrap(),
+        )
+        .unwrap();
+        let policy = policy.display().to_string();
+        for (flag, value, refusal) in [
+            (
+                "--job-id",
+                "a/b",
+                r#"job_id "a/b" must be one ordinary path component"#,
+            ),
+            (
+                "--policy",
+                policy.as_str(),
+                "policy max_rounds 3 does not match the budget's max_rounds 2; the Bonferroni divisor must be the number of candidates the job may try",
+            ),
+        ] {
+            let error = optimization(
+                &fixture,
+                &[
+                    "run",
+                    DEFINITION,
+                    "--subject",
+                    pack.as_str(),
+                    "--proposer",
+                    "behavior:prompt_proposer",
+                    "--rounds",
+                    "2",
+                    flag,
+                    value,
+                ],
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(format!("{error:#}"), refusal);
+        }
     }
 
     #[tokio::test]
@@ -915,6 +1147,39 @@ mod tests {
             .unwrap_or_else(|error| panic!("stdout is not pure JSON ({error}): {output}"));
         assert_eq!(json["state"]["state"], "running");
         assert_eq!(json["job"]["job_id"], "job-json");
+    }
+
+    #[tokio::test]
+    async fn a_failure_before_the_freeze_does_not_say_resume() {
+        let fixture = Fixture::new().await;
+        let subject = format!("{}:no-such-behavior", fixture.pack_arg());
+        let proposer = proposer_file(&fixture);
+        let error = optimization(
+            &fixture,
+            &[
+                "run",
+                DEFINITION,
+                "--subject",
+                subject.as_str(),
+                "--profile",
+                "local",
+                "--proposer",
+                proposer.as_str(),
+                "--job-id",
+                "pre-freeze",
+            ],
+        )
+        .await
+        .unwrap_err();
+        assert!(!format!("{error:#}").contains("resume"), "{error:#}");
+        assert!(gents::optimization::load_job(
+            &fixture.ctx.access,
+            &fixture.ctx.owner,
+            "pre-freeze"
+        )
+        .await
+        .unwrap()
+        .is_none());
     }
 
     #[tokio::test]

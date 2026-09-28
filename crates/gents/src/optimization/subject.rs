@@ -21,7 +21,7 @@ use serde_json::Value;
 use crate::document_config::PackConfig;
 use crate::eval::runner::freeze::{load_pack, write_pack_files};
 use crate::eval::runner::CellSource;
-use crate::optimization::target::TargetField;
+use crate::optimization::target::{JobTarget, TargetField};
 use crate::pack::{declared_paths, interpolate, PackManifest};
 
 /// The canonical config bundle a sidecar reference or an inline prompt lives in.
@@ -46,20 +46,13 @@ pub struct MaterializedPack {
     pub prompt_asset: Option<String>,
 }
 
-impl MaterializedPack {
-    fn task_id(&self) -> Option<&str> {
-        (self.target == TargetField::TaskPromptTemplate).then_some(self.target_id.as_str())
-    }
-}
-
 /// Read the pack at `dir` as the subject of `behavior_id`, optimizing the
-/// behavior's context or, for a task target, the task `task_id`.
+/// behavior's context or, for a task target, that task.
 pub fn materialize_pack(
     dir: &Path,
     owner: &str,
     behavior_id: &str,
-    target: TargetField,
-    task_id: Option<&str>,
+    target: &JobTarget,
 ) -> Result<MaterializedPack> {
     let pack = load_pack(&CellSource::Directory(dir.to_path_buf()), owner)
         .with_context(|| format!("loading pack {}", dir.display()))?;
@@ -71,25 +64,27 @@ pub fn materialize_pack(
         .find(|behavior| behavior.behavior_id == behavior_id)
         .with_context(|| format!("pack declares no behavior {behavior_id:?}"))?;
     let target_id = match target {
-        TargetField::AgentContextSystemPrompt => behavior
+        JobTarget::Context => behavior
             .context_id
             .clone()
             .with_context(|| format!("behavior {behavior_id:?} names no context to optimize"))?,
-        TargetField::TaskPromptTemplate => {
-            let task_id = task_id.context("a task prompt template target names a task")?;
+        JobTarget::Task(task_id) => {
             pack.config
                 .tasks
                 .iter()
-                .find(|task| task.task_id == task_id && task.behavior_id == behavior_id)
+                .find(|task| &task.task_id == task_id && task.behavior_id == behavior_id)
                 .with_context(|| {
                     format!("pack declares no task {task_id:?} of behavior {behavior_id:?}")
                 })?;
-            task_id.to_owned()
+            task_id.clone()
         }
     };
+    let target = target.field();
 
-    reject_shared_sidecars(&pack.files)?;
     let prompt_asset = sidecar_prompt_asset(&pack.manifest, &pack.files, target, &target_id)?;
+    if let Some(asset) = &prompt_asset {
+        reject_shared_sidecar(&pack.files, asset)?;
+    }
 
     Ok(MaterializedPack {
         dir: dir.to_path_buf(),
@@ -119,31 +114,26 @@ fn raw_target<'a>(
         .map(|document| &mut document[field])
 }
 
-/// A sidecar read by more than one config field would change every document
-/// that reads it in a trial, while promotion writes only the target.
-fn reject_shared_sidecars(files: &BTreeMap<String, Vec<u8>>) -> Result<()> {
-    fn count<'a>(value: &'a Value, seen: &mut BTreeMap<&'a str, usize>) {
+/// A target sidecar another config field also reads would change that
+/// document too in a trial, while promotion writes only the target.
+fn reject_shared_sidecar(files: &BTreeMap<String, Vec<u8>>, asset: &str) -> Result<()> {
+    fn uses(value: &Value, asset: &str) -> usize {
         match value {
-            Value::String(text) if text.starts_with("./") => *seen.entry(text).or_default() += 1,
-            Value::Array(items) => items.iter().for_each(|item| count(item, seen)),
-            Value::Object(fields) => fields.values().for_each(|field| count(field, seen)),
-            _ => {}
+            Value::String(text) => {
+                usize::from(text.starts_with("./") && text.trim_start_matches("./") == asset)
+            }
+            Value::Array(items) => items.iter().map(|item| uses(item, asset)).sum(),
+            Value::Object(fields) => fields.values().map(|field| uses(field, asset)).sum(),
+            _ => 0,
         }
     }
     let Some(bytes) = files.get(CONFIG_ASSET) else {
         return Ok(());
     };
     let raw: Value = serde_json::from_slice(bytes).context("parsing pack_config.json")?;
-    let mut seen = BTreeMap::new();
-    count(&raw, &mut seen);
-    let shared: Vec<&str> = seen
-        .into_iter()
-        .filter(|(_, uses)| *uses > 1)
-        .map(|(path, _)| path)
-        .collect();
     anyhow::ensure!(
-        shared.is_empty(),
-        "{CONFIG_ASSET} reads {shared:?} from more than one field; a candidate could not change one document alone"
+        uses(&raw, asset) <= 1,
+        "{CONFIG_ASSET} reads the target's sidecar {asset:?} from more than one field; a candidate could not change one document alone"
     );
     Ok(())
 }
@@ -249,15 +239,13 @@ pub fn materialize_candidate(
         dir,
         owner,
         &baseline.behavior_id,
-        baseline.target,
-        baseline.task_id(),
+        &baseline.target.job_target(&baseline.target_id),
     )
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::optimization::target::TargetField;
     use serde_json::json;
 
     const OWNER: &str = "did:key:subject-owner";
@@ -270,13 +258,7 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn context_pack(dir: &Path) -> Result<MaterializedPack> {
-        materialize_pack(
-            dir,
-            OWNER,
-            "monitor",
-            TargetField::AgentContextSystemPrompt,
-            None,
-        )
+        materialize_pack(dir, OWNER, "monitor", &JobTarget::Context)
     }
 
     pub(crate) const FIXTURE_TEMPLATE: &str = "Plan {{ doc.goal }} for {{ doc.owner }}.\n";
@@ -326,13 +308,7 @@ pub(crate) mod tests {
     }
 
     fn task_pack(dir: &Path) -> Result<MaterializedPack> {
-        materialize_pack(
-            dir,
-            OWNER,
-            "monitor",
-            TargetField::TaskPromptTemplate,
-            Some("plan"),
-        )
+        materialize_pack(dir, OWNER, "monitor", &JobTarget::Task("plan".into()))
     }
 
     #[test]
@@ -391,9 +367,10 @@ pub(crate) mod tests {
     }
 
     /// A sidecar two fields read would change both documents in a trial,
-    /// while promotion writes only the target.
+    /// while promotion writes only the target; a shared sidecar the target
+    /// does not read never changes.
     #[test]
-    fn a_sidecar_referenced_from_two_fields_is_an_error() {
+    fn only_a_target_sidecar_referenced_from_two_fields_is_an_error() {
         let dirs = tempfile::tempdir().unwrap();
         let baseline_dir = dirs.path().join("baseline");
         write_task_fixture_pack(&baseline_dir, false);
@@ -408,26 +385,22 @@ pub(crate) mod tests {
         std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
         let error = task_pack(&baseline_dir).unwrap_err();
         assert!(
-            format!("{error:#}").contains("./tasks/plan/prompt.md"),
+            format!("{error:#}").contains("tasks/plan/prompt.md"),
             "{error:#}"
+        );
+        let context = context_pack(&baseline_dir).unwrap();
+        assert_eq!(
+            context.prompt_asset.as_deref(),
+            Some("agent_behaviors/monitor/system_prompt.md")
         );
     }
 
     #[test]
-    fn a_task_the_pack_does_not_declare_or_name_is_an_error() {
+    fn a_task_the_pack_does_not_declare_is_an_error() {
         let dirs = tempfile::tempdir().unwrap();
         write_fixture_pack(&dirs.path().join("baseline"));
         let error = task_pack(&dirs.path().join("baseline")).unwrap_err();
         assert!(format!("{error:#}").contains("plan"), "{error:#}");
-        let error = materialize_pack(
-            &dirs.path().join("baseline"),
-            OWNER,
-            "monitor",
-            TargetField::TaskPromptTemplate,
-            None,
-        )
-        .unwrap_err();
-        assert!(format!("{error:#}").contains("task"), "{error:#}");
     }
 
     #[test]
@@ -511,8 +484,7 @@ pub(crate) mod tests {
             &baseline_dir,
             OWNER,
             "no-such-behavior",
-            TargetField::AgentContextSystemPrompt,
-            None,
+            &JobTarget::Context,
         )
         .unwrap_err();
         assert!(

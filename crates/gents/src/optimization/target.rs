@@ -39,6 +39,14 @@ impl TargetField {
 
     /// Where the field sits in a raw `pack_config.json`: the array, the
     /// document id key and the field.
+    /// The request naming this field of the document `id`.
+    pub fn job_target(&self, id: &str) -> JobTarget {
+        match self {
+            Self::AgentContextSystemPrompt => JobTarget::Context,
+            Self::TaskPromptTemplate => JobTarget::Task(id.to_owned()),
+        }
+    }
+
     pub fn pack_slot(&self) -> (&'static str, &'static str, &'static str) {
         match self {
             Self::AgentContextSystemPrompt => ("contexts", "context_id", "system_prompt"),
@@ -55,9 +63,26 @@ pub struct Target {
 }
 
 impl Target {
-    /// The task a task prompt template target names.
-    pub fn task_id(&self) -> Option<&str> {
-        (self.field == TargetField::TaskPromptTemplate).then_some(self.id.as_str())
+    /// The request that names this target.
+    pub fn job_target(&self) -> JobTarget {
+        self.field.job_target(&self.id)
+    }
+}
+
+/// What an operator asks a job to change: the system prompt of the context the
+/// subject behavior names, or the prompt template of one of its tasks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JobTarget {
+    Context,
+    Task(String),
+}
+
+impl JobTarget {
+    pub fn field(&self) -> TargetField {
+        match self {
+            Self::Context => TargetField::AgentContextSystemPrompt,
+            Self::Task(_) => TargetField::TaskPromptTemplate,
+        }
     }
 }
 
@@ -509,6 +534,28 @@ mod tests {
             "Do {{ args.goal }}.\n"
         );
         assert_eq!(current_text(&after, &target()).unwrap(), "a");
+    }
+
+    /// A job request names a target as one value: a context target carries
+    /// no task id to ignore, and a frozen target reads back as the request
+    /// that froze it.
+    #[test]
+    fn a_job_target_is_the_request_side_of_a_frozen_target() {
+        assert_eq!(
+            JobTarget::Context.field(),
+            TargetField::AgentContextSystemPrompt
+        );
+        assert_eq!(
+            JobTarget::Task("plan".into()).field(),
+            TargetField::TaskPromptTemplate
+        );
+        assert_eq!(target().job_target(), JobTarget::Context);
+        let task = Target {
+            field: TargetField::TaskPromptTemplate,
+            owner: OWNER.into(),
+            id: "plan".into(),
+        };
+        assert_eq!(task.job_target(), JobTarget::Task("plan".into()));
     }
 
     /// Finding F5: a definition is frozen in `JobOrigin::definition`, never in

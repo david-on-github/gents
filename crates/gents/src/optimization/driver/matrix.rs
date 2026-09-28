@@ -55,7 +55,7 @@ use crate::optimization::job::{create_job, load_job, Budgets, JobState, JournalE
 use crate::optimization::policy::{Decision, InconclusiveReason, Mode, PolicyV2, RejectReason};
 use crate::optimization::proposer::{Proposal, ProposalInput, Proposer, ScriptedProposer};
 use crate::optimization::subject::{baseline_text, materialize_candidate, materialize_pack};
-use crate::optimization::target::TargetField;
+use crate::optimization::target::JobTarget;
 use crate::Collection;
 
 pub(crate) const VALIDATION_CASES: [&str; 6] =
@@ -493,8 +493,7 @@ impl Harness {
             owner: OWNER.into(),
             evaluator_did: self.launching.evaluator_did(),
             behavior_id: "monitor".into(),
-            target_field: TargetField::AgentContextSystemPrompt,
-            task_id: None,
+            target: JobTarget::Context,
             definition_id: definition_id.into(),
             inference_profile_id: "local".into(),
             baseline_pack: self.pack.clone(),
@@ -743,8 +742,7 @@ pub(crate) async fn accepting_task_harness(job_id: &str) -> (Harness, JobRequest
     let executor = script(base_executor(), "baseline", &VALIDATION_CASES, |_| fail());
     let request = JobRequest {
         baseline_pack: pack,
-        target_field: TargetField::TaskPromptTemplate,
-        task_id: Some("plan".into()),
+        target: JobTarget::Task("plan".into()),
         ..harness.request(job_id, DEFINITION, budgets(1_000))
     };
     let outcome = settle(
@@ -1683,8 +1681,7 @@ async fn a_job_created_without_frozen_resumes_to_the_journal_of_its_twin() {
         &resumed.baseline_pack,
         OWNER,
         "monitor",
-        TargetField::AgentContextSystemPrompt,
-        None,
+        &JobTarget::Context,
     )
     .unwrap();
     let copy = materialize_candidate(
