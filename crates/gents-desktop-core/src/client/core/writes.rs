@@ -1479,7 +1479,6 @@ impl ClientCore {
         let (signer, admission, requester_did) = self
             .request_authority(&invocation.agent_did, peer_record.as_ref())
             .await?;
-        let session_id = uuid::Uuid::new_v4().to_string();
         let options = SubmitRequestOptions {
             input: RequestInput {
                 initial_title: Some(SessionTitle {
@@ -1495,42 +1494,20 @@ impl ClientCore {
             ..SubmitRequestOptions::default()
         };
         let behavior_id = behavior_id_for_write(Some(&invocation.behavior_id));
-        let submitted = match invocation.goal_objective.as_deref() {
-            Some(objective) => {
-                let access = self.operator_access(&invocation.agent_did)?;
-                mutations::submit_goal_backed_request(
-                    self.node.as_ref(),
-                    snapshot.as_ref(),
-                    &access,
-                    &session_id,
-                    &invocation.agent_did,
-                    &requester_did,
-                    signer.as_ref(),
-                    admission,
-                    &invocation.content,
-                    behavior_id.as_deref(),
-                    options,
-                    objective,
-                    invocation.goal_token_budget,
-                )
-                .await
-            }
-            None => {
-                mutations::submit_request(
-                    self.node.as_ref(),
-                    snapshot.as_ref(),
-                    &session_id,
-                    &invocation.agent_did,
-                    &requester_did,
-                    signer.as_ref(),
-                    admission,
-                    &invocation.content,
-                    behavior_id.as_deref(),
-                    options,
-                )
-                .await
-            }
-        };
+        let access = self.operator_access(&invocation.agent_did)?;
+        let submitted = mutations::submit_task_request(
+            self.node.as_ref(),
+            snapshot.as_ref(),
+            &access,
+            &invocation.fire,
+            &requester_did,
+            signer.as_ref(),
+            admission,
+            &invocation.content,
+            behavior_id.as_deref(),
+            options,
+        )
+        .await;
         match submitted {
             Ok(result) => {
                 self.store

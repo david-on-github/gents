@@ -5,7 +5,7 @@ mod setup;
 
 pub use chat::{
     interrupt_request, rename_session, resend_request, retry_request, submit_goal_backed_request,
-    submit_request, SubmitRequestOptions, SubmittedRequest,
+    submit_request, submit_task_request, SubmitRequestOptions, SubmittedRequest,
 };
 pub use manage::{
     apply_config_components_on, delete_agent_behavior_on, delete_agent_context_on,

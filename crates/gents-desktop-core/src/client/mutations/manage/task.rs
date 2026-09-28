@@ -574,6 +574,7 @@ async fn enqueue_task_now(
     Ok(
         gents::lifecycle::write_task_delivery_local(node, actor, &invocation.fire, false, &create)
             .await?
+            .request
             .doc_id,
     )
 }
