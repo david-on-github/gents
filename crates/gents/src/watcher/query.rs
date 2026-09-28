@@ -69,7 +69,7 @@ impl DefraWatcher {
             crate::graphql::graphql_with_transaction_retry(&self.node, &query, "watcher query")
                 .await?;
 
-        let (mut rows, malformed) = parse_active_runtime_rows(resp.data.as_ref())?;
+        let (rows, malformed) = parse_active_runtime_rows(resp.data.as_ref())?;
         for row in malformed {
             self.terminalize_malformed_pending_request(&row).await;
         }
@@ -121,7 +121,7 @@ impl DefraWatcher {
         )
         .await?;
 
-        let (rows, malformed) = parse_active_runtime_rows(resp.data.as_ref())?;
+        let (mut rows, malformed) = parse_active_runtime_rows(resp.data.as_ref())?;
         for row in malformed {
             self.terminalize_malformed_pending_request(&row).await;
         }
