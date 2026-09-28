@@ -126,6 +126,8 @@ async fn goal_task_waits_for_claim_and_emits_only_after_model_completion() -> Re
         ]);
     }
     apply(&access, &owner, documents).await?;
+    let runtime = boot_live_agent(&db, identity).await?;
+    let result: Result<()> = async {
     support::interrupt::create_runtime_request(&db.node, &owner, "delivery-lead", INITIAL, SESSION,
         "Write a numbered list with 150 entries, each saying 'still working'. Do not call tools and do not complete the Goal.").await;
     gents::goal::set_goal_from_access(
@@ -137,13 +139,14 @@ async fn goal_task_waits_for_claim_and_emits_only_after_model_completion() -> Re
         None,
     )
     .await?;
-    let runtime = boot_live_agent(&db, identity).await?;
-    let result: Result<()> = async {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(1800);
         loop {
             let state = evidence(&access, &owner).await?;
             healthy(&state)?;
             if inference_running(&state, INITIAL) { break; }
+            ensure!(!table(&state, "AgentRequest").iter().any(|row|
+                row["request_id"] == INITIAL && row["lifecycle_state"] == "completed"),
+                "initial inference ended before its busy window was observed: {state}");
             ensure!(tokio::time::Instant::now() < deadline, "initial real inference never started: {state}");
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
