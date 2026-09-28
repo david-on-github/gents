@@ -761,8 +761,7 @@ mod tests {
             .push(serde_json::from_value(json!({"name": "rg"})).unwrap());
         let mut subagent = base.clone();
         subagent.tools[0].subagents = Some(
-            serde_json::from_value(json!({"spawn_enabled": true, "target_ids": ["helper"]}))
-                .unwrap(),
+            serde_json::from_value(json!({"enabled": true, "target_ids": ["helper"]})).unwrap(),
         );
         subagent.subagent_targets.push(
             serde_json::from_value(json!({
@@ -778,7 +777,7 @@ mod tests {
         skills.contexts[0].skill_ids = vec!["review".to_owned()];
         for (config, offending) in [
             (cli, "\"rg\""),
-            (subagent, "\"spawn_subagent\""),
+            (subagent, "\"agent_new\""),
             (skills, "has skills [\"review\"]"),
         ] {
             let error = ensure_tool_less(&config, OWNER, "prompt-proposer")
