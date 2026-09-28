@@ -85,9 +85,11 @@ pub enum ConcurrencyMode {
     #[default]
     Parallel,
     Serial,
+    /// Persist every fire and admit one request at a time in source order.
+    QueuedSerial,
     LatestOnly,
 }
 
 impl ConcurrencyMode {
-    pub const ALL: [Self; 3] = [Self::Parallel, Self::Serial, Self::LatestOnly];
+    pub const ALL: [Self; 4] = [Self::Parallel, Self::Serial, Self::QueuedSerial, Self::LatestOnly];
 }
