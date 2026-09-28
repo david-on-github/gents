@@ -374,9 +374,10 @@ pub(crate) mod tests {
     }
 
     /// A sidecar two fields read would change both documents in a trial,
-    /// while promotion writes only the target.
+    /// while promotion writes only the target; a shared sidecar the target
+    /// does not read never changes.
     #[test]
-    fn a_sidecar_referenced_from_two_fields_is_an_error() {
+    fn only_a_target_sidecar_referenced_from_two_fields_is_an_error() {
         let dirs = tempfile::tempdir().unwrap();
         let baseline_dir = dirs.path().join("baseline");
         write_task_fixture_pack(&baseline_dir, false);
@@ -391,8 +392,13 @@ pub(crate) mod tests {
         std::fs::write(&config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
         let error = task_pack(&baseline_dir).unwrap_err();
         assert!(
-            format!("{error:#}").contains("./tasks/plan/prompt.md"),
+            format!("{error:#}").contains("tasks/plan/prompt.md"),
             "{error:#}"
+        );
+        let context = context_pack(&baseline_dir).unwrap();
+        assert_eq!(
+            context.prompt_asset.as_deref(),
+            Some("agent_behaviors/monitor/system_prompt.md")
         );
     }
 
