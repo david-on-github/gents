@@ -38,9 +38,10 @@ pub struct VerdictRow {
 
 /// One row per (stage, check) of `case`, in case order.
 ///
-/// `feedback` is passed through from the check unchanged; whether it may be
-/// written is the caller's decision, and `documents::append_verdict` refuses
-/// it off the train split.
+/// `feedback` is passed through from the check unchanged, except on
+/// `stage_failed` rows, where [`failed`] writes it; whether it may be written
+/// is the caller's decision, and `documents::append_verdict` refuses it off the
+/// train split.
 pub fn grade(
     case: &EvalCase,
     evidence: &TrialEvidence,
@@ -95,7 +96,6 @@ pub fn grade(
 ///
 /// The `stage_failed` row with `names_failure` carries [`failure_feedback`]: no
 /// check ran, so it is the only place the proposer learns why the stage failed.
-/// The caller sets it on one row per stage so the proposer reads it once.
 ///
 /// A `failure_kind` that does not classify as a failure is malformed evidence:
 /// an executor that reports one is claiming a stage both failed and passed.
