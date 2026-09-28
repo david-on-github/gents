@@ -99,6 +99,17 @@ async fn goal_task_waits_for_claim_and_emits_only_after_model_completion() -> Re
         )
         .await?;
     configure(&access, &db.node, &owner, &endpoints).await?;
+    support::fixtures::configure_behavior_tools(
+        &db.node, &owner, "delivery-lead",
+        Some("Follow the current request and Goal objective. Initial Task deliveries and inbox replies must not call update_goal. On an explicit durable Goal controller continuation, perform the objective and call update_goal complete when instructed. Do not create another Goal or use unrelated tools.".into()),
+        gents::document_config::Tools {
+            tools_id: "delivery-lead:tools".into(), agent_did: owner.clone(),
+            built_ins: Some(gents::document_config::BuiltInTools {
+                enable_goal_tools: Some(true), ..Default::default()
+            }),
+            ..Default::default()
+        }, Vec::new(),
+    ).await;
     let mut documents = Vec::new();
     for (kind, emit, objective, prompt) in [
         ("goal", true, Some(OBJECTIVE), "This is the initial Task delivery for your new Goal, not a controller continuation. Do not call update_goal in this request. Reply exactly GOAL_TASK_PROGRESS."),
