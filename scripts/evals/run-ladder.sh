@@ -11,7 +11,7 @@
 #
 # Environment:
 #   GENTS_EVAL_TARGET   scripts/evals/targets/<name>.json (default workstation-1)
-#   GENTS_EVAL_SPLITS   splits to run, in order (default "train validation")
+#   GENTS_EVAL_SPLITS   splits to run, in order (default "train validation"; "none" only sets up)
 #   GENTS_EVAL_HOME     eval home (default ~/gents-eval-homes/ladder-<short sha>)
 #   GENTS_EVAL_PORT     port the eval home is served on (default 9493)
 #   GENTS_EVAL_PER_TRIAL  inference calls one trial may have in flight (default 1)
@@ -71,7 +71,10 @@ GRAPHQL="http://127.0.0.1:$PORT/api/v0/graphql"
 served() { curl -fsS -m 3 -H 'content-type: application/json' -d '{"query":"{ AgentPrincipal { agent_did } }"}' "$GRAPHQL" >/dev/null 2>&1; }
 if ! served; then
   echo "serving $EVAL_HOME on $PORT (log $EVAL_HOME/server.log) ..." >&2
-  (cd "$EVAL_HOME/work" && nohup "$GENTS" server --home "$EVAL_HOME" --http-port "$PORT" >"$EVAL_HOME/server.log" 2>&1 & echo $! >"$EVAL_HOME/server.pid")
+  (cd "$EVAL_HOME/work" && exec nohup "$GENTS" server --home "$EVAL_HOME" --http-port "$PORT" \
+    </dev/null >"$EVAL_HOME/server.log" 2>&1) &
+  echo $! >"$EVAL_HOME/server.pid"
+  disown
   for _ in $(seq 1 90); do served && break; sleep 2; done
   served || { echo "the eval home did not come up; see $EVAL_HOME/server.log" >&2; exit 1; }
 fi
@@ -112,6 +115,7 @@ STAMP=$(date +%Y%m%d-%H%M)
 for level in "${SELECTED[@]}"; do
   "$GENTS" config apply --root "$LADDER/${level//-/_}" --bind-agent-did home --home "$EVAL_HOME" >/dev/null
   for split in $SPLITS; do
+    [ "$split" != none ] || continue
     RUN_ID="ladder-$level-$SHA-$split-$STAMP"
     cat >&2 <<EOF
 
