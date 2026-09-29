@@ -17,7 +17,7 @@ const BEHAVIOR: &str = "mailbox-turn-engineer";
 const SURFACE: &str = "engineer-mailbox";
 
 /// Filing an informational mailbox item through a surface shaped like the
-/// Engineer's () is an ordinary tool call: the
+/// Engineer's (`gents init --setup-steward`) is an ordinary tool call: the
 /// receipt reaches the model and the request completes on the next turn.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn filing_a_mailbox_item_returns_a_receipt_and_the_turn_continues() {
