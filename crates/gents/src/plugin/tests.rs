@@ -699,6 +699,80 @@ fn a_call_over_the_default_output_cap_succeeds_once_the_declared_limit_covers_it
     );
 }
 
+/// WAT for a guest that writes one 64 KiB chunk to stdout in a loop until it
+/// overflows [`super::STDOUT_CAPTURE_PIPE_BYTES`], the real fixed capture
+/// pipe every compiled plugin's stdout runs through regardless of what its
+/// own budget declares. `chunks * 65536` must exceed the pipe; the write
+/// that crosses it traps.
+fn overflow_stdout_capture_pipe_wat(chunks: u32) -> String {
+    const CHUNK_BYTES: u32 = 65536;
+    let iovec_ptr = CHUNK_BYTES;
+    let iovec_len_ptr = iovec_ptr + 4;
+    let nwritten_ptr = iovec_len_ptr + 4;
+    format!(
+        r#"(module
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 2)
+  (func (export "_start")
+    (local $i i32)
+    (i32.store (i32.const {iovec_ptr}) (i32.const 0))
+    (i32.store (i32.const {iovec_len_ptr}) (i32.const {CHUNK_BYTES}))
+    (local.set $i (i32.const 0))
+    (block $done
+      (loop $loop
+        (br_if $done (i32.ge_u (local.get $i) (i32.const {chunks})))
+        (call $fd_write (i32.const 1) (i32.const {iovec_ptr}) (i32.const 1) (i32.const {nwritten_ptr}))
+        drop
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $loop)))
+    ))
+"#
+    )
+}
+
+/// The blocker this test pins: a guest that fills the host's fixed 4 MiB
+/// stdout capture pipe before it finishes traps inside `wasmtime-wasi`'s
+/// preview1 shim (`wasm trap: wasm unreachable instruction executed`), not
+/// because it wrote anything invalid. Before this was classified, that trap
+/// surfaced as an opaque hard `Err`, indistinguishable from a genuine guest
+/// crash, and never reached `describe_prepare_plugin_failure`'s "narrow
+/// base..head" message. It must come back as `BadOutput` instead.
+#[test]
+fn a_trap_that_fills_the_stdout_capture_pipe_is_bad_output_not_a_hard_error() {
+    // 4 MiB / 64 KiB = 64 whole chunks fit exactly; the 65th overflows.
+    let wat_source = overflow_stdout_capture_pipe_wat(65);
+    let (plugin, afb) = build_plugin_pack("overflow_pack", &wat_source, None);
+    let runner = PluginRunner::compile(&afb, &plugin).expect("compiles");
+
+    let outcome = runner
+        .call(&serde_json::json!({}), &PluginBudget::default())
+        .expect("an output-capacity trap is reclassified, not a hard error");
+    assert_eq!(
+        outcome.verdict,
+        PluginVerdict::BadOutput,
+        "{:?}",
+        outcome.diagnostics
+    );
+}
+
+/// A guest that traps having written almost nothing (a genuine crash, not
+/// an output-capacity problem) must stay a hard `Err`: reclassifying every
+/// trap as `BadOutput` would hide a real bug behind an output-size message.
+#[test]
+fn a_trap_with_little_captured_output_stays_a_hard_error() {
+    let wat_source = r#"(module
+  (func (export "_start") unreachable))
+"#;
+    let (plugin, afb) = build_plugin_pack("crash_pack", wat_source, None);
+    let runner = PluginRunner::compile(&afb, &plugin).expect("compiles");
+
+    let err = runner
+        .call(&serde_json::json!({}), &PluginBudget::default())
+        .expect_err("a guest that never wrote stdout is a genuine crash, not BadOutput");
+    assert!(err.to_string().contains("trapped"), "{err}");
+}
+
 /// The same gate, the other way round: Python is admitted, because its
 /// dispatch path really does enforce every axis a call asks for.
 ///

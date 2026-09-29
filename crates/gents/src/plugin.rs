@@ -101,8 +101,28 @@ pub const MAX_DECLARED_WALL_CLOCK_SECS: u32 = 900;
 /// inside the guest before this host ever sees the bytes. Declaring more
 /// than that ceiling here would promise an output size this host can never
 /// actually deliver, so the declared limit is capped at the real capture
-/// size rather than a larger, unreachable number.
+/// size rather than a larger, unreachable number. Raising this ceiling
+/// needs a change to that fixed pipe in the external `afterburner` engine,
+/// outside this crate; until then, a guest that traps having filled the
+/// pipe is reclassified as [`PluginVerdict::BadOutput`] rather than
+/// surfaced as an opaque trap (see [`STDOUT_CAPTURE_PIPE_BYTES`]).
 pub const MAX_DECLARED_OUTPUT_MIB: u32 = 4;
+
+/// [`MAX_DECLARED_OUTPUT_MIB`]'s own fixed pipe, in bytes: the real hard
+/// ceiling on captured guest stdout regardless of what a plugin declared.
+const STDOUT_CAPTURE_PIPE_BYTES: usize = MAX_DECLARED_OUTPUT_MIB as usize * 1024 * 1024;
+
+/// How close a [`AfbRunOutcome::Trapped`] guest's captured stdout must sit
+/// to [`STDOUT_CAPTURE_PIPE_BYTES`] to be judged an output-capacity trap
+/// rather than a genuine guest crash. `wasmtime_wasi`'s preview1 `fd_write`
+/// shim writes into the capture pipe in 4 KiB chunks regardless of the
+/// guest's own write size, so a guest that overflows it has always filled
+/// the pipe to within one such chunk of capacity before the write that
+/// traps; an unrelated trap (divide by zero, an out-of-bounds index) has no
+/// reason to have written stdout anywhere near that boundary first. The
+/// margin is generous relative to that 4 KiB granularity so it stays
+/// correct even if the shim's chunk size changes.
+const STDOUT_CAPTURE_TRAP_MARGIN_BYTES: usize = 64 * 1024;
 
 /// Bytes of a plugin's stderr kept for a human to read. Diagnostics, not a
 /// log archive.
@@ -522,10 +542,28 @@ impl PluginRunner {
                 fuel_used: output.fuel_used,
                 wall_ms,
             }),
-            AfbRunOutcome::Trapped(message) => Err(anyhow::anyhow!(
-                "plugin {:?} trapped: {message}",
-                self.plugin.name
-            )),
+            AfbRunOutcome::Trapped(message) => {
+                if output.stdout.len() + STDOUT_CAPTURE_TRAP_MARGIN_BYTES
+                    >= STDOUT_CAPTURE_PIPE_BYTES
+                {
+                    Ok(PluginOutcome {
+                        verdict: PluginVerdict::BadOutput,
+                        output: serde_json::Value::Null,
+                        diagnostics: format!(
+                            "plugin output filled the host's {} MiB stdout capture buffer \
+                             before finishing; its result did not fit (guest trap: {message})",
+                            STDOUT_CAPTURE_PIPE_BYTES / (1024 * 1024)
+                        ),
+                        fuel_used: output.fuel_used,
+                        wall_ms,
+                    })
+                } else {
+                    Err(anyhow::anyhow!(
+                        "plugin {:?} trapped: {message}",
+                        self.plugin.name
+                    ))
+                }
+            }
             AfbRunOutcome::Exited(code) => Ok(outcome_from_exit(
                 code,
                 output,
