@@ -30,37 +30,6 @@ pub(crate) async fn dispatch(command: PluginCommand) -> Result<()> {
     }
 }
 
-/// Thin caller over [`gents::plugin::install::install_from_pack`]; the
-/// implementation moved into the runtime crate (D5), which `gents pack
-/// install` and `self_config`'s graph install both need. Called from
-/// `gents pack install`, not this module's own dispatch (a pack's plugins
-/// install as a side effect of installing the pack, not through a separate
-/// `gents plugin` command).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn install_from_pack(
-    home: &std::path::Path,
-    pack_namespace: &str,
-    pack_coordinate: &str,
-    pack_version: &str,
-    pack_digest: &str,
-    plugin: &gents::pack::PackPlugin,
-    artifact_bytes: &[u8],
-    instructions: Option<String>,
-    consent: bool,
-) -> Result<store::InstalledPlugin> {
-    gents::plugin::install::install_from_pack(
-        home,
-        pack_namespace,
-        pack_coordinate,
-        pack_version,
-        pack_digest,
-        plugin,
-        artifact_bytes,
-        instructions,
-        consent,
-    )
-}
-
 async fn publish(args: PluginPublishArgs) -> Result<()> {
     let bytes =
         std::fs::read(&args.file).with_context(|| format!("reading {}", args.file.display()))?;
