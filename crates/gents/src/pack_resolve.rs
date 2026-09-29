@@ -16,8 +16,8 @@ use anyhow::Result;
 
 use crate::pack::{is_valid_pack_name, InstalledPack};
 use crate::pack_archive::{PackArchive, DEFAULT_NAMESPACE};
-use crate::pack_registry::{fetch_pack, RegistryClient};
-use crate::pack_store::PackStore;
+use crate::pack_registry::{fetch_pack, RegistryClient, RegistryError};
+use crate::pack_store::{is_valid_index_version, PackStore};
 
 /// One parsed pack coordinate: `name` (this build's default namespace),
 /// `ns/name`, either with `@version` appended.
@@ -29,13 +29,20 @@ pub struct PackSpec<'a> {
 }
 
 /// Parses `spec` into a [`PackSpec`]. Namespace and name must be
-/// `is_valid_pack_name` (snake_case): they end up as path segments in the
-/// pack store's name index, so a spec this parser refuses never has the
-/// chance to become an unsafe one there.
+/// `is_valid_pack_name` (snake_case) and a pinned version must be
+/// `is_valid_index_version`: they end up as path segments in the pack
+/// store's name index, so a spec this parser refuses never has the chance to
+/// become an unsafe one there, and the two checks can never disagree about
+/// what a valid version looks like.
 pub fn parse_pack_spec(spec: &str) -> Result<PackSpec<'_>> {
     let (coordinate, version) = match spec.split_once('@') {
         Some((coordinate, version)) => {
             anyhow::ensure!(!version.is_empty(), "{spec:?} names no version after @");
+            anyhow::ensure!(
+                is_valid_index_version(version),
+                "{spec:?} names an invalid version; a version is lowercase ASCII letters, \
+                 digits, '.', '+' or '-', and never a bare '.' or '..'"
+            );
             (coordinate, Some(version))
         }
         None => (spec, None),
@@ -134,7 +141,15 @@ pub async fn resolve_named(spec: &str, options: &ResolveOptions<'_>) -> Result<R
         parsed.version,
     )
     .await
-    .map_err(|error| offline_pack_error(&coordinate, &options.registry_url, options.home, error))?;
+    .map_err(|error| {
+        offline_pack_error(
+            &coordinate,
+            parsed.version,
+            &options.registry_url,
+            options.home,
+            error,
+        )
+    })?;
     Ok(ResolvedNamedPack {
         archive: fetched.archive,
         from: ResolvedFrom::Registry {
@@ -145,12 +160,16 @@ pub async fn resolve_named(spec: &str, options: &ResolveOptions<'_>) -> Result<R
 }
 
 /// Turns a failed registry fetch into the one sentence an operator needs:
-/// unreachable or not found, each naming the fix. With no home there is no
-/// local store to speak of, so the underlying error is reported as is,
-/// with the coordinate for context, rather than inventing wording for a
-/// case D1 does not specify.
+/// unreachable or not found, each naming the fix and keeping a pinned
+/// `@version` in both the coordinate and the suggested command, so following
+/// the advice resolves the same thing that failed. Classified by
+/// [`RegistryError`], a typed marker from [`crate::pack_registry`], rather
+/// than by matching on message text that module is free to reword. With no
+/// home there is no local store to speak of, so the underlying error is
+/// reported as is, with the coordinate for context.
 fn offline_pack_error(
     coordinate: &str,
+    version: Option<&str>,
     registry_url: &str,
     home: Option<&Path>,
     error: anyhow::Error,
@@ -158,46 +177,33 @@ fn offline_pack_error(
     let Some(home) = home else {
         return error.context(format!("resolving {coordinate} from the registry"));
     };
-    let chain = format!("{error:#}");
-    if chain.contains("could not reach the registry") {
-        return anyhow::anyhow!(
-            "{coordinate} is not in the pack store of {} and the registry at {registry_url} \
-             could not be reached; fetch it while online with `gents pack fetch {coordinate} \
+    let pinned = match version {
+        Some(version) => format!("{coordinate}@{version}"),
+        None => coordinate.to_owned(),
+    };
+    match error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<RegistryError>())
+    {
+        Some(RegistryError::Unreachable { .. }) => anyhow::anyhow!(
+            "{pinned} is not in the pack store of {} and the registry at {registry_url} \
+             could not be reached; fetch it while online with `gents pack fetch {pinned} \
              --store`, or name a directory or .pack file.",
             home.display()
-        );
-    }
-    if chain.contains("the registry has nothing at") {
-        return anyhow::anyhow!(
-            "{coordinate} is not in the pack store of {} and the registry at {registry_url} \
+        ),
+        Some(RegistryError::NotFound { .. }) => anyhow::anyhow!(
+            "{pinned} is not in the pack store of {} and the registry at {registry_url} \
              has no such pack.",
             home.display()
-        );
+        ),
+        None => error.context(format!("resolving {coordinate} from the registry")),
     }
-    error.context(format!("resolving {coordinate} from the registry"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pack::declared_paths;
-
-    fn build_pack(name: &str, version: &str) -> (Vec<u8>, crate::pack_archive::PackHeader) {
-        let pack = crate::pack::resolve_pack("mailbox").expect("a bundled pack");
-        let dir = tempfile::tempdir().expect("tempdir");
-        for path in declared_paths(&pack.manifest) {
-            let target = dir.path().join(&path);
-            std::fs::create_dir_all(target.parent().expect("a parent")).expect("mkdir");
-            std::fs::write(&target, pack.asset(&path).expect("asset")).expect("write");
-        }
-        let manifest_path = dir.path().join("manifest.json");
-        let mut manifest: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-        manifest["name"] = serde_json::json!(name);
-        manifest["version"] = serde_json::json!(version);
-        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-        crate::pack_archive::pack_dir(dir.path()).expect("packing")
-    }
+    use crate::pack_store::test_pack_named as build_pack;
 
     /// An unroutable loopback address: a connection to it fails immediately
     /// rather than timing out, so a test that must never reach the network
@@ -252,6 +258,12 @@ mod tests {
             "demo@",
             "Acme/Demo",
             "acme/de-mo",
+            // A second `@` lands entirely inside what `split_once` reads as
+            // the version, so only the version-shape check catches it.
+            "demo@1@2",
+            "demo@a b",
+            "demo@../x",
+            "demo@1.0.0-RC1",
         ] {
             assert!(parse_pack_spec(spec).is_err(), "{spec:?} should be refused");
         }
@@ -371,6 +383,27 @@ mod tests {
         );
         assert!(
             message.contains("gents pack fetch gents/nowhere --store"),
+            "{message}"
+        );
+    }
+
+    /// A pinned `@version` must survive into the offline sentence: dropping
+    /// it would point the operator at `gents pack fetch gents/nowhere
+    /// --store`, which fetches latest and does not fix the failed
+    /// `@9.9.9` resolution.
+    #[tokio::test]
+    async fn an_unreachable_registry_keeps_the_pin_in_the_offline_sentence() {
+        let home = tempfile::tempdir().unwrap();
+        let options = ResolveOptions {
+            home: Some(home.path()),
+            registry_url: UNROUTABLE_REGISTRY.to_owned(),
+            installed: &[],
+        };
+        let error = expect_err(resolve_named("gents/nowhere@9.9.9", &options).await);
+        let message = format!("{error:#}");
+        assert!(message.contains("gents/nowhere@9.9.9"), "{message}");
+        assert!(
+            message.contains("gents pack fetch gents/nowhere@9.9.9 --store"),
             "{message}"
         );
     }
