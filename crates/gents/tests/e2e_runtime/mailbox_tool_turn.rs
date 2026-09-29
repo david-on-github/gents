@@ -125,10 +125,16 @@ async fn filing_a_mailbox_item_returns_a_receipt_and_the_turn_continues() {
         .unwrap();
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].title, "Crew ready");
+    // The first filing's outcome comes from the Lean-bound notification owner.
+    let outcome = serde_json::to_value(
+        gents::mailbox::NotificationIdentity::Event.write_outcome(false, false),
+    )
+    .unwrap();
+    let receipt_marker = format!("\"outcome\":{outcome}").replace('"', "\\\"");
     let bodies = runtime.backend.observed_completion_bodies();
     let followup = bodies.last().expect("follow-up provider turn").to_string();
     assert!(
-        followup.contains("\\\"outcome\\\":\\\"created\\\""),
+        followup.contains(&receipt_marker),
         "the receipt must reach the model: {followup}"
     );
     runtime.shutdown().await;
