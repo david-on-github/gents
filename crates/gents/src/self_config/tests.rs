@@ -5,6 +5,10 @@
 use super::command::{behavior_params, help_patch_contracts};
 use super::*;
 
+fn test_plugins() -> Arc<crate::plugin::executor::PluginExecutor> {
+    Arc::new(crate::plugin::executor::PluginExecutor::default())
+}
+
 #[derive(Clone)]
 struct RootReadModel {
     path: String,
@@ -314,6 +318,7 @@ async fn build_fails_closed_without_agent_did() {
         String::new(),
         None,
         &config(&["behavior"]),
+        test_plugins(),
     );
     assert!(
         tools.is_empty(),
@@ -337,6 +342,7 @@ async fn build_registers_gated_family() {
         "did:key:zSelfConfigTest".to_string(),
         None,
         &config(&["behavior", "backend"]),
+        test_plugins(),
     );
     assert_eq!(
         tools.len(),
@@ -382,6 +388,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
         agent_did.clone(),
         Some(identity),
         &tool_config,
+        test_plugins(),
     );
     let tool = tools
         .iter()
@@ -585,19 +592,10 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
         list["graphs"][0]["active_plan"]["digest"],
         output["install"]["revision_digest"]
     );
-    let run_error = tools
-        .iter()
-        .find(|tool| tool.name() == RUN_GRAPH_TOOL_NAME)
-        .unwrap()
-        .call(json!({"package": "code_review"}).to_string())
-        .await
-        .expect_err("code review cannot bypass this behavior's disabled file authority");
-    assert!(
-        run_error
-            .to_string()
-            .contains("requires effective read authority"),
-        "{run_error:#}"
-    );
+    // No run has been attempted here. The host-ceiling authority gate is
+    // exercised where it actually applies now: an entry whose `prepare`
+    // declares a `git_diff` host step (`entry::tests::prepare_entry_run_*`
+    // and, once `code_review` itself declares `prepare`, here again).
     let runs = node
         .execute(&format!(
             r#"{{ GraphRun(filter: {{owner_did: {{_eq: "{}"}}}}) {{run_id}} }}"#,
@@ -683,6 +681,7 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
         agent_did.clone(),
         Some(identity.clone()),
         &tool_config,
+        test_plugins(),
     );
     let call = |name: &str, args: Value| {
         let tool = tools
@@ -728,10 +727,33 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
     )
     .await
     .expect("code-review pack installs");
+    // `code_review` does not yet declare `prepare` (that ships with the
+    // packs-repo update this phase does not carry), so the operator input
+    // this generic tool admits is the entry's real seed directly; compute it
+    // the way the host's own `git_diff` prepare step will once it exists.
+    let access = graph_access(&node);
+    let prepared = crate::graph_package::prepare_code_review_run(
+        &access,
+        &agent_did,
+        repository.path(),
+        "HEAD^",
+        "HEAD",
+        Some("Review the changed text.".to_owned()),
+        Some(repository.path()),
+        None,
+    )
+    .await
+    .expect("legacy evidence preparation still runs directly");
     // Running an admitted pack needs neither installation nor self-config.
     tool_config.enabled = false;
     tool_config.enable_pack_install = false;
-    let tools = build_self_config_tools(node, agent_did.clone(), Some(identity), &tool_config);
+    let tools = build_self_config_tools(
+        node,
+        agent_did.clone(),
+        Some(identity),
+        &tool_config,
+        test_plugins(),
+    );
     assert!(!tools.iter().any(|t| t.name() == CONFIG_TOOL_NAME));
     let call = |name: &str, args: Value| {
         tools
@@ -744,10 +766,7 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
         RUN_GRAPH_TOOL_NAME,
         json!({
             "package": "code_review",
-            "repository": repository.path().to_string_lossy(),
-            "base": "HEAD^",
-            "head": "HEAD",
-            "focus": "Review the changed text.",
+            "input": prepared.input,
         }),
     )
     .await
@@ -795,7 +814,13 @@ async fn config_tools_cannot_self_grant_pack_install() {
 
     let mut tool_config = config(&["tools"]);
     tool_config.behavior_id = "setup".to_string();
-    let tools = build_self_config_tools(node, agent_did, Some(identity), &tool_config);
+    let tools = build_self_config_tools(
+        node,
+        agent_did,
+        Some(identity),
+        &tool_config,
+        test_plugins(),
+    );
     let tool = tools
         .iter()
         .find(|tool| tool.name() == CONFIG_TOOL_NAME)
@@ -871,7 +896,8 @@ async fn automation_rejects_invalid_template_before_publication_and_can_recover(
     crate::test_support::install_test_behavior(&node, &owner, "beh-test").await;
     let mut grants = config(&["automation"]);
     grants.preview = true;
-    let tools = build_self_config_tools(node.clone(), owner, Some(identity), &grants);
+    let tools =
+        build_self_config_tools(node.clone(), owner, Some(identity), &grants, test_plugins());
     for verb in ["preview", "edit"] {
         let error = call_config_tool(
             &tools,
@@ -925,7 +951,8 @@ async fn automation_rejects_a_count_field_the_runtime_cannot_read_and_can_recove
         .unwrap();
     let mut grants = config(&["automation"]);
     grants.preview = true;
-    let tools = build_self_config_tools(node.clone(), owner, Some(identity), &grants);
+    let tools =
+        build_self_config_tools(node.clone(), owner, Some(identity), &grants, test_plugins());
     let tool = tools
         .iter()
         .find(|tool| tool.name() == CONFIG_TOOL_NAME)
@@ -1008,7 +1035,8 @@ async fn schema_publication_matches_lean_grant_artifact_and_contract_guards() {
                     .await
                     .unwrap();
                 let grants = config(if granted { &["automation"] } else { &["tools"] });
-                let tools = build_self_config_tools(node, owner, Some(identity), &grants);
+                let tools =
+                    build_self_config_tools(node, owner, Some(identity), &grants, test_plugins());
                 let digest = if artifact_matches {
                     format!("sha256:{:x}", Sha256::digest(sdl))
                 } else {
@@ -1059,6 +1087,7 @@ async fn schema_publication_requires_automation_and_previewed_artifact() {
         owner.clone(),
         Some(identity.clone()),
         &config(&["tools"]),
+        test_plugins(),
     );
     assert!(call_config_tool(
         &denied,
@@ -1068,7 +1097,8 @@ async fn schema_publication_requires_automation_and_previewed_artifact() {
     .is_err());
     let mut grants = config(&["automation"]);
     grants.preview = true;
-    let tools = build_self_config_tools(node.clone(), owner, Some(identity), &grants);
+    let tools =
+        build_self_config_tools(node.clone(), owner, Some(identity), &grants, test_plugins());
     let preview = call_config_tool(
         &tools,
         command(&["schema", "preview", "install", "--sdl", sdl]),
@@ -1142,8 +1172,13 @@ async fn skill_import_previews_without_writes_and_requires_file_authority() {
     let mut grants = config(&["tools", "behavior"]);
     grants.preview = true;
     let command = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect();
-    let denied_tools =
-        build_self_config_tools(node.clone(), owner.clone(), Some(identity.clone()), &grants);
+    let denied_tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity.clone()),
+        &grants,
+        test_plugins(),
+    );
     let denied = call_config_tool(
         &denied_tools,
         command(&["skill", "import", "review", file.to_str().unwrap()]),
@@ -1169,7 +1204,13 @@ async fn skill_import_previews_without_writes_and_requires_file_authority() {
     ))
     .await
     .unwrap();
-    let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &grants);
+    let tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity),
+        &grants,
+        test_plugins(),
+    );
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(
         outside.path().join("SKILL.md"),
@@ -1279,8 +1320,13 @@ async fn configuration_discovery_is_read_only_root_bounded_and_sanitized() {
     std::fs::write(source.join("config.toml"), fixture).unwrap();
 
     let mut grants = config(&["tools"]);
-    let denied_tools =
-        build_self_config_tools(node.clone(), owner.clone(), Some(identity.clone()), &grants);
+    let denied_tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity.clone()),
+        &grants,
+        test_plugins(),
+    );
     let command = |args: &[&str]| args.iter().map(|value| (*value).to_owned()).collect();
     let help = call_config_tool(&denied_tools, command(&["help", "discovery"]))
         .await
@@ -1331,7 +1377,7 @@ async fn configuration_discovery_is_read_only_root_bounded_and_sanitized() {
         .read_effective_config(&BTreeSet::new(), false, false)
         .await
         .unwrap();
-    let tools = build_self_config_tools(node, owner, Some(identity), &grants);
+    let tools = build_self_config_tools(node, owner, Some(identity), &grants, test_plugins());
     let outside = tempfile::tempdir().unwrap();
     let outside_error = call_config_tool(
         &tools,
@@ -1444,7 +1490,13 @@ async fn setup_discovery_clarification_apply_and_verification_preserve_disabled_
     ))
     .await
     .unwrap();
-    let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &grants);
+    let tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity),
+        &grants,
+        test_plugins(),
+    );
     let scan = vec![
         "discovery".into(),
         "scan".into(),
@@ -1625,7 +1677,13 @@ async fn datastore_preview_create_and_sparse_edit_use_owned_patch_path() {
     crate::test_support::install_test_behavior(&node, &owner, "beh-test").await;
     let mut grants = config(&["tools"]);
     grants.preview = true;
-    let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &grants);
+    let tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity),
+        &grants,
+        test_plugins(),
+    );
     let command = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect();
     let expected_help = call_config_tool(&tools, command(&["help", "datastore"]))
         .await
@@ -1870,7 +1928,13 @@ async fn structured_config_preview_and_apply_round_trip_literal_prompt() {
     let mut settings = config(&["behavior"]);
     settings.behavior_id = "working".into();
     settings.preview = true;
-    let tools = build_self_config_tools(node.clone(), owner, Some(identity), &settings);
+    let tools = build_self_config_tools(
+        node.clone(),
+        owner,
+        Some(identity),
+        &settings,
+        test_plugins(),
+    );
     let tool = tools
         .iter()
         .find(|tool| tool.name() == CONFIG_TOOL_NAME)
@@ -1929,8 +1993,13 @@ async fn connected_plan_preview_validates_pending_references_without_writes() {
     ]);
     let mut grants = config(&["persona", "tools"]);
     grants.preview = true;
-    let tools =
-        build_self_config_tools(node.clone(), owner.clone(), Some(identity.clone()), &grants);
+    let tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity.clone()),
+        &grants,
+        test_plugins(),
+    );
     let tool = tools
         .iter()
         .find(|tool| tool.name() == CONFIG_TOOL_NAME)
@@ -2017,8 +2086,13 @@ async fn connected_plan_preview_validates_pending_references_without_writes() {
     ] {
         let mut denied = config(categories);
         denied.preview = preview;
-        let denied =
-            build_self_config_tools(node.clone(), owner.clone(), Some(identity.clone()), &denied);
+        let denied = build_self_config_tools(
+            node.clone(),
+            owner.clone(),
+            Some(identity.clone()),
+            &denied,
+            test_plugins(),
+        );
         assert!(denied
             .iter()
             .find(|tool| tool.name() == CONFIG_TOOL_NAME)
@@ -2061,7 +2135,8 @@ async fn config_execution_receipts_separate_rejected_syntax_from_write_dispatch(
         "mcp_service",
     ]);
     grants.preview = true;
-    let tools = build_self_config_tools(node.clone(), owner, Some(identity), &grants);
+    let tools =
+        build_self_config_tools(node.clone(), owner, Some(identity), &grants, test_plugins());
     let tool = tools
         .iter()
         .find(|tool| tool.name() == CONFIG_TOOL_NAME)
@@ -2136,14 +2211,20 @@ async fn persona_category_gates_the_tool() {
         agent_did.clone(),
         None,
         &config(&["behavior"]),
+        test_plugins(),
     );
     let error = call_config_tool(&without_persona, vec!["behavior".into(), "list".into()])
         .await
         .expect_err("catalog read requires persona grant");
     assert!(error.contains("catalog grant"), "{error}");
 
-    let with_persona =
-        build_self_config_tools(node, agent_did, Some(identity), &config(&["persona"]));
+    let with_persona = build_self_config_tools(
+        node,
+        agent_did,
+        Some(identity),
+        &config(&["persona"]),
+        test_plugins(),
+    );
     assert!(with_persona
         .iter()
         .any(|tool| tool.name() == CONFIG_TOOL_NAME));
@@ -2158,6 +2239,7 @@ async fn persona_unknown_action_errors_cleanly() {
         identity.did().to_string(),
         Some(identity),
         &config(&["persona"]),
+        test_plugins(),
     );
 
     let error = call_config_tool(&tools, vec!["behavior".into(), "delete".into()])
@@ -2178,7 +2260,13 @@ async fn behavior_only_grant_cannot_change_default_and_writes_require_exact_sign
     let mut tool_config = config(&["behavior"]);
     tool_config.behavior_id = "current".into();
     tool_config.preview = true;
-    let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &tool_config);
+    let tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity),
+        &tool_config,
+        test_plugins(),
+    );
     let tool = tools
         .iter()
         .find(|tool| tool.name() == CONFIG_TOOL_NAME)
@@ -2230,7 +2318,7 @@ async fn config_lists_are_bounded_paginated_and_inference_inventory_is_read_only
     }
     let mut tool_config = config(&["persona", "profile", "backend"]);
     tool_config.behavior_id = "alpha".into();
-    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config);
+    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config, test_plugins());
     let config = tools
         .iter()
         .find(|tool| tool.name() == CONFIG_TOOL_NAME)
@@ -2318,7 +2406,7 @@ async fn config_creates_and_discovers_an_unauthenticated_local_backend() {
     let mut tool_config = config(&["backend", "profile"]);
     tool_config.behavior_id = "setup".into();
     tool_config.preview = true;
-    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config);
+    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config, test_plugins());
     let endpoint = format!("http://{address}/v1");
     let profiles_before: Value = serde_json::from_str(
         &call_config_tool(
@@ -2454,7 +2542,13 @@ async fn config_targets_owned_working_behavior_for_all_bound_documents() {
     tool_config.behavior_id = "setup".into();
     tool_config.preview = true;
     tool_config.no_lockout = true;
-    let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &tool_config);
+    let tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity),
+        &tool_config,
+        test_plugins(),
+    );
 
     call_config_tool(
         &tools,
@@ -2766,7 +2860,7 @@ async fn cleanup_previews_and_removes_exact_unreferenced_cycles_atomically() {
     }
     let mut tool_config = config(&["persona", "tools", "profile", "backend"]);
     tool_config.preview = true;
-    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config);
+    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config, test_plugins());
 
     let referenced = call_config_tool(
         &tools,
@@ -2948,6 +3042,7 @@ async fn behavior_default_uses_the_signed_persona_request_owner() {
         agent_did.clone(),
         Some(identity.clone()),
         &tool_config,
+        test_plugins(),
     );
     let preview: Value = serde_json::from_str(
         &call_config_tool(
@@ -3021,6 +3116,7 @@ async fn persona_create_authors_row_and_applies_after_manual_tick() {
         agent_did.clone(),
         Some(identity.clone()),
         &config(&["persona"]),
+        test_plugins(),
     );
     let rejected_preview = call_config_tool(
         &tools,
@@ -3204,6 +3300,7 @@ async fn persona_create_authors_row_and_applies_after_manual_tick() {
         agent_did.clone(),
         Some(identity.clone()),
         &config(&["persona", "tools"]),
+        test_plugins(),
     );
     let selected = call_config_tool(
         &grant_tools,
@@ -3299,6 +3396,7 @@ async fn persona_clone_accepts_sibling_behavior_id() {
         agent_did.clone(),
         Some(identity.clone()),
         &config(&["persona"]),
+        test_plugins(),
     );
     let tool = take_persona_tool(tools);
     let args = json!({"argv": [
@@ -3578,6 +3676,7 @@ async fn descendant_root_preview_apply_reconcile_reaches_fresh_request_file_tool
         owner.clone(),
         Some(identity.clone()),
         &tool_config,
+        test_plugins(),
     );
     let profile_id = format!("{seed_behavior}:inference");
     let command = |preview: bool| {
@@ -3928,7 +4027,7 @@ async fn explicit_tools_grant_preserves_lsp_settings_guard_for_preview_and_apply
     crate::test_support::install_test_behavior(&node, &owner, "beh-test").await;
     let mut tool_config = config(&["tools"]);
     tool_config.preview = true;
-    let tools = build_self_config_tools(node, owner, None, &tool_config);
+    let tools = build_self_config_tools(node, owner, None, &tool_config, test_plugins());
     let config = tools
         .iter()
         .find(|tool| tool.name() == CONFIG_TOOL_NAME)
@@ -4007,7 +4106,7 @@ async fn profile_edit_rejects_a_context_window_above_the_advertised_maximum() {
     let mut tool_config = config(&["profile"]);
     tool_config.behavior_id = "setup".into();
     tool_config.preview = true;
-    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config);
+    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config, test_plugins());
     let edit = |verb: &str, window: u64| -> Vec<String> {
         vec![
             "profile".into(),

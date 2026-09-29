@@ -2006,31 +2006,12 @@ pub struct RunGraphParams {
     pub entry: Option<String>,
     #[serde(default)]
     pub input: Option<Value>,
-    #[serde(default)]
-    pub repository: Option<String>,
-    #[serde(default)]
-    pub base: Option<String>,
-    #[serde(default)]
-    pub head: Option<String>,
-    #[serde(default)]
-    pub focus: Option<String>,
-    #[serde(default)]
-    pub question: Option<String>,
-    #[serde(default)]
-    pub research_scope: Option<String>,
-    #[serde(default)]
-    pub freshness: Option<String>,
-    #[serde(default)]
-    pub audience: Option<String>,
-    #[serde(default)]
-    pub output_requirements: Option<String>,
-    #[serde(default)]
-    pub investigator_count: Option<u8>,
 }
 
 pub struct RunGraphTool {
     core: SelfConfigCore,
     node: Arc<EmbeddedNode>,
+    plugins: Arc<crate::plugin::executor::PluginExecutor>,
 }
 
 impl Tool for RunGraphTool {
@@ -2042,7 +2023,7 @@ impl Tool for RunGraphTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_owned(),
-            description: "Start an installed graph on this managed node as the current principal. For code_review, supply package, repository, base, and head; the node validates the repository against the process root, captures immutable Git evidence, and provisions the workspace. For web_deep_research, supply package and question. For another graph, supply the exact graph_id, revision_digest, entry, and input returned by list_graphs. Returns a durable run receipt and observed initial state.".to_owned(),
+            description: "Start an installed graph on this managed node as the current principal. Supply package (and, if the package has more than one entry, entry) plus input matching that entry's advertised input_schema for a package run; list_graphs returns each entry's input_schema. For another graph, supply the exact graph_id, revision_digest, entry, and input returned by list_graphs. Returns a durable run receipt and observed initial state.".to_owned(),
             parameters: json!({
                 "type":"object",
                 "properties":{
@@ -2050,17 +2031,7 @@ impl Tool for RunGraphTool {
                     "graph_id":{"type":"string"},
                     "revision_digest":{"type":"string"},
                     "entry":{"type":"string"},
-                    "input":{"type":"object"},
-                    "repository":{"type":"string","description":"Absolute repository path for code_review; must be under the published process ceiling."},
-                    "base":{"type":"string","description":"Git base revision for code_review."},
-                    "head":{"type":"string","description":"Git head revision for code_review."},
-                    "focus":{"type":"string"},
-                    "question":{"type":"string"},
-                    "research_scope":{"type":"string"},
-                    "freshness":{"type":"string"},
-                    "audience":{"type":"string"},
-                    "output_requirements":{"type":"string"},
-                    "investigator_count":{"type":"integer","minimum":2,"maximum":8}
+                    "input":{"type":"object"}
                 },
                 "additionalProperties":false
             }),
@@ -2069,14 +2040,10 @@ impl Tool for RunGraphTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let access = graph_access(&self.node);
-        let (graph_id, digest, entry, input) = if let Some(package) = args.package.as_deref() {
-            if args.graph_id.is_some()
-                || args.revision_digest.is_some()
-                || args.entry.is_some()
-                || args.input.is_some()
-            {
+        let (graph_id, digest, prepared) = if let Some(package) = args.package.as_deref() {
+            if args.graph_id.is_some() || args.revision_digest.is_some() {
                 return Err(anyhow!(
-                    "package runs must not include generic graph_id/revision_digest/entry/input selectors"
+                    "package runs must not include generic graph_id/revision_digest selectors"
                 )
                 .into());
             }
@@ -2101,90 +2068,76 @@ impl Tool for RunGraphTool {
                 )
                 .into());
             }
-            let prepared = match package {
-                "code_review" => {
-                    let effective = self
-                        .core
-                        .read_effective_config(&BTreeSet::new(), false, false)
-                        .await?;
-                    let effective_file_mode = effective
-                        .pointer("/runtime_effective/effective/file_mode")
-                        .and_then(Value::as_str)
-                        .map(crate::tool_surface::FileToolMode::parse)
-                        .transpose()?
-                        .unwrap_or_default();
-                    if effective_file_mode == crate::tool_surface::FileToolMode::Off {
-                        return Err(anyhow!(
-                            "code_review requires effective read authority on the current behavior"
-                        )
-                        .into());
-                    }
-                    let effective_root = effective
-                        .pointer("/runtime_effective/effective/root")
-                        .and_then(Value::as_str)
-                        .context("code_review requires an explicit effective managed root")?;
-                    crate::graph_package::prepare_code_review_run(
-                        &access,
-                        self.core.agent_did(),
-                        std::path::Path::new(
-                            args.repository
-                                .as_deref()
-                                .context("code_review requires repository")?,
-                        ),
-                        args.base.as_deref().context("code_review requires base")?,
-                        args.head.as_deref().context("code_review requires head")?,
-                        args.focus.clone(),
-                        Some(std::path::Path::new(effective_root)),
-                    )
-                    .await?
-                }
-                "web_deep_research" => {
-                    let count = args.investigator_count.unwrap_or(4);
-                    if !(2..=8).contains(&count) {
-                        return Err(anyhow!(
-                            "investigator_count must be between 2 and 8"
-                        )
-                        .into());
-                    }
-                    let question = args
-                        .question
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|question| !question.is_empty())
-                        .context("web_deep_research requires question")?;
-                    crate::graph_package::PreparedGraphRun {
-                        entry_name: "research".to_owned(),
-                        input: json!({
-                            "question": question,
-                            "scope": args.research_scope.unwrap_or_default(),
-                            "freshness": args.freshness.unwrap_or_default(),
-                            "audience": args.audience.unwrap_or_default(),
-                            "output_requirements": args.output_requirements.unwrap_or_default(),
-                            "investigator_count": count.to_string(),
-                        }),
-                    }
-                }
-                other => {
-                    return Err(anyhow!("bundled graph {other:?} has no node-bound entry adapter; use exact graph_id/revision_digest/entry/input from list_graphs").into())
-                }
+            let selected_entry = match args.entry.as_deref() {
+                Some(name) => plan.entries.iter().find(|entry| entry.name == name),
+                None => match plan.entries.as_slice() {
+                    [entry] => Some(entry),
+                    _ => None,
+                },
             };
-            (
-                plan.graph_id,
-                plan.digest,
-                prepared.entry_name,
-                prepared.input,
+            let requires_git_diff_ceiling = selected_entry
+                .and_then(|entry| entry.prepare.as_ref())
+                .is_some_and(|prepare| {
+                    prepare.host.iter().any(|step| {
+                        matches!(step, crate::graph_pipeline::HostInput::GitDiff { .. })
+                    })
+                });
+            let host_root = if requires_git_diff_ceiling {
+                let effective = self
+                    .core
+                    .read_effective_config(&BTreeSet::new(), false, false)
+                    .await?;
+                let effective_file_mode = effective
+                    .pointer("/runtime_effective/effective/file_mode")
+                    .and_then(Value::as_str)
+                    .map(crate::tool_surface::FileToolMode::parse)
+                    .transpose()?
+                    .unwrap_or_default();
+                if effective_file_mode == crate::tool_surface::FileToolMode::Off {
+                    return Err(anyhow!(
+                        "this graph's prepare step requires effective read authority on the current behavior"
+                    )
+                    .into());
+                }
+                let effective_root = effective
+                    .pointer("/runtime_effective/effective/root")
+                    .and_then(Value::as_str)
+                    .context(
+                        "this graph's prepare step requires an explicit effective managed root",
+                    )?;
+                Some(std::path::PathBuf::from(effective_root))
+            } else {
+                None
+            };
+            let prepared = crate::graph_package::prepare_entry_run(
+                &access,
+                self.core.agent_did(),
+                crate::graph_package::EntryRunRequest {
+                    plan: &plan,
+                    entry: args.entry.as_deref(),
+                    input: args.input.unwrap_or_else(|| json!({})),
+                    host_root: host_root.as_deref(),
+                    plugins: &self.plugins,
+                },
             )
+            .await?;
+            (plan.graph_id, plan.digest, prepared)
         } else {
             (
                 args.graph_id
                     .context("run_graph requires package or graph_id")?,
                 args.revision_digest
                     .context("generic graph run requires revision_digest from list_graphs")?,
-                args.entry
-                    .context("generic graph run requires entry from list_graphs")?,
-                args.input.context(
-                    "generic graph run requires input matching the advertised entry contract",
-                )?,
+                crate::graph_package::PreparedEntryRun {
+                    entry_name: args
+                        .entry
+                        .context("generic graph run requires entry from list_graphs")?,
+                    input: args.input.context(
+                        "generic graph run requires input matching the advertised entry contract",
+                    )?,
+                    origin: crate::graph_pipeline::EntryInputOrigin::Operator,
+                    documents: 0,
+                },
             )
         };
         let receipt = crate::graph_pipeline::start_graph_run_with_access(
@@ -2192,8 +2145,9 @@ impl Tool for RunGraphTool {
             self.core.agent_did(),
             &graph_id,
             Some(&digest),
-            &entry,
-            input,
+            &prepared.entry_name,
+            prepared.input,
+            prepared.origin,
         )
         .await?;
         let observed = crate::graph_pipeline::load_graph_run_view_with_access(
@@ -2325,6 +2279,7 @@ pub fn build_self_config_tools(
     agent_did: String,
     identity: Option<Arc<dyn AgentIdentity>>,
     config: &SelfConfigToolConfig,
+    plugins: Arc<crate::plugin::executor::PluginExecutor>,
 ) -> Vec<Box<dyn ToolDyn>> {
     if !config.enabled && !config.enable_graph_tools {
         return Vec::new();
@@ -2358,6 +2313,7 @@ pub fn build_self_config_tools(
         tools.push(Box::new(RunGraphTool {
             core: core.clone(),
             node: node.clone(),
+            plugins: plugins.clone(),
         }));
         tools.push(Box::new(GetGraphRunTool {
             core: core.clone(),
