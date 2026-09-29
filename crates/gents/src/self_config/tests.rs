@@ -724,23 +724,49 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
     )
     .await
     .expect("code-review pack installs");
-    // `code_review` does not yet declare `prepare` (that ships with the
-    // packs-repo update this phase does not carry), so the operator input
-    // this generic tool admits is the entry's real seed directly; compute it
-    // the way the host's own `git_diff` prepare step will once it exists.
+    // The bundled `code_review` has no `prepare`, so this test passes the
+    // entry's workspace and ref fields directly, provisioned through the
+    // same production path as `git_diff`, and leaves out evidence. That is
+    // enough to start, observe and cancel the run.
+    let rev_parse = |rev: &str| -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repository.path())
+            .args([
+                "rev-parse",
+                "--verify",
+                "--end-of-options",
+                &format!("{rev}^{{commit}}"),
+            ])
+            .output()
+            .expect("run git rev-parse");
+        assert!(output.status.success(), "git rev-parse {rev} failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let base_ref = rev_parse("HEAD^");
+    let head_ref = rev_parse("HEAD");
     let access = graph_access(&node);
-    let prepared = crate::graph_package::prepare_code_review_run(
+    let workspace = crate::workspace::provision_read_only_workspace(
         &access,
-        &agent_did,
         repository.path(),
-        "HEAD^",
-        "HEAD",
-        Some("Review the changed text.".to_owned()),
-        Some(repository.path()),
-        None,
+        &head_ref,
+        &agent_did,
     )
     .await
-    .expect("legacy evidence preparation still runs directly");
+    .expect("read-only workspace provisions");
+    let input = json!({
+        "repository_path": ".",
+        "base_ref": base_ref,
+        "head_ref": head_ref,
+        "workspace_id": workspace.workspace.workspace_id,
+        "workspace_authority": "readOnly",
+        "workspace_owner_agent_did": workspace.workspace.owner_agent_did,
+        "lens_count": "4",
+        "lens_min": "4",
+        "lens_max": "4",
+        "pr_number": "",
+        "focus": "Review the changed text.",
+    });
     // Running an admitted pack needs neither installation nor self-config.
     tool_config.enabled = false;
     tool_config.enable_pack_install = false;
@@ -763,7 +789,7 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
         RUN_GRAPH_TOOL_NAME,
         json!({
             "package": "code_review",
-            "input": prepared.input,
+            "input": input,
         }),
     )
     .await
