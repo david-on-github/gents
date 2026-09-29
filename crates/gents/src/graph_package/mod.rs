@@ -1,6 +1,6 @@
 mod catalog;
+mod entry;
 mod install;
-mod run_adapter;
 
 #[cfg(test)]
 pub(crate) use catalog::load_package;
@@ -16,10 +16,12 @@ pub use catalog::{
     GraphPackageCatalogEntry, GraphPackageManifest, LoadedGraphPackage, PackageCapabilityTemplate,
     PackageExternalDependency,
 };
+pub use entry::{
+    prepare_code_review_run, prepare_entry_run, EntryRunRequest, PreparedEntryRun, PreparedGraphRun,
+};
 pub use install::{
     default_bundled_graph_package_install_bindings, install_bundled_graph_package,
     install_bundled_graph_package_for_graph, load_installed_package_plan,
     prepare_bundled_graph_package_install, prepare_bundled_graph_package_install_for_graph,
     GraphInstallRecord, GraphPackageInstallBindings, GraphPackageInstallReceipt,
 };
-pub use run_adapter::{prepare_code_review_run, PreparedGraphRun};
