@@ -253,8 +253,9 @@ export function createDesktopUiHarness(
           title:
             "LongUnbrokenMailboxTitleThatMustWrapInsideTheMobileSidebarInsteadOfClippingActions",
           summary: "A mailbox item with adversarial mobile-width content.",
-          payload:
-            "https://example.invalid/a/very/long/unbroken/payload/path/that/must/stay/inside/the/sidebar",
+          payload: JSON.stringify({
+            url: "https://example.invalid/a/very/long/unbroken/payload/path/that/must/stay/inside/the/sidebar",
+          }),
           sourceKind: "AgentRequest",
           sourceId: "request_01JZ6Q0Y5Q7V0MOBILE_SOURCE_IDENTIFIER_WITHOUT_BREAKS",
           sessionId: "session-intro",
