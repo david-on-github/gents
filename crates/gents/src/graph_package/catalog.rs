@@ -317,8 +317,9 @@ mod tests {
         }
     }
 
-    /// The `review_graph` fixture directory, packed fresh every call so a
-    /// test never mutates another test's copy.
+    /// The checked-in `review_graph` fixture directory. Callers pack it
+    /// fresh with `pack_dir`, so mutating the resulting bytes never touches
+    /// this path or another test's copy.
     fn review_graph_dir() -> std::path::PathBuf {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/packs/review_graph")
     }

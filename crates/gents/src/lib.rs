@@ -246,10 +246,10 @@ pub(crate) mod test_support {
             .unwrap();
     }
 
-    /// Reads a graph pack fixture from `tests/fixtures/packs/<name>` (never a
-    /// bundled pack, which no longer exists once G7 lands) through the same
-    /// archive path an install takes: `pack_dir` packs the directory,
-    /// `PackArchive::from_bytes` reads it back, and the graph loader loads it.
+    /// Reads a graph pack fixture from `tests/fixtures/packs/<name>` through
+    /// the same archive path an install takes: `pack_dir` packs the
+    /// directory, `PackArchive::from_bytes` reads it back, and the graph
+    /// loader loads it.
     pub(crate) fn load_test_graph_package(
         name: &str,
         options: &crate::graph_package::GraphPackageInstallBindings,

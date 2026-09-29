@@ -1049,7 +1049,7 @@ async fn malformed_reserved_graph_trigger_cannot_publish() {
 }
 
 #[tokio::test]
-async fn bundled_package_root_binding_survives_task_metadata_changes() {
+async fn graph_fixture_root_binding_survives_task_metadata_changes() {
     use crate::config_client::{ConfigAccess, ConfigApplyTxn};
     use crate::graph_package::GraphPackageInstallBindings;
     use crate::test_support::install_test_graph_package;
