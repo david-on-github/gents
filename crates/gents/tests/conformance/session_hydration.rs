@@ -4,11 +4,11 @@ use std::collections::BTreeSet;
 
 use gents::agent::p2p_reconcile::session_hydration::{
     apply_hydration_delivery, begin_hydration_request, can_retry_hydration, can_start_hydration,
-    decide_hydration,
-    observe_hydration_progress, AppliedPairingRoute, ClientHydrationPhase, ClientHydrationProgress,
-    HydrationApplyOutcome, HydrationCatalog, HydrationDeliveryResult, HydrationDocument,
-    HydrationRequest, HydrationTerminalWriteResult, HydrationVerdict, SessionHydrationCollection,
-    SessionHydrationDocumentKey, SessionOwner, VerifiedActiveMembership,
+    decide_hydration, observe_hydration_progress, AppliedPairingRoute, ClientHydrationPhase,
+    ClientHydrationProgress, HydrationApplyOutcome, HydrationCatalog, HydrationDeliveryResult,
+    HydrationDocument, HydrationRequest, HydrationTerminalWriteResult, HydrationVerdict,
+    SessionHydrationCollection, SessionHydrationDocumentKey, SessionOwner,
+    VerifiedActiveMembership,
 };
 
 use crate::lean_vocab_test::{

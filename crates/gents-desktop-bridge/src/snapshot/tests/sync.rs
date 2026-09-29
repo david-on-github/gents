@@ -52,7 +52,9 @@ fn ownership_refusal_is_unreadable_not_a_retryable_failure() {
         Some(gents::agent::p2p_reconcile::session_hydration::SESSION_OWNERSHIP_MISMATCH.into()),
     );
     assert_eq!(view.phase, "unreadable");
-    assert!(view.detail.is_some_and(|detail| detail.contains("another requester")));
+    assert!(view
+        .detail
+        .is_some_and(|detail| detail.contains("another requester")));
 
     let other = to_hydration_view(&failed, Some("peer pairing does not match".into()));
     assert_eq!(other.phase, "failed");

@@ -1600,7 +1600,10 @@ impl ClientCore {
         session_id: &str,
         agent_did: &str,
     ) -> Result<gents::agent::p2p_reconcile::session_hydration::ClientHydrationProgress> {
-        Ok(self.session_hydration_status(session_id, agent_did).await?.0)
+        Ok(self
+            .session_hydration_status(session_id, agent_did)
+            .await?
+            .0)
     }
 
     /// Receiver progress plus the signed rejection detail of a refused
@@ -1997,7 +2000,10 @@ async fn load_hydration_server_state(
         "served" => Ok((ClientHydrationRequestState::Served(documents), None)),
         "rejected" => {
             let detail = Some(receipt.status_detail).filter(|detail| !detail.is_empty());
-            Ok((ClientHydrationRequestState::Rejected(Some(documents)), detail))
+            Ok((
+                ClientHydrationRequestState::Rejected(Some(documents)),
+                detail,
+            ))
         }
         _ => unreachable!(),
     }

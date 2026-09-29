@@ -4479,7 +4479,10 @@ mod tests {
         let result = retire_orphaned_client_state(&state).await;
         std::fs::set_permissions(&parent, original).unwrap();
 
-        assert!(result.is_err(), "startup must not reopen state it failed to retire");
+        assert!(
+            result.is_err(),
+            "startup must not reopen state it failed to retire"
+        );
         assert!(desktop.node_data_dir().join("MANIFEST").is_file());
         assert!(desktop.root().join(MANAGED_SERVER_CONFIG).is_file());
     }
