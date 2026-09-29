@@ -78,6 +78,9 @@ pub(crate) struct Heading {
 /// How many finished trials a frame shows.
 const FINISHED: usize = 4;
 
+/// How many of a finished trial's failing checks a frame names.
+const FAILING_SHOWN: usize = 2;
+
 pub(crate) fn frame(
     heading: &Heading,
     view: Option<&RunView>,
@@ -359,7 +362,7 @@ fn docs_vs_goal(live: Option<&LiveSnapshot>, goal: &[GoalEntry]) -> String {
             )
         })
         .collect();
-    if let Some(live) = live {
+    if let Some(live) = live.filter(|_| goal.is_empty()) {
         items.extend(
             live.documents
                 .iter()
@@ -505,7 +508,7 @@ fn finished(view: Option<&RunView>, paint: Paint, width: usize) -> Vec<String> {
             if failing.is_empty() {
                 "all checks passed".to_owned()
             } else {
-                failing.join("; ")
+                format!("{} failing", failing.len())
             }
         );
         let painted = match slot.class {
@@ -514,6 +517,9 @@ fn finished(view: Option<&RunView>, paint: Paint, width: usize) -> Vec<String> {
             _ => class.to_owned(),
         };
         lines.push(fit(&line, width).replacen(&format!(" {class} "), &format!(" {painted} "), 1));
+        for failing in failing.iter().take(FAILING_SHOWN) {
+            lines.push(fit(&format!("    └ {failing}"), width));
+        }
     }
     lines
 }
