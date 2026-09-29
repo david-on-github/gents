@@ -511,6 +511,7 @@ export function SetupScreen({
   const [authUrl, setAuthUrl] = useState<string | null>(null);
   /* The provider the user just chose, whose sign-in starts without a click. */
   const autoSignIn = useRef<ProviderId | null>(fixedProvider ?? null);
+  const [autoSignInRequest, setAutoSignInRequest] = useState(0);
   const root = shell.snapshot?.bootstrap.defaultAgentHome ?? "~/.gents";
   const toolRoot = selectedDirectory === undefined ? homeRoot : selectedDirectory;
   const authority = authorityForSelection(toolCeiling, toolRoot);
@@ -682,6 +683,7 @@ export function SetupScreen({
     const oauthProvider = oauthProviderFor(connection.authMethod);
     if (!oauthProvider) return;
     if (requiresManagedRuntime && runtimeGate !== "ready") return;
+    autoSignIn.current = null;
     setBusy(true);
     setError(null);
     setAuthUrl(null);
@@ -949,19 +951,12 @@ export function SetupScreen({
 
   const pickProvider = (id: ProviderId) => {
     if (busy) return;
+    autoSignIn.current = id;
     if (id === provider) {
       /* Choosing the preselected provider is a choice too. */
-      if (
-        connection &&
-        oauthProviderFor(connection.authMethod) &&
-        accountsObserved &&
-        !signedIn[provider] &&
-        !pendingSave[provider]
-      )
-        void signIn();
+      setAutoSignInRequest((count) => count + 1);
       return;
     }
-    autoSignIn.current = id;
     setProvider(id);
     setAuthUrl(null);
     setError(null);
@@ -984,6 +979,7 @@ export function SetupScreen({
     void signIn();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
+    autoSignInRequest,
     provider,
     step,
     catalog,

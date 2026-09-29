@@ -110,6 +110,61 @@ describe("setup provider sign-in", () => {
     expect(api.codexLogin).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a choice made before the account lookup resolves, once", async () => {
+    let resolveAccounts: (accounts: []) => void = () => {};
+    const { api, shell } = setup({
+      listProviderAccounts: vi.fn(
+        () => new Promise<[]>((resolve) => (resolveAccounts = resolve)),
+      ),
+      cancelClaudeLogin: vi.fn().mockResolvedValue(undefined),
+    });
+    let rejectLogin: (cause: Error) => void = () => {};
+    vi.mocked(api.claudeLogin).mockImplementation(
+      () => new Promise((_, reject) => (rejectLogin = reject)),
+    );
+    render(
+      <SetupScreen
+        shell={shell}
+        initialStep="inference"
+        purpose="add-backend"
+        provider="anthropic"
+        agentDid={AGENT}
+        onCancel={vi.fn()}
+        onDone={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+    resolveAccounts([]);
+    rejectLogin(new Error("Claude sign-in was cancelled"));
+    expect(await screen.findByRole("alert")).toHaveTextContent("cancelled");
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Sign in" })).toBeEnabled(),
+    );
+    expect(api.claudeLogin).toHaveBeenCalledTimes(1);
+  });
+
+  it("starts sign-in for the preselected provider chosen during the account lookup", async () => {
+    let resolveAccounts: (accounts: []) => void = () => {};
+    const { api, shell } = setup({
+      listProviderAccounts: vi.fn(
+        () => new Promise<[]>((resolve) => (resolveAccounts = resolve)),
+      ),
+    });
+    render(
+      <SetupScreen
+        shell={shell}
+        initialStep="inference"
+        agentDid={AGENT}
+        onDone={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByTestId("setup-provider-openai"));
+    expect(api.codexLogin).not.toHaveBeenCalled();
+    resolveAccounts([]);
+    expect(await screen.findByText("Account connected")).toBeVisible();
+    expect(api.codexLogin).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves sign-in to a click when the account lookup fails", async () => {
     const { api, shell } = setup({
       listProviderAccounts: vi.fn().mockRejectedValue(new Error("runtime not serving")),
