@@ -248,6 +248,20 @@ async fn automation_validation_refuses_what_every_fire_would_reject() {
     )
     .await;
     assert!(error.contains("not an installed collection"), "{error}");
+    // A stringified object where a native one belongs names the field.
+    let error = refused(
+        &tools,
+        edit(
+            "event-source",
+            "grouped",
+            json!({"source_collection":"GapInput","correlation_field":"message","group":"{\"expected_count\":2}"}),
+        ),
+    )
+    .await;
+    assert!(
+        error.contains("field \\\"group\\\" holds a JSON string; send a native JSON object"),
+        "{error}"
+    );
     // A native JSON object is not a filter string; the error names the field.
     let error = refused(
         &tools,

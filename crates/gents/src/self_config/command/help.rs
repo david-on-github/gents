@@ -210,10 +210,10 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             next: "change one part with its resource, e.g. [\"help\",\"tools\"].",
         },
         "graph" => Page {
-            what: "graphs are not configured through config.",
+            what: "a graph is a typed, acyclic set of stages over documents, with declared entries and results. Config does not author graphs; a pack installs one as a graph revision.",
             commands: &[],
-            notes: "Graphs are published only by installing a pack; run installed graphs with the graph tools.",
-            next: "[\"help\",\"pack\"] when pack installation is granted.",
+            notes: "Graph tools (when granted): list_graphs shows installed graphs; run_graph starts one, so keep its run_id; get_graph_run and get_graph_result inspect it; cancel_graph_run stops it. preview_graph checks a proposed intent's syntax and topology only; nothing publishes it. Loops such as retry are document automation (help automation), because graphs are acyclic. Workspaces for coding stages (RepositoryPlacement, workspace callbacks, sealed worktrees and integration) come with packs such as repo_maintenance; config does not author callbacks.",
+            next: "[\"help\",\"pack\"] to install one, then list_graphs.",
         },
         "plan" => Page {
             what: "preview a connected set of NEW documents that reference each other before any exists (behavior catalog grant and preview).",
@@ -320,7 +320,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "automation" => Page {
             what: "documents that start work without a user: event-source or schedule, trigger, task (automation grant). Use it to run a behavior on new documents or on a timer.",
             commands: &["automation get|preview|edit KIND  target_id; options.behavior; KIND is event-source, trigger, task or schedule"],
-            notes: "preview and edit are upserts. A task belongs to the selected behavior and its triggers use only its tasks; each fire renders the task into a request of that behavior.\nfilter is a GraphQL object literal in a string, keys unquoted, as in the recipe. Template roots: doc (the source document; its fields must exist in the schema), event, args, session, request, group; a missing value fails the fire. Render the data the task needs apart from its instructions.\nConcurrency: parallel (default); queued_serial runs one at a time in order, never skipping; serial skips a fire while work runs; latest_only supersedes. queued_serial, session_id_template (deliver into an existing session) and emit_outcome need an event source.",
+            notes: "preview and edit are upserts. A task belongs to the selected behavior and its triggers use only its tasks; each fire renders the task into a request of that behavior.\nfilter is a GraphQL object literal in a string, keys unquoted, as in the recipe. Template roots: doc (the source document; its fields must exist in the schema), event, args, session, request, group; a missing value fails the fire. Render the data the task needs apart from its instructions.\nConcurrency: parallel (default); queued_serial runs one at a time in order, never skipping; serial skips a fire while work runs; latest_only supersedes. queued_serial, session_id_template (deliver into an existing session) and emit_outcome need an event source.\nPipelines: a stage's task writes its output through a datastore surface, and that collection's event source fires the next stage. Fan-in: an event source group waits for expected_count documents sharing correlation_field.",
             next: "create one source document and read the resulting request and its output.",
         },
         "cleanup" => Page {
@@ -361,6 +361,24 @@ fn mailbox_values() -> Value {
 /// exercised end to end by `help_is_layered_and_its_recipes_run_as_written`.
 pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
     match resource {
+        // Needs a real package and slot binding, so the recipe test leaves it out.
+        "pack" => vec![(
+            "install a pack and feed it from your own automation",
+            vec![
+                (
+                    json!({"argv":["pack","get","<PACKAGE>"]}),
+                    Some("read its inference slots and the collections its graph reads and writes"),
+                ),
+                (
+                    json!({"argv":["pack","preview","install","<PACKAGE>","--inference-slot","<SLOT>=<PROFILE_ID>"]}),
+                    Some("pack install with the same argv and options.digest = the preview's digest"),
+                ),
+                (
+                    json!({"argv":["pack","get","<PACKAGE>"]}),
+                    Some("then wire it in: a datastore surface that writes its input collection (help datastore) and your own event source on its output collection (help automation)"),
+                ),
+            ],
+        )],
         "behavior" => vec![(
             "a new agent with its own model and run limits",
             vec![

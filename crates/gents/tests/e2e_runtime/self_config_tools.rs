@@ -288,7 +288,7 @@ async fn get_my_config_redacts_secrets_and_preview_does_not_write() {
     let before = read(&db.node, Collection::AgentContext, CONTEXT_ID).await;
     let preview=call_tool(&tools,"get_my_config",json!({"preview":{"category":"behavior","kind":"context","patch":{"system_prompt":"previewed prompt"}}})).await.unwrap();
     assert!(
-        preview.contains("previewed prompt") && preview.contains("dry-run"),
+        preview.contains("previewed prompt") && preview.contains("nothing was written"),
         "{preview}"
     );
     assert_eq!(
@@ -378,6 +378,11 @@ async fn configure_event_source_rejects_filter_and_collection_injection() {
         .unwrap();
     assert!(rows["data"]["EventSource"].as_array().unwrap().is_empty());
     assert_eq!(rows["data"]["AgentBehavior"].as_array().unwrap().len(), 1);
+    // Self-config installs schemas before sources that watch them.
+    db.node
+        .add_schema("type CustomerSignup { kind: String }")
+        .await
+        .unwrap();
     call_tool(&tools,"configure_automation",json!({"kind":"event_source","id":"source","patch":{"source_collection":"CustomerSignup","filter":r#"{ kind: { _eq: "signup" } }"#}})).await.unwrap();
     assert_eq!(
         read(&db.node, Collection::EventSource, "source").await["source_collection"],

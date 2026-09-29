@@ -1467,6 +1467,35 @@ impl ConfigCommandTool {
         verb: &str,
         request: ApplyRequest<'static>,
     ) -> Result<String> {
+        // A JSON-stringified object where a native one belongs is the common
+        // model mistake; name the field instead of the decoder's complaint.
+        let stringified = request
+            .patch
+            .iter()
+            .find(|(_, value)| {
+                value.as_ref().and_then(Value::as_str).is_some_and(|text| {
+                    serde_json::from_str::<Value>(text)
+                        .is_ok_and(|parsed| parsed.is_object() || parsed.is_array())
+                })
+            })
+            .map(|(field, _)| field.clone());
+        let collection = request.target.collection_name();
+        self.patch_outcome(core, verb, request).await.map_err(|error| {
+            match stringified.filter(|_| format!("{error:#}").contains("invalid type: string")) {
+                Some(field) => anyhow!(
+                    "{collection} field {field:?} holds a JSON string; send a native JSON object or array in set, not a string. ({error:#})"
+                ),
+                None => error,
+            }
+        })
+    }
+
+    async fn patch_outcome(
+        &self,
+        core: &SelfConfigCore,
+        verb: &str,
+        request: ApplyRequest<'static>,
+    ) -> Result<String> {
         let outcome = match verb {
             "preview" => {
                 anyhow::ensure!(self.preview, "preview is not granted for this behavior");
