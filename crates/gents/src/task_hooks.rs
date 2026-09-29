@@ -329,17 +329,20 @@ impl TaskHookCancellation {
         }
     }
 
-    /// Cancels hooks when the request's interrupt observer latches or the
-    /// runtime shuts down. A closed channel stops being watched; its last
-    /// value still counts.
+    /// Cancels hooks when the request's interrupt observer latches, the
+    /// execution lease owner observes this execution lost the request (a
+    /// revocation writes no interrupt latch), or the runtime shuts down. The
+    /// first two cancel ordinary phases only. A closed channel stops being
+    /// watched; its last value still counts.
     pub(crate) fn follow(
         &self,
         mut interrupt: tokio::sync::watch::Receiver<Option<crate::interrupt::InterruptIntent>>,
         mut shutdown: tokio::sync::watch::Receiver<bool>,
+        ownership_lost: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         if *shutdown.borrow() {
             self.shutdown();
-        } else if interrupt.borrow().is_some() {
+        } else if interrupt.borrow().is_some() || ownership_lost.is_cancelled() {
             self.interrupt();
         }
         let cancellation = self.clone();
@@ -359,6 +362,10 @@ impl TaskHookCancellation {
                     return;
                 }
                 tokio::select! {
+                    () = ownership_lost.cancelled(), if watch_interrupt => {
+                        cancellation.interrupt();
+                        watch_interrupt = false;
+                    }
                     changed = interrupt.changed(), if watch_interrupt => {
                         if changed.is_err() {
                             watch_interrupt = false;
@@ -442,6 +449,11 @@ impl TaskHookExec for ManagedTaskHookExec {
             .and_then(chrono::Duration::try_seconds)
             .and_then(|timeout| Utc::now().checked_add_signed(timeout))
         else {
+            if let Some(record) = &self.record {
+                record
+                    .attempt_refused(&hook.hook_id, HookCommandResult::LaunchFailed)
+                    .await;
+            }
             return refused(
                 HookCommandResult::LaunchFailed,
                 format!("a timeout of {timeout_secs}s has no representable deadline on this host"),
@@ -520,10 +532,10 @@ impl TaskHookExec for ManagedTaskHookExec {
 /// Task. A goal-backed Task's receipt names only its opening request, so its
 /// continuations run without hooks.
 ///
-/// A request bound to a Task that is gone or disabled by claim time fails,
-/// and so does an automated request whose Trigger is gone: running either
-/// without the hooks it was fired under would skip the operator's gates, so
-/// the binding fails closed.
+/// A request bound to a Task that is gone or disabled by claim time fails:
+/// running it without the hooks it was fired under would skip the operator's
+/// gates, so the binding fails closed. Claim admission already refuses an
+/// automated request whose Trigger is gone.
 pub(crate) async fn resolve_request_task_hooks(
     node: &EmbeddedNode,
     request: &AgentRequest,
@@ -535,11 +547,7 @@ pub(crate) async fn resolve_request_task_hooks(
                 .caused_by_trigger_id
                 .as_deref()
                 .context("automated trigger lineage has no trigger_id")?;
-            load_trigger_task_id(node, &request.agent_did, trigger_id)
-                .await?
-                .with_context(|| {
-                    format!("Trigger {trigger_id} this request was fired from no longer exists; refusing to run it without its hooks")
-                })?
+            load_trigger_task_id(node, &request.agent_did, trigger_id).await?
         }
         None => None,
     };
@@ -596,12 +604,11 @@ async fn load_fire_task_id(
     ))
 }
 
-/// `None` when the Trigger is gone; `Some(None)` when it fires no Task.
 async fn load_trigger_task_id(
     node: &EmbeddedNode,
     agent_did: &str,
     trigger_id: &str,
-) -> Result<Option<Option<String>>> {
+) -> Result<Option<String>> {
     let response = graphql_with_transaction_retry(
         node,
         &format!(
@@ -617,10 +624,9 @@ async fn load_trigger_task_id(
         rows.len() <= 1,
         "ambiguous Trigger {trigger_id:?} for {agent_did:?}"
     );
-    Ok(rows
-        .into_iter()
-        .next()
-        .map(|row| nonempty_task_id(row.task_id)))
+    Ok(nonempty_task_id(
+        rows.into_iter().next().and_then(|row| row.task_id),
+    ))
 }
 
 async fn load_task(node: &EmbeddedNode, agent_did: &str, task_id: &str) -> Result<Option<Task>> {

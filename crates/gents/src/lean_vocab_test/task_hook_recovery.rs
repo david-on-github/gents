@@ -558,3 +558,48 @@ async fn recovered_cleanup_outside_an_admitted_root_is_refused() {
         );
     }
 }
+
+/// A cleanup occurrence refused for a reason retrying cannot change is
+/// consumed once: recovery records it and forgets the record.
+#[tokio::test]
+async fn a_definitively_refused_cleanup_is_recovered_once() {
+    let fixture = Fixture::new().await;
+    let dir = tempfile::tempdir().expect("case directory");
+    let log = dir.path().join("cleanup.log");
+    let doc_id = fixture.abandoned_request(false).await;
+    let store = TaskHookRecordStore::durable(dir.path().join("task-hooks"));
+    let mut unbounded = logging_hook(&generated("unbounded", "finally"), &log, 0);
+    unbounded.timeout_secs = Some(i64::MAX);
+    persist_crashed(
+        &store,
+        record(
+            &doc_id,
+            "refused",
+            fixture.did(),
+            dir.path(),
+            vec![
+                unbounded,
+                logging_hook(&generated("sweep", "finally"), &log, 0),
+            ],
+            Vec::new(),
+        ),
+    )
+    .await;
+    RequestLifecycle::recover_all(&fixture.node, fixture.did())
+        .await
+        .unwrap();
+    let first = recover_task_hook_records(&fixture.node, fixture.did(), &store)
+        .await
+        .unwrap();
+    store.wait_for_recoveries().await;
+    assert_eq!(first.recoveries_started, 1);
+    assert_eq!(log_lines(&log), vec!["sweep".to_string()]);
+    assert!(
+        store.list().is_empty(),
+        "the refused occurrence counts as attempted"
+    );
+    let again = recover_task_hook_records(&fixture.node, fixture.did(), &store)
+        .await
+        .unwrap();
+    assert!(again.is_noop());
+}

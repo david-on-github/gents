@@ -301,8 +301,9 @@ impl TaskHookRecordHandle {
         }
     }
 
-    /// Records a cleanup occurrence that was refused without launching.
-    async fn attempt_refused(&self, hook_id: &str, result: HookCommandResult) {
+    /// Records an occurrence refused without launching, for a reason retrying
+    /// cannot change, so recovery never selects it again.
+    pub(crate) async fn attempt_refused(&self, hook_id: &str, result: HookCommandResult) {
         let key = hook_id.to_owned();
         if let Err(error) = self
             .update(move |record| {
@@ -503,7 +504,9 @@ pub(crate) async fn recover_task_hook_records(
             handle,
             store.shutdown.clone(),
         ));
-        locked(&store.recoveries).push(recovery);
+        let mut recoveries = locked(&store.recoveries);
+        recoveries.retain(|recovery| !recovery.is_finished());
+        recoveries.push(recovery);
     }
     Ok(report)
 }

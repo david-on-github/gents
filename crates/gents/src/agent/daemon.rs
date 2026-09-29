@@ -780,9 +780,15 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
             interrupt_tx,
             shutdown.clone(),
         );
+        let ownership_lost = lifecycle.ownership_lost();
         let hook_cancellation = crate::task_hooks::TaskHookCancellation::default();
-        let hook_cancellation_follower = (!hooks.is_empty())
-            .then(|| hook_cancellation.follow(interrupt_rx.clone(), shutdown.clone()));
+        let hook_cancellation_follower = (!hooks.is_empty()).then(|| {
+            hook_cancellation.follow(
+                interrupt_rx.clone(),
+                shutdown.clone(),
+                ownership_lost.clone(),
+            )
+        });
         let hook_record = if hooks.is_empty() {
             None
         } else {
@@ -857,6 +863,13 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
         }
         if let Some(record) = &hook_record {
             record.release().await;
+        }
+
+        // A revoked execution's terminal was written by the owner that
+        // revoked it; this one only finished its cleanup.
+        if ownership_lost.is_cancelled() {
+            tracing::warn!(request_id = %request.request_id, "task hooks stopped after execution ownership loss");
+            return Ok(());
         }
 
         let (work_reason, release_writer_binding) = match owned_work {

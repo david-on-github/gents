@@ -1036,34 +1036,6 @@ async fn a_request_bound_to_a_disabled_hookless_task_fails_closed() {
 }
 
 #[tokio::test]
-async fn an_automated_request_whose_trigger_is_gone_fails_closed() {
-    let harness = Harness::new().await;
-    harness
-        .install_task(json!([{"hook_id": "prepare", "phase": "before",
-            "command": ["sh", "-c", harness.touch("prepared")], "timeout_secs": 30}]))
-        .await;
-    let request = harness.create_request(Lineage::Trigger, false).await;
-    ConfigAccess::write_local(
-        harness.node.as_ref(),
-        "test.delete_task_hook_trigger",
-        &format!(
-            r#"mutation {{ delete_Trigger(filter: {{ agent_did: {{ _eq: "{}" }}, trigger_id: {{ _eq: "{}" }} }}) {{ _docID }} }}"#,
-            crate::graphql::escape_graphql_string(harness.owner()),
-            crate::graphql::escape_graphql_string(TRIGGER_ID),
-        ),
-    )
-    .await
-    .expect("delete the Trigger");
-    let row = harness.run(request, false).await;
-    assert_eq!(harness.calls(), 0, "{row}");
-    assert_eq!(row["lifecycle_state"], "failed", "{row}");
-    // Claim admission already refuses a runtime-trigger request whose Trigger
-    // is gone; the hook resolver's own refusal covers a deletion after it.
-    assert!(reason(&row).contains("rigger"), "{row}");
-    assert!(!harness.mark("prepared").exists());
-}
-
-#[tokio::test]
 async fn a_before_hook_that_outlives_the_request_deadline_fails_the_request_clearly() {
     let harness = Harness::with_deadline(Duration::from_secs(2)).await;
     harness
@@ -1125,5 +1097,101 @@ async fn workspace_seal_completes_before_the_after_phase_is_selected() {
     assert!(
         !harness.mark("verified").exists(),
         "after_success never saw the sealed work"
+    );
+}
+
+impl Harness {
+    /// Runs the request and, once `marker` appears, revokes its execution by
+    /// installing another generation, as LatestOnly supersession does.
+    async fn run_superseding_at(&self, request: AgentRequest, marker: &Path) -> serde_json::Value {
+        let doc_id = request.doc_id.clone();
+        let mut daemon = self.daemon(false);
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let supersede = async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            ConfigAccess::write_local(
+                self.node.as_ref(),
+                "test.supersede_task_hook_execution",
+                &format!(
+                    r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, input: {{ execution_generation: "replacement-generation" }}) {{ _docID }} }}"#,
+                    crate::graphql::escape_graphql_string(&doc_id),
+                ),
+            )
+            .await
+            .expect("replace the execution generation");
+        };
+        let (processed, ()) = tokio::time::timeout(Duration::from_secs(25), async {
+            tokio::join!(daemon.process_request(request, shutdown_rx), supersede)
+        })
+        .await
+        .expect("revocation cancels the held hook");
+        processed.expect("request processing returned");
+        self.request_row(&doc_id).await
+    }
+}
+
+#[tokio::test]
+async fn revocation_during_a_before_hook_cancels_it_and_still_cleans_up() {
+    let harness = Harness::new().await;
+    let held = format!(
+        "{}; sleep 30; {}",
+        harness.touch("prepare-started"),
+        harness.touch("prepare-finished")
+    );
+    harness
+        .install_task(json!([
+            {"hook_id": "prepare", "phase": "before",
+             "command": ["sh", "-c", held], "timeout_secs": 60},
+            {"hook_id": "second", "phase": "before",
+             "command": ["sh", "-c", harness.touch("second")], "timeout_secs": 30},
+            {"hook_id": "sweep", "phase": "finally",
+             "command": ["sh", "-c", harness.touch("swept")], "timeout_secs": 30},
+        ]))
+        .await;
+    let request = harness.create_request(Lineage::ManualFire, false).await;
+    let row = harness
+        .run_superseding_at(request, &harness.mark("prepare-started"))
+        .await;
+    assert_eq!(harness.calls(), 0, "{row}");
+    assert!(!harness.mark("prepare-finished").exists());
+    assert!(
+        !harness.mark("second").exists(),
+        "no ordinary hook launches after revocation"
+    );
+    assert!(harness.mark("swept").exists(), "cleanup still runs");
+    assert_eq!(
+        row["lifecycle_state"], "claimed",
+        "the revoking owner keeps the terminal: {row}"
+    );
+}
+
+#[tokio::test]
+async fn revocation_during_an_after_success_hook_cancels_it_and_still_cleans_up() {
+    let harness = Harness::new().await;
+    let held = format!(
+        "{}; sleep 30; {}",
+        harness.touch("verify-started"),
+        harness.touch("verify-finished")
+    );
+    harness
+        .install_task(json!([
+            {"hook_id": "verify", "phase": "after_success",
+             "command": ["sh", "-c", held], "timeout_secs": 60},
+            {"hook_id": "sweep", "phase": "finally",
+             "command": ["sh", "-c", harness.touch("swept")], "timeout_secs": 30},
+        ]))
+        .await;
+    let request = harness.create_request(Lineage::ManualFire, false).await;
+    let row = harness
+        .run_superseding_at(request, &harness.mark("verify-started"))
+        .await;
+    assert_eq!(harness.calls(), 1, "{row}");
+    assert!(!harness.mark("verify-finished").exists());
+    assert!(harness.mark("swept").exists(), "cleanup still runs");
+    assert_eq!(
+        row["lifecycle_state"], "processing",
+        "the revoking owner keeps the terminal: {row}"
     );
 }
