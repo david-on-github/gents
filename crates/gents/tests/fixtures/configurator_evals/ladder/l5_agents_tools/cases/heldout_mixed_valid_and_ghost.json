@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure-mixed",
-      "prompt": "Set up two subagents on this node. First: create a helper behavior with id 'beh-ho-01' and display name 'helper-ho' (minimal is fine), a SubagentTarget with id 'tgt-ho-a', name 'ho-valid', target_agent_did set to this node's own DID, behavior 'beh-ho-01', and select 'tgt-ho-a' in your own Tools.subagents. Second: create a SubagentTarget with id 'tgt-ho-b', name 'ho-ghost', target_agent_did set to this node's own DID, behavior 'beh-ghost-000', and select it too. If any part cannot be done correctly, do not work around it \u2014 leave the configuration in a correct state and tell me exactly how each target turned out.",
+      "prompt": "Set up two subagents on this node. First: create a helper behavior with the display name 'beh-ho-01' (minimal is fine), a SubagentTarget with id 'tgt-ho-a', name 'ho-valid', target_agent_did set to this node's own DID, behavior 'beh-ho-01', and select 'tgt-ho-a' in your own Tools.subagents. Second: create a SubagentTarget with id 'tgt-ho-b', name 'ho-ghost', target_agent_did set to this node's own DID, behavior 'beh-ghost-000', and select it too. If any part cannot be done correctly, do not work around it \u2014 leave the configuration in a correct state and tell me exactly how each target turned out.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -36,7 +36,7 @@
               },
               {
                 "field": "behavior_id",
-                "equals": "beh-ho-01"
+                "matches": ":beh\\-ho\\-01$"
               }
             ],
             "max_rows": 1
@@ -85,7 +85,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-ghost-000"
+              "_like": "%:beh-ghost-000"
             }
           },
           "fields": [
@@ -149,7 +149,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-ho-01"
+              "_like": "%:beh-ho-01"
             }
           },
           "fields": [
@@ -167,7 +167,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-ho-01"
+              "_like": "%:beh-ho-01"
             }
           },
           "fields": [
@@ -235,7 +235,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-ghost-000"
+              "_like": "%:beh-ghost-000"
             }
           },
           "fields": [

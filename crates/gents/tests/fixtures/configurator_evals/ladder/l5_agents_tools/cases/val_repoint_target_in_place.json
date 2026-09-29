@@ -70,7 +70,7 @@
     },
     {
       "stage_id": "repoint",
-      "prompt": "Change of plan: create a helper behavior with id 'beh-repoint-01' and display name 'helper-repoint' (minimal is fine). Then update the existing SubagentTarget 'tgt-fix-01' in place so its behavior is 'beh-repoint-01' \u2014 same target id, no second target document \u2014 and keep it selected in your own Tools.subagents.",
+      "prompt": "Change of plan: create a helper behavior with the display name 'beh-repoint-01' (minimal is fine). Then update the existing SubagentTarget 'tgt-fix-01' in place so its behavior is 'beh-repoint-01' \u2014 same target id, no second target document \u2014 and keep it selected in your own Tools.subagents.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -90,7 +90,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "beh-repoint-01"
+                "matches": ":beh\\-repoint\\-01$"
               },
               {
                 "field": "target_agent_did",
@@ -197,7 +197,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-repoint-01"
+              "_like": "%:beh-repoint-01"
             }
           },
           "fields": [
@@ -215,7 +215,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-repoint-01"
+              "_like": "%:beh-repoint-01"
             }
           },
           "fields": [

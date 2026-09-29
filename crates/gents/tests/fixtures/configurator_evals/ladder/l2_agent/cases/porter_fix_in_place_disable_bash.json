@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure_with_bash",
-      "prompt": "Create a new behavior with the exact id \"porter\" and display name \"Porter\", its own AgentContext with the exact id \"porter-context\" and system prompt exactly: You are Porter, a build-and-fetch helper. Its own Tools document has the exact id \"porter-tools\" granting read_file and bash. Do not touch your own configuration. Apply it and confirm.",
+      "prompt": "Create a new behavior with the display name \"porter\", its own AgentContext and system prompt exactly: You are Porter, a build-and-fetch helper. Its own Tools document grants read_file and bash. Do not touch your own configuration. Apply it and confirm.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -26,7 +26,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "porter"
+                "matches": ":porter$"
               },
               {
                 "field": "enabled",
@@ -52,7 +52,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "porter"
+              "_like": "%:porter"
             }
           },
           "fields": [
@@ -122,7 +122,7 @@
               "_eq": "$trial"
             },
             "tools_id": {
-              "_eq": "porter-tools"
+              "_like": "tools-%"
             }
           },
           "fields": [

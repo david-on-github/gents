@@ -78,7 +78,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "reviewer"
+              "_like": "%:reviewer"
             },
             "inference_profile_id": {
               "_eq": "profile-review"
@@ -113,7 +113,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "reviewer"
+                "matches": ":reviewer$"
               },
               {
                 "field": "inference_profile_id",
@@ -155,7 +155,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "reviewer"
+              "_like": "%:reviewer"
             }
           },
           "fields": [

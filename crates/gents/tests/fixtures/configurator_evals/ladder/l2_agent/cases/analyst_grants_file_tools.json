@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Create a new behavior with the exact id \"analyst\" and display name \"Analyst\". Its own AgentContext has the exact id \"analyst-context\" with system prompt exactly: You are Analyst, a read-only file assistant for research notes. Read and report; never modify files. Its own Tools document has the exact id \"analyst-tools\", files read-only granting exactly read_file and list_files, bash off, datastore off. Leave your own configuration untouched. Apply it and confirm.",
+      "prompt": "Create a new behavior with the display name \"analyst\". Its own AgentContext has the system prompt exactly: You are Analyst, a read-only file assistant for research notes. Read and report; never modify files. Its own Tools document has files read-only granting exactly read_file and list_files, bash off, datastore off. Leave your own configuration untouched. Apply it and confirm.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -29,7 +29,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "analyst"
+                "matches": ":analyst$"
               },
               {
                 "field": "enabled",
@@ -55,7 +55,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "analyst"
+              "_like": "%:analyst"
             }
           },
           "fields": [
@@ -102,7 +102,7 @@
               "_eq": "$trial"
             },
             "context_id": {
-              "_eq": "analyst-context"
+              "_like": "context-%"
             }
           },
           "fields": [
@@ -127,7 +127,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "analyst"
+                "matches": ":analyst$"
               }
             ]
           },
@@ -145,7 +145,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "analyst"
+              "_like": "%:analyst"
             }
           },
           "fields": [
@@ -168,7 +168,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "analyst"
+                "matches": ":analyst$"
               }
             ]
           },
@@ -186,7 +186,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "analyst"
+              "_like": "%:analyst"
             }
           },
           "fields": [

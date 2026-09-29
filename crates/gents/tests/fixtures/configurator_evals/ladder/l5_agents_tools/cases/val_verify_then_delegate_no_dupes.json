@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Set up subagent delegation: create a helper behavior with id 'beh-fix2-01' and display name 'helper-fixer2' (minimal is fine), a SubagentTarget with id 'tgt-fix2-01', name 'fix-target-2', target_agent_did set to this node's own DID, behavior 'beh-fix2-01', and select 'tgt-fix2-01' in your own Tools.subagents.",
+      "prompt": "Set up subagent delegation: create a helper behavior with the display name 'beh-fix2-01' (minimal is fine), a SubagentTarget with id 'tgt-fix2-01', name 'fix-target-2', target_agent_did set to this node's own DID, behavior 'beh-fix2-01', and select 'tgt-fix2-01' in your own Tools.subagents.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -36,7 +36,7 @@
               },
               {
                 "field": "behavior_id",
-                "equals": "beh-fix2-01"
+                "matches": ":beh\\-fix2\\-01$"
               }
             ],
             "max_rows": 1
@@ -188,7 +188,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-fix2-01"
+              "_like": "%:beh-fix2-01"
             }
           },
           "fields": [
@@ -208,7 +208,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-fix2-01"
+              "_like": "%:beh-fix2-01"
             }
           },
           "fields": [

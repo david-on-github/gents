@@ -46,7 +46,7 @@
               },
               {
                 "field": "behavior_id",
-                "equals": "beh-alpha-01"
+                "matches": ":beh\\-alpha\\-01$"
               }
             ],
             "max_rows": 1
@@ -188,7 +188,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-beta-01"
+              "_like": "%:beh-beta-01"
             }
           },
           "fields": [
@@ -206,7 +206,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-beta-01"
+              "_like": "%:beh-beta-01"
             }
           },
           "fields": [

@@ -11,7 +11,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Create a new behavior with the exact id \"clerk\" and display name \"Clerk\", its own AgentContext with the exact id \"clerk-context\" and system prompt exactly: You are Clerk, a restock note clerk. Acknowledge each restock note by sku. Its own Tools document has the exact id \"clerk-tools\" granting exactly read_file and list_files. Then configure an automation on top of it: an EventSource with the exact id \"clerk-source\" watching collection RestockNote, wired through a Trigger with the exact id \"clerk-trigger\" to a Task with the exact id \"clerk-task\" that selects behavior \"clerk\" and renders the source document's sku into its request. Do not touch your own configuration. Apply it and confirm.",
+      "prompt": "Create a new behavior with the display name \"clerk\", its own AgentContext and system prompt exactly: You are Clerk, a restock note clerk. Acknowledge each restock note by sku. Its own Tools document grants exactly read_file and list_files. Then configure an automation on top of it: an EventSource with the exact id \"clerk-source\" watching collection RestockNote, wired through a Trigger with the exact id \"clerk-trigger\" to a Task with the exact id \"clerk-task\" that selects behavior \"clerk\" and renders the source document's sku into its request. Do not touch your own configuration. Apply it and confirm.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -35,7 +35,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "clerk"
+                "matches": ":clerk$"
               },
               {
                 "field": "enabled",
@@ -61,7 +61,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "clerk"
+              "_like": "%:clerk"
             }
           },
           "fields": [
@@ -191,7 +191,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "clerk"
+                "matches": ":clerk$"
               },
               {
                 "field": "caused_by_source_doc_id",
@@ -213,7 +213,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "clerk"
+              "_like": "%:clerk"
             }
           },
           "fields": [

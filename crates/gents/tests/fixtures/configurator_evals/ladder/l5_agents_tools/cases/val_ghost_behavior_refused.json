@@ -42,7 +42,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-ghost-000"
+              "_like": "%:beh-ghost-000"
             }
           },
           "fields": [
@@ -79,7 +79,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-ghost-000"
+              "_like": "%:beh-ghost-000"
             }
           },
           "fields": [
@@ -116,7 +116,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-ghost-000"
+              "_like": "%:beh-ghost-000"
             }
           },
           "fields": [

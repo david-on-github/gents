@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Create a new behavior with the exact id \"ledger\" and display name \"Ledger\", its own AgentContext with the exact id \"ledger-context\" and system prompt exactly: You are Ledger, a read-only file assistant. Its own Tools document has the exact id \"ledger-tools\" granting exactly read_file and list_files. Do not touch your own configuration. Apply it and confirm.",
+      "prompt": "Create a new behavior with the display name \"ledger\", its own AgentContext and system prompt exactly: You are Ledger, a read-only file assistant. Its own Tools document grants exactly read_file and list_files. Do not touch your own configuration. Apply it and confirm.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -29,7 +29,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "ledger"
+                "matches": ":ledger$"
               },
               {
                 "field": "enabled",
@@ -55,7 +55,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "ledger"
+              "_like": "%:ledger"
             }
           },
           "fields": [
@@ -136,7 +136,7 @@
               "_eq": "$trial"
             },
             "context_id": {
-              "_eq": "ledger-context"
+              "_like": "context-%"
             }
           },
           "fields": [
@@ -161,7 +161,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "ledger"
+                "matches": ":ledger$"
               }
             ]
           },
@@ -179,7 +179,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "ledger"
+              "_like": "%:ledger"
             }
           },
           "fields": [
@@ -202,7 +202,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "ledger"
+                "matches": ":ledger$"
               }
             ]
           },
@@ -220,7 +220,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "ledger"
+              "_like": "%:ledger"
             }
           },
           "fields": [

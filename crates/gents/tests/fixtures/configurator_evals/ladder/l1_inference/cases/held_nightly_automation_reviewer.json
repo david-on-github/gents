@@ -88,7 +88,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "nightly-reviewer"
+              "_like": "%:nightly-reviewer"
             },
             "inference_profile_id": {
               "_eq": "profile-nightly"
@@ -214,7 +214,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "nightly-reviewer"
+              "_like": "%:nightly-reviewer"
             },
             "max_total_tokens": {
               "_eq": 120000
@@ -236,7 +236,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "nightly-reviewer"
+              "_like": "%:nightly-reviewer"
             },
             "max_total_tokens": {
               "_eq": 120000

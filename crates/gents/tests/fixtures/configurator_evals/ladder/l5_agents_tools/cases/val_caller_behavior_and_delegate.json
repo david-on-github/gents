@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "helper-and-target",
-      "prompt": "Wire up subagent delegation on this node. Create a helper behavior with id 'beh-helper-02' and display name 'helper-fixer' (minimal is fine). Then create a SubagentTarget with id 'tgt-fixer-01', name 'fixer-target', target_agent_did set to this node's own DID, and behavior 'beh-helper-02'. Select 'tgt-fixer-01' in your own Tools.subagents.",
+      "prompt": "Wire up subagent delegation on this node. Create a helper behavior with the display name 'beh-helper-02' (minimal is fine). Then create a SubagentTarget with id 'tgt-fixer-01', name 'fixer-target', target_agent_did set to this node's own DID, and behavior 'beh-helper-02'. Select 'tgt-fixer-01' in your own Tools.subagents.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -36,7 +36,7 @@
               },
               {
                 "field": "behavior_id",
-                "equals": "beh-helper-02"
+                "matches": ":beh\\-helper\\-02$"
               }
             ],
             "max_rows": 1
@@ -70,7 +70,7 @@
     },
     {
       "stage_id": "caller-selects-target",
-      "prompt": "Create a caller behavior with id 'beh-caller-01' and display name 'caller-ops' (minimal is fine). Select 'tgt-fixer-01' in its Tools.subagents as well, and keep 'tgt-fixer-01' selected in your own Tools too.",
+      "prompt": "Create a caller behavior with the display name 'beh-caller-01' (minimal is fine). Select 'tgt-fixer-01' in its Tools.subagents as well, and keep 'tgt-fixer-01' selected in your own Tools too.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -107,7 +107,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-caller-01"
+              "_like": "%:beh-caller-01"
             }
           },
           "fields": [
@@ -186,7 +186,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-helper-02"
+              "_like": "%:beh-helper-02"
             }
           },
           "fields": [
@@ -204,7 +204,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-helper-02"
+              "_like": "%:beh-helper-02"
             }
           },
           "fields": [

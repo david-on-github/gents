@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Create a new behavior on this node with the exact id \"scout\" and display name \"Scout\". It gets its own AgentContext with the exact id \"scout-context\" whose system prompt is exactly: You are Scout, a read-only file assistant. Find and report; never modify files. It gets its own Tools document with the exact id \"scout-tools\" granting exactly the file tools read_file and list_files, with bash off and datastore off. Do not change your own behavior, context, or tools. Apply it and confirm.",
+      "prompt": "Create a new behavior on this node with the display name \"scout\". It gets its own AgentContext whose system prompt is exactly: You are Scout, a read-only file assistant. Find and report; never modify files. It gets its own Tools document granting exactly the file tools read_file and list_files, with bash off and datastore off. Do not change your own behavior, context, or tools. Apply it and confirm.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -29,7 +29,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "scout"
+                "matches": ":scout$"
               },
               {
                 "field": "display_name",
@@ -59,7 +59,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "scout"
+              "_like": "%:scout"
             }
           },
           "fields": [
@@ -106,7 +106,7 @@
               "_eq": "$trial"
             },
             "tools_id": {
-              "_eq": "scout-tools"
+              "_like": "tools-%"
             }
           },
           "fields": [
@@ -141,7 +141,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "scout"
+                "matches": ":scout$"
               }
             ]
           },
@@ -159,7 +159,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "scout"
+              "_like": "%:scout"
             }
           },
           "fields": [
@@ -177,7 +177,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "scout"
+              "_like": "%:scout"
             }
           },
           "fields": [

@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "setup_partial",
-      "prompt": "Register this application schema on this node:\n\ntype EvalAutomationInput {\n  correlation: String\n  message: String\n}\n\ntype EvalAutomationOutput {\n  correlation: String\n  result: String\n}\n\nThen create a DatastoreToolSurface named \"HalfWired\" for the EvalAutomationOutput collection with a create entry and a query entry \u2014 scoped, no unscoped defra_query. Do not select the surface anywhere yet; that's all for now.",
+      "prompt": "Register this application schema on this node:\n\ntype EvalAutomationInput {\n correlation: String\n message: String\n}\n\ntype EvalAutomationOutput {\n correlation: String\n result: String\n}\n\nThen create a DatastoreToolSurface named \"HalfWired\" for the EvalAutomationOutput collection with a create entry and a query entry \u2014 scoped, no unscoped defra_query. Do not select the surface anywhere yet; that's all for now.",
       "deadline_secs": 600,
       "checks": [
         {

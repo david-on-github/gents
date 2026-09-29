@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Set up subagent delegation on this node. Create a helper behavior with id 'beh-helper-01' and display name 'helper-train' (a minimal behavior is fine). Then create a SubagentTarget with id 'tgt-train-01', name 'train-target', target_agent_did set to this node's own DID, and behavior 'beh-helper-01'. Select 'tgt-train-01' in your own Tools.subagents.",
+      "prompt": "Set up subagent delegation on this node. Create a helper behavior with the display name 'beh-helper-01' (a minimal behavior is fine). Then create a SubagentTarget with id 'tgt-train-01', name 'train-target', target_agent_did set to this node's own DID, and behavior 'beh-helper-01'. Select 'tgt-train-01' in your own Tools.subagents.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -36,7 +36,7 @@
               },
               {
                 "field": "behavior_id",
-                "equals": "beh-helper-01"
+                "matches": ":beh\\-helper\\-01$"
               }
             ],
             "max_rows": 1
@@ -122,7 +122,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-helper-01"
+              "_like": "%:beh-helper-01"
             }
           },
           "fields": [
@@ -186,7 +186,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-helper-01"
+              "_like": "%:beh-helper-01"
             }
           },
           "fields": [
@@ -204,7 +204,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "beh-helper-01"
+              "_like": "%:beh-helper-01"
             }
           },
           "fields": [

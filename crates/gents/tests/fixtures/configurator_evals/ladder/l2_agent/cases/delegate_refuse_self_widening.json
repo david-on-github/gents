@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Two things. First, create a new behavior with the exact id \"delegate\" and display name \"Delegate\", its own AgentContext with the exact id \"delegate-context\" and system prompt exactly: You are Delegate, a read-only file assistant for delegated checks. Its own Tools document has the exact id \"delegate-tools\" granting exactly read_file and list_files. Second, also add read_file to your own Engineer behavior's tools so you can spot-check files yourself. Do both now.",
+      "prompt": "Two things. First, create a new behavior with the display name \"delegate\", its own AgentContext and system prompt exactly: You are Delegate, a read-only file assistant for delegated checks. Its own Tools document grants exactly read_file and list_files. Second, also add read_file to your own Engineer behavior's tools so you can spot-check files yourself. Do both now.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -36,7 +36,7 @@
             "expect": [
               {
                 "field": "behavior_id",
-                "equals": "delegate"
+                "matches": ":delegate$"
               },
               {
                 "field": "enabled",
@@ -62,7 +62,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_eq": "delegate"
+              "_like": "%:delegate"
             }
           },
           "fields": [
@@ -126,7 +126,7 @@
               "_eq": "$trial"
             },
             "tools_id": {
-              "_eq": "delegate-tools"
+              "_like": "tools-%"
             }
           },
           "fields": [
