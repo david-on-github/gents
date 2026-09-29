@@ -58,6 +58,9 @@ def callbackCases : List CallbackCase :=
   , mkCase "denied_executing_journal_illegal" .denied [.executing] false false
   , mkCase "failed_after_result_docs_no_emit_legal" .failed
       [.resultDocsWritten] false true
+  , mkCase "failed_interrupted_no_emit_legal" .failed [.interrupted] false true
+  , mkCase "action_1_interrupted_while_0_not_result_docs_written_illegal" .failed
+      [.validated, .interrupted] false false
   ]
 
 theorem callbackCasesLegalCorrect :
@@ -98,7 +101,7 @@ def groupedInvocation (state : InvocationState) : CallbackInvocation :=
     state := state, journal := [], resultEmitted := false }
 
 def transitionCases : List TransitionCase :=
-  let interrupted := { groupedInvocation .failed with
+  let reportedFailure := { groupedInvocation .failed with
     journal := [{ index := 0, state := .executing }], attempts := 1 }
   let recovering := { groupedInvocation .running with
     journal := [{ index := 0, state := .executing }] }
@@ -128,9 +131,15 @@ def transitionCases : List TransitionCase :=
       pre := groupedInvocation .running,
       post := { groupedInvocation .running with state := .denied, resultEmitted := false },
       step := .deny_running rfl rfl rfl }
-  , { name := "retry_after_interrupted_attempt_starts_clean",
-      pre := interrupted,
-      post := { interrupted with state := .pending, journal := [], resultEmitted := false },
+  , { name := "interrupt_marks_executing_action_and_fails",
+      pre := recovering,
+      post := { recovering with
+        state := .failed, journal := [{ index := 0, state := .interrupted }],
+        resultEmitted := false },
+      step := .interrupt rfl rfl }
+  , { name := "retry_after_reported_failure_starts_clean",
+      pre := reportedFailure,
+      post := { reportedFailure with state := .pending, journal := [], resultEmitted := false },
       step := .retry 3 (by decide) rfl }
   ]
 
@@ -149,7 +158,7 @@ def retryCases : List RetryCase :=
   let states := [InvocationState.failed, .succeeded, .denied, .running]
   let journals : List (List ActionJournalState) :=
     [[], [.executing], [.validated], [.effectObserved], [.resultDocsWritten],
-     [.resultDocsWritten, .executing]]
+     [.resultDocsWritten, .executing], [.interrupted]]
   states.flatMap fun state =>
     journals.flatMap fun journal =>
       [0, 1, 2, 3].flatMap fun attempts =>
@@ -164,7 +173,7 @@ def retryCases : List RetryCase :=
             state := state, journal := journal, attempts := attempts,
             maxAttempts := maxAttempts, allowed := retryAllowed inv maxAttempts }
 
-theorem retryCases_count : retryCases.length = 192 := by native_decide
+theorem retryCases_count : retryCases.length = 224 := by native_decide
 
 end Conformance
 end Callback

@@ -272,6 +272,10 @@ source consistency checks, not a separate runtime compatibility version.
   failures retry on a capped backoff. Publication now refuses a Trigger that
   delivers a collection without a `String` `handoff_id` field to an
   `emit_outcome` Task.
+- A plugin callback invocation cut off mid-run is no longer run a second time
+  by recovery when its callback allows more than one attempt. Recovery records
+  the action as `interrupted` in the invocation's journal and fails it; a
+  failure the plugin reported is still retried.
 
 - `max_request_hop` bounds call depth again, not the number of calls (#2065).
   An `agent_new`/`agent_message` result returned to the calling session keeps

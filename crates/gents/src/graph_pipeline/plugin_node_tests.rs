@@ -317,6 +317,138 @@ async fn a_failed_plugin_node_is_retried_and_the_run_then_succeeds() {
     node.shutdown().await;
 }
 
+/// A plugin call cut off mid-run may already have done something outside the
+/// runtime, so recovery fails it and no retry repeats it, whatever the budget.
+/// The echo plugin's output document counts executions: a rerun would write one.
+#[tokio::test]
+async fn interrupted_plugin_invocation_is_not_rerun_on_recovery() {
+    let (home, record) = crate::plugin::tests::executor::installed_echo();
+    let node = Arc::new(EmbeddedNode::builder().build().await.unwrap());
+    crate::ensure_runtime_schemas(&node).await.unwrap();
+    node.add_schema(
+        "type EchoInput { graph_run_id: String @index(unique: true) payload: String }
+         type EchoOutput { graph_run_id: String @index payload: String }",
+    )
+    .await
+    .unwrap();
+    // Without its artifact the first attempt fails before the plugin runs,
+    // which leaves a real invocation to seed as interrupted.
+    let artifact = home.path().join(format!(
+        "plugins/store/{}.afb",
+        record.digest.strip_prefix("sha256:").unwrap()
+    ));
+    let bytes = std::fs::read(&artifact).unwrap();
+    std::fs::remove_file(&artifact).unwrap();
+    let plan = echo_plan(&record.digest, Some(3));
+    materialize_graph_revision(&node, None, graph_test_owner(), &plan)
+        .await
+        .unwrap();
+    let plugins = Arc::new(crate::plugin::executor::PluginExecutor::new(Some(
+        home.path().to_owned(),
+    )));
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let engine = tokio::spawn(crate::callback::run_callback_engine(
+        node.clone(),
+        graph_test_owner().to_owned(),
+        None,
+        plugins.clone(),
+        cancel.clone(),
+    ));
+    activate_graph_revision(
+        &node,
+        None,
+        graph_test_owner(),
+        "echo-pipeline",
+        &plan.digest,
+        None,
+    )
+    .await
+    .unwrap();
+    start_graph_run(
+        &node,
+        None,
+        graph_test_owner(),
+        "echo-pipeline",
+        None,
+        "input",
+        json!({ "payload": "hello" }),
+    )
+    .await
+    .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let invocation_id = loop {
+        let invocations = rows(
+            &node,
+            "{ CallbackInvocation { invocation_id lifecycle_state } }",
+            "CallbackInvocation",
+        )
+        .await;
+        if let Some(row) = invocations
+            .first()
+            .filter(|row| row["lifecycle_state"] == "failed")
+        {
+            break row["invocation_id"].as_str().unwrap().to_owned();
+        }
+        assert!(Instant::now() < deadline, "{invocations:?}");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    cancel.cancel();
+    let _ = engine.await;
+
+    let mut interrupted =
+        crate::callback::load_invocation(&node, &invocation_id, graph_test_owner())
+            .await
+            .unwrap()
+            .unwrap();
+    interrupted.lifecycle_state = "running".to_owned();
+    interrupted.attempts = Some(1);
+    interrupted.action_journal = Some(
+        serde_json::to_string(&[crate::workspace::ActionJournalEntry::new(
+            0,
+            crate::workspace::ActionJournalState::Executing,
+        )])
+        .unwrap(),
+    );
+    interrupted.error = None;
+    // Long past any backoff, so only the journal can hold a retry back.
+    interrupted.claimed_at = Some("2020-01-01T00:00:00Z".to_owned());
+    assert!(
+        crate::callback::update_invocation(&node, &interrupted, None)
+            .await
+            .unwrap()
+    );
+    std::fs::write(&artifact, &bytes).unwrap();
+
+    for _ in 0..2 {
+        crate::callback::recover_local_invocations(&node, graph_test_owner(), None, &plugins)
+            .await
+            .unwrap();
+    }
+    let recovered = crate::callback::load_invocation(&node, &invocation_id, graph_test_owner())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.lifecycle_state, "failed", "{recovered:?}");
+    assert_eq!(recovered.attempts, Some(1), "{recovered:?}");
+    assert_eq!(
+        serde_json::from_str::<Vec<crate::workspace::ActionJournalEntry>>(
+            recovered.action_journal.as_deref().unwrap()
+        )
+        .unwrap(),
+        vec![crate::workspace::ActionJournalEntry::new(
+            0,
+            crate::workspace::ActionJournalState::Interrupted,
+        )]
+    );
+    assert!(
+        rows(&node, "{ EchoOutput { payload } }", "EchoOutput")
+            .await
+            .is_empty(),
+        "the interrupted plugin call ran again"
+    );
+    node.shutdown().await;
+}
+
 /// A run started before the engine noticed the revision's routes still runs:
 /// its first document is live work, not history.
 #[tokio::test]

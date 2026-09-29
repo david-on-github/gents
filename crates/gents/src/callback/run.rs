@@ -293,6 +293,7 @@ pub(crate) fn journal_has_started_host_execution(journal: &[ActionJournalEntry])
                 | ActionJournalState::Executing
                 | ActionJournalState::EffectObserved
                 | ActionJournalState::ResultDocsWritten
+                | ActionJournalState::Interrupted
         )
     })
 }

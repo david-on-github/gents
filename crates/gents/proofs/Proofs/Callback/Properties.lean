@@ -74,6 +74,8 @@ theorem denied_or_failed_do_not_emit
       simp [hpost] at hterm
   | fail _ hpost =>
       simp [hpost]
+  | interrupt _ hpost =>
+      simp [hpost]
   | deny_claimed _ _ hpost =>
       simp [hpost]
   | deny_running _ _ hpost =>
@@ -95,6 +97,8 @@ theorem denied_keeps_empty_journal
       simp [hpost] at hden
   | fail _ hpost =>
       simp [hpost] at hden
+  | interrupt _ hpost =>
+      simp [hpost] at hden
   | deny_claimed _ hjournal hpost =>
       simp [hpost, hjournal]
   | deny_running _ hjournal hpost =>
@@ -102,11 +106,14 @@ theorem denied_keeps_empty_journal
   | retry _ _ hpost =>
       simp [hpost] at hden
 
+/-- Failure keeps the journal, or marks its executing actions interrupted when
+recovery cut the attempt off; it never drops what an action did. -/
 theorem fail_preserves_journal
     {pre post : CallbackInvocation}
     (h : Transition pre post)
     (hfail : post.state = .failed) :
-    post.journal = pre.journal ∧ post.resultEmitted = false := by
+    (post.journal = pre.journal ∨ post.journal = interruptJournal pre.journal) ∧
+      post.resultEmitted = false := by
   cases h with
   | claim _ hpost =>
       simp [hpost] at hfail
@@ -115,6 +122,8 @@ theorem fail_preserves_journal
   | succeed _ _ hpost =>
       simp [hpost] at hfail
   | fail _ hpost =>
+      simp [hpost]
+  | interrupt _ hpost =>
       simp [hpost]
   | deny_claimed _ _ hpost =>
       simp [hpost] at hfail
@@ -152,6 +161,7 @@ theorem retry_starts_clean {pre post : CallbackInvocation}
   | run hp _ => simp [hpre] at hp
   | succeed hp _ _ => simp [hpre] at hp
   | fail hp _ => simp [hpre] at hp
+  | interrupt hp _ => simp [hpre] at hp
   | deny_claimed hp _ _ => simp [hpre] at hp
   | deny_running hp _ _ => simp [hpre] at hp
   | retry _ _ heq => simp [heq]
@@ -162,6 +172,32 @@ theorem retry_never_repeats_an_effect (inv : CallbackInvocation) (maxAttempts : 
     ∀ e ∈ inv.journal, ActionJournalState.effectful e.state = false := by
   simp [retryAllowed] at h
   exact h.2
+
+/-- An attempt cut off mid-run is never run again, whatever the attempt budget:
+the runtime cannot observe what external side effect it had, and repeating an
+unknown effect is unsafe. Its invocation stays failed. -/
+theorem interrupted_attempt_never_retried (inv : CallbackInvocation) (maxAttempts : Nat)
+    (h : ∃ e ∈ inv.journal, e.state = .interrupted) :
+    retryAllowed inv maxAttempts = false := by
+  obtain ⟨e, he, hs⟩ := h
+  cases hr : retryAllowed inv maxAttempts with
+  | false => rfl
+  | true =>
+      have := retry_never_repeats_an_effect inv maxAttempts hr e he
+      simp [hs, ActionJournalState.effectful] at this
+
+/-- The `interrupt` step's result for an attempt that had started an action is
+an invocation no retry may pick up. -/
+theorem interrupt_blocks_retry (inv : CallbackInvocation)
+    (hexec : ∃ e ∈ inv.journal, e.state = .executing) (maxAttempts : Nat) :
+    retryAllowed { inv with
+      state := .failed, journal := interruptJournal inv.journal, resultEmitted := false }
+      maxAttempts = false := by
+  apply interrupted_attempt_never_retried
+  obtain ⟨e, he, hs⟩ := hexec
+  refine ⟨{ e with state := .interrupted }, ?_, rfl⟩
+  simp only [interruptJournal, List.mem_map]
+  exact ⟨e, he, by simp [hs, ActionJournalState.markInterrupted]⟩
 
 /-- Retries are bounded by the attempt budget. -/
 theorem retry_is_bounded (inv : CallbackInvocation) (maxAttempts : Nat)

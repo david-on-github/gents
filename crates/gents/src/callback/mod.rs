@@ -26,7 +26,9 @@ mod tests;
 
 pub use documents::reject_secret_bearing_callback_fields;
 #[cfg(test)]
-pub(crate) use documents::{create_callback_result, CallbackResultDoc};
+pub(crate) use documents::{
+    create_callback_result, load_invocation, update_invocation, CallbackResultDoc,
+};
 pub(crate) use run::recover_local_invocations;
 
 pub(crate) const LIFECYCLE_PENDING: &str = "pending";

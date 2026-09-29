@@ -21,7 +21,7 @@ use super::{LIFECYCLE_FAILED, LIFECYCLE_RUNNING, LIFECYCLE_SUCCEEDED};
 use crate::graph_pipeline::{PortCardinality, PortSpec};
 use crate::plugin::executor::PluginExecutor;
 use crate::plugin::PluginVerdict;
-use crate::workspace::journal::advance;
+use crate::workspace::journal::{advance, interrupt};
 use crate::workspace::{ActionJournalEntry, ActionJournalState};
 
 /// A plugin writes only a pack's own collections: never the runtime's
@@ -163,6 +163,8 @@ pub(super) async fn execute(
     journal: Vec<ActionJournalEntry>,
 ) -> Result<()> {
     if !journal.is_empty() {
+        let mut journal = journal;
+        interrupt(&mut journal);
         return persist_journal(
             node,
             invocation,
