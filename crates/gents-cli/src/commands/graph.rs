@@ -234,6 +234,10 @@ fn apply_input_fields(mut input: Value, fields: &[String]) -> Result<Value> {
         let (name, value) = field
             .split_once('=')
             .with_context(|| format!("--field {field:?} must be NAME=VALUE"))?;
+        anyhow::ensure!(
+            !name.is_empty(),
+            "--field {field:?} must name a field before '='"
+        );
         object.insert(name.to_owned(), Value::String(value.to_owned()));
     }
     Ok(input)
@@ -749,6 +753,80 @@ async fn toggle(args: GraphToggleArgs, enabled: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_input_arg_defaults_to_an_empty_object() {
+        assert_eq!(parse_input_arg(None).unwrap(), json!({}));
+    }
+
+    #[test]
+    fn parse_input_arg_reads_inline_json() {
+        assert_eq!(
+            parse_input_arg(Some(r#"{"question":"why?"}"#)).unwrap(),
+            json!({"question": "why?"})
+        );
+    }
+
+    #[test]
+    fn parse_input_arg_reads_an_at_file() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), r#"{"question":"from a file"}"#).unwrap();
+        let arg = format!("@{}", file.path().display());
+        assert_eq!(
+            parse_input_arg(Some(&arg)).unwrap(),
+            json!({"question": "from a file"})
+        );
+    }
+
+    #[test]
+    fn parse_input_arg_refuses_a_missing_at_file() {
+        let error = parse_input_arg(Some("@/does/not/exist.json")).unwrap_err();
+        assert!(
+            error.to_string().contains("reading --input file"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn parse_input_arg_refuses_invalid_json() {
+        let error = parse_input_arg(Some("not json")).unwrap_err();
+        assert!(
+            error.to_string().contains("parsing --input as JSON"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn parse_input_arg_refuses_a_non_object() {
+        let error = parse_input_arg(Some("[1, 2]")).unwrap_err();
+        assert!(
+            error.to_string().contains("--input must be a JSON object"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn apply_input_fields_overrides_input_values() {
+        let input = json!({"question": "original", "scope": "narrow"});
+        let updated = apply_input_fields(input, &["question=overridden".to_owned()]).unwrap();
+        assert_eq!(updated["question"], "overridden");
+        assert_eq!(updated["scope"], "narrow");
+    }
+
+    #[test]
+    fn apply_input_fields_refuses_a_field_without_equals() {
+        let error = apply_input_fields(json!({}), &["question".to_owned()]).unwrap_err();
+        assert!(
+            error.to_string().contains("must be NAME=VALUE"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn apply_input_fields_refuses_an_empty_name() {
+        let error = apply_input_fields(json!({}), &["=value".to_owned()]).unwrap_err();
+        assert!(error.to_string().contains("must name a field"), "{error:#}");
+    }
 
     fn result_view() -> GraphRunView {
         serde_json::from_str(
