@@ -1,10 +1,10 @@
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
-import { mkdir, writeFile } from "node:fs/promises";
+import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { lookup } from "node:dns/promises";
 import { randomUUID } from "node:crypto";
 
@@ -451,6 +451,28 @@ export class HostEnvironment {
       await candidate.close();
       throw error;
     }
+  }
+
+  // The runtime's node access control admits configuration writes only
+  // from its principal, so the coordinator signs as it. Copy only the
+  // principal key named by the runtime home into a private host directory.
+  async exportPrincipal(directory) {
+    await this.assertOwned();
+    const init = JSON.parse(
+      await this.exec(["cat", "/runtime/agent/init.json"]),
+    );
+    const keyPath = init.key_path;
+    const archive = await archiveContainerDirectory(
+      this.id,
+      dirname(keyPath),
+      directory,
+    );
+    const name = basename(keyPath);
+    await execute("tar", ["-xf", archive, "-C", directory, `./${name}`]);
+    await rm(archive);
+    const key = join(directory, name);
+    await chmod(key, 0o600);
+    return { agent_did: init.agent_did, key_path: key };
   }
 
   async submitChat(behavior, session, prompt, timeout) {
