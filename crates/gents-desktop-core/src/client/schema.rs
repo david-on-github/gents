@@ -45,15 +45,21 @@ pub(crate) async fn subscribe_runtime_collections(
 /// call onto the gossip channel, to a device class that includes iOS, for a
 /// collection nothing on the desktop reads.
 ///
+/// Credential collections are excluded too: the client route never carries
+/// them, and the desktop reads a hosted runtime's backends through that
+/// runtime's operator endpoint, so a subscription would only admit gossiped
+/// API keys and OAuth tokens into the client store.
+///
 /// This list is built from `ALL_COLLECTION_NAMES` verbatim, so a new collection
 /// otherwise joins the subscription set with no decision being taken about it.
-/// The same exclusion is applied to the desktop live-fixture runner.
+/// The same exclusions are applied to the desktop live-fixture runner.
 pub fn subscribed_collection_names() -> Vec<&'static str> {
     RUNTIME_COLLECTION_NAMES
         .iter()
         .chain(ALL_COLLECTION_NAMES.iter())
         .filter(|name| !gents_protocol::schemas::is_local_audit_collection(name))
         .filter(|name| !gents_protocol::schemas::is_local_only_collection(name))
+        .filter(|name| !gents_protocol::schemas::is_credential_collection(name))
         .copied()
         .collect()
 }
@@ -78,6 +84,24 @@ mod tests {
         assert!(
             names.iter().any(|name| *name == "AgentRequest"),
             "the exclusion must not have emptied the set: {names:?}"
+        );
+    }
+
+    /// The Lean scope model keeps credentials off every client route; the
+    /// broad subscription must not reintroduce them.
+    #[test]
+    fn the_desktop_does_not_replicate_credential_collections() {
+        let names = subscribed_collection_names();
+        assert!(!gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES.is_empty());
+        for credential in gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES {
+            assert!(
+                !names.contains(credential),
+                "{credential} must stay out of the desktop replication set: {names:?}"
+            );
+        }
+        assert!(
+            names.contains(&"InferenceProfile"),
+            "non-credential control plane stays subscribed: {names:?}"
         );
     }
 

@@ -450,10 +450,14 @@ mod tests {
     }
 
     /// A stale pair guards nothing: every restricted field must exist on its
-    /// collection in the registered SDL.
+    /// credential collection in the registered SDL.
     #[test]
     fn every_restricted_field_names_a_current_sdl_field() {
         for (collection, field) in RESTRICTED_FIELDS {
+            assert!(
+                gents_protocol::schemas::is_credential_collection(collection),
+                "{collection} is not a credential collection"
+            );
             let sdl = match *collection {
                 "InferenceBackend" => gents_protocol::schemas::INFERENCE_BACKEND,
                 "OAuthCredential" => gents_protocol::schemas::OAUTH_CREDENTIAL,

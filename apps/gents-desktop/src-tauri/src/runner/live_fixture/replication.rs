@@ -189,12 +189,14 @@ async fn set_replicator_with_retry(
 /// list is built from `ALL_COLLECTION_NAMES` verbatim, so a new collection
 /// joins the P2P subscription set with no decision being taken about it.
 /// Capture is on by default, so shipping those bodies to a fixture peer would
-/// be exactly that unmade decision.
+/// be exactly that unmade decision. Credential collections stay off the
+/// desktop for the same reason as in its own subscription set.
 fn subscribed_collection_names_for_runner() -> Vec<String> {
     gents_protocol::schemas::RUNTIME_COLLECTION_NAMES
         .iter()
         .chain(gents_protocol::schemas::ALL_COLLECTION_NAMES.iter())
         .filter(|name| !gents_protocol::schemas::is_local_audit_collection(name))
+        .filter(|name| !gents_protocol::schemas::is_credential_collection(name))
         .map(|name| (*name).to_string())
         .collect()
 }
@@ -209,7 +211,10 @@ mod tests {
     #[test]
     fn the_runner_does_not_replicate_plaintext_provider_bodies() {
         let names = subscribed_collection_names_for_runner();
-        for sensitive in gents_protocol::schemas::LOCAL_AUDIT_COLLECTION_NAMES {
+        for sensitive in gents_protocol::schemas::LOCAL_AUDIT_COLLECTION_NAMES
+            .iter()
+            .chain(gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES)
+        {
             assert!(
                 !names.iter().any(|name| name == sensitive),
                 "{sensitive} must stay out of the fixture replication set: {names:?}"
@@ -256,14 +261,6 @@ pub(super) async fn wait_for_live_documents(
             .behaviors
             .iter()
             .any(|row| row.behavior_id == docs.subagent_behavior_id);
-        let has_backend = snapshot
-            .inference_backends
-            .iter()
-            .any(|row| row.backend_id == docs.backend_id);
-        let has_subagent_backend = snapshot
-            .inference_backends
-            .iter()
-            .any(|row| row.backend_id == docs.subagent_backend_id);
         let has_tools = snapshot
             .tools
             .iter()
@@ -280,8 +277,6 @@ pub(super) async fn wait_for_live_documents(
         if has_principal
             && has_behavior
             && has_subagent_behavior
-            && has_backend
-            && has_subagent_backend
             && has_tools
             && has_subagent_tools
             && has_profile
