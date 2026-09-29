@@ -2352,3 +2352,6 @@ fn source_fields_query_refuses_a_hostile_collection_name() {
 
 #[path = "event_source/resumed_goal.rs"]
 mod resumed_goal;
+
+#[path = "event_source/unacknowledged.rs"]
+mod unacknowledged;

@@ -603,7 +603,7 @@ impl GoalSource {
                     %goal_id,
                     "pre-materialized goal continuation skipped"
                 ),
-                FireResult::Errored { error } => tracing::warn!(
+                FireResult::Errored { error } | FireResult::Rejected { error } => tracing::warn!(
                     %error,
                     %goal_id,
                     "pre-materialized goal continuation errored"

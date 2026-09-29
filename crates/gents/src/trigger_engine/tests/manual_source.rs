@@ -632,11 +632,11 @@ async fn dispatch_rejects_manual_intent_with_trigger_id() {
     let result = engine.dispatch(intent).await;
 
     match result {
-        FireResult::Errored { error } => assert!(
+        FireResult::Rejected { error } => assert!(
             error.contains("must not carry trigger_id"),
             "unexpected manual well-formedness error: {error}"
         ),
-        other => panic!("expected Errored for malformed Manual intent, got {other:?}"),
+        other => panic!("expected Rejected for malformed Manual intent, got {other:?}"),
     }
     assert!(
         materializer.calls().is_empty(),
@@ -645,7 +645,7 @@ async fn dispatch_rejects_manual_intent_with_trigger_id() {
     assert!(
         matches!(
             result_captured.lock().unwrap().as_ref(),
-            Some(FireResult::Errored { error }) if error.contains("must not carry trigger_id")
+            Some(FireResult::Rejected { error }) if error.contains("must not carry trigger_id")
         ),
         "on_result should receive the same malformed Manual error"
     );

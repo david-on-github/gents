@@ -3,21 +3,66 @@ use crate::config_client::ConfigAccess;
 use crate::graphql::escape_graphql_string;
 
 pub(super) struct PendingCheckpoint {
+    arrival: CheckpointArrival,
+    result: tokio::sync::oneshot::Receiver<super::super::FireResult>,
+}
+
+struct CheckpointArrival {
     owner: String,
     trigger_id: String,
     collection: String,
     position: String,
-    result: tokio::sync::oneshot::Receiver<super::super::FireResult>,
+    source_doc_id: String,
+    generation: u64,
+}
+
+/// Retries of one unacknowledged transient failure back off from the rescan
+/// interval to this multiple of it.
+const MAX_RETRY_BACKOFF_INTERVALS: u32 = 64;
+
+/// An arrival whose fire was not acknowledged. Its cursor stays before it, so
+/// the arrival remains pending and is never skipped. Every source event (the
+/// fire's own `Trigger` runtime-field write included) re-arms durable delivery,
+/// so an unconditional re-drive would fire the same arrival without bound
+/// (#2094). A parked trigger is therefore re-driven only when the runtime
+/// snapshot generation changes or, for a transient failure, after a capped
+/// exponential backoff. A refusal (`FireResult::Rejected`) is decided by the
+/// configuration and source document, so it waits for a configuration change
+/// or a restart; other triggers keep delivering meanwhile.
+pub(super) struct ParkedArrival {
+    position: String,
+    generation: u64,
+    retry_at: Option<Instant>,
+    attempts: u32,
+}
+
+impl ParkedArrival {
+    fn blocks(&self, generation: u64, now: Instant) -> bool {
+        generation == self.generation && self.retry_at.is_none_or(|retry_at| now < retry_at)
+    }
 }
 
 impl EventSource {
     pub(super) async fn finish_durable_checkpoint(&mut self) {
-        let Some(pending) = self.durable_checkpoint.take() else {
+        let Some(PendingCheckpoint {
+            arrival: pending,
+            result,
+        }) = self.durable_checkpoint.take()
+        else {
             return;
         };
         let result = tokio::select! {
             _ = self.cancel.cancelled() => return,
-            result = pending.result => result,
+            result = result => result,
+        };
+        let refusal = match &result {
+            Ok(super::super::FireResult::Rejected { error }) => Some(error.clone()),
+            Ok(super::super::FireResult::Skipped { reason })
+                if reason != super::super::SERIAL_BUSY =>
+            {
+                Some(reason.clone())
+            }
+            _ => None,
         };
         let acknowledged = matches!(
             &result,
@@ -41,12 +86,66 @@ impl EventSource {
                 })
                 .await;
             self.durable_ready = advanced.as_ref().copied().unwrap_or(false);
-            if let Err(error) = advanced {
-                tracing::warn!(%error, trigger_id = %pending.trigger_id, "arrival checkpoint remains pending");
+            match advanced {
+                Ok(true) => {
+                    self.parked_arrivals.remove(&pending.trigger_id);
+                    return;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    tracing::warn!(%error, trigger_id = %pending.trigger_id, "arrival checkpoint remains pending");
+                }
             }
         } else {
             self.durable_ready = false;
         }
+        self.park_arrival(&pending, refusal);
+    }
+
+    fn park_arrival(&mut self, pending: &CheckpointArrival, refusal: Option<String>) {
+        let attempts = self
+            .parked_arrivals
+            .get(&pending.trigger_id)
+            .filter(|parked| {
+                parked.position == pending.position && parked.generation == pending.generation
+            })
+            .map_or(1, |parked| parked.attempts.saturating_add(1));
+        let retry_at = match &refusal {
+            Some(reason) => {
+                tracing::warn!(
+                    trigger_id = %pending.trigger_id,
+                    source_collection = %pending.collection,
+                    source_doc_id = %pending.source_doc_id,
+                    %reason,
+                    "event trigger fire refused; the document stays pending until the configuration changes",
+                );
+                None
+            }
+            None => {
+                let delay = self.rescan_interval.saturating_mul(
+                    2u32.saturating_pow(attempts - 1)
+                        .min(MAX_RETRY_BACKOFF_INTERVALS),
+                );
+                tracing::warn!(
+                    trigger_id = %pending.trigger_id,
+                    source_collection = %pending.collection,
+                    source_doc_id = %pending.source_doc_id,
+                    attempts,
+                    retry_in_ms = delay.as_millis() as u64,
+                    "event trigger fire was not acknowledged; retrying after backoff",
+                );
+                Some(Instant::now() + delay)
+            }
+        };
+        self.parked_arrivals.insert(
+            pending.trigger_id.clone(),
+            ParkedArrival {
+                position: pending.position.clone(),
+                generation: pending.generation,
+                retry_at,
+                attempts,
+            },
+        );
     }
 
     pub(super) async fn next_durable_fire(&mut self) -> Option<FireIntent> {
@@ -63,6 +162,16 @@ impl EventSource {
             .cloned()
             .collect::<Vec<_>>();
         triggers.sort_by(|a, b| a.trigger_id.cmp(&b.trigger_id));
+        let now = Instant::now();
+        self.parked_arrivals.retain(|trigger_id, parked| {
+            parked.generation == snapshot.generation
+                && triggers.iter().any(|t| &t.trigger_id == trigger_id)
+        });
+        triggers.retain(|t| {
+            self.parked_arrivals
+                .get(&t.trigger_id)
+                .is_none_or(|parked| !parked.blocks(snapshot.generation, now))
+        });
         if let Some(last) = &self.durable_after_trigger {
             let offset = triggers
                 .iter()
@@ -142,10 +251,14 @@ impl EventSource {
                 observe(result);
             });
             self.durable_checkpoint = Some(PendingCheckpoint {
-                owner,
-                trigger_id: trigger.trigger_id.clone(),
-                collection: trigger.source_collection.clone(),
-                position: position.into(),
+                arrival: CheckpointArrival {
+                    owner,
+                    trigger_id: trigger.trigger_id.clone(),
+                    collection: trigger.source_collection.clone(),
+                    position: position.into(),
+                    source_doc_id: doc_id.into(),
+                    generation: snapshot.generation,
+                },
                 result: rx,
             });
             return Ok(Some(intent));
