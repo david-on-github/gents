@@ -53,7 +53,7 @@
     {
       "stage_id": "setup",
       "prompt": "Your kickoff is the file factory/kickoff.md under your tool root. Read all of it with read_file (page with offsets if a read is cut short), then carry it out exactly as if I had pasted it here.",
-      "deadline_secs": 21600,
+      "deadline_secs": 5400,
       "settle": true,
       "checks": [
         {
