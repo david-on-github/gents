@@ -263,6 +263,36 @@ pub fn read_pack(
     })
 }
 
+/// Reads just a `.pack`'s header, without verifying the rest of the archive:
+/// the header is the tar's first entry, so this decompresses only up to the
+/// end of it and stops, unlike [`read_pack`] which streams and hashes every
+/// entry. Cheap enough to call before deleting a stored pack, where the full
+/// verification cost would scale with that pack's size for no reason.
+pub fn peek_header(input: impl Read, bounds: Bounds) -> Result<PackHeader> {
+    let compressed = io::BufReader::new(BoundedReader::new(input, bounds.compressed, "compressed"));
+    let decompressed = BoundedReader::new(
+        GzDecoder::new(compressed),
+        bounds.decompressed,
+        "decompressed",
+    );
+    let mut archive = tar::Archive::new(decompressed);
+    let mut entries = archive.entries().context("reading the pack")?;
+    let mut entry = entries
+        .next()
+        .with_context(|| format!("this file is empty, so it is not a .{EXTENSION} file"))??;
+    let path = entry
+        .path()
+        .context("reading a pack member's path")?
+        .to_str()
+        .context("a pack member path is not valid UTF-8")?
+        .to_owned();
+    ensure!(
+        path == HEADER_ENTRY,
+        "this file does not start with {HEADER_ENTRY}, so it is not a .{EXTENSION} file"
+    );
+    read_header(&mut entry)
+}
+
 fn read_header(entry: &mut impl Read) -> Result<PackHeader> {
     let mut bytes = Vec::new();
     entry
