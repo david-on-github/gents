@@ -169,6 +169,34 @@ pub(super) async fn require_agent_session(
         })
 }
 
+/// The requester that owns the existing session `(agent_did, session_id)`,
+/// whichever requester that is; `None` when no session exists yet. Runtime
+/// deliveries into an existing session adopt it (Lean
+/// `Enrollment.runtimeRequesterScope`).
+pub(crate) async fn load_session_requester_scope(
+    node: &EmbeddedNode,
+    agent_did: &str,
+    session_id: &str,
+) -> Result<Option<String>> {
+    let query = format!(
+        r#"{{ AgentSession(filter: {{ agent_did: {{ _eq: "{}" }}, session_id: {{ _eq: "{}" }} }}) {{ {AGENT_SESSION_FIELDS} }} }}"#,
+        escape_graphql_string(agent_did),
+        escape_graphql_string(session_id)
+    );
+    let response = crate::graphql::graphql_with_transaction_retry(
+        node,
+        &query,
+        "load session requester scope",
+    )
+    .await?;
+    let rows = crate::graphql::rows::<serde_json::Value>(&response, "AgentSession")?;
+    anyhow::ensure!(rows.len() <= 1, "duplicate AgentSession rows for one label");
+    Ok(match rows.first() {
+        Some(row) => decode_session_row(row)?.session.requester_did,
+        None => None,
+    })
+}
+
 pub(crate) async fn require_session(
     node: &EmbeddedNode,
     agent_did: &str,

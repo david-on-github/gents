@@ -194,7 +194,7 @@ structure AgentRequestAdmissionCase where
   requesterMatchesTarget : Bool
   signerMatchesTarget : Bool
   signerMatchesIssuer : Bool
-  requesterMatchesIssuer : Bool
+  requesterMatchesSessionScope : Bool
   currentApproval : Bool
   exactGeneration : Bool
   authorizationFresh : Bool

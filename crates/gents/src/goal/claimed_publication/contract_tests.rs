@@ -822,6 +822,7 @@ async fn run_historical_publication_cases() {
                     &rows[0],
                     fixture.identity.did(),
                     PARENT,
+                    fixture.identity.did(),
                 )
                 .unwrap();
                 assert_eq!(rows[0].doc_id.as_deref(), Some(receipt.doc_id.as_str()));

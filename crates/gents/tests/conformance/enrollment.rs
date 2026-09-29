@@ -43,7 +43,7 @@ fn generated_agent_request_admission_cases_match_shared_projector() {
             requester_matches_target: case.requester_matches_target,
             signer_matches_target: case.signer_matches_target,
             signer_matches_issuer: case.signer_matches_issuer,
-            requester_matches_issuer: case.requester_matches_issuer,
+            requester_matches_session_scope: case.requester_matches_session_scope,
             current_approval: case.current_approval,
             exact_generation: case.exact_generation,
             authorization_fresh: case.authorization_fresh,

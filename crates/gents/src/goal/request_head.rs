@@ -30,7 +30,12 @@ pub(crate) fn verify_goal_continuation_edge(
         .doc_id
         .as_deref()
         .context("continuation predecessor has no document ID")?;
-    verify_runtime_local_control_receipt(child, agent_did, &parent_row.request_id)?;
+    verify_runtime_local_control_receipt(
+        child,
+        agent_did,
+        &parent_row.request_id,
+        parent_row.requester_did.as_deref().unwrap_or(agent_did),
+    )?;
     anyhow::ensure!(
         child.caused_by_parent_request_doc_id.as_deref() == Some(parent_doc)
             && child

@@ -28,14 +28,6 @@ example : latest [old, titleRequest] scope.agent scope.session none = some old :
 example : advance session [old, titleRequest] titleRequest "title" 100 = session := by decide
 example : observedRequest [titleRequest] titleRequest.observed = none := by decide
 
-def runtimeControl := { newerRequest with scope := { scope with requester := some 1 } }
-example : preserveControlSession session runtimeControl scope true = some session := by decide
-example : preserveControlSession session runtimeControl scope false = none := by decide
-example : preserveControlSession session runtimeControl { scope with session := 99 } true = none := by decide
-example : preserveControlSession session runtimeControl { scope with requester := some 99 } true = none := by decide
-example : preserveControlSession session { runtimeControl with behavior := 99 } scope true = none := by decide
-example : preserveControlSession session { runtimeControl with scope := { scope with agent := 99 } } scope true = none := by decide
-
 example : latest [newerRequest, old] 1 10 none = some newerRequest := by decide
 example : latest [old, newerRequest] 1 10 none = some newerRequest := by decide
 example : latest [old] 1 10 (some none) = none := by decide

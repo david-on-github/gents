@@ -197,6 +197,8 @@ async fn publish_graph_root_request(
 /// transaction can precompute the request/session/retry identity, then pass the
 /// returned immutable create document to their atomic submit seam. The ordinary
 /// trigger path above deliberately keeps its existing create behavior.
+/// `requester_did` is the requester that owns the existing session a runtime
+/// fire is delivered into; `None` is the target itself.
 #[allow(clippy::too_many_arguments)]
 pub async fn build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title(
     agent_did: &str,
@@ -265,14 +267,8 @@ pub async fn build_signed_pending_agent_request_with_lineage_workspace_and_conve
         }
         Some(kind) => anyhow::bail!("unsupported runtime request trigger kind {kind}"),
     };
-    if requester_did.is_some_and(|did| did.trim() != agent_did) {
-        tracing::debug!(
-            target_agent_did = agent_did,
-            "runtime trigger requester provenance remains in signed trigger context"
-        );
-    }
     let identity = RequestIdentity {
-        requester_did: None,
+        requester_did: requester_did.map(str::to_owned),
         request_id: request_id.to_string(),
         agent_did: agent_did.to_string(),
         behavior_id: behavior_id.to_string(),
@@ -978,17 +974,32 @@ pub(super) async fn apply_request_session_projection(
     request: &AgentRequest,
     now: &str,
 ) -> Result<()> {
-    if session::preserve_control_session_in_txn(txn, request).await? {
-        return Ok(());
-    }
-    if let Some(existing) = session::load_agent_session_row_in_txn(
-        txn,
-        &request.agent_did,
-        &request.session_id,
-        request.requester_did.as_deref(),
-    )
-    .await?
-    {
+    // The session belongs to one requester; a request under any other scope
+    // is refused rather than attached (Lean `Enrollment.runtimeRequesterScope`).
+    let response = txn
+        .execute(&format!(
+            r#"{{ AgentSession(filter: {{ agent_did: {{ _eq: "{}" }}, session_id: {{ _eq: "{}" }} }}) {{ {} }} }}"#,
+            escape_graphql_string(&request.agent_did),
+            escape_graphql_string(&request.session_id),
+            session::AGENT_SESSION_FIELDS,
+        ))
+        .await?;
+    let rows = response["data"]["AgentSession"]
+        .as_array()
+        .context("AgentSession query omitted rows")?;
+    anyhow::ensure!(
+        rows.len() <= 1,
+        "duplicate AgentSession rows for session_id={}",
+        request.session_id
+    );
+    if let Some(existing) = rows.first().map(session::decode_session_row).transpose()? {
+        if existing.session.requester_did != request.requester_did {
+            return Err(ClaimAdmissionError::SessionScopeMismatch {
+                session_id: request.session_id.clone(),
+                reason: "the request's requester does not own the session".to_owned(),
+            }
+            .into());
+        }
         if existing.session.behavior_id != request.behavior_id {
             return Err(ClaimAdmissionError::SessionBehaviorMismatch {
                 session_id: request.session_id.clone(),

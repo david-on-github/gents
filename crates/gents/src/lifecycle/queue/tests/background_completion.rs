@@ -2,94 +2,108 @@ use super::*;
 use crate::lifecycle::RequestTerminalOutcome;
 use crate::session;
 
-/// Model-driven witnesses for AgentSession.preserveControlSession: an enrolled
-/// desktop parent and runtime-signed controls share the existing session, while
-/// foreign physical ancestry cannot grant its scope.
-#[tokio::test]
-async fn desktop_session_runtime_controls_preserve_owner_and_reject_foreign_ancestry() {
+/// A desktop-owned session: an enrolled desktop request, finished through the
+/// real lifecycle, whose session is owned by the desktop's requester DID.
+async fn desktop_owned_session(
+    db: &TestDb,
+    session_id: &str,
+) -> (
+    crate::identity::KeyIdentity,
+    gents_protocol::request_admission::AgentRequestCreate,
+    AgentRequest,
+    crate::streaming::DefraStreamWriter,
+) {
     use gents_protocol::request_admission::{AgentRequestAdmissionRecord, AgentRequestCreate};
+    let desktop =
+        crate::identity::KeyIdentity::load_or_create(db._tempdir.path().join("desktop.key"), None)
+            .unwrap();
+    let mut create = AgentRequestCreate::base(
+        gents_protocol::request_admission::RequestPurpose::Normal,
+        "desktop-parent",
+        db.agent_did(),
+        desktop.did(),
+        TEST_BEHAVIOR_ID,
+        session_id,
+        "run work",
+        "interactive",
+        "2030-01-01T00:00:00Z",
+        AgentRequestAdmissionRecord::enrollment(
+            desktop.did(),
+            "enrollment",
+            "digest",
+            db.agent_did(),
+            1,
+            "2099-01-01T00:00:00Z",
+        ),
+    );
+    crate::sign_agent_request_create(&desktop, &mut create)
+        .await
+        .unwrap();
+    let response = db.node.execute(&create.graphql_mutation().unwrap()).await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let parent = crate::request_binding::load_agent_request(&db.node, "desktop-parent")
+        .await
+        .unwrap()
+        .unwrap();
+    // Materialize and finish the enrolled desktop turn through the real
+    // lifecycle, before its longer-lived background work completes.
+    let writer = crate::streaming::DefraStreamWriter::new(
+        db.node.clone(),
+        db.agent_did(),
+        std::time::Duration::ZERO,
+    );
+    let mut parent_lifecycle = crate::RequestLifecycle::new_with_execution_binding(
+        db.node.clone(),
+        TEST_BEHAVIOR_ID,
+        db.agent_did(),
+        parent.clone(),
+        60,
+        ExecutionOrigin::Interactive,
+        "backend-test",
+    );
+    assert_eq!(
+        parent_lifecycle.claim_with_identity().await.unwrap(),
+        crate::lifecycle::ClaimOutcome::Claimed
+    );
+    parent_lifecycle
+        .begin_owned_execution(&writer)
+        .await
+        .unwrap();
+    parent_lifecycle
+        .terminalize_owned(
+            RequestTerminalOutcome::Completed,
+            gents_protocol::output::TerminalOutput::NoMessage,
+            None,
+        )
+        .await
+        .unwrap();
+    session::ensure_session_with_behavior_id_and_requester_did(
+        &db.node,
+        session_id,
+        TEST_BEHAVIOR_ID,
+        db.agent_did(),
+        TEST_BEHAVIOR_ID,
+        Some(desktop.did()),
+    )
+    .await
+    .unwrap();
+    (desktop, create, parent, writer)
+}
+
+/// Lean `Enrollment.runtime_internal_adopts_session_scope`: runtime-signed
+/// controls of an enrolled desktop parent are written under the desktop's
+/// requester and share its existing session, while a parent from another
+/// session cannot lend its scope.
+#[tokio::test]
+async fn desktop_session_runtime_controls_adopt_owner_and_reject_foreign_ancestry() {
     for source in [
         QueueSource::BackgroundCompletion,
         QueueSource::Steering,
         QueueSource::Goal,
     ] {
         let db = test_db("desktop-control-scope").await;
-        let desktop = crate::identity::KeyIdentity::load_or_create(
-            db._tempdir.path().join("desktop.key"),
-            None,
-        )
-        .unwrap();
         let session_id = "desktop-owned-session";
-        let mut create = AgentRequestCreate::base(
-            gents_protocol::request_admission::RequestPurpose::Normal,
-            "desktop-parent",
-            db.agent_did(),
-            desktop.did(),
-            TEST_BEHAVIOR_ID,
-            session_id,
-            "run work",
-            "interactive",
-            "2030-01-01T00:00:00Z",
-            AgentRequestAdmissionRecord::enrollment(
-                desktop.did(),
-                "enrollment",
-                "digest",
-                db.agent_did(),
-                1,
-                "2099-01-01T00:00:00Z",
-            ),
-        );
-        crate::sign_agent_request_create(&desktop, &mut create)
-            .await
-            .unwrap();
-        let response = db.node.execute(&create.graphql_mutation().unwrap()).await;
-        assert!(!response.has_errors(), "{:?}", response.errors);
-        let parent = crate::request_binding::load_agent_request(&db.node, "desktop-parent")
-            .await
-            .unwrap()
-            .unwrap();
-        // Materialize and finish the enrolled desktop turn through the real
-        // lifecycle, before its longer-lived background work completes.
-        let writer = crate::streaming::DefraStreamWriter::new(
-            db.node.clone(),
-            db.agent_did(),
-            std::time::Duration::ZERO,
-        );
-        let mut parent_lifecycle = crate::RequestLifecycle::new_with_execution_binding(
-            db.node.clone(),
-            TEST_BEHAVIOR_ID,
-            db.agent_did(),
-            parent.clone(),
-            60,
-            ExecutionOrigin::Interactive,
-            "backend-test",
-        );
-        assert_eq!(
-            parent_lifecycle.claim_with_identity().await.unwrap(),
-            crate::lifecycle::ClaimOutcome::Claimed
-        );
-        parent_lifecycle
-            .begin_owned_execution(&writer)
-            .await
-            .unwrap();
-        parent_lifecycle
-            .terminalize_owned(
-                RequestTerminalOutcome::Completed,
-                gents_protocol::output::TerminalOutput::NoMessage,
-                None,
-            )
-            .await
-            .unwrap();
-        session::ensure_session_with_behavior_id_and_requester_did(
-            &db.node,
-            session_id,
-            TEST_BEHAVIOR_ID,
-            db.agent_did(),
-            TEST_BEHAVIOR_ID,
-            Some(desktop.did()),
-        )
-        .await
-        .unwrap();
+        let (desktop, create, parent, writer) = desktop_owned_session(&db, session_id).await;
         let query = format!("{{ AgentSession {{ {} }} }}", session::AGENT_SESSION_FIELDS);
         let before = db.node.execute(&query).await.data.unwrap();
         let mutation = if source == QueueSource::Goal {
@@ -138,7 +152,7 @@ async fn desktop_session_runtime_controls_preserve_owner_and_reject_foreign_ance
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(request.requester_did.as_deref(), Some(db.agent_did()));
+        assert_eq!(request.requester_did.as_deref(), Some(desktop.did()));
         let mut lifecycle = crate::RequestLifecycle::new_with_execution_binding(
             db.node.clone(),
             TEST_BEHAVIOR_ID,
@@ -152,11 +166,13 @@ async fn desktop_session_runtime_controls_preserve_owner_and_reject_foreign_ance
             lifecycle.claim_with_identity().await.unwrap(),
             crate::lifecycle::ClaimOutcome::Claimed
         );
+        let sessions = db.node.execute(&query).await.data.unwrap();
+        assert_eq!(sessions["AgentSession"].as_array().unwrap().len(), 1);
         assert_eq!(
-            db.node.execute(&query).await.data.unwrap(),
-            before,
-            "control must preserve exact user observation and session owner"
+            sessions["AgentSession"][0]["_docID"], before["AgentSession"][0]["_docID"],
+            "control must reuse the desktop-owned session"
         );
+        assert_eq!(sessions["AgentSession"][0]["requester_did"], desktop.did());
         lifecycle.begin_owned_execution(&writer).await.unwrap();
         lifecycle
             .terminalize_owned(
@@ -198,7 +214,10 @@ async fn desktop_session_runtime_controls_preserve_owner_and_reject_foreign_ance
             second_lifecycle.claim_with_identity().await.unwrap(),
             crate::lifecycle::ClaimOutcome::Claimed
         );
-        assert_eq!(db.node.execute(&query).await.data.unwrap(), before);
+        assert_eq!(
+            db.node.execute(&query).await.data.unwrap()["AgentSession"][0]["_docID"],
+            before["AgentSession"][0]["_docID"]
+        );
         second_lifecycle
             .begin_owned_execution(&writer)
             .await
@@ -231,6 +250,11 @@ async fn desktop_session_runtime_controls_preserve_owner_and_reject_foreign_ance
             .await
             .unwrap()
             .unwrap();
+        let error = admission_verifier(&db)
+            .verify_fresh(&forged, TEST_BEHAVIOR_ID)
+            .await
+            .unwrap_err();
+        assert!(error.is_denied(), "{error:#}");
         let mut forged_lifecycle = crate::RequestLifecycle::new_with_execution_binding(
             db.node.clone(),
             TEST_BEHAVIOR_ID,
@@ -239,11 +263,6 @@ async fn desktop_session_runtime_controls_preserve_owner_and_reject_foreign_ance
             60,
             ExecutionOrigin::Scheduled,
             "backend-test",
-        );
-        let error = forged_lifecycle.claim_with_identity().await.unwrap_err();
-        assert!(
-            crate::lifecycle::is_claim_admission_error(&error),
-            "{error:#}"
         );
         forged_lifecycle
             .reject_admission(&error.to_string())
@@ -327,21 +346,93 @@ async fn desktop_session_runtime_controls_preserve_owner_and_reject_foreign_ance
             .await
             .unwrap()
             .unwrap();
-        let mut lifecycle = crate::RequestLifecycle::new_with_execution_binding(
-            db.node.clone(),
-            TEST_BEHAVIOR_ID,
-            db.agent_did(),
-            bad,
-            60,
-            ExecutionOrigin::Scheduled,
-            "backend-test",
-        );
-        let error = lifecycle.claim_with_identity().await.unwrap_err();
+        let error = admission_verifier(&db)
+            .verify_fresh(&bad, TEST_BEHAVIOR_ID)
+            .await
+            .unwrap_err();
+        assert!(error.is_denied(), "{error:#}");
         assert!(
-            crate::lifecycle::is_claim_admission_error(&error),
+            error.to_string().contains("outside its session"),
             "{error:#}"
         );
     }
+}
+
+fn admission_verifier(db: &TestDb) -> crate::request_admission::AgentRequestAdmissionVerifier {
+    let (_owner, authority) = crate::agent::p2p_reconcile::enrollment_authority_channel();
+    crate::request_admission::AgentRequestAdmissionVerifier::new(
+        db.node.clone(),
+        db.identity.clone(),
+        authority,
+    )
+}
+
+/// #2064: a node-owned callee's result, returned (Lean
+/// `CausalHop.return_keeps_caller_hop`) into a session a paired desktop
+/// started, is written under the desktop's requester, admitted, claimed and
+/// resumed in that same session.
+#[tokio::test]
+async fn a_paired_client_session_receives_an_agent_new_completion() {
+    let db = test_db("paired-client-completion").await;
+    let session_id = "desktop-owned-session";
+    let (desktop, _, parent, _) = desktop_owned_session(&db, session_id).await;
+    let wake = persist_background_completion_with_message_waking(
+        &db.node,
+        &parent,
+        "gatekeeper answer",
+        "background-completion-notification:agent-new:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+        crate::lifecycle::RequestHopCause::Return,
+    )
+    .await
+    .unwrap()
+    .request
+    .expect("completion wake");
+    let wake = crate::request_admission::load_request_for_admission_test(&db.node, &wake.doc_id)
+        .await
+        .unwrap();
+    assert_eq!(wake.requester_did.as_deref(), Some(desktop.did()));
+    assert_eq!(wake.subagent_depth, parent.subagent_depth);
+    let verified = admission_verifier(&db)
+        .verify_fresh(&wake, TEST_BEHAVIOR_ID)
+        .await
+        .unwrap();
+    let mut lifecycle = crate::RequestLifecycle::new_with_execution_binding(
+        db.node.clone(),
+        TEST_BEHAVIOR_ID,
+        db.agent_did(),
+        verified.clone(),
+        60,
+        ExecutionOrigin::Scheduled,
+        "backend-test",
+    );
+    assert_eq!(
+        lifecycle.claim_with_identity().await.unwrap(),
+        crate::lifecycle::ClaimOutcome::Claimed
+    );
+    crate::hook::DefraSessionHook::resume_with_identity_policy(
+        db.node.clone(),
+        session_id,
+        TEST_BEHAVIOR_ID,
+        db.agent_did(),
+        verified.requester_did.as_deref(),
+        crate::hook::FailurePolicy::FailClosed,
+    )
+    .await
+    .expect("the completion resumes the desktop-owned session");
+    let sessions = db
+        .node
+        .execute(&format!(
+            "{{ AgentSession {{ {} }} }}",
+            session::AGENT_SESSION_FIELDS
+        ))
+        .await
+        .data
+        .unwrap();
+    assert_eq!(sessions["AgentSession"].as_array().unwrap().len(), 1);
+    assert_eq!(sessions["AgentSession"][0]["requester_did"], desktop.did());
 }
 
 fn root_parent(agent_did: &str, session_id: &str) -> AgentRequest {

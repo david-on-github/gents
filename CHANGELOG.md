@@ -212,6 +212,13 @@ source consistency checks, not a separate runtime compatibility version.
   number of sequential calls to a callee at depth one, while an A↔B message
   loop is still refused at the bound.
 
+- Agent results and trigger fires reach sessions a paired client started
+  (#2064). A completion wake, control continuation or automated trigger fire
+  delivered into an existing session is written under the requester that owns the
+  session, and admission refuses any other requester, so an `agent_new` result
+  or a `session_id_template` fire lands in a desktop-created session instead of
+  failing with "no AgentSession".
+
 - Desktop observation retains other agents when a document is deleted and prevents
   an older reload from replacing a freshly observed request (#1960, #2054).
 

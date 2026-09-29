@@ -969,7 +969,7 @@ pub(crate) struct LeanAgentRequestAdmissionCase {
     pub(crate) requester_matches_target: bool,
     pub(crate) signer_matches_target: bool,
     pub(crate) signer_matches_issuer: bool,
-    pub(crate) requester_matches_issuer: bool,
+    pub(crate) requester_matches_session_scope: bool,
     pub(crate) current_approval: bool,
     pub(crate) exact_generation: bool,
     pub(crate) authorization_fresh: bool,
