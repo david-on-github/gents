@@ -3,10 +3,7 @@
 //! [`prepare_entry_run`] is the generic path: it admits operator input
 //! against an entry's `input_schema` and, when the entry declares `prepare`,
 //! collects the declared host facts and hands them plus the admitted input
-//! to the pack's own plugin, persisting whatever documents it returns. The
-//! `code_review`-specific functions below it are the legacy path this
-//! generalizes; they stay until every consumer moves to `prepare`, and until
-//! then this file also generates and checks their byte-identical goldens.
+//! to the pack's own plugin, persisting whatever documents it returns.
 //!
 //! Every adapter here prepares host evidence and durable workspace/config
 //! rows for the same [`ConfigAccess`] and principal that own the graph.
@@ -20,7 +17,6 @@ use anyhow::{Context, Result};
 use gents_protocol::graphql::graphql_input_literal;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use sha2::{Digest, Sha256};
 
 use crate::config_client::ConfigAccess;
 use crate::graph_pipeline::{
@@ -28,20 +24,11 @@ use crate::graph_pipeline::{
 };
 use crate::plugin::executor::PluginExecutor;
 
-const EVIDENCE_CHUNKS_PER_PAGE: usize = 16;
-const EVIDENCE_CHUNK_MAX_BYTES: usize = 1_800;
-
 /// A prepare plugin's returned documents are persisted in batches of at most
 /// this many, so one prepare step never renders an unbounded mutation.
 const PREPARE_DOCUMENTS_BATCH_LIMIT: usize = 32;
 /// ...or this many bytes of rendered mutation text, whichever comes first.
 const PREPARE_DOCUMENTS_BATCH_BYTES: usize = 1024 * 1024;
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct PreparedGraphRun {
-    pub entry_name: String,
-    pub input: Value,
-}
 
 fn git_output_bytes(repo: &Path, arguments: &[&str]) -> Result<Vec<u8>> {
     let output = Command::new("git")
@@ -69,7 +56,7 @@ fn git_output(repo: &Path, arguments: &[&str]) -> Result<String> {
 
 fn git_output_exact(repo: &Path, arguments: &[&str]) -> Result<String> {
     String::from_utf8(git_output_bytes(repo, arguments)?)
-        .context("Git emitted non-UTF-8 code-review evidence")
+        .context("Git emitted non-UTF-8 diff output")
 }
 
 fn resolve_repository(
@@ -110,205 +97,9 @@ fn resolve_repository(
     Ok((canonical, base_sha, head_sha))
 }
 
-struct CodeReviewEvidence {
-    summary: String,
-    chunks: Vec<String>,
-    byte_count: usize,
-    sha256: String,
-}
-
-fn split_evidence_packet(packet: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
-    let mut start = 0;
-    while start < packet.len() {
-        let mut end = (start + EVIDENCE_CHUNK_MAX_BYTES).min(packet.len());
-        while !packet.is_char_boundary(end) {
-            end -= 1;
-        }
-        chunks.push(packet[start..end].to_owned());
-        start = end;
-    }
-    chunks
-}
-
-fn evidence_page_inputs(
-    evidence_id: &str,
-    evidence_sha256: &str,
-    evidence_byte_count: usize,
-    chunks: &[String],
-) -> Vec<Value> {
-    let page_count = chunks.len().div_ceil(EVIDENCE_CHUNKS_PER_PAGE);
-    let mut pages = Vec::with_capacity(page_count);
-    for page in 0..page_count {
-        let first = page * EVIDENCE_CHUNKS_PER_PAGE;
-        let mut input = serde_json::Map::new();
-        input.insert(
-            "page_key".to_owned(),
-            Value::String(format!("{evidence_id}:{page:08}")),
-        );
-        input.insert(
-            "evidence_id".to_owned(),
-            Value::String(evidence_id.to_owned()),
-        );
-        input.insert("page_index".to_owned(), Value::String(page.to_string()));
-        input.insert(
-            "page_count".to_owned(),
-            Value::String(page_count.to_string()),
-        );
-        input.insert(
-            "evidence_chunk_count".to_owned(),
-            Value::String(chunks.len().to_string()),
-        );
-        input.insert(
-            "evidence_byte_count".to_owned(),
-            Value::String(evidence_byte_count.to_string()),
-        );
-        input.insert(
-            "evidence_sha256".to_owned(),
-            Value::String(evidence_sha256.to_owned()),
-        );
-        for slot in 0..EVIDENCE_CHUNKS_PER_PAGE {
-            input.insert(
-                format!("evidence_chunk_{slot}"),
-                Value::String(chunks.get(first + slot).cloned().unwrap_or_default()),
-            );
-        }
-        pages.push(Value::Object(input));
-    }
-    pages
-}
-
-fn code_review_evidence(repo: &Path, base: &str, head: &str) -> Result<CodeReviewEvidence> {
-    let changed = git_output(repo, &["diff", "--name-status", base, head, "--"])?;
-    let stat = git_output(repo, &["diff", "--stat", base, head, "--"])?;
-    let patch = git_output_exact(
-        repo,
-        &[
-            "-c",
-            "core.quotepath=true",
-            "diff",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--binary",
-            "--find-renames=50%",
-            "--unified=12",
-            base,
-            head,
-            "--",
-        ],
-    )?;
-    let summary = format!(
-        "PINNED BASE: {base}\nPINNED HEAD: {head}\n\nCHANGED FILES:\n{changed}\n\nDIFF STAT:\n{stat}"
-    );
-    let packet = format!("{summary}\n\nCOMPLETE PATCH:\n{patch}");
-    Ok(CodeReviewEvidence {
-        summary,
-        chunks: split_evidence_packet(&packet),
-        byte_count: packet.len(),
-        sha256: format!("{:x}", Sha256::digest(packet.as_bytes())),
-    })
-}
-
-async fn persist_evidence(
-    access: &ConfigAccess,
-    evidence_id: &str,
-    evidence: &CodeReviewEvidence,
-) -> Result<()> {
-    let pages = evidence_page_inputs(
-        evidence_id,
-        &evidence.sha256,
-        evidence.byte_count,
-        &evidence.chunks,
-    );
-    let manifest = json!({
-        "evidence_id": evidence_id,
-        "format_version": "1",
-        "page_count": evidence.chunks.len().div_ceil(EVIDENCE_CHUNKS_PER_PAGE).to_string(),
-        "evidence_chunk_count": evidence.chunks.len().to_string(),
-        "evidence_byte_count": evidence.byte_count.to_string(),
-        "evidence_sha256": evidence.sha256,
-    });
-    access
-        .transact("graph.prepare_code_review_evidence", move |txn| {
-            let manifest = manifest.clone();
-            let pages = pages.clone();
-            Box::pin(async move {
-                txn.execute(&format!(
-                    "mutation {{ create_CodeReviewEvidenceManifest(input: {}) {{ _docID }} }}",
-                    graphql_input_literal(&manifest)?
-                ))
-                .await
-                .context("persisting immutable code-review evidence manifest")?;
-                for (page, input) in pages.iter().enumerate() {
-                    txn.execute(&format!(
-                        "mutation {{ create_CodeReviewEvidencePage(input: {}) {{ _docID }} }}",
-                        graphql_input_literal(input)?
-                    ))
-                    .await
-                    .with_context(|| {
-                        format!("persisting immutable code-review evidence page {page}")
-                    })?;
-                }
-                Ok(())
-            })
-        })
-        .await
-}
-
-/// Prepare the code-review entry against an explicitly admitted repository.
-/// `process_root` is the managed runtime ceiling; passing `None` is reserved
-/// for operator CLI callers that already own host authority selection.
-/// `evidence_id` fixes the nonce the golden generator and the legacy/plugin
-/// equivalence test compare against; `None` mints a fresh one, as every real
-/// caller wants.
-#[allow(clippy::too_many_arguments)]
-pub async fn prepare_code_review_run(
-    access: &ConfigAccess,
-    principal_did: &str,
-    repository: &Path,
-    base: &str,
-    head: &str,
-    focus: Option<String>,
-    process_root: Option<&Path>,
-    evidence_id: Option<String>,
-) -> Result<PreparedGraphRun> {
-    let (repository_path, base_ref, head_ref) =
-        resolve_repository(repository, base, head, process_root)?;
-    let evidence = code_review_evidence(&repository_path, &base_ref, &head_ref)?;
-    let workspace = crate::workspace::provision_read_only_workspace(
-        access,
-        &repository_path,
-        &head_ref,
-        principal_did,
-    )
-    .await?;
-    let evidence_id = evidence_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    persist_evidence(access, &evidence_id, &evidence).await?;
-    Ok(PreparedGraphRun {
-        entry_name: "review".to_owned(),
-        input: json!({
-            "repository_path": ".",
-            "base_ref": base_ref,
-            "head_ref": head_ref,
-            "workspace_id": workspace.workspace.workspace_id,
-            "workspace_authority": "readOnly",
-            "workspace_owner_agent_did": workspace.workspace.owner_agent_did,
-            "lens_count": "4",
-            "lens_min": "4",
-            "lens_max": "4",
-            "pr_number": "",
-            "evidence_id": evidence_id,
-            "evidence_summary": evidence.summary,
-            "evidence_chunk_count": evidence.chunks.len().to_string(),
-            "focus": focus.unwrap_or_else(|| "Review the diff for material correctness, safety, durability, and maintainability defects.".to_owned()),
-        }),
-    })
-}
-
-/// Host facts collected for one `git_diff` step: the resolved repository and
-/// SHAs, and exactly the legacy `git` output shapes so a pack plugin can
-/// reproduce evidence byte-identical to code compiled into the host.
+/// Host facts collected for one `git_diff` step: the resolved repository,
+/// SHAs, and the exact `git` output shapes a pack plugin builds its evidence
+/// from.
 struct GitDiffFacts {
     repository: PathBuf,
     base_sha: String,
@@ -318,8 +109,8 @@ struct GitDiffFacts {
     patch: String,
 }
 
-/// Runs the declared `git diff` exactly as the legacy adapter did, generalized
-/// to the entry's declared context lines and rename threshold.
+/// Runs the declared `git diff` at the entry's declared context lines and
+/// rename threshold.
 fn collect_git_diff(
     repository: &Path,
     base: &str,
@@ -416,10 +207,6 @@ pub(crate) fn select_entry<'a>(
 }
 
 /// One document a prepare plugin asked to create, as its stdout names it.
-/// `Serialize` too, so this file's own golden generator builds its `expect`
-/// fixtures through the exact type the runtime deserializes a plugin's
-/// stdout with: the two cannot drift apart the way two hand-written JSON
-/// shapes could.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct PreparePluginDocument {
@@ -435,11 +222,7 @@ pub(crate) struct PreparePluginOutput {
     pub(crate) documents: Vec<PreparePluginDocument>,
 }
 
-/// The `git_diff` host fact exactly as a prepare plugin's stdin carries it:
-/// the legacy `git` output shapes, so the production host step and this
-/// file's own golden generator serialize identical JSON from the same
-/// [`GitDiffFacts`] rather than keeping two hand-written copies that could
-/// drift apart.
+/// The `git_diff` host fact exactly as a prepare plugin's stdin carries it.
 fn git_diff_host_json(facts: &GitDiffFacts) -> Value {
     json!({
         "repository": facts.repository.to_string_lossy(),
@@ -462,10 +245,7 @@ fn read_only_workspace_host_json(workspace_id: &str, owner_agent_did: &str) -> V
 }
 
 /// A prepare plugin's whole stdin envelope: the admitted operator input, a
-/// fresh nonce, and the host facts collected for it. The production prepare
-/// path and this file's own golden generator both build a plugin's stdin
-/// through this one function, so the byte-identity proof the goldens carry
-/// actually pins the stdin production sends.
+/// fresh nonce, and the host facts collected for it.
 fn prepare_stdin(input: Value, nonce: &str, host: Value) -> Value {
     json!({
         "input": input,

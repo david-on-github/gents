@@ -17,9 +17,7 @@ pub use catalog::{
     GraphPackageCatalogEntry, GraphPackageManifest, LoadedGraphPackage, PackageCapabilityTemplate,
     PackageExternalDependency,
 };
-pub use entry::{
-    prepare_code_review_run, prepare_entry_run, EntryRunRequest, PreparedEntryRun, PreparedGraphRun,
-};
+pub use entry::{prepare_entry_run, EntryRunRequest, PreparedEntryRun};
 pub use install::{
     default_bundled_graph_package_install_bindings, install_bundled_graph_package,
     install_bundled_graph_package_for_graph, load_installed_package_plan,
