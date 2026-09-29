@@ -89,6 +89,11 @@ pub enum RequestTerminalOutcome {
 }
 
 impl RequestTerminalOutcome {
+    #[cfg(test)]
+    pub(crate) fn request_lifecycle_state(self) -> RequestLifecycleState {
+        self.request_state()
+    }
+
     fn request_state(self) -> RequestLifecycleState {
         match self {
             Self::Completed => RequestLifecycleState::Completed,
@@ -150,6 +155,33 @@ impl RequestLifecycle {
             return Err(ExecutionOwnershipLost.into());
         }
         Ok(())
+    }
+
+    /// Whether this execution's generation still holds a live lease on its
+    /// active request. A failure observed after the lease is lost belongs to
+    /// the request's current owner, not to this execution.
+    pub(crate) async fn owns_execution(&self) -> Result<bool> {
+        let Some(row) = self.request_view().await? else {
+            return Ok(false);
+        };
+        let (Some(state), Some(generation), Some(expiry)) = (
+            row.lifecycle_state,
+            row.execution_generation.as_deref(),
+            row.execution_lease_expires_at.as_deref(),
+        ) else {
+            return Ok(false);
+        };
+        let observed = super::execution_policy::LeaseObservation {
+            request: state,
+            generation,
+            deadline_ms: DateTime::parse_from_rfc3339(expiry)?.timestamp_millis(),
+        };
+        Ok(super::execution_policy::renewable_lifecycle(state)
+            && super::execution_policy::is_live(
+                observed,
+                self.execution_generation()?,
+                Utc::now().timestamp_millis(),
+            ))
     }
 
     pub async fn terminalize_owned(

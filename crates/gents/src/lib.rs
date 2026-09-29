@@ -326,6 +326,7 @@ pub mod session_message;
 pub mod session_origin;
 pub mod skills;
 pub mod streaming;
+pub(crate) mod task_hooks;
 pub mod template;
 pub mod tool_call_lifecycle;
 pub mod tool_control;
