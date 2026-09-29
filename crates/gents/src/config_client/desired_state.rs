@@ -448,7 +448,11 @@ async fn validate_trigger_document_fields(
             ),
         ];
         for (field, template) in templates {
-            let Some(template) = template else { continue };
+            let Some(template) =
+                template.filter(|template| !crate::template::template_guards_undefined(template))
+            else {
+                continue;
+            };
             for reference in crate::template::parse_template_for_validation(template)? {
                 let Some(name) = reference
                     .path

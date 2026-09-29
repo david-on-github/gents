@@ -572,6 +572,8 @@ fn authoring_rejects_a_bare_variable_that_is_not_a_context_root() {
         "{% for item in doc.items %}{{ item }} {{ loop.index }}{% endfor %}",
         "{% set name = doc.name %}{{ name }}",
         "{{ range(3) | list }}",
+        "{{ missing | default('fallback') }}",
+        "{% if missing is defined %}{{ missing }}{% endif %}",
     ] {
         check_template_vocabulary(template).unwrap_or_else(|error| panic!("{template}: {error}"));
     }

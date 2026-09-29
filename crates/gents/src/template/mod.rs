@@ -275,6 +275,12 @@ pub fn check_template_vocabulary(template: &str) -> Result<(), TemplateError> {
         if !judged.insert((use_site, name.clone())) {
             continue;
         }
+        // A default filter or definedness test renders an absent value, and
+        // which lookup it guards is value flow this walk does not follow, so a
+        // template that uses one anywhere leaves its variables to fire time.
+        if use_site == NameUse::Variable && guards_undefined(&compiled) {
+            continue;
+        }
         let provided = match use_site {
             NameUse::Filter => engine_resolves(&env, &format!("{{{{ 0 | {name} }}}}"), None),
             NameUse::Test => engine_resolves(&env, &format!("{{{{ 0 is {name} }}}}"), None),
@@ -292,6 +298,31 @@ pub fn check_template_vocabulary(template: &str) -> Result<(), TemplateError> {
         }
     }
     Ok(())
+}
+
+/// Whether a compiled template uses a filter or test that renders an absent
+/// value (`default`, `d`, `defined`, `undefined`, `none`).
+fn guards_undefined(compiled: &minijinja::Template<'_, '_>) -> bool {
+    let instructions = &machinery::get_compiled_template(compiled).instructions;
+    (0..)
+        .map_while(|index| instructions.get(index))
+        .any(|instruction| match instruction {
+            Instruction::ApplyFilter(name, _, _) => {
+                matches!(engine_name(name).as_str(), "default" | "d")
+            }
+            Instruction::PerformTest(name, _, _) => {
+                matches!(engine_name(name).as_str(), "defined" | "undefined" | "none")
+            }
+            _ => false,
+        })
+}
+
+/// Whether a template renders an absent value somewhere, so configure-time
+/// field checks cannot tell an optional field from a misspelled one.
+pub fn template_guards_undefined(template: &str) -> bool {
+    environment()
+        .template_from_str(template)
+        .is_ok_and(|compiled| guards_undefined(&compiled))
 }
 
 /// `map` resolves a filter, and the `select`/`reject` family a test, from a

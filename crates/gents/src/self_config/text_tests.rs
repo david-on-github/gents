@@ -331,6 +331,16 @@ async fn automation_validation_refuses_what_every_fire_would_reject() {
             && error.contains("message, reply_session_id"),
         "{error}"
     );
+    // A defaulted field may be absent from this collection.
+    ok(
+        &tools,
+        edit(
+            "task",
+            "work",
+            json!({"prompt_template":"Do {{ doc.message }} {{ doc.priority | default('normal') }}"}),
+        ),
+    )
+    .await;
     let error = refused(
         &tools,
         edit(
