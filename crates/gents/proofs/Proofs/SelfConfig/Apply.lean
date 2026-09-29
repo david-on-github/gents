@@ -56,10 +56,25 @@ def runStep (validate guard : Doc → Bool) (t : Target) (s : Store)
   | some merged => (fun t' => if t' = t then merged else s t', true)
   | none => (s, false)
 
-/-- The canonical Tools decoder projects self_config.enable_self_config.
-Missing enablement is false. Decode errors must fail the shared validator;
-this model does not parse or duplicate the nested configuration schema. -/
-def gateOn (decodeEnabled : Doc → Option Bool) (doc : Doc) : Bool :=
-  (decodeEnabled doc).getD false
+/-- The invoker's retained control over itself, projected from its candidate
+Tools by the canonical typed decoder: `self_config.enable_self_config` and
+`subagents.enabled` (absent is false). Decode errors must fail the shared
+validator; this model does not parse or duplicate the nested schema. -/
+structure Control where
+  selfConfig : Bool
+  agents : Bool
+  deriving DecidableEq, Repr
+
+/-- No lockout (#1796) is the only self-protection. The Engineer is a full
+self-writing agent: it may edit its own Tools and target itself with
+automation, and every such write is checked the normal way (preview, ACP, typed
+validation). It is refused only a candidate that turns off its self-config tool
+or removes an agents tool group it already had. Behavior and backend
+enablement are the same invariant on the other reference-chain documents and
+remain their existing typed guards. -/
+def keepsControl (decode : Doc → Option Control) (stored candidate : Doc) : Bool :=
+  match decode stored, decode candidate with
+  | some old, some new => new.selfConfig && (!old.agents || new.agents)
+  | _, _ => false
 
 end SelfConfig

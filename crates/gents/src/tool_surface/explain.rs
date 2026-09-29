@@ -309,9 +309,14 @@ fn explain_subagents(
     builder: &mut ExplanationBuilder,
 ) {
     let included = subagent_tool_names(&surface.subagent_tools);
+    let agent_new_included = surface.subagent_tools.agent_new_enabled();
     if !included.is_empty() {
         builder.include_many("subagent", included);
-    } else if config.subagent_tools().tools_enabled() {
+    }
+    if agent_new_included {
+        return;
+    }
+    if config.subagent_tools().agent_new_enabled() {
         builder.unavailable("subagent", crate::toolset::AGENT_NEW_TOOL_NAME);
         builder.warn(
             "subagent_targets_unavailable",

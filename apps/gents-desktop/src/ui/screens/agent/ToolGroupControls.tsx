@@ -302,7 +302,7 @@ export function ToolGroupControls({
           ["enable_self_config", "Configure this agent"],
           ["enable_pack_install", "Install graph packs"],
           ["self_config_no_lockout", "Prevent self-configuration lockout"],
-          ["self_config_dry_run", "Preview configuration changes"],
+          ["self_config_preview", "Preview configuration changes"],
         ])}
         <Note>
           Permissions are independent opt-ins. Process authority remains the ceiling.
@@ -312,7 +312,7 @@ export function ToolGroupControls({
         {flags("subagents", [["enabled", "Start and message subagent sessions"]])}
         <DocumentSelection
           label="Subagent targets"
-          description="The agents this one may start sessions with or message. Enabling subagents does not grant access to unselected behaviors."
+          description="The agents this one may start with agent_new. Once subagents are enabled it can message and list sessions on this node without a target."
           options={(deployment.subagentTargets ?? []).map((target) => ({
             value: target.target_id,
             label: target.name,

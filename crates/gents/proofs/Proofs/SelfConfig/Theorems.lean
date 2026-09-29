@@ -123,16 +123,61 @@ theorem runStep_accept_target (validate guard : Doc → Bool) (t : Target)
       have hm := step_accepts_wholesale validate guard t (s t) p merged hstep
       simp [runStep, hstep, hm]
 
-theorem no_lockout_recoverable (decodeEnabled : Doc → Option Bool) (validate : Doc → Bool) (s : Store) (p : Patch)
-    (h : (runStep validate (gateOn decodeEnabled) .tools s p).2 = true) :
-    (gateOn decodeEnabled) ((runStep validate (gateOn decodeEnabled) .tools s p).1 .tools)
-      = true := by
-  cases hstep : step validate (gateOn decodeEnabled) .tools (s .tools) p with
+theorem no_lockout_recoverable (decode : Doc → Option Control) (validate : Doc → Bool)
+    (s : Store) (p : Patch)
+    (h : (runStep validate (keepsControl decode (s .tools)) .tools s p).2 = true) :
+    ∃ old new, decode (s .tools) = some old ∧
+      decode ((runStep validate (keepsControl decode (s .tools)) .tools s p).1 .tools)
+        = some new ∧
+      new.selfConfig = true ∧ (old.agents = true → new.agents = true) := by
+  cases hstep : step validate (keepsControl decode (s .tools)) .tools (s .tools) p with
   | none => simp [runStep, hstep] at h
   | some merged =>
-      have hval := step_accept_validates validate (gateOn decodeEnabled) .tools
-        (s .tools) p merged hstep
-      simp [runStep, hstep, hval.2]
+      have hg := (step_accept_validates validate (keepsControl decode (s .tools)) .tools
+        (s .tools) p merged hstep).2
+      have hpost :
+          (runStep validate (keepsControl decode (s .tools)) .tools s p).1 .tools = merged := by
+        simp [runStep, hstep]
+      rw [hpost]
+      unfold keepsControl at hg
+      cases ho : decode (s .tools) with
+      | none => simp [ho] at hg
+      | some old =>
+        cases hn : decode merged with
+        | none => simp [ho, hn] at hg
+        | some new =>
+          rw [ho, hn] at hg
+          refine ⟨old, new, rfl, rfl, ?_, ?_⟩
+          · cases h1 : new.selfConfig <;> simp_all
+          · intro ha
+            cases h2 : new.agents <;> simp_all
+
+/-- Turning the invoker's own self-config tool off is a lockout. -/
+theorem self_config_disable_refused (decode : Doc → Option Control)
+    (stored candidate : Doc) (old new : Control)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (hoff : new.selfConfig = false) :
+    keepsControl decode stored candidate = false := by
+  simp [keepsControl, ho, hn, hoff]
+
+/-- Removing an agents tool group the invoker already had is a lockout. -/
+theorem agents_removal_refused (decode : Doc → Option Control)
+    (stored candidate : Doc) (old new : Control)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (had : old.agents = true) (removed : new.agents = false) :
+    keepsControl decode stored candidate = false := by
+  simp [keepsControl, ho, hn, had, removed]
+
+/-- Everything else on the invoker's own Tools is allowed: a candidate that
+keeps self-config on and keeps (or adds) the agents group passes the guard. -/
+theorem retained_control_allowed (decode : Doc → Option Control)
+    (stored candidate : Doc) (old new : Control)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (hon : new.selfConfig = true) (hagents : old.agents = true → new.agents = true) :
+    keepsControl decode stored candidate = true := by
+  cases ha : old.agents
+  · simp [keepsControl, ho, hn, hon, ha]
+  · simp [keepsControl, ho, hn, hon, ha, hagents ha]
 
 theorem runStep_identity_immutable (validate guard : Doc → Bool) (t : Target)
     (s : Store) (p : Patch) (k : FieldKey) (hk : k ∈ protectedFields t) :

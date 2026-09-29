@@ -8,6 +8,26 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- `Tools.self_config.self_config_dry_run` is renamed `self_config_preview`
+  (#2062). It grants the `config` preview verb; it never blocked writes. There
+  is no alias: rewrite stored Tools documents and manifests that set the old
+  key. The effective self-config read reports `preview` instead of `dry_run`.
+
+- The Engineer is a full self-writing agent (#1796). Self-config no longer
+  refuses edits that reference the Setup behavior: it may edit its own Tools,
+  Context, profile and datastore surfaces and create Tasks, Triggers and
+  EventSources that target itself. With `self_config_no_lockout` it is refused
+  only a lockout: disabling its behavior or backend, turning off its
+  self-config tool, or turning off an agents tool group it had. `config` gains
+  `subagent-target` and `execution` resources (list, get, preview, create,
+  edit; delete through `cleanup`), and `plan preview` accepts `SubagentTarget`
+  and `InferenceExecution` (#2058, #2059). `gents init --setup-steward` (the
+  desktop first run) ships the Engineer with the agents tools, the sessions
+  tool, read-only query and an `engineer-mailbox` escalation surface (#2060).
+  `agent_message`, `agent_interrupt` and `agent_list` now follow
+  `Tools.subagents.enabled` alone; `agent_new` still appears only when
+  `target_ids` selects a target.
+
 - DefraDB moves to defradb.rs `main` at `6d9aa9d9`, which includes the
   durable document-arrival journal behind #2041 (defradb.rs#1853). Collection
   identities now commit to `@immutable`, `@branchable` and any governance root,

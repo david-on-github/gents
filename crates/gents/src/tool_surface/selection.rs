@@ -82,7 +82,16 @@ impl SubagentToolConfig {
         Ok(resolved)
     }
 
+    /// The agents group follows `SubagentTools.enabled` alone (Lean
+    /// `ToolPolicy.Surface.sessionMessages`): `agent_message`, `agent_list` and
+    /// `agent_interrupt` address sessions on this node and need no target.
     pub(crate) fn tools_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// `agent_new` can only start an allowlisted target (Lean
+    /// `subagentTargets`), so it is presented only when one resolves.
+    pub(crate) fn agent_new_enabled(&self) -> bool {
         self.enabled && !self.targets.is_empty()
     }
 
@@ -162,7 +171,7 @@ pub struct ResolvedToolSelection {
     pub enable_self_config: bool,
     pub self_config_categories: Option<Vec<String>>,
     pub self_config_no_lockout: bool,
-    pub self_config_dry_run: bool,
+    pub self_config_preview: bool,
     pub enable_pack_install: bool,
     pub enable_lsp: bool,
     pub lsp_config: Option<String>,
@@ -200,7 +209,7 @@ impl Default for ResolvedToolSelection {
             enable_self_config: false,
             self_config_categories: None,
             self_config_no_lockout: false,
-            self_config_dry_run: false,
+            self_config_preview: false,
             enable_pack_install: false,
             enable_lsp: false,
             lsp_config: None,
@@ -377,8 +386,8 @@ impl ResolvedToolSelection {
             self_config_no_lockout: self_config_group
                 .and_then(|group| group.self_config_no_lockout)
                 .unwrap_or(false),
-            self_config_dry_run: self_config_group
-                .and_then(|group| group.self_config_dry_run)
+            self_config_preview: self_config_group
+                .and_then(|group| group.self_config_preview)
                 .unwrap_or(false),
             enable_pack_install: self_config_group
                 .and_then(|group| group.enable_pack_install)

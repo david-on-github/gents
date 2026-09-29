@@ -15,8 +15,8 @@ mod read;
 mod tests;
 
 pub use ops::{
-    apply_tool_grant_selection, validate_tool_network_selection, PatchOutcome, SelfConfigCore,
-    EFFECT_TIMING_NOTE,
+    apply_tool_grant_selection, guard_tools_keep_control, validate_tool_network_selection,
+    PatchOutcome, SelfConfigCore, EFFECT_TIMING_NOTE,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -38,7 +38,7 @@ use crate::tool_surface::SelfConfigToolConfig;
 use crate::AgentIdentity;
 use defra_node::EmbeddedNode;
 use gents_protocol::persona::{LocalPersonaRequestRecord, PERSONA_AUTHORITY_LOCAL_SELF};
-use ops::{decode_merged, guard_selection_keeps_gate, validate_merged_selection, ApplyRequest};
+use ops::{decode_merged, validate_merged_selection, ApplyRequest};
 
 pub const CONFIG_TOOL_NAME: &str = "config";
 pub const PREVIEW_GRAPH_TOOL_NAME: &str = "preview_graph";
@@ -108,7 +108,7 @@ fn behavior_request(core: &SelfConfigCore, patch: SelfConfigPatch) -> ApplyReque
     let id = core.behavior_id().to_owned();
     let mut request = ApplyRequest::new(SelfConfigTarget::AgentBehavior, patch);
     request.resolve_unique = Box::new(move |_| Ok(id.clone()));
-    request.guard = Box::new(|_, merged| {
+    request.guard = Box::new(|_, _, merged| {
         anyhow::ensure!(
             merged.get("enabled").and_then(Value::as_bool) != Some(false),
             "no-lockout guard: behavior must remain enabled"
@@ -118,30 +118,16 @@ fn behavior_request(core: &SelfConfigCore, patch: SelfConfigPatch) -> ApplyReque
     request
 }
 
-/// Model-facing patches may target any owned working behavior, but never the
-/// protected Setup configurator. Keep that policy inside the same transaction
-/// as validation/publication so a stale preflight cannot authorize a write.
+/// Model-facing patches may target any owned behavior, including the invoking
+/// configurator itself; the no-lockout guard is its only self-protection
+/// (Lean `SelfConfig.keepsControl`). Keep the shared-reference check inside the
+/// same transaction as validation/publication so a stale preflight cannot
+/// authorize a write.
 fn protect_working_behavior(mut request: ApplyRequest<'static>) -> ApplyRequest<'static> {
     let target = request.target;
     let validate = request.validate;
     request.validate = Box::new(move |txn, anchor, stored, merged| {
         let validation = validate(txn, anchor, stored, merged);
-        let protected = anchor
-            .doc
-            .get("tags")
-            .and_then(Value::as_array)
-            .is_some_and(|tags| {
-                tags.iter().any(|tag| {
-                    tag.as_str() == Some(crate::agent::persona_ops::SETUP_STEWARD_BEHAVIOR_TAG)
-                })
-            });
-        if protected {
-            return Box::pin(async {
-                bail!(
-                    "target behavior is the protected Setup configurator; select a working behavior"
-                )
-            });
-        }
         Box::pin(async move {
             // Context and Tools are reusable documents. A targeted edit must
             // not mutate another behavior (especially Setup) through a shared
@@ -252,7 +238,7 @@ fn tools_request(
             Ok(())
         })
     });
-    request.guard = Box::new(|_, merged| guard_selection_keeps_gate(merged));
+    request.guard = Box::new(|_, stored, merged| guard_tools_keep_control(stored, merged));
     request
 }
 fn profile_request(patch: SelfConfigPatch) -> ApplyRequest<'static> {
@@ -318,7 +304,7 @@ fn backend_request(patch: SelfConfigPatch) -> ApplyRequest<'static> {
             backend.validate()
         })
     });
-    request.guard = Box::new(|_, merged| {
+    request.guard = Box::new(|_, _, merged| {
         anyhow::ensure!(
             merged.get("enabled").and_then(Value::as_bool) != Some(false),
             "no-lockout guard: backend must remain enabled"
@@ -2154,7 +2140,7 @@ pub fn build_self_config_tools(
         core,
         categories: config.categories.clone(),
         no_lockout: config.no_lockout,
-        dry_run: config.dry_run,
+        preview: config.preview,
         allow_pack_install: config.enable_pack_install,
         process_ceiling: config.process_ceiling.clone(),
         execution: Arc::new(execution::ExecutionObservation::default()),

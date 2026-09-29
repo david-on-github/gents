@@ -155,7 +155,7 @@ async fn bash_schema_advertises_decoupled_default_and_max() {
 }
 
 #[test]
-fn session_message_tool_names_are_gated_by_enabled_and_targets() {
+fn session_message_tools_follow_enabled_and_agent_new_needs_a_target() {
     let disabled = SubagentToolConfig {
         targets: subagent_targets("worker"),
         enabled: false,
@@ -166,7 +166,21 @@ fn session_message_tool_names_are_gated_by_enabled_and_targets() {
         targets: Vec::new(),
         enabled: true,
     };
-    assert!(subagent_tool_names(&no_targets).is_empty());
+    assert_eq!(
+        subagent_tool_names(&no_targets),
+        AGENT_TOOL_NAMES
+            .iter()
+            .filter(|name| **name != AGENT_NEW_TOOL_NAME)
+            .map(|name| name.to_string())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        build_subagent_tools(no_targets)
+            .iter()
+            .map(|tool| tool.name())
+            .collect::<Vec<_>>(),
+        ["agent_message", "agent_interrupt", "agent_list"]
+    );
 
     let enabled = SubagentToolConfig {
         targets: subagent_targets("worker"),

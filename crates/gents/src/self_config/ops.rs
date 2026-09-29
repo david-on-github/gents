@@ -285,7 +285,7 @@ impl SelfConfigCore {
 
         if self.no_lockout && request.guard_selected_chain {
             if self.lockout_behavior_id == self.behavior_id {
-                (request.guard)(&anchor, &merged)?;
+                (request.guard)(&anchor, &stored_doc, &merged)?;
             }
             self.guard_candidate_chain(txn, request.target, &merged)
                 .await?;
@@ -354,7 +354,7 @@ impl SelfConfigCore {
             merged,
         )
         .await?;
-        guard_selection_keeps_gate(&tools)?;
+        guard_tools_keep_control(&self.stored_lockout_tools(txn).await?, &tools)?;
         let profile_id = behavior
             .get("inference_profile_id")
             .and_then(Value::as_str)
@@ -388,7 +388,35 @@ impl SelfConfigCore {
         Ok(())
     }
 
-    /// Dry-run preview: merge + validate in memory, return the diff. Nothing
+    /// The invoker's Tools as committed, before this candidate.
+    async fn stored_lockout_tools(&self, txn: &ConfigApplyTxn<'_>) -> Result<Map<String, Value>> {
+        let owner = self.agent_did();
+        let read = |target, id: String| async move {
+            read_owned_doc(txn, target, owner, &id)
+                .await?
+                .map(|(_, doc)| doc)
+                .context("no-lockout: stored reference chain is incomplete")
+        };
+        let behavior = read(
+            SelfConfigTarget::AgentBehavior,
+            self.lockout_behavior_id.clone(),
+        )
+        .await?;
+        let field = |doc: &Map<String, Value>, name: &str| {
+            doc.get(name)
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned)
+                .with_context(|| format!("no-lockout: stored {name} missing"))
+        };
+        let context = read(
+            SelfConfigTarget::AgentContext,
+            field(&behavior, "context_id")?,
+        )
+        .await?;
+        read(SelfConfigTarget::Tools, field(&context, "tools_id")?).await
+    }
+
+    /// Preview: merge + validate in memory, return the diff. Nothing
     /// is written; the consistent-snapshot transaction remains read-only.
     pub(crate) async fn preview(&self, request: ApplyRequest<'_>) -> Result<PatchOutcome> {
         ensure_admissible(request.target, &request.patch)?;
@@ -432,7 +460,7 @@ impl SelfConfigCore {
         (request.validate)(txn, &anchor, &stored_doc, &merged).await?;
         if self.no_lockout && request.guard_selected_chain {
             if self.lockout_behavior_id == self.behavior_id {
-                (request.guard)(&anchor, &merged)?;
+                (request.guard)(&anchor, &stored_doc, &merged)?;
             }
             self.guard_candidate_chain(txn, request.target, &merged)
                 .await?;
@@ -504,8 +532,13 @@ pub(crate) struct ApplyRequest<'a> {
         Box<dyn Fn(&str, &mut Map<String, Value>) -> Result<()> + Send + Sync + 'a>,
     pub(crate) normalize: NormalizeFn<'a>,
     pub(crate) validate: ValidateFn<'a>,
-    pub(crate) guard:
-        Box<dyn Fn(&BehaviorAnchor, &Map<String, Value>) -> Result<()> + Send + Sync + 'a>,
+    /// Invoker-only no-lockout slice over (stored, candidate) target documents.
+    pub(crate) guard: Box<
+        dyn Fn(&BehaviorAnchor, &Map<String, Value>, &Map<String, Value>) -> Result<()>
+            + Send
+            + Sync
+            + 'a,
+    >,
 }
 
 pub(crate) type ValidateFn<'a> = Box<
@@ -544,7 +577,7 @@ impl<'a> ApplyRequest<'a> {
             on_create: Box::new(|_, _| Ok(())),
             normalize: Box::new(|_, _, _, _| Box::pin(async { Ok(()) })),
             validate: Box::new(|_, _, _, _| Box::pin(async { Ok(()) })),
-            guard: Box::new(|_, _| Ok(())),
+            guard: Box::new(|_, _, _| Ok(())),
         }
     }
 }
@@ -559,15 +592,34 @@ pub(crate) fn decode_merged<T: serde::de::DeserializeOwned>(
         .map_err(|error| anyhow!("merged {collection} document is not valid: {error}"))
 }
 
-pub(crate) fn guard_selection_keeps_gate(merged: &Map<String, Value>) -> Result<()> {
-    let tools: Tools = decode_merged("Tools", merged)?;
+/// Lean `SelfConfig.keepsControl`: the invoker's candidate Tools keep its
+/// self-config tool on and keep an agents tool group it already had. This is
+/// the only self-protection on its own Tools (#1796).
+pub fn guard_tools_keep_control(
+    stored: &Map<String, Value>,
+    candidate: &Map<String, Value>,
+) -> Result<()> {
+    let control = |tools: Tools| {
+        (
+            tools
+                .self_config
+                .and_then(|config| config.enable_self_config)
+                .unwrap_or(false),
+            tools
+                .subagents
+                .and_then(|agents| agents.enabled)
+                .unwrap_or(false),
+        )
+    };
+    let (_, had_agents) = control(decode_merged("Tools", stored)?);
+    let (self_config, agents) = control(decode_merged("Tools", candidate)?);
     anyhow::ensure!(
-        tools
-            .self_config
-            .as_ref()
-            .and_then(|config| config.enable_self_config)
-            .unwrap_or(false),
+        self_config,
         "no-lockout guard: self-config must remain enabled"
+    );
+    anyhow::ensure!(
+        !had_agents || agents,
+        "no-lockout guard: the agents tools must remain enabled"
     );
     Ok(())
 }

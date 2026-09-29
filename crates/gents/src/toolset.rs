@@ -694,19 +694,25 @@ pub(crate) fn subagent_tool_names(config: &SubagentToolConfig) -> Vec<String> {
     if !config.tools_enabled() {
         return Vec::new();
     }
-    AGENT_TOOL_NAMES.into_iter().map(str::to_string).collect()
+    AGENT_TOOL_NAMES
+        .into_iter()
+        .filter(|name| *name != AGENT_NEW_TOOL_NAME || config.agent_new_enabled())
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) fn build_subagent_tools(config: SubagentToolConfig) -> Vec<Box<dyn ToolDyn>> {
     if !config.tools_enabled() {
         return Vec::new();
     }
-    vec![
-        Box::new(AgentNewTool::new(config)),
-        Box::new(AgentMessageTool),
-        Box::new(AgentInterruptTool),
-        Box::new(AgentListTool),
-    ]
+    let mut tools: Vec<Box<dyn ToolDyn>> = Vec::with_capacity(AGENT_TOOL_NAMES.len());
+    if config.agent_new_enabled() {
+        tools.push(Box::new(AgentNewTool::new(config)));
+    }
+    tools.push(Box::new(AgentMessageTool));
+    tools.push(Box::new(AgentInterruptTool));
+    tools.push(Box::new(AgentListTool));
+    tools
 }
 
 pub(crate) fn background_tool_names(config: &BackgroundToolConfig) -> Vec<String> {

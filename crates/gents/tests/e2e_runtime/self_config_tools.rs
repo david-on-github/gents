@@ -59,13 +59,13 @@ async fn read(node: &Arc<EmbeddedNode>, collection: Collection, id: &str) -> Val
         .unwrap()
 }
 
-fn tool_config(categories: &[&str], no_lockout: bool, dry_run: bool) -> SelfConfigToolConfig {
+fn tool_config(categories: &[&str], no_lockout: bool, preview: bool) -> SelfConfigToolConfig {
     SelfConfigToolConfig {
         enabled: true,
         behavior_id: BEHAVIOR_ID.into(),
         categories: categories.iter().map(|s| s.to_string()).collect(),
         no_lockout,
-        dry_run,
+        preview,
         enable_pack_install: false,
         enable_graph_tools: false,
         process_ceiling: Default::default(),

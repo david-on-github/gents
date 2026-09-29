@@ -26,6 +26,7 @@ pub enum SelfConfigTarget {
     AgentContext,
     Compaction,
     Tools,
+    SubagentTarget,
     InferenceProfile,
     InferenceSampling,
     InferenceExecution,
@@ -49,11 +50,12 @@ pub const SELF_CONFIG_CATEGORIES: [&str; 7] = [
     "persona",
 ];
 pub const DEFAULT_SELF_CONFIG_CATEGORIES: [&str; 3] = ["behavior", "tools", "profile"];
-pub const ALL_SELF_CONFIG_TARGETS: [SelfConfigTarget; 16] = [
+pub const ALL_SELF_CONFIG_TARGETS: [SelfConfigTarget; 17] = [
     SelfConfigTarget::AgentBehavior,
     SelfConfigTarget::AgentContext,
     SelfConfigTarget::Compaction,
     SelfConfigTarget::Tools,
+    SelfConfigTarget::SubagentTarget,
     SelfConfigTarget::InferenceProfile,
     SelfConfigTarget::InferenceSampling,
     SelfConfigTarget::InferenceExecution,
@@ -74,6 +76,7 @@ impl SelfConfigTarget {
             Self::AgentContext => crate::Collection::AgentContext,
             Self::Compaction => crate::Collection::Compaction,
             Self::Tools => crate::Collection::Tools,
+            Self::SubagentTarget => crate::Collection::SubagentTarget,
             Self::InferenceProfile => crate::Collection::InferenceProfile,
             Self::InferenceSampling => crate::Collection::InferenceSampling,
             Self::InferenceExecution => crate::Collection::InferenceExecution,
@@ -102,7 +105,9 @@ impl SelfConfigTarget {
     pub fn category(self) -> &'static str {
         match self {
             Self::AgentBehavior | Self::AgentContext => "behavior",
-            Self::Tools | Self::DatastoreToolSurface | Self::Skill => "tools",
+            Self::Tools | Self::SubagentTarget | Self::DatastoreToolSurface | Self::Skill => {
+                "tools"
+            }
             Self::Compaction
             | Self::InferenceProfile
             | Self::InferenceSampling

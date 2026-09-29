@@ -19,9 +19,11 @@ self_config_categories?: Array<string> | null,
  */
 self_config_no_lockout?: boolean | null,
 /**
- * Opt-in guardrail: `config` accepts document patch previews.
+ * Grants the `preview` verb: `config` may validate a change and return
+ * its diff without writing. It does not restrict writes; `edit` applies
+ * whether or not previews are granted.
  */
-self_config_dry_run?: boolean | null,
+self_config_preview?: boolean | null,
 /**
  * Opt-in authority to install and activate bundled graph packs for this
  * principal. Disabled by absence and never implied by general self-config.

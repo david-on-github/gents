@@ -13,7 +13,7 @@ impl SelfConfigCore {
         &self,
         categories: &BTreeSet<String>,
         no_lockout: bool,
-        dry_run: bool,
+        preview: bool,
     ) -> Result<Value> {
         ConfigAccess::transact_local(
             self.node(),
@@ -21,7 +21,7 @@ impl SelfConfigCore {
             "self_config.read",
             move |txn| {
                 Box::pin(
-                    async move { self.read_in_txn(txn, categories, no_lockout, dry_run).await },
+                    async move { self.read_in_txn(txn, categories, no_lockout, preview).await },
                 )
             },
         )
@@ -33,7 +33,7 @@ impl SelfConfigCore {
         txn: &ConfigApplyTxn<'_>,
         categories: &BTreeSet<String>,
         no_lockout: bool,
-        dry_run: bool,
+        preview: bool,
     ) -> Result<Value> {
         let anchor = self.load_behavior_anchor(txn).await?;
         let mut documents = serde_json::Map::new();
@@ -227,7 +227,7 @@ impl SelfConfigCore {
             "agent_did": self.agent_did(), "behavior_id": self.behavior_id(),
             "behavior": anchor.doc, "context": anchor.context, "inference_profile": anchor.profile,
             "documents": documents, "skills": skills, "automation": automation,
-            "self_config": {"categories": categories, "no_lockout": no_lockout, "dry_run": dry_run},
+            "self_config": {"categories": categories, "no_lockout": no_lockout, "preview": preview},
             "tool_grants": {
                 "configured": { "lsp": lsp_selected, "native_graph_tools": graph_selected, "network_mode": configured_network_mode },
                 "confirmed_by": "canonical Tools selection decoded from durable configuration",

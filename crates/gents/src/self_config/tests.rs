@@ -81,7 +81,7 @@ fn config(categories: &[&str]) -> SelfConfigToolConfig {
         behavior_id: "beh-test".to_string(),
         categories: categories.iter().map(|c| c.to_string()).collect(),
         no_lockout: false,
-        dry_run: false,
+        preview: false,
         enable_pack_install: false,
         enable_graph_tools: false,
         process_ceiling: Default::default(),
@@ -132,6 +132,8 @@ fn help_contracts_conform_to_canonical_types_and_enum_vocabulary() {
         "automation",
         "datastore",
         "skill",
+        "subagent-target",
+        "execution",
     ]
     .into_iter()
     .flat_map(|resource| {
@@ -831,7 +833,7 @@ async fn automation_rejects_invalid_template_before_publication_and_can_recover(
     let owner = identity.did().to_string();
     crate::test_support::install_test_behavior(&node, &owner, "beh-test").await;
     let mut grants = config(&["automation"]);
-    grants.dry_run = true;
+    grants.preview = true;
     let tools = build_self_config_tools(node.clone(), owner, Some(identity), &grants);
     for verb in ["preview", "edit"] {
         let error = call_config_tool(
@@ -885,7 +887,7 @@ async fn automation_rejects_a_count_field_the_runtime_cannot_read_and_can_recove
         .await
         .unwrap();
     let mut grants = config(&["automation"]);
-    grants.dry_run = true;
+    grants.preview = true;
     let tools = build_self_config_tools(node.clone(), owner, Some(identity), &grants);
     let tool = tools
         .iter()
@@ -1028,7 +1030,7 @@ async fn schema_publication_requires_automation_and_previewed_artifact() {
     .await
     .is_err());
     let mut grants = config(&["automation"]);
-    grants.dry_run = true;
+    grants.preview = true;
     let tools = build_self_config_tools(node.clone(), owner, Some(identity), &grants);
     let preview = call_config_tool(
         &tools,
@@ -1101,7 +1103,7 @@ async fn skill_import_previews_without_writes_and_requires_file_authority() {
     )
     .unwrap();
     let mut grants = config(&["tools", "behavior"]);
-    grants.dry_run = true;
+    grants.preview = true;
     let command = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect();
     let denied_tools =
         build_self_config_tools(node.clone(), owner.clone(), Some(identity.clone()), &grants);
@@ -1385,7 +1387,7 @@ async fn setup_discovery_clarification_apply_and_verification_preserve_disabled_
     .unwrap();
 
     let mut grants = config(&["tools", "behavior", "backend"]);
-    grants.dry_run = true;
+    grants.preview = true;
     grants.process_ceiling = crate::tool_surface::SelfConfigProcessCeiling {
         file_mode: crate::tool_surface::FileToolMode::ReadOnly,
         bash_mode: crate::tool_surface::BashMode::Off,
@@ -1585,7 +1587,7 @@ async fn datastore_preview_create_and_sparse_edit_use_owned_patch_path() {
     let owner = identity.did().to_string();
     crate::test_support::install_test_behavior(&node, &owner, "beh-test").await;
     let mut grants = config(&["tools"]);
-    grants.dry_run = true;
+    grants.preview = true;
     let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &grants);
     let command = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect();
     let expected_help = call_config_tool(&tools, command(&["help", "datastore"]))
@@ -1793,27 +1795,15 @@ async fn datastore_preview_create_and_sparse_edit_use_owned_patch_path() {
     ))
     .await
     .unwrap();
-    let denied = call_config_tool(
-        &tools,
-        command(&["datastore", "edit", "jobs", "--set", "enabled=false"]),
-    )
-    .await
-    .unwrap_err();
-    assert!(denied.contains("protected Setup"), "{denied}");
-    let denied = call_config_tool(
-        &tools,
-        command(&[
-            "datastore",
-            "preview",
-            "edit",
-            "jobs",
-            "--set",
-            "enabled=false",
-        ]),
-    )
-    .await
-    .unwrap_err();
-    assert!(denied.contains("protected Setup"), "{denied}");
+    // The Engineer may edit surfaces its own Tools select (#1796).
+    for verb in [&["datastore", "preview", "edit"][..], &["datastore", "edit"]] {
+        call_config_tool(
+            &tools,
+            command(&[verb, &["jobs", "--set", "display_name=\"Engineer jobs\""]].concat()),
+        )
+        .await
+        .unwrap();
+    }
 }
 
 #[tokio::test]
@@ -1824,7 +1814,7 @@ async fn structured_config_preview_and_apply_round_trip_literal_prompt() {
     crate::test_support::install_test_behavior(&node, &owner, "working").await;
     let mut settings = config(&["behavior"]);
     settings.behavior_id = "working".into();
-    settings.dry_run = true;
+    settings.preview = true;
     let tools = build_self_config_tools(node.clone(), owner, Some(identity), &settings);
     let tool = tools
         .iter()
@@ -1883,7 +1873,7 @@ async fn connected_plan_preview_validates_pending_references_without_writes() {
         {"collection":"Tools","document":{"agent_did":owner,"tools_id":"proposed-tools"}}
     ]);
     let mut grants = config(&["persona", "tools"]);
-    grants.dry_run = true;
+    grants.preview = true;
     let tools =
         build_self_config_tools(node.clone(), owner.clone(), Some(identity.clone()), &grants);
     let tool = tools
@@ -1972,13 +1962,13 @@ async fn connected_plan_preview_validates_pending_references_without_writes() {
     let mut duplicate = documents.clone();
     duplicate.as_array_mut().unwrap().push(documents[0].clone());
     assert!(tool.call(args(duplicate)).await.is_err());
-    for (categories, dry_run) in [
+    for (categories, preview) in [
         (&["persona"][..], true),
         (&["tools"][..], true),
         (&["persona", "tools"][..], false),
     ] {
         let mut denied = config(categories);
-        denied.dry_run = dry_run;
+        denied.preview = preview;
         let denied =
             build_self_config_tools(node.clone(), owner.clone(), Some(identity.clone()), &denied);
         assert!(denied
@@ -2001,7 +1991,7 @@ async fn connected_plan_preview_validates_pending_references_without_writes() {
         .unwrap();
         assert_eq!(
             help["connected_preview"].is_object(),
-            dry_run && categories.contains(&"persona")
+            preview && categories.contains(&"persona")
         );
     }
     assert_eq!(
@@ -2025,7 +2015,7 @@ async fn config_execution_receipts_separate_rejected_syntax_from_write_dispatch(
         "backend",
         "mcp_service",
     ]);
-    grants.dry_run = true;
+    grants.preview = true;
     let tools = build_self_config_tools(node.clone(), owner, Some(identity), &grants);
     let tool = tools
         .iter()
@@ -2142,7 +2132,7 @@ async fn behavior_only_grant_cannot_change_default_and_writes_require_exact_sign
     crate::test_support::install_test_behavior(&node, &owner, "current").await;
     let mut tool_config = config(&["behavior"]);
     tool_config.behavior_id = "current".into();
-    tool_config.dry_run = true;
+    tool_config.preview = true;
     let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &tool_config);
     let tool = tools
         .iter()
@@ -2282,7 +2272,7 @@ async fn config_creates_and_discovers_an_unauthenticated_local_backend() {
     crate::test_support::install_test_behavior(&node, &owner, "setup").await;
     let mut tool_config = config(&["backend", "profile"]);
     tool_config.behavior_id = "setup".into();
-    tool_config.dry_run = true;
+    tool_config.preview = true;
     let tools = build_self_config_tools(node, owner, Some(identity), &tool_config);
     let endpoint = format!("http://{address}/v1");
     let profiles_before: Value = serde_json::from_str(
@@ -2417,7 +2407,7 @@ async fn config_targets_owned_working_behavior_for_all_bound_documents() {
 
     let mut tool_config = config(&["persona", "behavior", "tools", "profile", "backend"]);
     tool_config.behavior_id = "setup".into();
-    tool_config.dry_run = true;
+    tool_config.preview = true;
     tool_config.no_lockout = true;
     let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &tool_config);
 
@@ -2636,7 +2626,8 @@ async fn config_targets_owned_working_behavior_for_all_bound_documents() {
     assert_eq!(default_preview["admitted"], true);
     assert_eq!(default_preview["proposed_values"]["make_default"], true);
 
-    let setup_error = call_config_tool(
+    // The Engineer edits its own Tools; only a lockout is refused (#1796).
+    call_config_tool(
         &tools,
         vec![
             "tools".into(),
@@ -2648,8 +2639,22 @@ async fn config_targets_owned_working_behavior_for_all_bound_documents() {
         ],
     )
     .await
+    .unwrap();
+    let lockout = call_config_tool(
+        &tools,
+        vec![
+            "tools".into(),
+            "edit".into(),
+            "--set".into(),
+            "self_config={\"enable_self_config\":false}".into(),
+        ],
+    )
+    .await
     .unwrap_err();
-    assert!(setup_error.to_string().contains("protected Setup"));
+    assert!(
+        lockout.contains("self-config must remain enabled"),
+        "{lockout}"
+    );
 
     // Lean siblingToolsAllowed: both reference observations happen in the
     // same patch transaction. Sharing either the Context or Tools with Setup
@@ -2723,7 +2728,7 @@ async fn cleanup_previews_and_removes_exact_unreferenced_cycles_atomically() {
         crate::test_support::install_test_behavior(&node, &owner, behavior).await;
     }
     let mut tool_config = config(&["persona", "tools", "profile", "backend"]);
-    tool_config.dry_run = true;
+    tool_config.preview = true;
     let tools = build_self_config_tools(node, owner, Some(identity), &tool_config);
 
     let referenced = call_config_tool(
@@ -2900,7 +2905,7 @@ async fn behavior_default_uses_the_signed_persona_request_owner() {
     }
     let mut tool_config = config(&["persona"]);
     tool_config.behavior_id = "seed".into();
-    tool_config.dry_run = true;
+    tool_config.preview = true;
     let tools = build_self_config_tools(
         node.clone(),
         agent_did.clone(),
@@ -3817,7 +3822,7 @@ async fn explicit_tools_grant_preserves_lsp_settings_guard_for_preview_and_apply
     let owner = identity.did().to_string();
     crate::test_support::install_test_behavior(&node, &owner, "beh-test").await;
     let mut tool_config = config(&["tools"]);
-    tool_config.dry_run = true;
+    tool_config.preview = true;
     let tools = build_self_config_tools(node, owner, None, &tool_config);
     let config = tools
         .iter()
@@ -3896,7 +3901,7 @@ async fn profile_edit_rejects_a_context_window_above_the_advertised_maximum() {
     .unwrap();
     let mut tool_config = config(&["profile"]);
     tool_config.behavior_id = "setup".into();
-    tool_config.dry_run = true;
+    tool_config.preview = true;
     let tools = build_self_config_tools(node, owner, Some(identity), &tool_config);
     let edit = |verb: &str, window: u64| -> Vec<String> {
         vec![
@@ -3933,4 +3938,277 @@ async fn profile_edit_rejects_a_context_window_above_the_advertised_maximum() {
     .await
     .unwrap();
     assert!(stored.contains("500000"), "{stored}");
+}
+
+/// #1796: the Engineer builds its crew and edits itself through `config`,
+/// and only a self-lockout is refused.
+#[tokio::test]
+async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out() {
+    let node = build_persona_node().await;
+    let identity = persona_identity("engineer-god-mode");
+    let owner = identity.did().to_string();
+    for behavior in ["setup", "lead"] {
+        crate::test_support::install_test_behavior(&node, &owner, behavior).await;
+    }
+    let setup = SelfConfigCore::new(node.clone(), owner.clone(), "setup".into()).unwrap();
+    setup
+        .apply(behavior_request(
+            &setup,
+            vec![(
+                "tags".into(),
+                Some(json!([
+                    crate::agent::persona_ops::SETUP_STEWARD_BEHAVIOR_TAG
+                ])),
+            )],
+        ))
+        .await
+        .unwrap();
+    setup
+        .apply(tools_request(
+            &setup,
+            vec![
+                (
+                    "self_config".into(),
+                    Some(json!({"enable_self_config": true})),
+                ),
+                ("subagents".into(), Some(json!({"enabled": true}))),
+            ],
+            false,
+        ))
+        .await
+        .unwrap();
+    let mut grants = config(&["persona", "behavior", "tools", "profile", "automation"]);
+    grants.behavior_id = "setup".into();
+    grants.preview = true;
+    grants.no_lockout = true;
+    let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &grants);
+    let command = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+    let ok = |result: Result<String, String>| -> Value {
+        serde_json::from_str(&result.unwrap_or_else(|error| panic!("{error}"))).unwrap()
+    };
+
+    // #2058: SubagentTarget through the desired-state owner.
+    let target_patch = [
+        "--set",
+        "name=\"gatekeeper\"",
+        "--set",
+        &format!("target_agent_did={}", json!(owner)),
+        "--set",
+        "behavior_id=\"lead\"",
+    ];
+    let preview = ok(call_config_tool(
+        &tools,
+        command(
+            &[
+                &["subagent-target", "preview", "create", "gatekeeper"][..],
+                &target_patch,
+            ]
+            .concat(),
+        ),
+    )
+    .await);
+    assert_eq!(preview["committed"], false);
+    let missing = call_config_tool(
+        &tools,
+        command(&[
+            "subagent-target",
+            "preview",
+            "create",
+            "dangling",
+            "--set",
+            "name=\"dangling\"",
+            "--set",
+            &format!("target_agent_did={}", json!(owner)),
+            "--set",
+            "behavior_id=\"missing\"",
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert!(missing.contains("missing"), "{missing}");
+    ok(call_config_tool(
+        &tools,
+        command(
+            &[
+                &["subagent-target", "create", "gatekeeper"][..],
+                &target_patch,
+            ]
+            .concat(),
+        ),
+    )
+    .await);
+    let listed = ok(call_config_tool(&tools, command(&["subagent-target", "list"])).await);
+    assert_eq!(listed["items"][0]["target_id"], "gatekeeper");
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "subagent-target",
+            "edit",
+            "gatekeeper",
+            "--set",
+            "description=\"Reviews lead work\"",
+        ]),
+    )
+    .await);
+
+    // Own Tools: select the target, the sessions tool and read-only query.
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "tools",
+            "edit",
+            "--set",
+            r#"subagents={"enabled":true,"target_ids":["gatekeeper"]}"#,
+            "--set",
+            r#"built_ins={"enable_session_history_tool":true}"#,
+            "--set",
+            r#"datastore={"enable_defra_query":true}"#,
+        ]),
+    )
+    .await);
+    for (patch, refusal) in [
+        (
+            r#"subagents={"enabled":false,"target_ids":["gatekeeper"]}"#,
+            "agents tools must remain enabled",
+        ),
+        (
+            r#"self_config={"enable_self_config":false}"#,
+            "self-config must remain enabled",
+        ),
+    ] {
+        for verb in ["preview", "edit"] {
+            let error = call_config_tool(&tools, command(&["tools", verb, "--set", patch]))
+                .await
+                .unwrap_err();
+            assert!(error.contains(refusal), "{verb} {patch}: {error}");
+        }
+    }
+    let disable = call_config_tool(
+        &tools,
+        command(&["behavior", "edit", "setup", "--set", "enabled=false"]),
+    )
+    .await
+    .unwrap_err();
+    assert!(disable.contains("no-lockout"), "{disable}");
+
+    // #2059: create an execution, bind it, then edit its limits normally.
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "execution",
+            "preview",
+            "create",
+            "lead-execution",
+            "--set",
+            "max_turns=40",
+        ]),
+    )
+    .await);
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "execution",
+            "create",
+            "lead-execution",
+            "--set",
+            "max_turns=40",
+        ]),
+    )
+    .await);
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "profile",
+            "edit",
+            "--behavior",
+            "lead",
+            "--set",
+            "execution_id=\"lead-execution\"",
+        ]),
+    )
+    .await);
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "profile",
+            "edit",
+            "execution",
+            "--behavior",
+            "lead",
+            "--set",
+            "max_turns=12",
+        ]),
+    )
+    .await);
+    let execution =
+        ok(call_config_tool(&tools, command(&["execution", "get", "lead-execution"])).await);
+    assert_eq!(execution["document"]["max_turns"], 12);
+
+    // Automation that targets the Engineer itself.
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "automation",
+            "edit",
+            "task",
+            "engineer-inbox",
+            "--behavior",
+            "setup",
+            "--set",
+            "prompt_template=\"Review {{ doc.message }}\"",
+        ]),
+    )
+    .await);
+
+    // Connected plan preview accepts both new resource kinds.
+    let documents = json!([
+        {"collection":"SubagentTarget","document":{"agent_did":owner,"target_id":"planned","name":"planned","target_agent_did":owner,"behavior_id":"lead"}},
+        {"collection":"InferenceExecution","document":{"agent_did":owner,"execution_id":"planned-execution","max_turns":8}}
+    ]);
+    ok(call_config_tool(
+        &tools,
+        command(&["plan", "preview", "--documents", &documents.to_string()]),
+    )
+    .await);
+
+    // Delete through the reference-aware cleanup owner once deselected.
+    assert!(call_config_tool(
+        &tools,
+        command(&[
+            "cleanup",
+            "preview",
+            "--target",
+            "subagent-target=gatekeeper"
+        ]),
+    )
+    .await
+    .is_err());
+    ok(call_config_tool(
+        &tools,
+        command(&["tools", "edit", "--set", r#"subagents={"enabled":true}"#]),
+    )
+    .await);
+    let cleanup = ok(call_config_tool(
+        &tools,
+        command(&[
+            "cleanup",
+            "preview",
+            "--target",
+            "subagent-target=gatekeeper",
+        ]),
+    )
+    .await);
+    let digest = cleanup["plan_digest"].as_str().unwrap().to_owned();
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "cleanup",
+            "remove",
+            "--digest",
+            &digest,
+            "--target",
+            "subagent-target=gatekeeper",
+        ]),
+    )
+    .await);
 }

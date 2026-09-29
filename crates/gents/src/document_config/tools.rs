@@ -521,10 +521,12 @@ pub struct SelfConfigTools {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
     pub self_config_no_lockout: Option<bool>,
-    /// Opt-in guardrail: `config` accepts document patch previews.
+    /// Grants the `preview` verb: `config` may validate a change and return
+    /// its diff without writing. It does not restrict writes; `edit` applies
+    /// whether or not previews are granted.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
-    pub self_config_dry_run: Option<bool>,
+    pub self_config_preview: Option<bool>,
     /// Opt-in authority to install and activate bundled graph packs for this
     /// principal. Disabled by absence and never implied by general self-config.
     #[serde(skip_serializing_if = "Option::is_none")]
