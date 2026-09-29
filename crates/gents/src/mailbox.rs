@@ -697,9 +697,10 @@ impl crate::llm::tool::Tool for MailboxCreateTool {
         self.policy.validate()?;
         let question = QuestionFiling::from_args(&args, &request_id)?;
         let request = notification::request_provenance(&self.node, &request_id, &context).await?;
-        let (identity, kind, action, expected_collection, payload) = match &question {
+        let (identity, event_id, kind, action, expected_collection, payload) = match &question {
             Some(question) => (
-                &question.identity,
+                &NotificationIdentity::Event,
+                question.event_id.as_str(),
                 MailboxKind::Ask,
                 MailboxAction::StartRequest,
                 None,
@@ -707,6 +708,7 @@ impl crate::llm::tool::Tool for MailboxCreateTool {
             ),
             None => (
                 &self.policy.identity,
+                request_id.as_str(),
                 self.policy.kind,
                 self.policy.action,
                 self.policy.expected_collection.clone(),
@@ -717,7 +719,7 @@ impl crate::llm::tool::Tool for MailboxCreateTool {
             &context.agent_did,
             &context.requester_did,
             &context.behavior_id,
-            &request_id,
+            event_id,
         )?;
         let receipt = stamp_notification(
             &self.node,
@@ -748,10 +750,11 @@ impl crate::llm::tool::Tool for MailboxCreateTool {
 
 /// A question filed through `file_mailbox_item`. It is always an `ask` that
 /// the person answers with an interactive reply request, whatever the
-/// surface's default kind and action, and each distinct prompt in a request
-/// is its own event so a second question is not reused as the first.
+/// surface's default kind and action. Its event identity covers the request,
+/// title and whole question, so a different question is a new item and a
+/// filed question is never rewritten under a pending answer.
 struct QuestionFiling {
-    identity: NotificationIdentity,
+    event_id: String,
     payload: String,
 }
 
@@ -765,17 +768,18 @@ impl QuestionFiling {
             "a question is the item's payload; omit `payload` when passing `question`"
         );
         question.validate()?;
+        let payload = serde_json::to_string(question).context("serialize mailbox question")?;
         use sha2::Digest;
-        let digest = sha2::Sha256::digest(question.prompt.trim().as_bytes());
-        let prompt_key: String = digest[..8]
+        let digest = sha2::Sha256::digest(
+            serde_json::to_vec(&(args.title.trim(), &payload)).context("digest question")?,
+        );
+        let question_key: String = digest[..8]
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect();
         Ok(Some(Self {
-            identity: NotificationIdentity::Condition {
-                key: format!("{request_id}:question:{prompt_key}"),
-            },
-            payload: serde_json::to_string(question).context("serialize mailbox question")?,
+            event_id: format!("{request_id}:question:{question_key}"),
+            payload,
         }))
     }
 }

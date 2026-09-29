@@ -493,6 +493,24 @@ async fn question_files_an_ask_whatever_the_surface_policy_and_refuses_invalid_p
     .unwrap();
     assert_eq!(second["outcome"], "created");
     assert_ne!(second["item"]["_docID"], receipt["item"]["_docID"]);
+    // The same prompt under another title is another question, and re-filing
+    // an identical question reuses it unchanged.
+    let retitled: Value = serde_json::from_str(
+        &call(content("Release B", None, Some(first.clone())))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(retitled["outcome"], "created");
+    assert_ne!(retitled["item"]["_docID"], receipt["item"]["_docID"]);
+    let again: Value = serde_json::from_str(
+        &call(content("Release", None, Some(first.clone())))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(again["outcome"], "reused");
+    assert_eq!(again["item"]["_docID"], receipt["item"]["_docID"]);
     let flag: Value =
         serde_json::from_str(&call(content("Note", Some("fyi"), None)).await.unwrap()).unwrap();
     assert_eq!(flag["item"]["kind"], "flag");

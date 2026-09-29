@@ -189,6 +189,31 @@ describe("mailbox question", () => {
     expect(answer).toHaveBeenCalledWith(ask, { option_ids: [], free_text: "Ollama" });
   });
 
+  it("keeps the generic view for a malformed question", () => {
+    for (const bad of [
+      {
+        options: [
+          { id: "a", label: "A", description: { text: "x" } },
+          { id: "b", label: "B" },
+        ],
+      },
+      {
+        options: [
+          { id: "a", label: "A" },
+          { id: "a", label: "B" },
+        ],
+      },
+      { multi_select: "yes" },
+      { prompt: " " },
+    ]) {
+      const { unmount } = render(
+        <MailboxScreen shell={shellWith([questionItem(bad)])} />,
+      );
+      expect(screen.queryByTestId("mailbox-question")).toBeNull();
+      unmount();
+    }
+  });
+
   it("keeps the generic view for a payload that is not a question", () => {
     render(
       <MailboxScreen

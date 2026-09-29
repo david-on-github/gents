@@ -8,42 +8,62 @@ import type {
   MailboxItemView,
   MailboxQuestion,
   MailboxQuestionAnswer,
+  MailboxQuestionOption,
 } from "@source-inc/gents-desktop-client";
 import { Button } from "@gents/ui/components/button";
 import { Input } from "@gents/ui/components/input";
 import { toast } from "sonner";
 import { useState } from "react";
 
-/* a payload the runtime validated when it was filed; anything else keeps
-   the generic reading view */
+/* the question's shape, checked in full: any ask may carry an arbitrary
+   payload, and only a well-formed question gets the answer surface */
+const text = (value: unknown): value is string =>
+  typeof value === "string" && value.trim() !== "";
+const flag = (value: unknown) => value === undefined || typeof value === "boolean";
+
+function option(value: unknown): MailboxQuestionOption | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { id, label, description } = value as Record<string, unknown>;
+  if (!text(id) || !text(label)) return null;
+  if (
+    description !== undefined &&
+    description !== null &&
+    typeof description !== "string"
+  ) {
+    return null;
+  }
+  return { id, label, description: description ?? null };
+}
+
 export function parseQuestion(item: MailboxItemView): MailboxQuestion | null {
   if (item.kind !== "ask" || item.action !== "start_request" || !item.payload) {
     return null;
   }
+  let value: unknown;
   try {
-    const value = JSON.parse(item.payload) as Partial<MailboxQuestion> | null;
-    if (
-      !value ||
-      value.version !== 1 ||
-      typeof value.prompt !== "string" ||
-      !Array.isArray(value.options) ||
-      value.options.length < 2 ||
-      !value.options.every(
-        (option) => typeof option?.id === "string" && typeof option?.label === "string",
-      )
-    ) {
-      return null;
-    }
-    return {
-      version: value.version,
-      prompt: value.prompt,
-      options: value.options,
-      multi_select: value.multi_select === true,
-      allow_free_text: value.allow_free_text === true,
-    };
+    value = JSON.parse(item.payload);
   } catch {
     return null;
   }
+  if (typeof value !== "object" || value === null) return null;
+  const { version, prompt, options, multi_select, allow_free_text } = value as Record<
+    string,
+    unknown
+  >;
+  if (version !== 1 || !text(prompt) || !Array.isArray(options)) return null;
+  if (options.length < 2 || options.length > 4) return null;
+  if (!flag(multi_select) || !flag(allow_free_text)) return null;
+  const parsed = options.map(option);
+  if (parsed.some((entry) => entry === null)) return null;
+  const valid = parsed as MailboxQuestionOption[];
+  if (new Set(valid.map((entry) => entry.id.trim())).size !== valid.length) return null;
+  return {
+    version,
+    prompt,
+    options: valid,
+    multi_select: multi_select === true,
+    allow_free_text: allow_free_text === true,
+  };
 }
 
 export function QuestionAnswer({
