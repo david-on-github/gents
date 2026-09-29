@@ -9,7 +9,7 @@
 use anyhow::Result;
 
 use super::runtime::graph_trigger_id;
-use super::types::{GraphPlan, StageTarget};
+use super::types::{GraphPlan, PlannedEdge, PlannedEntry, StageTarget};
 use crate::Collection;
 
 /// One route a compiled plan materializes.
@@ -19,27 +19,41 @@ pub(super) struct PlannedRoute<'a> {
     pub(super) target: &'a StageTarget,
 }
 
+/// The id of the route that delivers `entry` into its node.
+pub(super) fn entry_route_id(digest: &str, entry: &PlannedEntry) -> Result<String> {
+    graph_trigger_id(
+        digest,
+        &format!(
+            "entry:{}:{}:{}",
+            entry.name, entry.to.node_id, entry.to.port
+        ),
+    )
+}
+
+/// The id of the route that delivers the plan's `index`th edge.
+pub(super) fn edge_route_id(digest: &str, index: usize, edge: &PlannedEdge) -> Result<String> {
+    graph_trigger_id(
+        digest,
+        &format!(
+            "edge:{index}:{}:{}:{}:{}",
+            edge.from.node_id, edge.from.port, edge.to.node_id, edge.to.port,
+        ),
+    )
+}
+
 /// Every route `plan` materializes, entries then edges, in plan order.
 pub(super) fn planned_routes(plan: &GraphPlan) -> Result<Vec<PlannedRoute<'_>>> {
     let mut routes = Vec::with_capacity(plan.entries.len() + plan.edges.len());
     for entry in &plan.entries {
-        let route = format!(
-            "entry:{}:{}:{}",
-            entry.name, entry.to.node_id, entry.to.port
-        );
         routes.push(PlannedRoute {
-            id: graph_trigger_id(&plan.digest, &route)?,
+            id: entry_route_id(&plan.digest, entry)?,
             node_id: &entry.to.node_id,
             target: &entry.target,
         });
     }
     for (index, edge) in plan.edges.iter().enumerate() {
-        let route = format!(
-            "edge:{index}:{}:{}:{}:{}",
-            edge.from.node_id, edge.from.port, edge.to.node_id, edge.to.port,
-        );
         routes.push(PlannedRoute {
-            id: graph_trigger_id(&plan.digest, &route)?,
+            id: edge_route_id(&plan.digest, index, edge)?,
             node_id: &edge.to.node_id,
             target: &edge.target,
         });
@@ -97,6 +111,7 @@ mod tests {
                         task_id: "recon-task".to_owned(),
                     },
                     output_ports: Vec::new(),
+                    session: None,
                 },
                 PlannedNode {
                     node_id: "scan".to_owned(),
@@ -108,6 +123,7 @@ mod tests {
                         max_attempts: None,
                     },
                     output_ports: Vec::new(),
+                    session: None,
                 },
             ],
             edges: vec![PlannedEdge {

@@ -179,13 +179,7 @@ pub(crate) async fn derive_graph_workspace(
         .iter()
         .find(|entry| run.get("entry_name").and_then(Value::as_str) == Some(entry.name.as_str()))
         .context("graph run selected entry is absent from its pinned plan")?;
-    let entry_route = super::super::runtime::graph_trigger_id(
-        &digest,
-        &format!(
-            "entry:{}:{}:{}",
-            entry.name, entry.to.node_id, entry.to.port
-        ),
-    )?;
+    let entry_route = crate::graph_pipeline::routes::entry_route_id(&digest, entry)?;
     let source = if trigger_id == entry_route {
         validate_collection_identifier(&entry.collection)?;
         validate_collection_identifier(&entry.correlation_field)?;
@@ -501,13 +495,7 @@ pub(crate) async fn resolve_graph_session(
             incoming.is_empty(),
             "graph session entry target has additional routes"
         );
-        graph_trigger_id(
-            &verified.digest,
-            &format!(
-                "entry:{}:{}:{}",
-                entry.name, entry.to.node_id, entry.to.port
-            ),
-        )?
+        crate::graph_pipeline::routes::entry_route_id(&verified.digest, entry)?
     } else {
         let [(index, edge)] = incoming.as_slice() else {
             anyhow::bail!("graph session target is not singleton")
@@ -516,13 +504,7 @@ pub(crate) async fn resolve_graph_session(
             edge.delivery.is_some(),
             "graph session target is per-document fan-out"
         );
-        graph_trigger_id(
-            &verified.digest,
-            &format!(
-                "edge:{index}:{}:{}:{}:{}",
-                edge.from.node_id, edge.from.port, edge.to.node_id, edge.to.port
-            ),
-        )?
+        crate::graph_pipeline::routes::edge_route_id(&verified.digest, *index, edge)?
     };
     let eligibility = SessionTargetEligibility {
         source_is_task: matches!(node.target, StageTarget::Task { .. }),
