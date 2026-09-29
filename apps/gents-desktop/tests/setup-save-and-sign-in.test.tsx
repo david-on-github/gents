@@ -165,6 +165,28 @@ describe("setup provider sign-in", () => {
     expect(api.codexLogin).toHaveBeenCalledTimes(1);
   });
 
+  it("starts sign-in when the OAuth connection method is chosen", async () => {
+    const { api, shell } = setup();
+    render(
+      <SetupScreen
+        shell={shell}
+        initialStep="inference"
+        agentDid={AGENT}
+        onDone={vi.fn()}
+      />,
+    );
+    const user = userEvent.setup();
+    const method = () => screen.getByRole("combobox", { name: "Connection method" });
+    await screen.findByRole("button", { name: "Sign in" });
+    await user.click(method());
+    await user.click(await screen.findByRole("option", { name: "OpenAI API key" }));
+    expect(api.codexLogin).not.toHaveBeenCalled();
+    await user.click(method());
+    await user.click(await screen.findByRole("option", { name: "ChatGPT sign-in" }));
+    expect(await screen.findByText("Account connected")).toBeVisible();
+    expect(api.codexLogin).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves sign-in to a click when the account lookup fails", async () => {
     const { api, shell } = setup({
       listProviderAccounts: vi.fn().mockRejectedValue(new Error("runtime not serving")),
