@@ -125,6 +125,10 @@ pub struct StageSpec {
     /// the pack's trigger fires for it.
     pub seed: Option<FixtureDocument>,
     pub deadline_secs: u64,
+    /// Observe the home until it is quiet before capturing; see
+    /// [`crate::document_config::EvalStage::settle`].
+    #[serde(default)]
+    pub settle: bool,
     /// What to read out of the home when this stage ends: the stage's own
     /// captures, or the run's request-level list when the stage declares none.
     pub captures: Vec<Capture>,

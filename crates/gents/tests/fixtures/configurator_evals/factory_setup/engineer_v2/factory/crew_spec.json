@@ -1,0 +1,209 @@
+{
+  "spec": "factory crew for run #1786, setup only",
+  "ids_are_exact": true,
+  "inference": {
+    "backend": "the one existing backend (config backend list); do not edit it",
+    "model_name": "GLM-5.3-Flash-NVFP4",
+    "reasoning_effort": "high where the backend catalog lists it, otherwise unset"
+  },
+  "profiles": [
+    {"profile_id": "glm-a", "execution_id": "glm-a-execution", "used_by": ["factory-worker-a", "factory-verifier"]},
+    {"profile_id": "glm-b", "execution_id": "glm-b-execution", "used_by": ["factory-worker-b"]},
+    {"profile_id": "claude-lead", "execution_id": "claude-lead-execution", "used_by": ["factory-impl-lead", "factory-reviewer-claude"]},
+    {"profile_id": "astra-lead", "execution_id": "astra-lead-execution", "used_by": ["factory-proofs-lead", "factory-reviewer-astra"]},
+    {"profile_id": "grok-review", "execution_id": "grok-review-execution", "used_by": ["factory-gatekeeper", "factory-reviewer-grok"]}
+  ],
+  "executions": {
+    "claude-lead-execution": "largest max_turns and deadline_duration_secs admission allows; report the values",
+    "astra-lead-execution": "largest max_turns and deadline_duration_secs admission allows; report the values",
+    "glm-a-execution": "canonical defaults",
+    "glm-b-execution": "canonical defaults",
+    "grok-review-execution": "canonical defaults"
+  },
+  "tool_root": "worktrees/ under your tool root for every crew agent; repo/ is the repository",
+  "agents": [
+    {
+      "behavior_id": "factory-proofs-lead",
+      "display_name": "Proofs Lead",
+      "profile": "astra-lead",
+      "prompt": ["Proofs Lead", "Crew rules"],
+      "files": "ReadWrite",
+      "bash": {"mode": "Unrestricted", "allowed_argv_prefixes": [["git"], ["gh"], ["make", "worktree"], ["rg"], ["ls"], ["cat"]]},
+      "agents_tools": {"enabled": true, "target_ids": ["factory-engineer", "factory-gatekeeper"]},
+      "surface": "factory-proofs-lead-handoffs",
+      "creates": ["RunStart", "ShardAssignment", "ShardIntegration", "BuildRequest", "GateRequest"],
+      "queries": ["RunStart", "ShardAssignment", "ShardResult", "ShardReview", "ShardIntegration", "BuildResult", "GateResult", "FireOutcome"]
+    },
+    {
+      "behavior_id": "factory-impl-lead",
+      "display_name": "Impl Lead",
+      "profile": "claude-lead",
+      "prompt": ["Impl Lead", "Crew rules"],
+      "files": "ReadOnly",
+      "bash": {"mode": "Unrestricted", "allowed_argv_prefixes": [["git"], ["gh"], ["rg"], ["ls"], ["cat"]]},
+      "agents_tools": {"enabled": true, "target_ids": ["factory-engineer", "factory-gatekeeper"]},
+      "surface": "factory-impl-lead-handoffs",
+      "creates": ["RunStart", "ShardAssignment", "ShardIntegration", "BuildRequest", "GateRequest"],
+      "queries": ["RunStart", "ShardAssignment", "ShardResult", "ShardReview", "ShardIntegration", "BuildResult", "GateResult", "FireOutcome"]
+    },
+    {
+      "behavior_id": "factory-gatekeeper",
+      "display_name": "Gatekeeper",
+      "profile": "grok-review",
+      "prompt": ["Reviewers and Gatekeeper", "Crew rules"],
+      "files": "ReadOnly",
+      "bash": {"mode": "Unrestricted", "allowed_argv_prefixes": [["git", "diff"], ["git", "log"], ["git", "status"], ["rg"]]},
+      "agents_tools": {"enabled": false},
+      "surface": "factory-gatekeeper-handoffs",
+      "creates": ["GateResult"],
+      "queries": ["GateRequest"]
+    },
+    {
+      "behavior_id": "factory-reviewer-claude",
+      "display_name": "Reviewer Claude",
+      "profile": "claude-lead",
+      "prompt": ["Reviewers and Gatekeeper", "Crew rules"],
+      "files": "ReadOnly",
+      "bash": {"mode": "Unrestricted", "allowed_argv_prefixes": [["git", "diff"], ["git", "log"], ["git", "status"], ["rg"]]},
+      "agents_tools": {"enabled": false},
+      "surface": "factory-reviewer-claude-handoffs",
+      "creates": ["ShardReview"],
+      "queries": ["ShardAssignment", "ShardResult"]
+    },
+    {
+      "behavior_id": "factory-reviewer-astra",
+      "display_name": "Reviewer Astra",
+      "profile": "astra-lead",
+      "prompt": ["Reviewers and Gatekeeper", "Crew rules"],
+      "files": "ReadOnly",
+      "bash": {"mode": "Unrestricted", "allowed_argv_prefixes": [["git", "diff"], ["git", "log"], ["git", "status"], ["rg"]]},
+      "agents_tools": {"enabled": false},
+      "surface": "factory-reviewer-astra-handoffs",
+      "creates": ["ShardReview"],
+      "queries": ["ShardAssignment", "ShardResult"]
+    },
+    {
+      "behavior_id": "factory-reviewer-grok",
+      "display_name": "Reviewer Grok",
+      "profile": "grok-review",
+      "prompt": ["Reviewers and Gatekeeper", "Crew rules"],
+      "files": "ReadOnly",
+      "bash": {"mode": "Unrestricted", "allowed_argv_prefixes": [["git", "diff"], ["git", "log"], ["git", "status"], ["rg"]]},
+      "agents_tools": {"enabled": false},
+      "surface": "factory-reviewer-grok-handoffs",
+      "creates": ["ShardReview"],
+      "queries": ["ShardAssignment", "ShardResult"]
+    },
+    {
+      "behavior_id": "factory-worker-a",
+      "display_name": "Worker A",
+      "profile": "glm-a",
+      "prompt": ["Worker", "Crew rules"],
+      "files": "ReadWrite",
+      "bash": {"mode": "Unrestricted", "allowed_argv_prefixes": [["rustfmt"], ["lake", "env", "lean"], ["rg"], ["sed"]]},
+      "agents_tools": {"enabled": false},
+      "surface": "factory-worker-a-handoffs",
+      "creates": ["ShardResult"],
+      "queries": ["ShardAssignment"]
+    },
+    {
+      "behavior_id": "factory-worker-b",
+      "display_name": "Worker B",
+      "profile": "glm-b",
+      "prompt": ["Worker", "Crew rules"],
+      "files": "ReadWrite",
+      "bash": {"mode": "Unrestricted", "allowed_argv_prefixes": [["rustfmt"], ["lake", "env", "lean"], ["rg"], ["sed"]]},
+      "agents_tools": {"enabled": false},
+      "surface": "factory-worker-b-handoffs",
+      "creates": ["ShardResult"],
+      "queries": ["ShardAssignment"]
+    },
+    {
+      "behavior_id": "factory-verifier",
+      "display_name": "Verifier",
+      "profile": "glm-a",
+      "prompt": ["Verifier", "Crew rules"],
+      "files": "ReadOnly",
+      "bash": {"mode": "Unrestricted", "allowed_argv_prefixes": [["cargo"], ["lake"], ["npm"], ["git", "-C"]]},
+      "agents_tools": {"enabled": false},
+      "surface": "factory-verifier-handoffs",
+      "creates": ["BuildResult"],
+      "queries": ["BuildRequest"]
+    }
+  ],
+  "engineer": {
+    "behavior_id": "your own behavior (config get)",
+    "agents_tools": {"enabled": true, "target_ids": ["factory-proofs-lead", "factory-impl-lead", "factory-gatekeeper"]},
+    "surfaces": "keep engineer-mailbox; add factory-engineer-handoffs",
+    "creates": ["RunStart", "ShardAssignment"],
+    "queries": ["RunStart", "ShardAssignment", "ShardResult", "ShardReview", "BuildResult", "GateResult", "FireOutcome"]
+  },
+  "targets": [
+    {"target_id": "factory-engineer", "behavior_id": "your own behavior", "selected_by": ["factory-proofs-lead", "factory-impl-lead"]},
+    {"target_id": "factory-gatekeeper", "behavior_id": "factory-gatekeeper", "selected_by": ["factory-proofs-lead", "factory-impl-lead", "engineer"]},
+    {"target_id": "factory-proofs-lead", "behavior_id": "factory-proofs-lead", "selected_by": ["engineer"]},
+    {"target_id": "factory-impl-lead", "behavior_id": "factory-impl-lead", "selected_by": ["engineer"]}
+  ],
+  "collections": {
+    "rules": "one SDL type per collection, no @branchable, handoff_id carries @index(unique: true); every field String except the Int fields listed",
+    "common": ["handoff_id", "run_id", "stage", "reply_session_id", "created_by_model", "tags"],
+    "int_fields": ["k", "attempt", "token_estimate"],
+    "list_fields": {"tags": "[String]"},
+    "RunStart": ["lead", "objective", "k", "target_session_id"],
+    "ShardAssignment": ["shard_id", "attempt", "phase", "worktree", "owned_files", "token_estimate", "base_sha", "instructions", "worklist", "workstation", "reviewer", "review_notes"],
+    "ShardResult": ["assignment_id", "shard_id", "attempt", "phase", "worktree", "owned_files", "reviewer", "status", "report", "author_model"],
+    "ShardReview": ["result_id", "assignment_id", "shard_id", "attempt", "phase", "worktree", "owned_files", "verdict", "review_notes", "verifier_model"],
+    "ShardIntegration": ["review_id", "assignment_id", "shard_id", "attempt", "commit", "counts"],
+    "BuildRequest": ["build_id", "commit", "commands"],
+    "BuildResult": ["request_id", "build_id", "commit", "status", "failures"],
+    "GateRequest": ["gate_id", "commit", "scope", "queries", "kept", "downstream"],
+    "GateResult": ["request_id", "gate_id", "commit", "status", "hits"],
+    "FireOutcome": "runtime-provided; do not create it"
+  },
+  "handoff_ids": {
+    "RunStart": "run:<run_id>:<k>",
+    "ShardAssignment": "assign:<run_id>:<stage>:<phase>:<shard_id>:<attempt>",
+    "ShardResult": "result:<assignment handoff_id>",
+    "ShardReview": "review:<assignment handoff_id>",
+    "ShardIntegration": "integrated:<assignment handoff_id>",
+    "BuildRequest": "build:<build_id>, with build_id = <run_id>-<n>",
+    "BuildResult": "build-result:<build_id>",
+    "GateRequest": "gate:<gate_id>, with gate_id = <run_id>-<n>",
+    "GateResult": "gate-result:<gate_id>",
+    "run_ids": "start with the lead: proofs-… or impl-… (tests: impl-test-1, impl-test-2); inbox routes and outcome routes select the lead by this prefix"
+  },
+  "why_inboxes_are_per_lead": "A Task fired into an existing session must use that session's behavior, so each lead (and you) needs its own inbox Tasks; routes tell the leads apart by the run_id prefix.",
+  "automation": [
+    {"trigger_id": "run-start-proofs", "source": "RunStart", "filter": "{ k: { _eq: 0 }, lead: { _eq: \"proofs\" } }", "task_id": "lead-proofs", "behavior": "factory-proofs-lead", "session": "new", "concurrency": "parallel", "emit_outcome": true, "goal": true},
+    {"trigger_id": "run-continue-proofs", "source": "RunStart", "filter": "{ k: { _gt: 0 }, lead: { _eq: \"proofs\" } }", "task_id": "lead-proofs", "behavior": "factory-proofs-lead", "session": "{{ doc.target_session_id }}", "concurrency": "parallel", "emit_outcome": true, "goal": true},
+    {"trigger_id": "run-start-impl", "source": "RunStart", "filter": "{ k: { _eq: 0 }, lead: { _eq: \"impl\" } }", "task_id": "lead-impl", "behavior": "factory-impl-lead", "session": "new", "concurrency": "parallel", "emit_outcome": true, "goal": true},
+    {"trigger_id": "run-continue-impl", "source": "RunStart", "filter": "{ k: { _gt: 0 }, lead: { _eq: \"impl\" } }", "task_id": "lead-impl", "behavior": "factory-impl-lead", "session": "{{ doc.target_session_id }}", "concurrency": "parallel", "emit_outcome": true, "goal": true},
+    {"trigger_id": "assign-a", "source": "ShardAssignment", "filter": "{ workstation: { _eq: \"a\" } }", "task_id": "work-a", "behavior": "factory-worker-a", "session": "new", "concurrency": "parallel", "emit_outcome": true},
+    {"trigger_id": "assign-b", "source": "ShardAssignment", "filter": "{ workstation: { _eq: \"b\" } }", "task_id": "work-b", "behavior": "factory-worker-b", "session": "new", "concurrency": "parallel", "emit_outcome": true},
+    {"trigger_id": "result-review-claude", "source": "ShardResult", "filter": "{ status: { _eq: \"done\" }, phase: { _ne: \"audit\" }, reviewer: { _eq: \"claude\" } }", "task_id": "review-claude", "behavior": "factory-reviewer-claude", "session": "new", "concurrency": "parallel", "emit_outcome": true},
+    {"trigger_id": "result-review-astra", "source": "ShardResult", "filter": "{ status: { _eq: \"done\" }, phase: { _ne: \"audit\" }, reviewer: { _eq: \"astra\" } }", "task_id": "review-astra", "behavior": "factory-reviewer-astra", "session": "new", "concurrency": "parallel", "emit_outcome": true},
+    {"trigger_id": "result-review-grok", "source": "ShardResult", "filter": "{ status: { _eq: \"done\" }, phase: { _ne: \"audit\" }, reviewer: { _eq: \"grok\" } }", "task_id": "review-grok", "behavior": "factory-reviewer-grok", "session": "new", "concurrency": "parallel", "emit_outcome": true},
+    {"trigger_id": "build-request", "source": "BuildRequest", "filter": null, "task_id": "build", "behavior": "factory-verifier", "session": "new", "concurrency": "queued_serial", "emit_outcome": true},
+    {"trigger_id": "gate-request", "source": "GateRequest", "filter": null, "task_id": "gate", "behavior": "factory-gatekeeper", "session": "new", "concurrency": "queued_serial", "emit_outcome": true},
+    {"trigger_id": "result-blocked", "source": "ShardResult", "filter": "{ status: { _eq: \"blocked\" }, run_id: { _like: \"impl-%\" } }", "task_id": "inbox-blocked", "behavior": "factory-impl-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "result-audit", "source": "ShardResult", "filter": "{ phase: { _eq: \"audit\" }, run_id: { _like: \"impl-%\" } }", "task_id": "inbox-audit", "behavior": "factory-impl-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "review-inbox", "source": "ShardReview", "filter": "{ run_id: { _like: \"impl-%\" } }", "task_id": "inbox-review", "behavior": "factory-impl-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "build-result", "source": "BuildResult", "filter": "{ run_id: { _like: \"impl-%\" } }", "task_id": "inbox-build", "behavior": "factory-impl-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "gate-result", "source": "GateResult", "filter": "{ run_id: { _like: \"impl-%\" } }", "task_id": "inbox-gate", "behavior": "factory-impl-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "fire-outcome", "source": "FireOutcome", "filter": "{ source_collection: { _ne: \"RunStart\" }, source_handoff_id: { _like: \"%:impl-%\" } }", "task_id": "inbox-outcome", "behavior": "factory-impl-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "result-blocked-proofs", "source": "ShardResult", "filter": "{ status: { _eq: \"blocked\" }, run_id: { _like: \"proofs-%\" } }", "task_id": "inbox-blocked-proofs", "behavior": "factory-proofs-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "result-audit-proofs", "source": "ShardResult", "filter": "{ phase: { _eq: \"audit\" }, run_id: { _like: \"proofs-%\" } }", "task_id": "inbox-audit-proofs", "behavior": "factory-proofs-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "review-inbox-proofs", "source": "ShardReview", "filter": "{ run_id: { _like: \"proofs-%\" } }", "task_id": "inbox-review-proofs", "behavior": "factory-proofs-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "build-result-proofs", "source": "BuildResult", "filter": "{ run_id: { _like: \"proofs-%\" } }", "task_id": "inbox-build-proofs", "behavior": "factory-proofs-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "gate-result-proofs", "source": "GateResult", "filter": "{ run_id: { _like: \"proofs-%\" } }", "task_id": "inbox-gate-proofs", "behavior": "factory-proofs-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "fire-outcome-proofs", "source": "FireOutcome", "filter": "{ source_collection: { _ne: \"RunStart\" }, source_handoff_id: { _like: \"%:proofs-%\" } }", "task_id": "inbox-outcome-proofs", "behavior": "factory-proofs-lead", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "fire-outcome-engineer", "source": "FireOutcome", "filter": "{ source_collection: { _eq: \"RunStart\" } }", "task_id": "inbox-outcome-engineer", "behavior": "your own behavior", "session": "{{ doc.reply_session_id }}", "concurrency": "parallel", "emit_outcome": false},
+    {"trigger_id": "engineer-watch", "source": {"schedule_id": "engineer-watch-hourly", "cadence": "hourly"}, "task_id": "engineer-watch", "behavior": "your own behavior", "session": "new", "concurrency": "serial", "emit_outcome": false, "enabled": false}
+  ],
+  "automation_rules": [
+    "Each row is one EventSource (source collection + filter, your choice of ID), one Task (task_id, behavior, template from task_templates.md, emit_outcome) and one Trigger (trigger_id, task, source, session, concurrency). Rows that share a task_id share one Task.",
+    "session \"new\" means no session_id_template; otherwise session_id_template is exactly the value shown.",
+    "Every trigger is enabled except engineer-watch.",
+    "goal: true means the Task uses goal_objective_template (not prompt_template) with the largest goal_token_budget admission allows."
+  ]
+}

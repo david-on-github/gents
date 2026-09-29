@@ -49,8 +49,8 @@ fn some<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Valu
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Expectation {
-    field: String,
+pub(super) struct Expectation {
+    pub(super) field: String,
     #[serde(default, deserialize_with = "some")]
     equals: Option<Value>,
     #[serde(default)]
@@ -59,14 +59,14 @@ struct Expectation {
     matches: Option<String>,
 }
 
-enum Test {
+pub(super) enum Test {
     Equals(Value),
     Contains(String),
     Matches(Regex),
 }
 
 impl Test {
-    fn holds(&self, actual: &Value) -> bool {
+    pub(super) fn holds(&self, actual: &Value) -> bool {
         match self {
             Self::Equals(expected) => actual == expected,
             Self::Contains(needle) => text(actual).contains(needle.as_str()),
@@ -74,7 +74,7 @@ impl Test {
         }
     }
 
-    fn describe(&self) -> String {
+    pub(super) fn describe(&self) -> String {
         match self {
             Self::Equals(expected) => format!("equals {expected}"),
             Self::Contains(needle) => format!("contains {needle:?}"),
@@ -91,7 +91,7 @@ fn text(value: &Value) -> String {
 }
 
 /// `expectation` as a test, or why it is not one.
-fn test(expectation: Expectation) -> Result<(String, Test), String> {
+pub(super) fn test(expectation: Expectation) -> Result<(String, Test), String> {
     let field = expectation.field;
     match (
         expectation.equals,

@@ -1,0 +1,23 @@
+{
+  "agent_principal": {},
+  "eval_definitions": [
+    {
+      "definition_id": "factory-setup",
+      "comparability_version": 2,
+      "title": "Factory crew setup (#1786), one Engineer, setup only",
+      "subject": {
+        "kind": "behavior",
+        "inference_slots": [
+          "engineer"
+        ]
+      },
+      "cases": [
+        "./cases/factory_setup.json"
+      ],
+      "tags": [
+        "configurator",
+        "factory"
+      ]
+    }
+  ]
+}

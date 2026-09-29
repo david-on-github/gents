@@ -8,4 +8,12 @@ export type EvalStage = { stage_id: string, prompt: string,
  * A document written instead of a prompt: the stage's request is whatever
  * the pack's own EventTrigger fires for it.
  */
-seed?: EvalFixtureDocument | null, deadline_secs: number, checks?: Array<EvalCheckRef> | null, capture?: Array<EvalCapture> | null, };
+seed?: EvalFixtureDocument | null, deadline_secs: number,
+/**
+ * Keep observing after the stage's request ends, within `deadline_secs`,
+ * until no request in the trial home is running: the work the subject
+ * started (trigger fires, agent sessions, later messages into its own
+ * session) is part of the stage. The stage's evidence then includes every
+ * later request of the trial session, and captures read the settled home.
+ */
+settle?: boolean | null, checks?: Array<EvalCheckRef> | null, capture?: Array<EvalCapture> | null, };

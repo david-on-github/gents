@@ -181,6 +181,14 @@ pub struct EvalStage {
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
     pub seed: Option<EvalFixtureDocument>,
     pub deadline_secs: u64,
+    /// Keep observing after the stage's request ends, within `deadline_secs`,
+    /// until no request in the trial home is running: the work the subject
+    /// started (trigger fires, agent sessions, later messages into its own
+    /// session) is part of the stage. The stage's evidence then covers every
+    /// later request of the trial session, and captures read the settled home.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "typescript", ts(as = "Option<bool>", optional = nullable))]
+    pub settle: bool,
     #[serde(
         default,
         deserialize_with = "super::serde_helpers::deserialize_default_on_null",
