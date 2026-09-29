@@ -389,6 +389,21 @@ async fn prepare_package(
         });
     }
     schema_digests.sort();
+    for entry in &base.entries {
+        let Some(prepare) = entry.prepare.as_ref() else {
+            continue;
+        };
+        for collection in &prepare.writes {
+            anyhow::ensure!(
+                schema_digests
+                    .iter()
+                    .any(|schema| schema.collection_contract_digests.contains_key(collection)),
+                "entry {:?} prepare.writes names {collection:?}, which package {:?} does not declare in its schemas",
+                entry.name,
+                package.manifest.name
+            );
+        }
+    }
     let mut package_plan = PackagePlan {
         name: package.manifest.name.clone(),
         version: package.manifest.version.clone(),

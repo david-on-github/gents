@@ -1,5 +1,7 @@
 use super::*;
-use crate::graph_pipeline::{activate_graph_revision, start_graph_run, EntryInputOrigin};
+use crate::graph_pipeline::{
+    activate_graph_revision, start_graph_run, EntryInputOrigin, EntryPrepare,
+};
 use crate::test_support::{install_test_graph_package, load_test_graph_package};
 use defra_node::EmbeddedNode;
 use serde_json::json;
@@ -26,6 +28,25 @@ async fn fixture() -> (Arc<EmbeddedNode>, ConfigAccess, GraphPackageInstallBindi
     };
     let access = ConfigAccess::Local(node.clone());
     (node, access, options)
+}
+
+#[tokio::test]
+async fn prepare_package_refuses_a_write_collection_the_package_does_not_declare() {
+    let (_node, access, options) = fixture().await;
+    let mut package = load_test_graph_package("review_graph", &options);
+    package.config.graph_intents[0].entries[0].prepare = Some(EntryPrepare {
+        host: vec![],
+        plugin: "review-evidence".to_owned(),
+        digest: Some(format!("sha256:{}", "0".repeat(64))),
+        writes: vec!["NotDeclaredCollection".to_owned()],
+    });
+    let error = prepare_loaded_graph_package_install(&access, &package, &options)
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("NotDeclaredCollection"), "{message}");
+    assert!(message.contains("review"), "{message}");
 }
 
 #[test]
