@@ -119,6 +119,13 @@ pub async fn desktop_client_start<R: Runtime>(
             .map_err(BridgeError::untyped);
     }
 
+    if let Err(error) = super::managed_server::retire_orphaned_client_state(&state).await {
+        tracing::warn!(
+            error = %error.message,
+            "could not archive client state paired with a node that is no longer here"
+        );
+    }
+
     let progress_rx = claim_or_join_client_start(&app, &state);
 
     wait_for_client_start_progress(progress_rx).await?;
