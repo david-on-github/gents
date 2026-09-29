@@ -65,10 +65,14 @@ impl CollectionSchema {
     }
 }
 
-/// DefraDB's aggregate pseudo-fields (`AVG`, `COUNT`, `GROUP`, ...) are the
-/// all-uppercase names introspection reports beside a collection's own fields.
+/// DefraDB's aggregate pseudo-fields, which introspection reports beside a
+/// collection's own fields. An application field may itself be uppercase
+/// (`URL`), so these are named rather than inferred from case.
 pub(crate) fn is_aggregate_pseudo_field(name: &str) -> bool {
-    name.chars().all(|c| c.is_ascii_uppercase())
+    matches!(
+        name,
+        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "GROUP" | "SIMILARITY" | "BM25"
+    )
 }
 
 /// The selection every introspection query asks of a `__type`.
