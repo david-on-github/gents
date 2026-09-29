@@ -350,8 +350,10 @@ impl PackPlugin {
                 self.name
             );
             anyhow::ensure!(
-                schema_declares_property(&self.input_schema, &bind_dir.input_field),
-                "plugin {:?} bind_dir.input_field {:?} is not a property of input_schema",
+                schema_declares_string_property(&self.input_schema, &bind_dir.input_field),
+                "plugin {:?} bind_dir.input_field {:?} must be a string property of \
+                 input_schema, or of at least one oneOf branch, since call_bound always \
+                 injects a string",
                 self.name,
                 bind_dir.input_field
             );
@@ -376,27 +378,33 @@ impl PackPlugin {
             if let Some(memory_mib) = limits.memory_mib {
                 anyhow::ensure!(
                     (1..=crate::plugin::MAX_DECLARED_MEMORY_MIB).contains(&memory_mib),
-                    "plugin {:?} declares memory_mib {memory_mib}, over the host ceiling of {} MiB",
+                    "plugin {:?} declares memory_mib {memory_mib}, but it {}",
                     self.name,
-                    crate::plugin::MAX_DECLARED_MEMORY_MIB
+                    limit_range_reason(memory_mib, crate::plugin::MAX_DECLARED_MEMORY_MIB, "MiB")
                 );
             }
             if let Some(wall_clock_secs) = limits.wall_clock_secs {
                 anyhow::ensure!(
                     (1..=crate::plugin::MAX_DECLARED_WALL_CLOCK_SECS).contains(&wall_clock_secs),
-                    "plugin {:?} declares wall_clock_secs {wall_clock_secs}, over the host ceiling \
-                     of {}s",
+                    "plugin {:?} declares wall_clock_secs {wall_clock_secs}, but it {}",
                     self.name,
-                    crate::plugin::MAX_DECLARED_WALL_CLOCK_SECS
+                    limit_range_reason(
+                        wall_clock_secs,
+                        crate::plugin::MAX_DECLARED_WALL_CLOCK_SECS,
+                        "s"
+                    )
                 );
             }
             if let Some(max_output_mib) = limits.max_output_mib {
                 anyhow::ensure!(
                     (1..=crate::plugin::MAX_DECLARED_OUTPUT_MIB).contains(&max_output_mib),
-                    "plugin {:?} declares max_output_mib {max_output_mib}, over the host ceiling \
-                     of {} MiB",
+                    "plugin {:?} declares max_output_mib {max_output_mib}, but it {}",
                     self.name,
-                    crate::plugin::MAX_DECLARED_OUTPUT_MIB
+                    limit_range_reason(
+                        max_output_mib,
+                        crate::plugin::MAX_DECLARED_OUTPUT_MIB,
+                        "MiB"
+                    )
                 );
             }
         }
@@ -404,29 +412,38 @@ impl PackPlugin {
     }
 }
 
-/// Whether `field` is a property `input_schema` declares directly, or that
-/// every one of its `oneOf` branches declaring properties declares. A
-/// schema with neither shape declares nothing, so `field` is refused.
-fn schema_declares_property(input_schema: &serde_json::Value, field: &str) -> bool {
-    if input_schema
-        .get("properties")
-        .and_then(|properties| properties.get(field))
-        .is_some()
-    {
+/// Why a declared limit outside `1..=ceiling` was refused: the operator is
+/// told the actual reason (zero is never a valid budget) rather than always
+/// being told it is over the ceiling, which is only true above it.
+fn limit_range_reason(value: u32, ceiling: u32, unit: &str) -> String {
+    if value == 0 {
+        "must be at least 1".to_owned()
+    } else {
+        format!("must be at most the host ceiling of {ceiling} {unit}")
+    }
+}
+
+/// Whether `field` is a string property `input_schema` declares directly,
+/// or that at least one of its `oneOf` branches declares: `call_bound`
+/// always injects a string, so a field declared with another type could
+/// never be satisfied, and a field absent from every location declares
+/// nothing to bind.
+fn schema_declares_string_property(input_schema: &serde_json::Value, field: &str) -> bool {
+    let is_string_property = |schema: &serde_json::Value| {
+        schema
+            .get("properties")
+            .and_then(|properties| properties.get(field))
+            .and_then(|property| property.get("type"))
+            .and_then(serde_json::Value::as_str)
+            == Some("string")
+    };
+    if is_string_property(input_schema) {
         return true;
     }
-    match input_schema
+    input_schema
         .get("oneOf")
         .and_then(serde_json::Value::as_array)
-    {
-        Some(branches) if !branches.is_empty() => branches.iter().all(|branch| {
-            branch
-                .get("properties")
-                .and_then(|properties| properties.get(field))
-                .is_some()
-        }),
-        _ => false,
-    }
+        .is_some_and(|branches| branches.iter().any(is_string_property))
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -958,25 +975,48 @@ mod tests {
     }
 
     #[test]
-    fn bind_dir_accepts_a_property_common_to_every_one_of_schema() {
+    fn bind_dir_accepts_a_property_declared_by_one_one_of_branch() {
+        // The secscan shape: `root` is required in one branch and absent
+        // from the other (which takes `files` instead), so requiring every
+        // branch to declare it would refuse a pack that never asked for
+        // that.
         let mut plugin = bindable_plugin();
         plugin.input_schema = serde_json::json!({
             "oneOf": [
                 {"properties": {"root": {"type": "string"}}},
-                {"properties": {"root": {"type": "string"}, "extra": {"type": "boolean"}}},
+                {"properties": {"files": {"type": "array"}}},
             ]
         });
-        plugin.validate().expect("every branch declares root");
+        plugin
+            .validate()
+            .expect("one branch declaring root as a string is enough");
 
         plugin.input_schema = serde_json::json!({
             "oneOf": [
-                {"properties": {"root": {"type": "string"}}},
                 {"properties": {"other": {"type": "string"}}},
+                {"properties": {"files": {"type": "array"}}},
             ]
+        });
+        assert!(plugin.validate().is_err(), "no branch declares root at all");
+    }
+
+    #[test]
+    fn bind_dir_refuses_a_non_string_input_field() {
+        let mut plugin = bindable_plugin();
+        plugin.input_schema = serde_json::json!({
+            "type": "object", "properties": {"root": {"type": "integer"}}
+        });
+        let error = plugin
+            .validate()
+            .expect_err("call_bound always injects a string; a non-string field can never match");
+        assert!(format!("{error:#}").contains("string"));
+
+        plugin.input_schema = serde_json::json!({
+            "oneOf": [{"properties": {"root": {"type": "integer"}}}]
         });
         assert!(
             plugin.validate().is_err(),
-            "a branch missing root must be refused"
+            "a non-string oneOf branch property must also be refused"
         );
     }
 
@@ -1033,5 +1073,18 @@ mod tests {
             ..Default::default()
         });
         assert!(plugin.validate().is_err());
+    }
+
+    #[test]
+    fn a_zero_limit_is_refused_for_being_zero_not_for_being_over_the_ceiling() {
+        let mut plugin = valid_plugin();
+        plugin.limits = Some(PluginLimits {
+            memory_mib: Some(0),
+            ..Default::default()
+        });
+        let error = plugin.validate().expect_err("zero is never a valid budget");
+        let message = format!("{error:#}");
+        assert!(message.contains("at least 1"), "{message}");
+        assert!(!message.contains("ceiling"), "{message}");
     }
 }
