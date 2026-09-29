@@ -1010,19 +1010,31 @@ enum ClientBinding {
     Orphaned,
 }
 
+/// A path is not identity: only the reviewed home itself being gone, or now
+/// carrying another DID, orphans the client. A configured home that moved or
+/// changed while the reviewed identity still exists keeps the client state.
 fn classify_binding(
     reviewed: Option<&ReviewedHome>,
-    home: Option<&HomeIdentity>,
-    init_present: bool,
+    configured: Option<&HomeIdentity>,
+    reviewed_home: Option<&HomeIdentity>,
+    reviewed_init_present: bool,
 ) -> ClientBinding {
-    match (reviewed, home) {
-        (None, _) => ClientBinding::Unbound,
-        (Some(reviewed), Some(home)) if home.reviewed == *reviewed => ClientBinding::BoundToHome,
-        (Some(_), Some(_)) => ClientBinding::Orphaned,
+    let Some(reviewed) = reviewed else {
+        return ClientBinding::Unbound;
+    };
+    if configured.is_some_and(|home| home.reviewed == *reviewed) {
+        return ClientBinding::BoundToHome;
+    }
+    if configured.is_some_and(|home| home.reviewed.agent_did == reviewed.agent_did) {
+        return ClientBinding::Unbound;
+    }
+    match reviewed_home {
+        Some(home) if home.reviewed.agent_did == reviewed.agent_did => ClientBinding::Unbound,
+        Some(_) => ClientBinding::Orphaned,
         // An init marker that exists but cannot be read is not evidence the
         // node is gone.
-        (Some(_), None) if init_present => ClientBinding::Unbound,
-        (Some(_), None) => ClientBinding::Orphaned,
+        None if reviewed_init_present => ClientBinding::Unbound,
+        None => ClientBinding::Orphaned,
     }
 }
 
@@ -1041,11 +1053,21 @@ async fn client_binding(state: &DesktopAppState) -> ClientBinding {
             None
         }
     };
-    let home = read_home_identity(agent_home).await;
-    let Ok(init_present) = present(&gents::home::init_config_path(agent_home)) else {
+    let Some(reviewed) = reviewed else {
         return ClientBinding::Unbound;
     };
-    classify_binding(reviewed.as_ref(), home.as_ref(), init_present)
+    let configured = read_home_identity(agent_home).await;
+    let reviewed_path = Path::new(&reviewed.home);
+    let reviewed_home = read_home_identity(reviewed_path).await;
+    let Ok(reviewed_init_present) = present(&gents::home::init_config_path(reviewed_path)) else {
+        return ClientBinding::Unbound;
+    };
+    classify_binding(
+        Some(&reviewed),
+        configured.as_ref(),
+        reviewed_home.as_ref(),
+        reviewed_init_present,
+    )
 }
 
 /// Before a client start opens its store: client state paired with a home
@@ -4344,31 +4366,54 @@ mod tests {
             tool_ceiling: None,
             tool_root: None,
         };
-        assert_eq!(classify_binding(None, None, false), ClientBinding::Unbound);
+        let a = identity("/homes/a", "did:key:a");
+        let b = identity("/homes/b", "did:key:b");
         assert_eq!(
-            classify_binding(
-                Some(&reviewed),
-                Some(&identity("/homes/a", "did:key:a")),
-                true
-            ),
+            classify_binding(None, None, None, false),
+            ClientBinding::Unbound
+        );
+        assert_eq!(
+            classify_binding(Some(&reviewed), Some(&a), Some(&a), true),
             ClientBinding::BoundToHome
         );
+        let reidentified = identity("/homes/a", "did:key:b");
         assert_eq!(
             classify_binding(
                 Some(&reviewed),
-                Some(&identity("/homes/a", "did:key:b")),
+                Some(&reidentified),
+                Some(&reidentified),
                 true
             ),
             ClientBinding::Orphaned
         );
         assert_eq!(
-            classify_binding(Some(&reviewed), None, false),
+            classify_binding(Some(&reviewed), None, None, false),
             ClientBinding::Orphaned
         );
         assert_eq!(
-            classify_binding(Some(&reviewed), None, true),
+            classify_binding(Some(&reviewed), None, None, true),
             ClientBinding::Unbound,
             "an unreadable init marker is not evidence the node is gone"
+        );
+        assert_eq!(
+            classify_binding(Some(&reviewed), Some(&b), Some(&a), true),
+            ClientBinding::Unbound,
+            "switching to another home while the reviewed one still exists keeps the client"
+        );
+        assert_eq!(
+            classify_binding(
+                Some(&reviewed),
+                Some(&identity("/homes/moved", "did:key:a")),
+                None,
+                false
+            ),
+            ClientBinding::Unbound,
+            "the reviewed identity relocated to the configured home keeps the client"
+        );
+        assert_eq!(
+            classify_binding(Some(&reviewed), Some(&b), None, false),
+            ClientBinding::Orphaned,
+            "the reviewed home is gone and the configured home is another node"
         );
     }
 
