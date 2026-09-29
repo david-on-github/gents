@@ -95,7 +95,14 @@ const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 /// declares nothing, this is the most a pack may ask for at all.
 pub const MAX_DECLARED_MEMORY_MIB: u32 = 4096;
 pub const MAX_DECLARED_WALL_CLOCK_SECS: u32 = 900;
-pub const MAX_DECLARED_OUTPUT_MIB: u32 = 1024;
+/// `run_afb_bytes`'s WASI-command dispatch (every compiled plugin language)
+/// captures guest stdout into a fixed 4 MiB pipe
+/// (`afterburner_wasi::embedder_vm::run_command_raw`); a write past it fails
+/// inside the guest before this host ever sees the bytes. Declaring more
+/// than that ceiling here would promise an output size this host can never
+/// actually deliver, so the declared limit is capped at the real capture
+/// size rather than a larger, unreachable number.
+pub const MAX_DECLARED_OUTPUT_MIB: u32 = 4;
 
 /// Bytes of a plugin's stderr kept for a human to read. Diagnostics, not a
 /// log archive.
@@ -398,19 +405,21 @@ impl PluginRunner {
     }
 
     /// Runs it once, binding `bound` into `plugin.bind_dir`'s declared
-    /// input field: read-only, and only for this one call (this module's
-    /// own doc, D5's authority model). Refuses outright when the plugin
-    /// declares no `bind_dir` - the field it would overwrite does not exist,
-    /// so there is nothing this call could bind.
+    /// input field: read-only, and only for this one call. Refuses outright
+    /// when the plugin declares no `bind_dir` - the field it would
+    /// overwrite does not exist, so there is nothing this call could bind.
     ///
     /// `arguments[bind_dir.input_field]` is overwritten with `bound`'s own
     /// canonical path regardless of what the caller passed, so a plugin can
     /// never point the binding at a directory other than the one its
-    /// caller named. The manifold this call actually runs under is the
-    /// admitted one with `fs` replaced by exactly `bound`'s directory,
-    /// read-only - never wider, and never recorded as a standing grant
-    /// (the install record's `granted` is untouched; see [`BoundDir`]'s own
-    /// doc).
+    /// caller named. `arguments` may be `Value::Null` (an omitted
+    /// `--input`, for instance): the binding itself can be the only field a
+    /// call needs, so a missing operator input is treated as an empty
+    /// object rather than refused; any other non-object value is still
+    /// refused. The manifold this call actually runs under is the admitted
+    /// one with `fs` replaced by exactly `bound`'s directory, read-only -
+    /// never wider, and never recorded as a standing grant (the install
+    /// record's `granted` is untouched; see [`BoundDir`]'s own doc).
     pub fn call_bound(
         &self,
         arguments: &serde_json::Value,
@@ -429,7 +438,11 @@ impl PluginRunner {
                 bound.path().display()
             )
         })?;
-        let mut arguments = arguments.clone();
+        let mut arguments = if arguments.is_null() {
+            serde_json::Value::Object(serde_json::Map::new())
+        } else {
+            arguments.clone()
+        };
         let object = arguments.as_object_mut().with_context(|| {
             format!(
                 "plugin {:?} arguments must be a JSON object to bind {:?}",
@@ -750,8 +763,8 @@ fn outcome_from_exit(
 
     if output.stdout.len() > max_output_bytes {
         notes.push(format!(
-            "stdout truncated to {max_output_bytes} of {} bytes; a plugin result is a small JSON \
-             value, not a file, so a result this large is refused rather than accepted partial",
+            "plugin output exceeded {max_output_bytes} bytes ({} bytes produced); declare \
+             limits.max_output_mib to raise it, up to the host ceiling",
             output.stdout.len()
         ));
         return PluginOutcome {

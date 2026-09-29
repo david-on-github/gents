@@ -600,6 +600,105 @@ fn for_plugin_raises_the_default_to_declared_limits() {
     );
 }
 
+/// The literal prefix of the JSON this guest writes: `{"filler":"`. Kept as
+/// bytes (not a WAT text literal) because embedding an unescaped `"` inside
+/// a WAT string would terminate it early; every byte is written with its
+/// own `i32.store8` instead.
+const LARGE_OUTPUT_PREFIX: &[u8] = b"{\"filler\":\"";
+const LARGE_OUTPUT_SUFFIX: &[u8] = b"\"}";
+
+/// WAT for a guest that writes exactly `total_len` bytes of one valid JSON
+/// value to stdout: `{"filler":"aaa...a"}`, the `a`s filled in bulk with
+/// `memory.fill` rather than a giant literal in the module source. Used to
+/// prove `limits.max_output_mib` actually changes what a real call accepts,
+/// not just the arithmetic in [`PluginBudget::for_plugin`].
+fn large_json_output_wat(total_len: usize) -> String {
+    let envelope_len = LARGE_OUTPUT_PREFIX.len() + LARGE_OUTPUT_SUFFIX.len();
+    assert!(total_len > envelope_len, "need room for the JSON envelope");
+    let filler_len = total_len - envelope_len;
+    let suffix_offset = total_len - LARGE_OUTPUT_SUFFIX.len();
+    let iovec_offset = total_len;
+    let nwritten_offset = iovec_offset + 8;
+    let pages = (nwritten_offset + 4).div_ceil(65536);
+
+    let mut stores = String::new();
+    for (offset, byte) in LARGE_OUTPUT_PREFIX.iter().enumerate() {
+        stores.push_str(&format!(
+            "    (i32.store8 (i32.const {offset}) (i32.const {byte}))\n"
+        ));
+    }
+    for (index, byte) in LARGE_OUTPUT_SUFFIX.iter().enumerate() {
+        stores.push_str(&format!(
+            "    (i32.store8 (i32.const {}) (i32.const {byte}))\n",
+            suffix_offset + index
+        ));
+    }
+
+    format!(
+        r#"(module
+  (import "wasi_snapshot_preview1" "fd_write"
+    (func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") {pages})
+  (func (export "_start")
+{stores}    (memory.fill (i32.const {prefix_len}) (i32.const 0x61) (i32.const {filler_len}))
+    (i32.store (i32.const {iovec_offset}) (i32.const 0))
+    (i32.store (i32.const {iovec_len_offset}) (i32.const {total_len}))
+    (call $fd_write (i32.const 1) (i32.const {iovec_offset}) (i32.const 1) (i32.const {nwritten_offset}))
+    drop))
+"#,
+        prefix_len = LARGE_OUTPUT_PREFIX.len(),
+        iovec_len_offset = iovec_offset + 4,
+    )
+}
+
+/// The real bound end to end: a guest that actually writes past the default
+/// 1 MiB output cap is `BadOutput` under the default budget, and succeeds
+/// once `limits.max_output_mib` raises it - proving the declared limit
+/// changes what a real call accepts, not only what [`PluginBudget::for_plugin`]
+/// computes on paper.
+#[test]
+fn a_call_over_the_default_output_cap_succeeds_once_the_declared_limit_covers_it() {
+    const TOTAL_LEN: usize = 1_500_000; // > default 1 MiB, <= a declared 2 MiB limit
+    let wat_source = large_json_output_wat(TOTAL_LEN);
+    let (mut plugin, afb) = build_plugin_pack("large_output_pack", &wat_source, None);
+    plugin.limits = Some(crate::pack::PluginLimits {
+        memory_mib: None,
+        wall_clock_secs: None,
+        max_output_mib: Some(2),
+    });
+    let runner = PluginRunner::compile(&afb, &plugin).expect("compiles");
+
+    let under_default = runner
+        .call(&serde_json::json!({}), &PluginBudget::default())
+        .expect("the guest itself runs to completion");
+    assert_eq!(
+        under_default.verdict,
+        PluginVerdict::BadOutput,
+        "a {TOTAL_LEN}-byte result must be refused under the default 1 MiB cap: {:?}",
+        under_default.diagnostics
+    );
+
+    let afb_parsed = afterburner_afb::Afb::from_bytes(&afb).expect("readable .afb");
+    let raised_budget = PluginBudget::for_plugin(&afb_parsed, &plugin);
+    let raised = runner
+        .call(&serde_json::json!({}), &raised_budget)
+        .expect("the guest itself runs to completion");
+    assert_eq!(
+        raised.verdict,
+        PluginVerdict::Success,
+        "{:?}",
+        raised.diagnostics
+    );
+    assert_eq!(
+        raised
+            .output
+            .get("filler")
+            .and_then(serde_json::Value::as_str)
+            .map(str::len),
+        Some(TOTAL_LEN - LARGE_OUTPUT_PREFIX.len() - LARGE_OUTPUT_SUFFIX.len())
+    );
+}
+
 /// The same gate, the other way round: Python is admitted, because its
 /// dispatch path really does enforce every axis a call asks for.
 ///
@@ -812,7 +911,7 @@ fn masked_trap_startup_uses_the_plugin_request_engine() {
     assert!(std::ptr::eq(startup, selected));
 }
 
-// ---- BoundDir and PluginRunner::call_bound (D5) --------------------
+// ---- BoundDir and PluginRunner::call_bound --------------------
 
 #[test]
 fn bound_dir_requires_a_directory() {
@@ -842,6 +941,44 @@ fn bound_dir_allows_a_path_inside_within() {
 
     let bound = BoundDir::new(&nested, Some(&within)).expect("nested is inside within");
     assert_eq!(bound.path(), nested.canonicalize().unwrap().as_path());
+}
+
+/// A lexical `starts_with` on the uncanonicalized path would accept this: as
+/// text, `within/../outside` starts with `within`. Canonicalizing first
+/// (what `BoundDir::new` actually does) resolves the `..` away, so the
+/// comparison sees `outside` sitting beside `within`, not inside it.
+#[test]
+fn bound_dir_refuses_dot_dot_traversal_out_of_within() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let within = root.path().join("within");
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(&within).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let traversal = within.join("..").join("outside");
+    let error = BoundDir::new(&traversal, Some(&within))
+        .expect_err("../outside must resolve outside within and be refused");
+    assert!(format!("{error:#}").contains("outside"));
+}
+
+/// A symlink physically inside `within` whose target lives outside it must
+/// still be refused: `canonicalize` resolves the symlink before the prefix
+/// check runs, so the comparison sees where it actually points, not where
+/// it sits in the directory tree.
+#[test]
+#[cfg(unix)]
+fn bound_dir_refuses_a_symlink_inside_within_pointing_outside() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let within = root.path().join("within");
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(&within).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    let link = within.join("link");
+    std::os::unix::fs::symlink(&outside, &link).expect("creating the symlink");
+
+    let error = BoundDir::new(&link, Some(&within))
+        .expect_err("a symlink resolving outside within must be refused");
+    assert!(format!("{error:#}").contains("outside"));
 }
 
 #[test]
@@ -883,6 +1020,36 @@ fn call_bound_overwrites_the_declared_input_field_with_the_canonical_bound_path(
             "other": 1,
         })
     );
+}
+
+/// A missing operator input (`Value::Null`, what a CLI turns an omitted
+/// `--input` into) is not a refusal when the binding itself supplies the
+/// only field the call needs: it is treated as an empty object before
+/// `input_field` is inserted. A non-object, non-null value is still refused.
+#[test]
+fn call_bound_treats_null_arguments_as_an_empty_object() {
+    let (mut plugin, afb) = build_plugin_pack("bind_null_pack", ECHO_WAT, None);
+    plugin.bind_dir = Some(crate::pack::PluginDirBinding {
+        input_field: "root".to_owned(),
+        description: "a directory".to_owned(),
+    });
+    let runner = PluginRunner::compile(&afb, &plugin).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let bound = BoundDir::new(dir.path(), None).unwrap();
+
+    let outcome = runner
+        .call_bound(&serde_json::Value::Null, &PluginBudget::default(), &bound)
+        .expect("null arguments must be treated as an empty object, not refused");
+    assert_eq!(outcome.verdict, PluginVerdict::Success);
+    assert_eq!(
+        outcome.output,
+        serde_json::json!({"root": bound.path().to_str().unwrap()})
+    );
+
+    let error = runner
+        .call_bound(&serde_json::json!([1, 2]), &PluginBudget::default(), &bound)
+        .expect_err("a non-object, non-null value must still be refused");
+    assert!(format!("{error:#}").contains("must be a JSON object"));
 }
 
 #[test]
