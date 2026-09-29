@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use defra_node::EmbeddedNode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::collection::Collection;
@@ -14,9 +14,17 @@ use crate::lifecycle::RequestTerminalOutcome;
 use crate::managed_exec::{run_managed_exec, ManagedExecOutcome, ManagedExecRequest};
 use crate::watcher::AgentRequest;
 
+#[path = "task_hooks/records.rs"]
+mod records;
 #[cfg(test)]
 #[path = "task_hooks/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use records::RecordedHookAttempt;
+use records::TaskHookRecordHandle;
+pub use records::TaskHookRecoveryReport;
+pub(crate) use records::{recover_task_hook_records, TaskHookRecord, TaskHookRecordStore};
 
 /// `TaskHooks.defaultHookTimeoutSecs`: the executor's own bound for a hook that
 /// configures none. Callers consume [`effective_timeout_secs`] rather than
@@ -44,7 +52,8 @@ pub(crate) fn effective_timeout_secs(hook: &TaskHook) -> u64 {
 /// `TaskHooks.CommandResult`. `Exited { code: None }` is a signal-terminated
 /// child: no exit status exists, so it can never satisfy the modeled success
 /// condition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum HookCommandResult {
     Exited {
         code: Option<i64>,
@@ -288,16 +297,21 @@ pub(crate) struct TaskHookCancellation {
 
 impl Default for TaskHookCancellation {
     fn default() -> Self {
-        let shutdown = CancellationToken::new();
+        Self::under(&CancellationToken::new())
+    }
+}
+
+impl TaskHookCancellation {
+    /// Cancellation that runtime shutdown, `shutdown`, also cancels.
+    pub(crate) fn under(shutdown: &CancellationToken) -> Self {
+        let shutdown = shutdown.child_token();
         let interrupt = shutdown.child_token();
         Self {
             shutdown,
             interrupt,
         }
     }
-}
 
-impl TaskHookCancellation {
     pub(crate) fn interrupt(&self) {
         self.interrupt.cancel();
     }
@@ -372,11 +386,22 @@ impl TaskHookCancellation {
 pub(crate) struct ManagedTaskHookExec {
     cwd: PathBuf,
     cancellation: TaskHookCancellation,
+    record: Option<TaskHookRecordHandle>,
 }
 
 impl ManagedTaskHookExec {
     pub(crate) fn new(cwd: PathBuf, cancellation: TaskHookCancellation) -> Self {
-        Self { cwd, cancellation }
+        Self {
+            cwd,
+            cancellation,
+            record: None,
+        }
+    }
+
+    /// Records each attempt in `record` before its command launches.
+    pub(crate) fn with_record(mut self, record: Option<TaskHookRecordHandle>) -> Self {
+        self.record = record;
+        self
     }
 }
 
@@ -403,7 +428,8 @@ impl TaskHookExec for ManagedTaskHookExec {
     /// hook is refused before launch: the alternatives are a managed execution
     /// with no deadline at all, or a panic inside the addition. A command whose
     /// cancellation already fired is not launched at all, so it has no host
-    /// effect to account for.
+    /// effect to account for and is not recorded; one whose attempt cannot be
+    /// recorded is not launched either, since recovery could then replay it.
     async fn attempt(&self, hook: &TaskHook) -> HookAttempt {
         let refused = |result, detail: String| HookAttempt {
             hook_id: hook.hook_id.clone(),
@@ -428,7 +454,15 @@ impl TaskHookExec for ManagedTaskHookExec {
                 "cancelled before launch".to_string(),
             );
         }
-        let outcome = run_managed_exec(ManagedExecRequest {
+        if let Some(record) = &self.record {
+            if let Err(error) = record.attempt_started(&hook.hook_id).await {
+                return refused(
+                    HookCommandResult::LaunchFailed,
+                    format!("could not record the attempt before launch: {error}"),
+                );
+            }
+        }
+        let execution = run_managed_exec(ManagedExecRequest {
             argv: hook.command.clone(),
             cwd: self.cwd.clone(),
             deadline_at: Some(deadline_at),
@@ -438,8 +472,17 @@ impl TaskHookExec for ManagedTaskHookExec {
             environment: None,
             tool_name: Some(format!("task_hook:{}", hook.hook_id)),
             live_output: None,
-        })
-        .await;
+        });
+        let outcome = match &self.record {
+            Some(record) => {
+                crate::managed_exec::ownership::scope_process_recorder(
+                    record.process_recorder(&hook.hook_id),
+                    execution,
+                )
+                .await
+            }
+            None => execution.await,
+        };
         let (result, detail) = match outcome {
             ManagedExecOutcome::Exited {
                 code,
@@ -460,6 +503,9 @@ impl TaskHookExec for ManagedTaskHookExec {
             }
             ManagedExecOutcome::SpawnFailed { error } => (HookCommandResult::LaunchFailed, error),
         };
+        if let Some(record) = &self.record {
+            record.attempt_finished(&hook.hook_id, &result).await;
+        }
         HookAttempt {
             hook_id: hook.hook_id.clone(),
             result,

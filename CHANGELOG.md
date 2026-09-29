@@ -151,6 +151,20 @@ source consistency checks, not a separate runtime compatibility version.
   (`tool call`) and every write (`self-config write`) under
   `gents::self_config`.
 
+- Task hooks configured on a Task now run (#1600). `before` hooks gate the
+  request before the agent starts; `after_success`/`after_failure` run before
+  the request's terminal is written, so a failing gate fails the request with
+  the tail of the command's own output; `finally` hooks always run. After-hooks
+  run after a workspace-bound request's seal and integration, so they cannot
+  block those; hook time counts against the request deadline. Hooks apply
+  to scheduled, event-fired and manual (`gents task run`, desktop) runs; a
+  goal-backed Task's hooks wrap only its opening request. A user interrupt
+  cancels a running `before`/`after_*` hook and interrupts the request, but
+  never cancels cleanup. A request whose Task was deleted or disabled after it
+  was fired fails instead of running without its hooks. Each attempt is
+  recorded on the host under `task-hooks/` in the data directory, so after a
+  crash or restart the remaining cleanup runs once, a surviving hook command
+  is stopped, and no attempted hook runs again (#1956).
 - Document-triggered Tasks support durable `queued_serial` delivery, atomic
   fire deduplication, restart catch-up and delivery after re-enabling a trigger
   (#2041). Delivery follows receiving-node arrival order, including replicated

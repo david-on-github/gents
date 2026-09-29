@@ -28,6 +28,7 @@ pub struct StartupRecoveryOutcome {
     pub tool_calls: anyhow::Result<ToolCallRecoveryReport>,
     pub requests: anyhow::Result<RecoveryReport>,
     pub inference_calls: anyhow::Result<InferenceCallRecoveryReport>,
+    pub task_hooks: anyhow::Result<crate::task_hooks::TaskHookRecoveryReport>,
 }
 
 /// Run the startup recovery sweeps in dependency order:
@@ -42,6 +43,9 @@ pub struct StartupRecoveryOutcome {
 ///    queued/running rows observe terminal parents and are terminalized in
 ///    this same pass, or the later periodic pass that repairs a deferred parent
 ///    (`Recovery.request_before_inference_converges`).
+/// 4. **Task hook records** — cleanup recovery reports the terminal request
+///    recovery decided (`TaskHooks.recoverInterrupted`), so it runs after it;
+///    a record whose request is still owned waits for a periodic pass.
 pub async fn run_startup_recovery(
     node: &std::sync::Arc<EmbeddedNode>,
     agent_did: &str,
@@ -65,9 +69,16 @@ pub async fn run_startup_recovery_with_executions(
         ToolCallLifecycle::recover_all_with_executions(node, agent_did, executions).await;
     let requests = RequestLifecycle::recover_all(node, agent_did).await;
     let inference_calls = InferenceCall::recover_all(node, agent_did).await;
+    let task_hooks = crate::task_hooks::recover_task_hook_records(
+        node,
+        agent_did,
+        executions.task_hook_records(),
+    )
+    .await;
     StartupRecoveryOutcome {
         tool_calls,
         requests,
         inference_calls,
+        task_hooks,
     }
 }

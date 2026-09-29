@@ -232,14 +232,40 @@ impl Default for ProcessRecordStore {
     }
 }
 
+/// Path of the durable host record keyed by `key` in `dir`.
+pub(crate) fn durable_record_path(dir: &std::path::Path, key: &str) -> PathBuf {
+    let name = key
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    dir.join(format!("{name}.json"))
+}
+
+/// Replaces the durable host record keyed by `key` atomically. The record
+/// must survive the crash it exists for, so the file and the directory entry
+/// are both synced before this returns.
+pub(crate) fn write_durable_record(
+    dir: &std::path::Path,
+    key: &str,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    std::fs::create_dir_all(dir)?;
+    let path = durable_record_path(dir, key);
+    let temporary = path.with_extension("json.tmp");
+    {
+        use std::io::Write;
+        let mut file = std::fs::File::create(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&temporary, &path)?;
+    std::fs::File::open(dir).and_then(|dir| dir.sync_all())
+}
+
 impl ProcessRecordStore {
     fn path_for(dir: &std::path::Path, tool_call_id: &str) -> PathBuf {
-        let name = tool_call_id
-            .as_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        dir.join(format!("{name}.json"))
+        durable_record_path(dir, tool_call_id)
     }
 
     fn volatile(
@@ -258,19 +284,8 @@ impl ProcessRecordStore {
             }
             Self::Durable(dir) => dir,
         };
-        std::fs::create_dir_all(dir)?;
-        let path = Self::path_for(dir, &record.tool_call_id);
-        let temporary = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
-        {
-            use std::io::Write;
-            let mut file = std::fs::File::create(&temporary)?;
-            file.write_all(&bytes)?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&temporary, &path)?;
-        // The record must survive the crash it exists for.
-        std::fs::File::open(dir).and_then(|dir| dir.sync_all())
+        write_durable_record(dir, &record.tool_call_id, &bytes)
     }
 
     pub(crate) fn read(&self, tool_call_id: &str) -> Option<ProcessRecord> {

@@ -9,7 +9,7 @@ pub(super) async fn generated_recovery_sweep_cases_drive_startup_recovery_contra
     let cases = lean_recovery_sweep_cases();
     assert_eq!(
         cases.len(),
-        29,
+        32,
         "Lean should emit one row per registered recovery predicate witness"
     );
 
@@ -21,6 +21,7 @@ pub(super) async fn generated_recovery_sweep_cases_drive_startup_recovery_contra
         "tool_call_lifecycle_reconcile_terminal_parent_owned_tools",
         "tool_call_lifecycle_recover_session_message_rows",
         "inference_call_recover_all_stale_calls",
+        "task_hook_recover_interrupted_cleanup",
     ]
     .into_iter()
     .collect::<BTreeSet<_>>();
@@ -141,6 +142,11 @@ async fn drive_recovery_sweep_case(case: &lean_vocab_test::LeanRecoverySweepCase
     if case.collection == "AgentToolCall" {
         // These rows are driven by the crate-private accepted-publication
         // recovery conformance tests, including deferred missing parents.
+        return;
+    }
+    if case.collection == "TaskHookRecord" {
+        // Host records are crate-private; lean_vocab_test::task_hook_recovery
+        // drives these witnesses through the production sweep.
         return;
     }
     match (case.collection.as_str(), case.sweep_id.as_str()) {

@@ -783,10 +783,60 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
         let hook_cancellation = crate::task_hooks::TaskHookCancellation::default();
         let hook_cancellation_follower = (!hooks.is_empty())
             .then(|| hook_cancellation.follow(interrupt_rx.clone(), shutdown.clone()));
-        let hook_exec = crate::task_hooks::ManagedTaskHookExec::new(hook_cwd, hook_cancellation);
+        let hook_record = if hooks.is_empty() {
+            None
+        } else {
+            let record = crate::task_hooks::TaskHookRecord {
+                request_doc_id: request.doc_id.clone(),
+                request_id: request.request_id.clone(),
+                agent_did: request.agent_did.clone(),
+                cwd: hook_cwd.clone(),
+                root_guard: self.root_execution_guard.clone(),
+                hooks: hooks.clone(),
+                attempts: Vec::new(),
+            };
+            match self
+                .background_execution_registry
+                .task_hook_records()
+                .begin(record)
+            {
+                Ok(handle) => Some(handle),
+                Err(error) => {
+                    observer.abort();
+                    if let Some(follower) = hook_cancellation_follower {
+                        follower.abort();
+                    }
+                    let error = anyhow::anyhow!("could not record task hook state: {error}");
+                    record_current_request_outcome("task_hook_record_failed");
+                    record_current_failure_class(&error);
+                    self.finalize_failure_before_work(
+                        &mut lifecycle,
+                        &stream_writer,
+                        &error.to_string(),
+                        &request,
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
+        };
+        let hook_exec = crate::task_hooks::ManagedTaskHookExec::new(hook_cwd, hook_cancellation)
+            .with_record(hook_record.clone());
 
         let mut owned_work = None;
         let run = crate::task_hooks::run_task_hooks(&hooks, &hook_exec, || async {
+            if let Some(record) = &hook_record {
+                if let Err(error) = record.work_started().await {
+                    let outcome = OwnedWorkOutcome::observed(
+                        crate::task_hooks::TaskAgentResult::Failure,
+                        Some(format!("could not record task hook state: {error}")),
+                        true,
+                    );
+                    let observation = outcome.observation;
+                    owned_work = Some(outcome);
+                    return observation;
+                }
+            }
             let outcome = self
                 .observe_owned_work(
                     &mut lifecycle,
@@ -804,6 +854,9 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
         observer.abort();
         if let Some(follower) = hook_cancellation_follower {
             follower.abort();
+        }
+        if let Some(record) = &hook_record {
+            record.release().await;
         }
 
         let (work_reason, release_writer_binding) = match owned_work {

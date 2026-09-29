@@ -2,6 +2,7 @@ import Proofs.Recovery.Sweeps.Requests
 import Proofs.Recovery.Sweeps.ToolCalls
 import Proofs.Recovery.Sweeps.SessionMessage
 import Proofs.Recovery.Sweeps.Inference
+import Proofs.Recovery.Sweeps.TaskHooks
 
 namespace Recovery
 
@@ -13,6 +14,7 @@ def registeredRecoverySweeps : List RecoverySweep :=
   , terminalParentOwnedToolSweep
   , sessionMessageRecoverySweep
   , inferenceCallRecoverySweep
+  , taskHookRecoverySweep
   ]
 
 def registeredRecoverySweepIds : List String :=
@@ -36,5 +38,7 @@ theorem registered_sweeps_cover_persisted_collections :
       exact ⟨toolCallRecoverySweep, by simp [registeredRecoverySweeps], rfl⟩
   | inferenceCall =>
       exact ⟨inferenceCallRecoverySweep, by simp [registeredRecoverySweeps], rfl⟩
+  | taskHookRecord =>
+      exact ⟨taskHookRecoverySweep, by simp [registeredRecoverySweeps], rfl⟩
 
 end Recovery

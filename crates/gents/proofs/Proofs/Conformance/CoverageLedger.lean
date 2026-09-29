@@ -762,11 +762,10 @@ def caseCoverage : List CoverageEntry :=
       "lean_vocab_test::task_hook_executor::generated_task_hook_run_cases_drive_real_host_commands"
       "Every generated trace runs through the production orchestration and managed host execution with real commands: each scripted result is produced by a real process (an exit status, a nonexistent executable, a command outliving its model-resolved timeout, or a held command cancelled through the interrupt or shutdown source its phase uses). The processes' own invocation log, with the owned work's entry, is compared against the emitted invocationTrace, excluding only occurrences that could not launch; attempts, outcomes and the terminal request state are compared too. The daemon placement of the before gate at claim and the after phases ahead of terminalization is fenced by daemon tests, not these traces.")
       "task-hooks" [Surface.runtimeInternal]
-  , tagged (consumerWithFollowUp
+  , tagged (consumerCoverage
       "task_hook_recovery_cases"
       "TaskHookRecoveryCases"
-      "lean_vocab_test::task_hooks_policy::generated_task_hook_cases_fence_the_modeled_phase_vocabulary"
-      "Recovery selection of remaining cleanup from observed attempts has no native owner. Binding it needs the host executor's durable attempt observations, not a test-local replay of recoveryCleanup.")
+      "lean_vocab_test::task_hook_recovery::generated_task_hook_recovery_cases_drive_startup_recovery_and_host_records")
       "task-hooks" [Surface.runtimeInternal]
   , tagged (consumerCoverage
       "request_progress_cases"
@@ -1259,6 +1258,11 @@ def caseCoverage : List CoverageEntry :=
       "recovery_sweep_cases"
       "RecoverySweepCases"
       "tool_call_lifecycle::recovery_closeout_conformance::generated_background_completion_recovery_uses_accepted_native_call")
+      "recovery" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "recovery_sweep_cases"
+      "RecoverySweepCases"
+      "lean_vocab_test::task_hook_recovery::generated_task_hook_sweep_cases_drive_the_record_sweep")
       "recovery" [Surface.runtimeInternal]
   , tagged (consumerCoverage
       "r6_background_cases"

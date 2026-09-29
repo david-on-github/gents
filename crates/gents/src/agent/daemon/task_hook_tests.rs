@@ -26,11 +26,13 @@ const TASK_ID: &str = "hook-task";
 const TRIGGER_ID: &str = "hook-trigger";
 const WORKSPACE_ID: &str = "task-hook-workspace";
 
-/// Replies once, or fails the provider call, counting every call.
+/// Replies once, fails the provider call, or never answers, counting every
+/// call.
 #[derive(Clone)]
 struct ScriptedModel {
     calls: Arc<AtomicUsize>,
     fail: bool,
+    hang: bool,
 }
 
 #[allow(refining_impl_trait)]
@@ -59,6 +61,10 @@ impl CompletionModel for ScriptedModel {
         if self.fail {
             return Err(CompletionError::ProviderError("agent refused".into()));
         }
+        if self.hang {
+            let inner: rig::streaming::StreamingResult<()> = Box::pin(stream::pending());
+            return Ok(StreamingCompletionResponse::stream(inner));
+        }
         let inner: rig::streaming::StreamingResult<()> = Box::pin(stream::iter(vec![
             Ok(RawStreamingChoice::Message("hooked reply".to_string())),
             Ok(RawStreamingChoice::FinalResponse(())),
@@ -67,7 +73,7 @@ impl CompletionModel for ScriptedModel {
     }
 }
 
-fn test_behavior() -> Arc<ResolvedBehavior> {
+fn test_behavior(deadline: Duration) -> Arc<ResolvedBehavior> {
     let identity: Arc<dyn AgentIdentity> = Arc::new(
         KeyIdentity::load_or_create(
             std::env::temp_dir().join(format!("daemon-task-hooks-{}.key", uuid::Uuid::new_v4())),
@@ -103,7 +109,7 @@ fn test_behavior() -> Arc<ResolvedBehavior> {
         max_total_tokens: None,
         stream_batch_ms: 0,
         stream_liveness_timeout: Duration::from_secs(5),
-        deadline_duration: Duration::from_secs(60),
+        deadline_duration: deadline,
         provider_idle_timeout: Duration::from_secs(
             crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS,
         ),
@@ -132,6 +138,10 @@ struct Harness {
 
 impl Harness {
     async fn new() -> Self {
+        Self::with_deadline(Duration::from_secs(60)).await
+    }
+
+    async fn with_deadline(deadline: Duration) -> Self {
         let data = tempfile::tempdir().expect("node data directory");
         let node = Arc::new(
             defra_node::EmbeddedNode::builder()
@@ -141,7 +151,7 @@ impl Harness {
                 .expect("embedded node"),
         );
         crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
-        let behavior = test_behavior();
+        let behavior = test_behavior(deadline);
         crate::test_support::install_test_behavior(
             node.as_ref(),
             behavior.agent_did(),
@@ -343,6 +353,23 @@ impl Harness {
     }
 
     fn daemon(&self, fail: bool) -> BehaviorDaemon<ScriptedModel> {
+        self.daemon_with(fail, BackgroundExecutionRegistry::default())
+    }
+
+    fn daemon_with(
+        &self,
+        fail: bool,
+        executions: BackgroundExecutionRegistry,
+    ) -> BehaviorDaemon<ScriptedModel> {
+        self.daemon_model(fail, false, executions)
+    }
+
+    fn daemon_model(
+        &self,
+        fail: bool,
+        hang: bool,
+        executions: BackgroundExecutionRegistry,
+    ) -> BehaviorDaemon<ScriptedModel> {
         let prompt_builder = LayeredPromptBuilder::for_behavior(
             &self.behavior.system_prompt,
             &self.behavior.behavior_id,
@@ -357,6 +384,7 @@ impl Harness {
             Arc::new(ScriptedModel {
                 calls: self.calls.clone(),
                 fail,
+                hang,
             }),
             prompt_builder.preamble().to_string(),
             Arc::new(Vec::<Box<dyn ToolDyn>>::new()),
@@ -366,7 +394,7 @@ impl Harness {
                 crate::rendered_request::defra_rendered_request_capture_factory(self.node.clone()),
             ),
             BackgroundToolRegistry::default(),
-            BackgroundExecutionRegistry::default(),
+            executions,
             Arc::new(StartupBarrier::ready_for_test()),
             crate::runtime_status::RuntimeStatusHandle::new(
                 self.node.clone(),
@@ -771,5 +799,331 @@ async fn a_failing_before_hook_releases_the_bound_workspace() {
             .iter()
             .any(crate::workspace::WorkspaceBindingDoc::is_active_read_write),
         "{bindings:?}"
+    );
+}
+
+impl Harness {
+    /// Runs the request against durable task hook records in `records`, and
+    /// abandons it the moment `marker` appears, as a runtime crash would.
+    async fn crash_at(&self, request: AgentRequest, marker: &Path, records: &Path) {
+        let mut daemon = self.daemon_with(
+            false,
+            BackgroundExecutionRegistry::default().with_task_hook_records(records.to_path_buf()),
+        );
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let crashed = async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        };
+        tokio::select! {
+            _ = daemon.process_request(request, shutdown_rx) => panic!("the held hook must not finish"),
+            () = crashed => {}
+        }
+    }
+
+    /// Restarts against the same records: startup recovery until request
+    /// recovery has decided the abandoned request, which task hook recovery
+    /// waits for, then the recovered cleanup it started.
+    async fn restart(&self, records: &Path, doc_id: &str) {
+        let registry =
+            BackgroundExecutionRegistry::default().with_task_hook_records(records.to_path_buf());
+        for _ in 0..40 {
+            let outcome = crate::startup_recovery::run_startup_recovery_with_executions(
+                &self.node,
+                self.owner(),
+                &registry,
+            )
+            .await;
+            if !outcome.task_hooks.expect("task hook recovery").is_noop() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        registry.task_hook_records().wait_for_recoveries().await;
+        let row = self.request_row(doc_id).await;
+        assert!(
+            matches!(row["lifecycle_state"].as_str(), Some("failed")),
+            "request recovery must decide the abandoned request: {row}"
+        );
+        assert!(registry.task_hook_records().list().is_empty());
+        let again = crate::startup_recovery::run_startup_recovery_with_executions(
+            &self.node,
+            self.owner(),
+            &registry,
+        )
+        .await;
+        assert!(again.task_hooks.expect("second pass").is_noop());
+    }
+
+    fn log_lines(&self) -> Vec<String> {
+        std::fs::read_to_string(self.mark("hooks.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn logging(&self, hook_id: &str, then: &str) -> String {
+        format!(
+            "printf '%s\\n' {hook_id} >> {}; {then}",
+            self.mark("hooks.log").display()
+        )
+    }
+}
+
+#[tokio::test]
+async fn a_restart_during_a_before_hook_runs_cleanup_once_without_rerunning_it() {
+    let harness = Harness::new().await;
+    let held = harness.logging(
+        "prepare",
+        &format!(
+            "{}; sleep 30; {}",
+            harness.touch("prepare-started"),
+            harness.touch("prepare-finished")
+        ),
+    );
+    harness
+        .install_task(json!([
+            {"hook_id": "prepare", "phase": "before",
+             "command": ["sh", "-c", held], "timeout_secs": 60},
+            {"hook_id": "sweep", "phase": "finally",
+             "command": ["sh", "-c", harness.logging("sweep", "true")], "timeout_secs": 30},
+        ]))
+        .await;
+    let records = harness.mark("task-hooks");
+    let request = harness.create_request(Lineage::ManualFire, false).await;
+    let doc_id = request.doc_id.clone();
+    harness
+        .crash_at(request, &harness.mark("prepare-started"), &records)
+        .await;
+    harness.restart(&records, &doc_id).await;
+    assert_eq!(harness.log_lines(), vec!["prepare", "sweep"]);
+    assert!(!harness.mark("prepare-finished").exists());
+    assert_eq!(harness.calls(), 0);
+}
+
+#[tokio::test]
+async fn a_restart_during_cleanup_runs_only_the_remaining_cleanup() {
+    let harness = Harness::new().await;
+    let held = harness.logging(
+        "first",
+        &format!("{}; sleep 30", harness.touch("first-started")),
+    );
+    harness
+        .install_task(json!([
+            {"hook_id": "first", "phase": "finally",
+             "command": ["sh", "-c", held], "timeout_secs": 60},
+            {"hook_id": "second", "phase": "finally",
+             "command": ["sh", "-c", harness.logging("second", "true")], "timeout_secs": 30},
+        ]))
+        .await;
+    let records = harness.mark("task-hooks");
+    let request = harness.create_request(Lineage::Trigger, false).await;
+    let doc_id = request.doc_id.clone();
+    harness
+        .crash_at(request, &harness.mark("first-started"), &records)
+        .await;
+    harness.restart(&records, &doc_id).await;
+    assert_eq!(harness.log_lines(), vec!["first", "second"]);
+}
+
+#[tokio::test]
+async fn losing_the_lease_mid_work_skips_after_failure_and_still_cleans_up() {
+    let harness = Harness::new().await;
+    harness
+        .install_task(json!([
+            {"hook_id": "report", "phase": "after_failure",
+             "command": ["sh", "-c", harness.touch("reported")], "timeout_secs": 30},
+            {"hook_id": "sweep", "phase": "finally",
+             "command": ["sh", "-c", harness.touch("swept")], "timeout_secs": 30},
+        ]))
+        .await;
+    let request = harness.create_request(Lineage::ManualFire, false).await;
+    let doc_id = request.doc_id.clone();
+    let mut daemon = harness.daemon_model(false, true, BackgroundExecutionRegistry::default());
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let replace = async {
+        while harness.calls() == 0 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        ConfigAccess::write_local(
+            harness.node.as_ref(),
+            "test.replace_task_hook_generation",
+            &format!(
+                r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, input: {{ execution_generation: "replacement-generation" }}) {{ _docID }} }}"#,
+                crate::graphql::escape_graphql_string(&doc_id),
+            ),
+        )
+        .await
+        .expect("replace the execution generation");
+    };
+    let (processed, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+        tokio::join!(daemon.process_request(request, shutdown_rx), replace)
+    })
+    .await
+    .expect("lease loss is observed");
+    processed.expect("request processing returned");
+    let row = harness.request_row(&doc_id).await;
+    assert!(
+        !harness.mark("reported").exists(),
+        "a lost lease is not this execution's failure: {row}"
+    );
+    assert!(harness.mark("swept").exists(), "cleanup still runs live");
+    assert_eq!(
+        row["lifecycle_state"], "processing",
+        "the current owner keeps the terminal: {row}"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_before_any_hook_launches_leaves_no_record_to_recover() {
+    let harness = Harness::new().await;
+    harness
+        .install_task(json!([
+            {"hook_id": "prepare", "phase": "before",
+             "command": ["sh", "-c", harness.logging("prepare", "true")], "timeout_secs": 30},
+            {"hook_id": "sweep", "phase": "finally",
+             "command": ["sh", "-c", harness.logging("sweep", "true")], "timeout_secs": 30},
+        ]))
+        .await;
+    let records = harness.mark("task-hooks");
+    let executions = BackgroundExecutionRegistry::default().with_task_hook_records(records.clone());
+    let request = harness.create_request(Lineage::ManualFire, false).await;
+    let mut daemon = harness.daemon_model(false, false, executions.clone());
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(true);
+    daemon
+        .process_request(request, shutdown_rx)
+        .await
+        .expect("request processing returned");
+    assert!(harness.log_lines().is_empty(), "no hook launched");
+    assert!(harness.calls() == 0);
+    assert!(
+        executions.task_hook_records().list().is_empty(),
+        "an execution that never started leaves nothing for recovery"
+    );
+    let restarted = BackgroundExecutionRegistry::default().with_task_hook_records(records);
+    let outcome = crate::startup_recovery::run_startup_recovery_with_executions(
+        &harness.node,
+        harness.owner(),
+        &restarted,
+    )
+    .await;
+    assert!(outcome.task_hooks.unwrap().is_noop());
+}
+
+#[tokio::test]
+async fn a_request_bound_to_a_disabled_hookless_task_fails_closed() {
+    let harness = Harness::new().await;
+    harness.install_task(json!([])).await;
+    let request = harness.create_request(Lineage::ManualFire, false).await;
+    harness
+        .apply(vec![(
+            Collection::Task,
+            json!({
+                "agent_did": harness.owner(),
+                "task_id": TASK_ID,
+                "behavior_id": harness.behavior.behavior_id,
+                "prompt_template": "run the gate",
+                "enabled": false,
+            }),
+        )])
+        .await;
+    let row = harness.run(request, false).await;
+    assert_eq!(harness.calls(), 0, "{row}");
+    assert_eq!(row["lifecycle_state"], "failed", "{row}");
+    assert!(reason(&row).contains("disabled"), "{row}");
+}
+
+#[tokio::test]
+async fn an_automated_request_whose_trigger_is_gone_fails_closed() {
+    let harness = Harness::new().await;
+    harness
+        .install_task(json!([{"hook_id": "prepare", "phase": "before",
+            "command": ["sh", "-c", harness.touch("prepared")], "timeout_secs": 30}]))
+        .await;
+    let request = harness.create_request(Lineage::Trigger, false).await;
+    ConfigAccess::write_local(
+        harness.node.as_ref(),
+        "test.delete_task_hook_trigger",
+        &format!(
+            r#"mutation {{ delete_Trigger(filter: {{ agent_did: {{ _eq: "{}" }}, trigger_id: {{ _eq: "{}" }} }}) {{ _docID }} }}"#,
+            crate::graphql::escape_graphql_string(harness.owner()),
+            crate::graphql::escape_graphql_string(TRIGGER_ID),
+        ),
+    )
+    .await
+    .expect("delete the Trigger");
+    let row = harness.run(request, false).await;
+    assert_eq!(harness.calls(), 0, "{row}");
+    assert_eq!(row["lifecycle_state"], "failed", "{row}");
+    // Claim admission already refuses a runtime-trigger request whose Trigger
+    // is gone; the hook resolver's own refusal covers a deletion after it.
+    assert!(reason(&row).contains("rigger"), "{row}");
+    assert!(!harness.mark("prepared").exists());
+}
+
+#[tokio::test]
+async fn a_before_hook_that_outlives_the_request_deadline_fails_the_request_clearly() {
+    let harness = Harness::with_deadline(Duration::from_secs(2)).await;
+    harness
+        .install_task(json!([
+            {"hook_id": "prepare", "phase": "before",
+             "command": ["sh", "-c", "sleep 3"], "timeout_secs": 30},
+            {"hook_id": "sweep", "phase": "finally",
+             "command": ["sh", "-c", harness.touch("swept")], "timeout_secs": 30},
+        ]))
+        .await;
+    let request = harness.create_request(Lineage::ManualFire, false).await;
+    let row = harness.run(request, false).await;
+    assert_eq!(harness.calls(), 0, "{row}");
+    assert_eq!(row["lifecycle_state"], "failed", "{row}");
+    assert!(reason(&row).contains("request deadline exceeded"), "{row}");
+    assert!(harness.mark("swept").exists());
+}
+
+/// The owned work's result is observed after its workspace seal, so the
+/// after-phase a Task runs is selected by the seal's outcome: after_success
+/// cannot gate sealing or integration.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn workspace_seal_completes_before_the_after_phase_is_selected() {
+    let harness = Harness::new().await;
+    let placement = tempfile::tempdir().expect("workspace placement directory");
+    install_workspace(&harness, placement.path()).await;
+    harness
+        .install_task(json!([
+            {"hook_id": "verify", "phase": "after_success",
+             "command": ["sh", "-c", harness.touch("verified")], "timeout_secs": 30},
+            {"hook_id": "report", "phase": "after_failure",
+             "command": ["sh", "-c", harness.touch("reported")], "timeout_secs": 30},
+        ]))
+        .await;
+    let request = harness.create_request(Lineage::Trigger, true).await;
+    crate::workspace::materialize_workspace_binding(
+        harness.node.as_ref(),
+        &request.request_id,
+        &request.doc_id,
+        harness.owner(),
+        &crate::lifecycle::WorkspaceLineage {
+            workspace_id: request.workspace_id.clone(),
+            workspace_authority: request.workspace_authority.clone(),
+            workspace_owner_agent_did: request.workspace_owner_agent_did.clone(),
+            workspace_seal_hash: request.workspace_seal_hash.clone(),
+        },
+    )
+    .await
+    .expect("materialize the writer binding");
+    let row = harness.run(request, false).await;
+    assert_eq!(harness.calls(), 1, "{row}");
+    assert_eq!(row["lifecycle_state"], "failed", "{row}");
+    assert!(reason(&row).contains("placement"), "the seal failed: {row}");
+    assert!(
+        harness.mark("reported").exists(),
+        "the seal's failure selected after_failure"
+    );
+    assert!(
+        !harness.mark("verified").exists(),
+        "after_success never saw the sealed work"
     );
 }
