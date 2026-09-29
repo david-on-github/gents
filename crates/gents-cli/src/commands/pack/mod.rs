@@ -1,6 +1,7 @@
 //! One package-facing CLI; install writes stay with their existing owners.
 pub(crate) mod account;
 mod build;
+mod cache;
 mod check;
 mod cli_process;
 mod edit;
@@ -8,6 +9,8 @@ mod import;
 mod inspect;
 mod local;
 pub(crate) mod registry;
+mod remove;
+pub(crate) use remove::remove;
 mod scaffold;
 mod scenario;
 mod secscan;
@@ -20,8 +23,7 @@ use gents::pack::{pack_catalog, resolve_pack, PackKind, PackManifest, ResolvedPa
 use serde_json::json;
 use std::collections::BTreeMap;
 
-const CACHE_MARKER: &str = ".gents-pack-cache-v1";
-const CACHE_LOCK: &str = ".cache.lock";
+use cache::{asset_cache_root_for, lock_exclusive, release_cache_root, CacheRelease};
 
 pub(crate) fn parse_inference_slot_bindings(
     values: &[String],
@@ -68,10 +70,10 @@ pub(crate) async fn dispatch(command: PackCommand) -> Result<()> {
         PackCommand::Check(args) => check::check(args).await,
         PackCommand::Graph(args) => check::graph(args),
         PackCommand::Install(args) => install(args).await,
-        PackCommand::Remove(args) => remove(args).await,
+        PackCommand::Remove(args) => remove::remove(args).await,
         PackCommand::Outdated(args) => update::outdated(args).await,
         PackCommand::Update(args) => update::update(args).await,
-        PackCommand::Prune(args) => prune(args),
+        PackCommand::Prune(args) => cache::prune(args),
         PackCommand::Scenario(PackScenarioCommand::Run(args)) => scenario::run(args).await,
         PackCommand::Scenario(PackScenarioCommand::Init(args)) => scenario::init_pack(args).await,
         PackCommand::Scenario(PackScenarioCommand::Seed(args)) => scenario::seed(args).await,
@@ -233,78 +235,26 @@ fn set_distribution_permissions(file: &std::fs::File) -> Result<()> {
     Ok(())
 }
 
-fn write_cache_marker(root: &std::path::Path) -> Result<()> {
-    let marker = root.join(CACHE_MARKER);
-    if marker.exists() {
-        return Ok(());
-    }
-    let staged = tempfile::NamedTempFile::new_in(root)?;
-    set_distribution_permissions(staged.as_file())?;
-    match staged.persist_noclobber(&marker) {
-        Ok(_) => Ok(()),
-        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
-        Err(error) => Err(error.error.into()),
-    }
-}
-
-fn cache_lock(parent: &std::path::Path) -> Result<std::fs::File> {
-    std::fs::create_dir_all(parent)?;
-    Ok(std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(parent.join(CACHE_LOCK))?)
-}
-
-fn prune_stale_asset_cache(
-    parent: &std::path::Path,
-    current: &std::path::Path,
-) -> Result<Vec<String>> {
-    let mut removed = Vec::new();
-    for entry in std::fs::read_dir(parent)? {
-        let entry = entry?;
-        let root = entry.path();
-        if root == current || !root.is_dir() {
-            continue;
-        }
-        let Some(name) = root.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if name.len() != 64 || !name.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            continue;
-        }
-        if !root.join(CACHE_MARKER).is_file() {
-            continue;
-        }
-        // `runs/` is operator-owned history. The caller holds the exclusive
-        // per-pack lock, so no Gents scenario can acquire or use any sibling
-        // cache root while the probe and removal occur.
-        if !root.join("runs").exists() {
-            std::fs::remove_dir_all(&root)
-                .with_context(|| format!("pruning stale pack cache {}", root.display()))?;
-            removed.push(name.to_owned());
-        }
-    }
-    removed.sort();
-    Ok(removed)
-}
-
 fn materialize_cached_pack(
     home: &std::path::Path,
     pack: &PackSource,
-) -> Result<(std::path::PathBuf, std::fs::File)> {
+) -> Result<(std::path::PathBuf, gents::file_lock::FileLock)> {
     let root = asset_cache_root(home, pack)?;
-    let lock = cache_lock(root.parent().context("pack cache parent")?)?;
-    lock.lock_shared()?;
+    let lock = gents::file_lock::FileLock::shared(cache::cache_lock(
+        root.parent().context("pack cache parent")?,
+    )?)?;
     materialize(pack, &root)?;
-    write_cache_marker(&root)?;
+    cache::write_cache_marker(&root)?;
     Ok((root, lock))
 }
 
 pub(crate) fn materialize_named_pack(
     name: &str,
-) -> Result<(std::path::PathBuf, std::fs::File, gents::pack::PackManifest)> {
+) -> Result<(
+    std::path::PathBuf,
+    gents::file_lock::FileLock,
+    gents::pack::PackManifest,
+)> {
     let pack = resolve_pack(name)?;
     let manifest = pack.manifest.clone();
     let (root, lease) = materialize_cached_pack(
@@ -321,7 +271,7 @@ pub(crate) struct SubjectPack {
     pub(crate) source: gents::eval::runner::CellSource,
     pub(crate) manifest: PackManifest,
     /// The shared lock on a materialized cache entry, held while it is read.
-    _lease: Option<std::fs::File>,
+    _lease: Option<gents::file_lock::FileLock>,
 }
 
 impl SubjectPack {
@@ -412,56 +362,7 @@ fn names_a_directory(spec: &str) -> bool {
 }
 
 fn asset_cache_root(home: &std::path::Path, pack: &PackSource) -> Result<std::path::PathBuf> {
-    // Keep the shared sha256: digest representation out of filesystem names.
-    let hash = pack
-        .digest()
-        .strip_prefix("sha256:")
-        .context("invalid pack digest")?;
-    Ok(home
-        .join(gents::home::PACKS_DIR_NAME)
-        .join(&pack.manifest().name)
-        .join(hash))
-}
-
-fn prune(args: PackPruneArgs) -> Result<()> {
-    let pack = PackSource::Bundled(resolve_pack(&args.package)?);
-    anyhow::ensure!(
-        pack.manifest().metadata.kind == PackKind::Assets
-            || pack
-                .manifest()
-                .metadata
-                .assets
-                .iter()
-                .any(|asset| asset == "experiment.json"),
-        "pack {} has no materialized asset cache",
-        pack.manifest().name
-    );
-    let home = crate::home_state::resolve_home_dir(args.home.as_deref());
-    let current = asset_cache_root(&home, &pack)?;
-    let parent = current.parent().context("pack cache parent")?;
-    if !parent.is_dir() {
-        return crate::print_json(&json!({
-            "pack": pack.manifest().name,
-            "current_digest": pack.digest(),
-            "removed_digests": [],
-        }));
-    }
-    let lock = cache_lock(parent)?;
-    match lock.try_lock() {
-        Ok(()) => {}
-        Err(std::fs::TryLockError::WouldBlock) => {
-            anyhow::bail!("pack cache is in use; stop active pack operations and retry")
-        }
-        Err(std::fs::TryLockError::Error(error)) => {
-            return Err(error).context("locking pack cache for pruning")
-        }
-    }
-    let removed = prune_stale_asset_cache(parent, &current)?;
-    crate::print_json(&json!({
-        "pack": pack.manifest().name,
-        "current_digest": pack.digest(),
-        "removed_digests": removed,
-    }))
+    cache::asset_cache_root_for(home, &pack.manifest().name, pack.digest())
 }
 
 /// Admits and stores every plugin a pack ships in `home`'s plugin store, the
@@ -586,41 +487,6 @@ pub(crate) async fn resolve_scope_owner(
     )
     .await?;
     Ok((access, owner))
-}
-
-/// `gents pack remove`: deletes what the pack's install created, keeping
-/// documents it adopted, and forgets the install.
-pub(crate) async fn remove(args: PackRemoveArgs) -> Result<()> {
-    let (namespace, name) = split_namespace(&args.package);
-    let (access, owner) = resolve_scope_owner(&args.scope).await?;
-    let report = gents::pack::remove_pack(
-        &access,
-        &owner,
-        &format!("{namespace}/{name}"),
-        args.drift.policy(),
-    )
-    .await?;
-    if !report.plugins.is_empty() {
-        let home = crate::home_state::resolve_home_dir(args.scope.home.as_deref());
-        let pack_coordinate = format!("{namespace}/{name}");
-        for plugin in &report.plugins {
-            // A registry or local pack install may have replaced the name
-            // with its own plugin since; only a record this pack's own
-            // coordinate still owns is removed.
-            if super::plugin::store::owns_plugin_record(
-                &home,
-                namespace,
-                &plugin.name,
-                &pack_coordinate,
-                &plugin.digest,
-            ) {
-                super::plugin::store::remove_record(&home, namespace, &plugin.name)?;
-            }
-        }
-    }
-    crate::print_json(
-        &json!({ "pack": format!("{namespace}/{name}"), "owner": owner, "removed": report }),
-    )
 }
 
 pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
@@ -795,6 +661,15 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     "would_write": false,
                 }));
             }
+            let dependency_coordinates: Vec<String> = dependencies
+                .iter()
+                .map(|dependency| {
+                    format!(
+                        "{}/{}",
+                        dependency.manifest.metadata.namespace, dependency.manifest.name
+                    )
+                })
+                .collect();
             for dependency in dependencies {
                 let dependency_slots = dependency_inference[&dependency.manifest.name]
                     .bindings
@@ -815,6 +690,7 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                         registry: args.registry.clone(),
                         drift: args.drift,
                         grant_authority: args.grant_authority,
+                        explicit: false,
                     },
                     false,
                 )
@@ -846,7 +722,7 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                 .inspect_err(|_| rollback_pack_plugin_records(&plugin_home, &rollback))?;
                 (installed, rollback)
             };
-            let identity = gents::pack::PackIdentity::new(
+            let mut identity = gents::pack::PackIdentity::new(
                 pack.manifest(),
                 pack.digest(),
                 plugins
@@ -857,6 +733,7 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     })
                     .collect(),
             );
+            identity.dependencies = dependency_coordinates;
             // From here, a document-transaction failure must not leave the
             // plugins installed above orphaned: the operator sees this pack
             // install as one atomic step, so its filesystem side effect is
@@ -921,19 +798,50 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
             // content-addressed plugin store `gents plugin install` uses:
             // a plugin that arrived bundled in a pack is just as runnable
             // by name (`gents plugin run <name>`) as one installed on its
-            // own.
+            // own. A failure past this point (the record write) must not
+            // leave the plugins installed above orphaned.
+            let rollback = snapshot_pack_plugin_records(&home, pack.manifest());
             let installed_plugins = install_pack_plugins(
                 &home,
                 pack.manifest(),
                 pack.digest(),
                 |path| pack.asset(path),
                 args.grant_authority,
-            )?;
+            )
+            .inspect_err(|_| rollback_pack_plugin_records(&home, &rollback))?;
+            let record = gents::pack::HomePackInstall {
+                coordinate: format!(
+                    "{}/{}",
+                    pack.manifest().metadata.namespace,
+                    pack.manifest().name
+                ),
+                version: pack.manifest().version.clone(),
+                digest: pack.digest().to_owned(),
+                kind: pack.manifest().metadata.kind.clone(),
+                assets: root
+                    .strip_prefix(&home)
+                    .unwrap_or(root.as_path())
+                    .to_string_lossy()
+                    .into_owned(),
+                plugins: installed_plugins
+                    .iter()
+                    .map(|plugin| gents::pack::InstalledPackPlugin {
+                        name: plugin.name.clone(),
+                        digest: plugin.digest.clone(),
+                    })
+                    .collect(),
+                installed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            };
+            if let Err(error) = gents::pack::write_home_install(&home, &record) {
+                rollback_pack_plugin_records(&home, &rollback);
+                return Err(error);
+            }
             crate::print_json(&json!({
                 "pack": pack.manifest().name,
                 "digest": pack.digest(),
                 "installed_assets": root,
                 "installed_plugins": installed_plugins,
+                "record": record,
                 "source": pack.label(),
             }))
         }
@@ -1032,37 +940,11 @@ mod tests {
     }
 
     #[test]
-    fn cache_pruning_removes_only_owned_versions_without_runs() {
-        let parent = tempfile::tempdir().unwrap();
-        let current = parent.path().join("a".repeat(64));
-        let stale = parent.path().join("b".repeat(64));
-        let active = parent.path().join("c".repeat(64));
-        let unowned = parent.path().join("d".repeat(64));
-        for root in [&current, &stale, &active, &unowned] {
-            std::fs::create_dir_all(root).unwrap();
-        }
-        write_cache_marker(&current).unwrap();
-        write_cache_marker(&stale).unwrap();
-        write_cache_marker(&active).unwrap();
-        std::fs::create_dir(active.join("runs")).unwrap();
-
-        prune_stale_asset_cache(parent.path(), &current).unwrap();
-
-        assert!(current.exists());
-        assert!(!stale.exists());
-        assert!(active.exists(), "run artifacts retain their source version");
-        assert!(
-            unowned.exists(),
-            "directories without our marker are not ours"
-        );
-    }
-
-    #[test]
     fn scenario_cache_lease_excludes_pruning() {
         let home = tempfile::tempdir().unwrap();
         let pack = PackSource::Bundled(resolve_pack("pipeline").unwrap());
         let (root, lease) = materialize_cached_pack(home.path(), &pack).unwrap();
-        let exclusive = cache_lock(root.parent().unwrap()).unwrap();
+        let exclusive = cache::cache_lock(root.parent().unwrap()).unwrap();
         assert!(exclusive.try_lock().is_err());
         drop(lease);
         // A process another test forks inherits every open descriptor until it
@@ -1077,19 +959,6 @@ mod tests {
             std::thread::sleep(backoff);
             backoff = (backoff * 2).min(std::time::Duration::from_millis(100));
         }
-    }
-
-    #[test]
-    fn graph_pack_prune_rejects_without_creating_a_cache_tree() {
-        let parent = tempfile::tempdir().unwrap();
-        let home = parent.path().join("missing-home");
-        let error = prune(PackPruneArgs {
-            package: "code_review".to_owned(),
-            home: Some(home.clone()),
-        })
-        .unwrap_err();
-        assert!(error.to_string().contains("no materialized asset cache"));
-        assert!(!home.exists());
     }
 
     #[test]

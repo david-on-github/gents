@@ -863,10 +863,11 @@ async fn initialize_runtime_home(
     // The retired per-type writers each validated their document before
     // publication; the shared plan owner normalizes but does not re-validate,
     // so init preserves that guarantee explicitly before staging.
-    for error in tools
+    if let Some(error) = tools
         .validation_violations()
         .into_iter()
         .chain(wide_open_tools_document(agent_did).validation_violations())
+        .next()
     {
         return Err(anyhow::anyhow!("seeded Tools document: {error}"));
     }

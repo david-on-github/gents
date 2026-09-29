@@ -602,7 +602,7 @@ pub(crate) enum PackCommand {
     Graph(PackGraphArgs),
     /// Install a pack into an initialized node; never seed or prune.
     Install(PackInstallArgs),
-    /// Remove what a pack install created, and its record.
+    /// Remove an installed pack of any kind, and whatever nothing else still uses.
     Remove(PackRemoveArgs),
     /// List installed packs with a newer version in the registry.
     Outdated(PackOutdatedArgs),
@@ -924,6 +924,12 @@ pub(crate) struct PackInstallArgs {
         help = "Allow the files, network or environment the pack's plugins ask for"
     )]
     pub(crate) grant_authority: bool,
+    /// Whether this install was requested for its own sake, rather than only
+    /// as a documents pack's dependency; never a CLI flag, so a parsed
+    /// top-level `gents pack install` always reads `true`, and code
+    /// constructing a dependency's own args sets `false`.
+    #[arg(skip = true)]
+    pub(crate) explicit: bool,
 }
 
 /// What to do with pack documents someone edited since the pack wrote them.
@@ -949,7 +955,9 @@ impl PackDriftArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct PackRemoveArgs {
-    #[arg(help = "The installed pack, as name or namespace/name")]
+    #[arg(
+        help = "The installed pack, as name or namespace/name; asset and plugins packs need only --home"
+    )]
     pub(crate) package: String,
     #[command(flatten)]
     pub(crate) scope: GraphScopeArgs,

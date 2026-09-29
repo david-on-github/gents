@@ -96,9 +96,31 @@ source consistency checks, not a separate runtime compatibility version.
   (`replay_associations_json`) have new collection baselines, and a desktop or
   runtime on the previous collections is refused as schema skew. Update desktop
   and paired runtimes together. Existing stores are not migrated (#1603).
+- `PackInstallation` gains `required_by` and `explicit`, for `gents pack
+  remove` dependency bookkeeping. New collection baseline: a store created by
+  an earlier build fails to open with "unknown lineage ... export/import
+  required". Export and re-import to carry installed packs forward.
 
 ### Added
 
+- `gents pack remove` works for every pack kind, not only documents packs
+  (#2067). Assets and plugins packs record their install at
+  `<home>/pack-installs/<namespace>/<name>.json` and remove locally, with no
+  node and no initialized home required; removal releases the cache version
+  (keeping one with run history, reported under `retained`), the plugin
+  records the pack still owns, and plugin bytes and imported archives nothing
+  else references. Graph packs are recorded in the same `PackInstallation`
+  used for documents packs and removed in one transaction: every revision the
+  package produced (including retired ones) and their derived triggers are
+  deleted, refused while any of the package's graphs has a run that has not
+  reached a terminal status. Package SDL schemas cannot be dropped and are
+  reported under `retained`, never silently kept without saying so. A
+  documents pack's graph dependency is now tracked: installing it adds the
+  dependent's coordinate to the dependency's `required_by`; removing the
+  dependent releases its last non-explicit claim, and removing a still-
+  required dependency directly is refused, naming the dependents. `gents
+  pack outdated`/`update` and the desktop installed-pack list now include
+  file-recorded installs alongside node-recorded ones.
 - Document-triggered Tasks support durable `queued_serial` delivery, atomic
   fire deduplication, restart catch-up and delivery after re-enabling a trigger
   (#2041). Delivery follows receiving-node arrival order, including replicated
@@ -203,6 +225,10 @@ source consistency checks, not a separate runtime compatibility version.
   `gents config apply`, the self-config tool and pack installs. An accepted type
   is not a promise that the count arrives: a `DateTime` field takes the string
   but rejects every all-digit value (#1735).
+- The self-config `pack` tool's `remove` operation (`PackInstaller`) removes an
+  installed graph package instead of refusing every call; it releases no
+  plugin bytes or archive, since that tool has no filesystem home (use
+  `gents pack remove` for that).
 
 ### Fixed
 

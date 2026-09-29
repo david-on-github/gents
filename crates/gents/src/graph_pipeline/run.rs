@@ -17,7 +17,6 @@ use crate::graphql::{
     document_composite_version, escape_graphql_string, validate_collection_identifier,
 };
 
-use super::runtime::graph_trigger_id;
 use super::{
     graph_run_terminal_decision, verify_graph_plan_digest, GraphPlan, PlannedResult,
     ResultCardinality,
@@ -149,9 +148,14 @@ pub struct GraphRunView {
     pub failure_evidence: Option<Value>,
 }
 
+/// A run in one of these statuses is done and will never change again.
+/// Shared by `is_terminal` and `gents pack remove`'s unfinished-run check,
+/// so the two cannot disagree about what "done" means.
+pub(crate) const GRAPH_RUN_TERMINAL_STATUSES: [&str; 3] = ["succeeded", "failed", "cancelled"];
+
 impl GraphRunView {
     pub fn is_terminal(&self) -> bool {
-        matches!(self.status.as_str(), "succeeded" | "failed" | "cancelled")
+        GRAPH_RUN_TERMINAL_STATUSES.contains(&self.status.as_str())
     }
 
     fn successful_result_refs(&self) -> Vec<GraphResultRef> {
@@ -278,27 +282,10 @@ async fn load_plan(
 }
 
 fn planned_trigger_nodes(plan: &GraphPlan) -> Result<BTreeMap<String, String>> {
-    let mut nodes_by_trigger = BTreeMap::new();
-    for entry in &plan.entries {
-        let route = format!(
-            "entry:{}:{}:{}",
-            entry.name, entry.to.node_id, entry.to.port
-        );
-        nodes_by_trigger.insert(
-            graph_trigger_id(&plan.digest, &route)?,
-            entry.to.node_id.clone(),
-        );
-    }
-    for (index, edge) in plan.edges.iter().enumerate() {
-        let route = format!(
-            "edge:{index}:{}:{}:{}:{}",
-            edge.from.node_id, edge.from.port, edge.to.node_id, edge.to.port
-        );
-        nodes_by_trigger.insert(
-            graph_trigger_id(&plan.digest, &route)?,
-            edge.to.node_id.clone(),
-        );
-    }
+    let nodes_by_trigger: BTreeMap<String, String> = super::routes::planned_routes(plan)?
+        .into_iter()
+        .map(|route| (route.id, route.node_id.to_owned()))
+        .collect();
     if nodes_by_trigger.is_empty() {
         anyhow::bail!("pinned graph plan has no materialized trigger routes");
     }

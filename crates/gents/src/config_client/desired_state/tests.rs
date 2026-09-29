@@ -313,6 +313,77 @@ async fn ambiguous_scope_aborts_transaction_including_prior_staged_writes() -> R
     Ok(())
 }
 
+#[tokio::test]
+async fn read_records_pages_across_batches_and_omits_missing_ids() -> Result<()> {
+    let node = Arc::new(EmbeddedNode::builder().build().await?);
+    register_config_schemas(&node).await?;
+    let access = ConfigAccess::Local(node.clone());
+    let owner = "did:key:owner";
+    let ids = ["a", "b", "c", "d", "e"];
+    for id in ids {
+        apply(&access, vec![document(backend(owner, id))]).await?;
+    }
+    let records = access
+        .transact("test.read_records.paged", |txn| {
+            Box::pin(async move {
+                // A page size smaller than the ID set forces several pages,
+                // exercising the pager rather than a single query.
+                read_records_with_page_size(
+                    txn,
+                    Collection::InferenceBackend,
+                    owner,
+                    &["a", "b", "c", "d", "e", "missing"],
+                    2,
+                )
+                .await
+            })
+        })
+        .await?;
+    assert_eq!(records.len(), ids.len(), "{records:?}");
+    assert!(!records.contains_key("missing"));
+    for id in ids {
+        let (doc_id, value) = records.get(id).expect("present");
+        assert_eq!(value["backend_id"], id);
+        assert!(!doc_id.is_empty());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn read_records_rejects_duplicate_live_documents_naming_them() -> Result<()> {
+    let node = Arc::new(EmbeddedNode::builder().build().await?);
+    register_config_schemas_dropping_unique_indexes(&node, &[Collection::InferenceBackend]).await?;
+    let access = ConfigAccess::Local(node.clone());
+    let owner = "did:key:owner";
+    apply(&access, vec![document(backend(owner, "dup"))]).await?;
+    let mut duplicate = backend(owner, "dup");
+    duplicate["name"] = "Second".into();
+    access
+        .write(
+            "test.read_records.duplicate",
+            &format!(
+                "mutation {{ create_InferenceBackend(input:{}){{_docID}} }}",
+                gents_protocol::graphql::graphql_input_literal(&duplicate)?
+            ),
+        )
+        .await?;
+    let error = access
+        .transact("test.read_records.duplicate.read", |txn| {
+            Box::pin(async move {
+                read_records(txn, Collection::InferenceBackend, owner, &["dup"]).await
+            })
+        })
+        .await
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("multiple live InferenceBackend documents"),
+        "{message}"
+    );
+    assert!(message.contains("dup"), "{message}");
+    Ok(())
+}
+
 fn config(collection: Collection, value: Value) -> DesiredStateApplyDocument {
     DesiredStateApplyDocument {
         collection,
@@ -1745,4 +1816,23 @@ async fn replacement_judges_the_count_field_of_the_event_source_update_payload()
     assert_eq!(published_count_field_of(&node, "replaced").await?, "amount");
     node.shutdown().await;
     Ok(())
+}
+
+#[test]
+fn schema_targets_name_exactly_the_collections_the_checks_introspect() {
+    let owner = "did:key:z6MkTargets";
+    let correlated = event_source_document(owner, "a", "EventProbeSource", Some("batch"), None);
+    assert_eq!(
+        schema_targets(Collection::EventSource, &correlated.add),
+        vec!["EventProbeSource".to_owned()]
+    );
+    let plain = event_source_document(owner, "b", "EventProbeSource", None, None);
+    assert!(schema_targets(Collection::EventSource, &plain.add).is_empty());
+    assert!(schema_targets(Collection::EventSource, &json!({"not": "a source"})).is_empty());
+    let surface = obligation_surface(owner, "s", "EventProbeSource", "total");
+    assert_eq!(
+        schema_targets(Collection::DatastoreToolSurface, &surface.add),
+        vec!["EventProbeSource".to_owned()]
+    );
+    assert!(schema_targets(Collection::Task, &surface.add).is_empty());
 }

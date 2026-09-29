@@ -115,3 +115,24 @@ fn only_a_sha256_digest_names_a_stored_pack() {
     assert!(store.path("mailbox").is_err());
     assert!(store.path("sha256:../../etc").is_err());
 }
+
+#[test]
+fn release_removes_the_archive_and_its_unpacked_copy() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (bytes, header) = mailbox_pack();
+    let stored = store.import(bytes.as_slice(), None).unwrap();
+    store.open(&header.digest).unwrap();
+    let unpacked = store
+        .unpacked_root()
+        .join(crate::pack_archive::digest_hex(&header.digest).unwrap());
+    assert!(stored.path.is_file());
+    assert!(unpacked.is_dir());
+
+    assert!(store.release(&header.digest).unwrap());
+    assert!(!stored.path.exists());
+    assert!(!unpacked.exists());
+
+    // Idempotent: nothing left to release the second time.
+    assert!(!store.release(&header.digest).unwrap());
+}

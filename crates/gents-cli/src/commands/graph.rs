@@ -7,7 +7,7 @@ use gents::config_client::ConfigAccess;
 use gents::graph_package::{
     default_bundled_graph_package_install_bindings, install_bundled_graph_package,
     load_bundled_graph_package, load_installed_package_plan, prepare_code_review_run,
-    GraphPackageInstallBindings,
+    GraphInstallRecord, GraphPackageInstallBindings,
 };
 use gents::graph_pipeline::{
     activate_graph_revision_with_access, load_active_graph_plan_with_access,
@@ -105,8 +105,9 @@ pub(crate) async fn install_with_access(
     }
     let distribution = gents::pack::resolve_pack(&args.package)?;
     let plugin_home = crate::home_state::resolve_home_dir(args.scope.home.as_deref());
-    let plugin_rollback = if distribution.manifest.metadata.plugins.is_empty() {
-        Vec::new()
+    let (plugin_rollback, installed_plugins) = if distribution.manifest.metadata.plugins.is_empty()
+    {
+        (Vec::new(), Vec::new())
     } else {
         // A plugin runs on the host of the node that calls it; a remote
         // node's host is not reachable from here.
@@ -118,7 +119,7 @@ pub(crate) async fn install_with_access(
         );
         let rollback =
             super::pack::snapshot_pack_plugin_records(&plugin_home, &distribution.manifest);
-        super::pack::install_pack_plugins(
+        let installed = super::pack::install_pack_plugins(
             &plugin_home,
             &distribution.manifest,
             &distribution.digest,
@@ -126,12 +127,24 @@ pub(crate) async fn install_with_access(
             args.grant_authority,
         )
         .inspect_err(|_| super::pack::rollback_pack_plugin_records(&plugin_home, &rollback))?;
-        rollback
+        (rollback, installed)
+    };
+    let record = GraphInstallRecord {
+        plugins: installed_plugins
+            .iter()
+            .map(|plugin| gents::pack::InstalledPackPlugin {
+                name: plugin.name.clone(),
+                digest: plugin.digest.clone(),
+            })
+            .collect(),
+        explicit: args.explicit,
     };
     // A failure past this point must not leave the plugins installed above
     // orphaned: undo them along with the graph install that never landed.
     let receipt =
-        match install_bundled_graph_package(access, owner_did, &args.package, &bindings).await {
+        match install_bundled_graph_package(access, owner_did, &args.package, &bindings, &record)
+            .await
+        {
             Ok(receipt) => receipt,
             Err(error) => {
                 super::pack::rollback_pack_plugin_records(&plugin_home, &plugin_rollback);

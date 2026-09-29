@@ -86,6 +86,7 @@ pub async fn install(
         registry,
         drift: drift(edited),
         grant_authority,
+        explicit: true,
     }))
     .await
 }

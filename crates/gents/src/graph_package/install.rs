@@ -30,6 +30,19 @@ impl GraphPackageInstallBindings {
     }
 }
 
+/// What an install/reinstall of a graph package puts in its
+/// `PackInstallation` record: the plugins it just installed, and whether it
+/// was requested for its own sake (a direct `gents pack install`) rather
+/// than only as a documents pack's dependency. Every graph installer (the
+/// CLI, a documents pack's graph dependency, and the `self_config` tool)
+/// goes through this one type so the record is written the same way from
+/// every call site.
+#[derive(Clone, Debug, Default)]
+pub struct GraphInstallRecord {
+    pub plugins: Vec<crate::pack::InstalledPackPlugin>,
+    pub explicit: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct GraphPackageInstallReceipt {
     pub package_name: String,
@@ -466,8 +479,9 @@ pub async fn install_bundled_graph_package(
     actor_did: &str,
     package_name: &str,
     options: &GraphPackageInstallBindings,
+    record: &GraphInstallRecord,
 ) -> Result<GraphPackageInstallReceipt> {
-    install_package(access, actor_did, package_name, options, None).await
+    install_package(access, actor_did, package_name, options, None, record).await
 }
 
 pub async fn install_bundled_graph_package_for_graph(
@@ -476,8 +490,17 @@ pub async fn install_bundled_graph_package_for_graph(
     package_name: &str,
     options: &GraphPackageInstallBindings,
     graph_id: &str,
+    record: &GraphInstallRecord,
 ) -> Result<GraphPackageInstallReceipt> {
-    install_package(access, actor_did, package_name, options, Some(graph_id)).await
+    install_package(
+        access,
+        actor_did,
+        package_name,
+        options,
+        Some(graph_id),
+        record,
+    )
+    .await
 }
 
 async fn install_package(
@@ -486,9 +509,10 @@ async fn install_package(
     package_name: &str,
     options: &GraphPackageInstallBindings,
     graph_id: Option<&str>,
+    record: &GraphInstallRecord,
 ) -> Result<GraphPackageInstallReceipt> {
     let package = load_bundled_graph_package(package_name, &options.scope())?;
-    install_loaded_graph_package(access, actor_did, &package, options, graph_id).await
+    install_loaded_graph_package(access, actor_did, &package, options, graph_id, record).await
 }
 
 /// Publication owner shared by named distributions and already resolved packs.
@@ -498,13 +522,15 @@ pub(crate) async fn install_loaded_graph_package(
     package: &LoadedGraphPackage,
     options: &GraphPackageInstallBindings,
     graph_id: Option<&str>,
+    record: &GraphInstallRecord,
 ) -> Result<GraphPackageInstallReceipt> {
     anyhow::ensure!(
         actor_did == options.agent_did,
         "package install requires graph owner authority"
     );
     let prepared = prepare_package(access, package, options, graph_id).await?;
-    commit_prepared_graph_package_install(access, &options.agent_did, package, &prepared).await
+    commit_prepared_graph_package_install(access, &options.agent_did, package, &prepared, record)
+        .await
 }
 
 /// Publishes package schemas and writes the desired state and graph
@@ -520,12 +546,22 @@ async fn commit_prepared_graph_package_install(
     owner: &str,
     package: &LoadedGraphPackage,
     prepared: &PreparedGraphPackageInstall,
+    record: &GraphInstallRecord,
 ) -> Result<GraphPackageInstallReceipt> {
     ensure_package_schemas(access, package).await?;
     let desired = &prepared.desired_state;
     let plan = &prepared.plan;
     let graph_id = &plan.graph_id;
     let expected_active_revision_digest = &prepared.expected_active_revision_digest;
+    let identity = crate::pack::PackIdentity::new(
+        &package.manifest,
+        &package.package_digest,
+        record.plugins.clone(),
+    );
+    // A retryable transaction's closure runs as `Fn`, so it can only ever
+    // move a `Copy` capture; hand the `async move` block a reference rather
+    // than the owned identity itself.
+    let identity = &identity;
     access
         .transact("graph_package.install", |txn| {
             Box::pin(async move {
@@ -547,8 +583,29 @@ async fn commit_prepared_graph_package_install(
                 let effective =
                     crate::pack::prepare_pack_plan_in_txn(txn, desired.documents(), true).await?;
                 crate::config_client::validate_desired_state_plan(txn, &effective).await?;
+                // Observed before any write, so the install's own record can
+                // tell a document it created from one that already existed.
+                let observed = crate::pack::observe_graph_install_in_txn(
+                    txn,
+                    owner,
+                    &identity.coordinate,
+                    desired.documents(),
+                    graph_id,
+                )
+                .await?;
                 apply_desired_state_plan(txn, &effective).await?;
                 crate::graph_pipeline::materialize_graph_revision_in_txn(txn, owner, plan).await?;
+                crate::pack::record_graph_install_in_txn(
+                    txn,
+                    owner,
+                    identity,
+                    record.explicit,
+                    observed,
+                    desired.documents(),
+                    graph_id,
+                    &package.manifest.name,
+                )
+                .await?;
                 Ok(())
             })
         })

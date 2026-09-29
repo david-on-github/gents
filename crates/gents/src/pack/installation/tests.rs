@@ -33,6 +33,7 @@ fn identity(version: &str) -> PackIdentity {
             name: "echo".into(),
             digest: format!("sha256:{}", "e".repeat(64)),
         }],
+        dependencies: Vec::new(),
     }
 }
 
@@ -100,9 +101,9 @@ async fn install_then_remove_leaves_no_pack_documents_and_keeps_adopted_ones() {
     let removed = remove_pack(&access, OWNER, "acme/demo", DriftPolicy::Refuse)
         .await
         .unwrap();
-    assert_eq!(removed.removed, vec!["Tools/alpha"]);
+    assert_eq!(removed.documents.removed, vec!["Tools/alpha"]);
     assert_eq!(
-        removed.plugins,
+        removed.documents.plugins,
         identity("1").plugins,
         "removal releases what install stored"
     );
@@ -286,5 +287,248 @@ async fn list_installed_packs_fails_loudly_on_a_malformed_record() {
     assert!(
         format!("{error:#}").contains("malformed version field"),
         "{error:#}"
+    );
+}
+
+// --- Dependency bookkeeping (design C) ---------------------------------
+
+async fn dependency_fixture() -> (
+    Arc<defra_node::EmbeddedNode>,
+    ConfigAccess,
+    crate::graph_package::GraphPackageInstallBindings,
+) {
+    let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
+    crate::ensure_runtime_schemas(&node).await.unwrap();
+    crate::document_config::ensure_agent_principal(&node, OWNER)
+        .await
+        .unwrap();
+    for profile in ["claude", "glm", "grok"] {
+        crate::test_support::install_test_behavior(&node, OWNER, profile).await;
+    }
+    let options = crate::graph_package::GraphPackageInstallBindings {
+        agent_did: OWNER.into(),
+        inference_slots: std::collections::BTreeMap::from([
+            ("coordinator".into(), "claude:inference".into()),
+            ("worker".into(), "glm:inference".into()),
+            ("verifier".into(), "grok:inference".into()),
+        ]),
+    };
+    let access = ConfigAccess::Local(node.clone());
+    (node, access, options)
+}
+
+fn demo_identity(dependencies: Vec<String>) -> PackIdentity {
+    PackIdentity {
+        coordinate: "acme/demo".into(),
+        version: "1".into(),
+        digest: format!("sha256:{}", "d".repeat(64)),
+        plugins: vec![],
+        dependencies,
+    }
+}
+
+async fn activate(access: &ConfigAccess, graph_id: &str, digest: &str) {
+    crate::graph_pipeline::activate_graph_revision_with_access(
+        access, OWNER, graph_id, digest, None,
+    )
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_dependency_is_released_with_its_last_non_explicit_dependent() {
+    let (_node, access, options) = dependency_fixture().await;
+    let receipt = crate::test_support::install_test_graph_package_explicit(
+        &access,
+        OWNER,
+        "code_review",
+        &options,
+        false,
+    )
+    .await
+    .unwrap();
+    activate(&access, &receipt.graph_id, &receipt.revision_digest).await;
+
+    super::super::install_pack_documents(
+        &access,
+        OWNER,
+        &demo_identity(vec!["gents/code_review".into()]),
+        &config(&[("alpha", "Alpha")]),
+        DriftPolicy::Refuse,
+    )
+    .await
+    .unwrap();
+
+    // Removing the dependency directly is refused, naming the dependent.
+    let error = remove_pack(&access, OWNER, "gents/code_review", DriftPolicy::Refuse)
+        .await
+        .unwrap_err();
+    assert!(format!("{error:#}").contains("acme/demo"), "{error:#}");
+
+    // Removing the dependent releases its last non-explicit claim too.
+    let report = remove_pack(&access, OWNER, "acme/demo", DriftPolicy::Refuse)
+        .await
+        .unwrap();
+    assert_eq!(report.dependencies.len(), 1);
+    assert_eq!(report.dependencies[0].pack, "gents/code_review");
+    assert!(report.dependencies[0]
+        .documents
+        .removed
+        .iter()
+        .any(|name| name.starts_with("GraphDefinition/")));
+
+    let remaining = access
+        .execute("{ PackInstallation { coordinate } }")
+        .await
+        .unwrap();
+    assert_eq!(remaining["data"]["PackInstallation"], json!([]));
+}
+
+#[tokio::test]
+async fn an_explicit_dependency_survives_its_dependent() {
+    let (_node, access, options) = dependency_fixture().await;
+    let receipt =
+        crate::test_support::install_test_graph_package(&access, OWNER, "code_review", &options)
+            .await
+            .unwrap();
+    activate(&access, &receipt.graph_id, &receipt.revision_digest).await;
+
+    super::super::install_pack_documents(
+        &access,
+        OWNER,
+        &demo_identity(vec!["gents/code_review".into()]),
+        &config(&[("alpha", "Alpha")]),
+        DriftPolicy::Refuse,
+    )
+    .await
+    .unwrap();
+
+    let report = remove_pack(&access, OWNER, "acme/demo", DriftPolicy::Refuse)
+        .await
+        .unwrap();
+    assert!(
+        report.dependencies.is_empty(),
+        "an explicit install is never auto-released"
+    );
+
+    let remaining = access
+        .execute("{ PackInstallation { coordinate required_by } }")
+        .await
+        .unwrap();
+    let rows = remaining["data"]["PackInstallation"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["coordinate"], "gents/code_review");
+    assert_eq!(rows[0]["required_by"], Value::Null);
+
+    // Still removable directly now that nothing requires it.
+    remove_pack(&access, OWNER, "gents/code_review", DriftPolicy::Refuse)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn an_upgrade_that_drops_a_dependency_releases_its_claim() {
+    let (_node, access, options) = dependency_fixture().await;
+    let receipt = crate::test_support::install_test_graph_package_explicit(
+        &access,
+        OWNER,
+        "code_review",
+        &options,
+        false,
+    )
+    .await
+    .unwrap();
+    activate(&access, &receipt.graph_id, &receipt.revision_digest).await;
+
+    super::super::install_pack_documents(
+        &access,
+        OWNER,
+        &demo_identity(vec!["gents/code_review".into()]),
+        &config(&[("alpha", "Alpha")]),
+        DriftPolicy::Refuse,
+    )
+    .await
+    .unwrap();
+    let after_first = access
+        .execute("{ PackInstallation { coordinate required_by } }")
+        .await
+        .unwrap();
+    let rows = after_first["data"]["PackInstallation"].as_array().unwrap();
+    let code_review = rows
+        .iter()
+        .find(|row| row["coordinate"] == "gents/code_review")
+        .unwrap();
+    assert_eq!(code_review["required_by"], json!(["acme/demo"]));
+
+    // An upgrade of acme/demo that no longer depends on code_review.
+    super::super::install_pack_documents(
+        &access,
+        OWNER,
+        &demo_identity(vec![]),
+        &config(&[("alpha", "Alpha 2")]),
+        DriftPolicy::Refuse,
+    )
+    .await
+    .unwrap();
+
+    let after_upgrade = access
+        .execute("{ PackInstallation { coordinate required_by } }")
+        .await
+        .unwrap();
+    let rows = after_upgrade["data"]["PackInstallation"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !rows
+            .iter()
+            .any(|row| row["coordinate"] == "gents/code_review"),
+        "the dropped, non-explicit dependency is released outright (its own graph \
+         documents removed), the same as `gents pack remove` releases a dependency \
+         whose last dependent is removed; a dangling required_by is not enough: {rows:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_legacy_record_without_dependency_fields_reads_as_explicit() {
+    let (_node, access, options) = dependency_fixture().await;
+    let receipt = crate::test_support::install_test_graph_package_explicit(
+        &access,
+        OWNER,
+        "code_review",
+        &options,
+        false,
+    )
+    .await
+    .unwrap();
+    activate(&access, &receipt.graph_id, &receipt.revision_digest).await;
+
+    // Simulate a record written before `explicit` existed.
+    let doc_id = installation_doc_id(&access).await;
+    corrupt_installation_field(&access, &doc_id, "explicit", Value::Null).await;
+
+    super::super::install_pack_documents(
+        &access,
+        OWNER,
+        &demo_identity(vec!["gents/code_review".into()]),
+        &config(&[("alpha", "Alpha")]),
+        DriftPolicy::Refuse,
+    )
+    .await
+    .unwrap();
+    remove_pack(&access, OWNER, "acme/demo", DriftPolicy::Refuse)
+        .await
+        .unwrap();
+
+    // required_by is now empty, but a legacy `explicit: null` reads as
+    // `true`, so the dependency is never auto-released.
+    let remaining = access
+        .execute("{ PackInstallation { coordinate } }")
+        .await
+        .unwrap();
+    let rows = remaining["data"]["PackInstallation"].as_array().unwrap();
+    assert!(
+        rows.iter()
+            .any(|row| row["coordinate"] == "gents/code_review"),
+        "a legacy record with no explicit field must never be auto-released: {rows:?}"
     );
 }

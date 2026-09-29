@@ -20,6 +20,6 @@ pub use install::{
     default_bundled_graph_package_install_bindings, install_bundled_graph_package,
     install_bundled_graph_package_for_graph, load_installed_package_plan,
     prepare_bundled_graph_package_install, prepare_bundled_graph_package_install_for_graph,
-    GraphPackageInstallBindings, GraphPackageInstallReceipt,
+    GraphInstallRecord, GraphPackageInstallBindings, GraphPackageInstallReceipt,
 };
 pub use run_adapter::{prepare_code_review_run, PreparedGraphRun};
