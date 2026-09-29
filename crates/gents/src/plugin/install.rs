@@ -1,9 +1,9 @@
 //! Installing a pack's plugins into the home's plugin store.
 //!
-//! Moved here from `gents-cli` (D5's home-for-`self_config`, so a graph
-//! install driven by `self_config` can install a pack's plugins itself,
-//! rather than asking the CLI to do it). The CLI's own `commands::pack` and
-//! `commands::plugin` modules keep thin callers that forward here.
+//! Lives in the runtime crate, not `gents-cli`, so a graph install driven
+//! by `self_config` can install a pack's plugins itself without going
+//! through the CLI. `gents-cli`'s `commands::pack` module keeps a thin
+//! caller that forwards here.
 
 use std::path::Path;
 
