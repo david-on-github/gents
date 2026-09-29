@@ -98,15 +98,12 @@ pub fn default_data_dir(home_dir: &Path) -> PathBuf {
 /// The exclusive lock a process holds on a data directory while it has the
 /// store open. The OS releases it when the holder exits, however it exits.
 ///
-/// The lock is a `flock` on the lock file's open file description, which a
-/// child forked while the lock is held shares until it execs (the descriptor
-/// is close-on-exec). Dropping a `StoreLock` therefore releases the store
-/// only once every such child has exec'd or exited: a process that forks (a
-/// `pre_exec` spawn, or glibc's vfork-based spawn from another thread) may
-/// still exclude a new holder briefly after the drop.
+/// Dropping it unlocks the store at once, even while a child forked from
+/// this process still shares the lock file's descriptor (see
+/// [`crate::file_lock`]).
 #[derive(Debug)]
 pub struct StoreLock {
-    _file: fs::File,
+    _lock: crate::file_lock::FileLock,
     path: PathBuf,
 }
 
@@ -225,7 +222,10 @@ fn lock_path(home_dir: &Path, path: PathBuf) -> Result<StoreLock> {
     file.set_len(0)?;
     file.rewind()?;
     writeln!(file, "{}", std::process::id())?;
-    Ok(StoreLock { _file: file, path })
+    Ok(StoreLock {
+        _lock: crate::file_lock::FileLock::adopt(file),
+        path,
+    })
 }
 
 /// The default identity key path under a gents home, for the named agent.
