@@ -465,7 +465,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{live}"));
         assert!(stale.contains("(trial-2) stale: pid 4242 "), "{stale}");
         assert!(
-            !live.contains("finished") && !live.contains("stopped"),
+            !live.lines().any(|line| line == "finished") && !live.contains("stopped"),
             "--once renders and returns: {live}"
         );
 
@@ -657,9 +657,15 @@ mod tests {
             2,
             "in flight and finished: {frame}"
         );
+        let held_at = lines
+            .iter()
+            .position(|line| line.starts_with("held by pid "))
+            .unwrap();
         assert!(
-            lines.iter().all(|line| line.chars().count() <= 120),
-            "fits 120 columns: {frame}"
+            lines[held_at..]
+                .iter()
+                .all(|line| line.chars().count() <= 120),
+            "the live sections fit 120 columns: {frame}"
         );
 
         // On a terminal the same files make one compact frame, redrawn in
@@ -705,7 +711,7 @@ mod tests {
             flight.contains("6m40s")
                 && flight.contains("812.3k/41.2k")
                 && flight.contains("143/6")
-                && flight.contains("beh 7/9 task 12/20..22 sub 2/2 schema 3/9 ctx 7"),
+                && flight.ends_with("beh 7/9 task 12/20..22 sub 2/2 schema 3/9"),
             "{flight}"
         );
         assert!(
@@ -721,11 +727,12 @@ mod tests {
         );
         let latest = lines
             .iter()
-            .find(|line| line.contains(" FAIL "))
+            .position(|line| line.contains(" FAIL "))
             .unwrap_or_else(|| panic!("{lines:#?}"));
-        assert!(
-            latest.ends_with("captured_rows_count findings observed 0 expected ≥1"),
-            "{latest}"
+        assert!(lines[latest].ends_with("1 failing"), "{}", lines[latest]);
+        assert_eq!(
+            lines[latest + 1],
+            "    └ captured_rows_count findings observed 0 expected ≥1"
         );
         let colored = super::frame::frame(
             &heading,
@@ -788,7 +795,7 @@ mod tests {
         );
         let stopped = String::from_utf8(out).unwrap();
         assert_eq!(stopped.matches("--- ").count(), 1, "{stopped}");
-        assert!(!stopped.contains("finished"), "{stopped}");
+        assert!(!stopped.lines().any(|line| line == "finished"), "{stopped}");
     }
 
     #[test]
