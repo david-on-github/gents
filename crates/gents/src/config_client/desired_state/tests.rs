@@ -1836,3 +1836,94 @@ fn schema_targets_name_exactly_the_collections_the_checks_introspect() {
     );
     assert!(schema_targets(Collection::Task, &surface.add).is_empty());
 }
+
+/// #2094: an `emit_outcome` Task delivered a collection without `handoff_id`
+/// could never admit a fire, so publication refuses the delivery whichever of
+/// its Trigger, Task or EventSource the plan writes.
+#[tokio::test]
+async fn outcome_delivery_requires_a_string_handoff_id_on_its_source_collection() -> Result<()> {
+    let node = Arc::new(EmbeddedNode::builder().build().await?);
+    crate::ensure_runtime_schemas(&node).await?;
+    node.add_schema(
+        "type PlainPing { message: String } type HandoffPing { handoff_id: String message: String } type NumberedPing { handoff_id: Int }",
+    )
+    .await?;
+    let access = ConfigAccess::Local(node.clone());
+    let owner = "did:key:outcome-owner";
+    apply(&access, cyclic_configuration(owner)).await?;
+    let source = |collection: &str| {
+        config(
+            Collection::EventSource,
+            json!({"agent_did":owner,"event_source_id":"watcher","source_collection":collection,"event_kind":"created"}),
+        )
+    };
+    let task = |emit_outcome: bool| {
+        config(
+            Collection::Task,
+            json!({"agent_did":owner,"task_id":"handle","behavior_id":"behavior","prompt_template":"Handle {{ doc.message }}","emit_outcome":emit_outcome}),
+        )
+    };
+    let trigger = config(
+        Collection::Trigger,
+        json!({"agent_did":owner,"trigger_id":"on-ping","task_id":"handle","source":{"kind":"event","event_source_id":"watcher"},"concurrency":"parallel"}),
+    );
+    let triggers = || async {
+        let rows = node.execute("{ Trigger { trigger_id } }").await;
+        assert!(!rows.has_errors());
+        rows.data.unwrap()["Trigger"].as_array().unwrap().len()
+    };
+
+    let refused = apply(
+        &access,
+        vec![source("PlainPing"), task(true), trigger.clone()],
+    )
+    .await
+    .err()
+    .expect("a collection without handoff_id can never carry an outcome");
+    let diagnostic = format!("{refused:#}");
+    assert!(
+        diagnostic.contains("Trigger on-ping delivers PlainPing to Task handle")
+            && diagnostic.contains("has no handoff_id field"),
+        "{diagnostic}"
+    );
+    let mistyped = apply(
+        &access,
+        vec![source("NumberedPing"), task(true), trigger.clone()],
+    )
+    .await
+    .err()
+    .expect("a non-String handoff_id is not a handoff identity");
+    assert!(
+        format!("{mistyped:#}").contains("NumberedPing.handoff_id is Int, not String"),
+        "{mistyped:#}"
+    );
+    assert_eq!(triggers().await, 0, "a refused delivery publishes nothing");
+
+    apply(
+        &access,
+        vec![source("PlainPing"), task(false), trigger.clone()],
+    )
+    .await?;
+    let opted_in = apply(&access, vec![task(true)])
+        .await
+        .err()
+        .expect("opting the retained delivery's Task in is the same refusal");
+    assert!(
+        format!("{opted_in:#}").contains("has no handoff_id field"),
+        "{opted_in:#}"
+    );
+    apply(&access, vec![source("HandoffPing"), task(true)]).await?;
+    let rerouted = apply(&access, vec![source("PlainPing")])
+        .await
+        .err()
+        .expect("rerouting the retained opted-in delivery is the same refusal");
+    assert!(
+        format!("{rerouted:#}").contains("has no handoff_id field"),
+        "{rerouted:#}"
+    );
+    // A collection the schema does not have yet cannot refute the delivery.
+    apply(&access, vec![source("LaterPing")]).await?;
+    assert_eq!(triggers().await, 1);
+    node.shutdown().await;
+    Ok(())
+}

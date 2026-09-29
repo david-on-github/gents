@@ -224,14 +224,16 @@ impl TriggerSource for ScheduleSource {
                                     last_error: None,
                                     fire_count_delta: None,
                                 },
-                                FireResult::Errored { error } => TriggerRuntimeUpdate {
-                                    last_fired_source_doc_id: None,
-                                    next_run_at: None,
-                                    last_attempt_at: Some(last_attempt_at.clone()),
-                                    last_status: Some("error".to_string()),
-                                    last_error: Some(error.clone()),
-                                    fire_count_delta: None,
-                                },
+                                FireResult::Errored { error } | FireResult::Rejected { error } => {
+                                    TriggerRuntimeUpdate {
+                                        last_fired_source_doc_id: None,
+                                        next_run_at: None,
+                                        last_attempt_at: Some(last_attempt_at.clone()),
+                                        last_status: Some("error".to_string()),
+                                        last_error: Some(error.clone()),
+                                        fire_count_delta: None,
+                                    }
+                                }
                             };
                             tokio::spawn(async move {
                                 if let Err(e) = update_trigger_runtime_fields(

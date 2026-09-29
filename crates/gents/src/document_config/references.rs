@@ -126,6 +126,41 @@ impl ConfigReferences {
             .collect()
     }
 
+    /// Event Triggers of this snapshot whose Task opts into `emit_outcome`,
+    /// as `(trigger_id, task_id, event_source_id, source_collection)`.
+    /// Unresolvable links are the reference validator's diagnostic and are
+    /// omitted here.
+    pub(crate) fn outcome_event_deliveries(&self) -> Vec<(String, String, String, String)> {
+        self.documents
+            .iter()
+            .filter(|((collection, _), _)| *collection == Collection::Trigger)
+            .filter_map(|(_, value)| {
+                let trigger: Trigger = decode(value).ok()?;
+                let TriggerSource::Event { event_source_id } = &trigger.source else {
+                    return None;
+                };
+                let task: Task = decode(
+                    self.documents
+                        .get(&(Collection::Task, trigger.task_id.clone()))?,
+                )
+                .ok()?;
+                let source: EventSource = decode(
+                    self.documents
+                        .get(&(Collection::EventSource, event_source_id.clone()))?,
+                )
+                .ok()?;
+                task.emit_outcome.then(|| {
+                    (
+                        trigger.trigger_id.clone(),
+                        task.task_id.clone(),
+                        event_source_id.clone(),
+                        source.source_collection,
+                    )
+                })
+            })
+            .collect()
+    }
+
     /// Validate the full retained candidate, including unchanged inbound links.
     /// Membership checks permit cycles and impose no collection ordering.
     pub fn validate(&self) -> Result<()> {

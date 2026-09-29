@@ -161,6 +161,10 @@ struct DeliveryBuild {
 pub struct EventSource {
     durable_checkpoint: Option<durable::PendingCheckpoint>,
     durable_ready: bool,
+    /// Per-trigger arrivals whose last fire was not acknowledged; see
+    /// [`durable::ParkedArrival`].
+    parked_arrivals: HashMap<String, durable::ParkedArrival>,
+    last_refusal_scan: Option<Instant>,
     durable_after_trigger: Option<String>,
     runtime_observer: Option<Arc<dyn crate::agent::RuntimeSnapshotObserver>>,
     snapshot_rx: watch::Receiver<Arc<ActiveRuntimeSnapshot>>,
@@ -200,6 +204,7 @@ pub struct EventSource {
     /// interval is stored on the source so a busy stream of `next_fire()` calls
     /// does not reset the cadence.
     rescan_tick: tokio::time::Interval,
+    rescan_interval: Duration,
 }
 
 /// Per-source-collection schema cache.
@@ -333,6 +338,8 @@ impl EventSource {
             collection_id_to_name: HashMap::new(),
             durable_checkpoint: None,
             durable_ready: true,
+            parked_arrivals: HashMap::new(),
+            last_refusal_scan: None,
             durable_after_trigger: None,
             seen_docs: HashMap::new(),
             partially_seen_triggers: HashMap::new(),
@@ -349,6 +356,7 @@ impl EventSource {
             #[cfg(test)]
             group_membership_queries: AtomicUsize::new(0),
             rescan_tick: event_source_rescan_tick(EVENT_SOURCE_RESCAN_INTERVAL),
+            rescan_interval: EVENT_SOURCE_RESCAN_INTERVAL,
         }
     }
 
@@ -363,6 +371,9 @@ impl EventSource {
     #[doc(hidden)]
     pub fn with_rescan_interval(mut self, interval: Duration) -> Self {
         self.rescan_tick = event_source_rescan_tick(interval);
+        if !interval.is_zero() {
+            self.rescan_interval = interval;
+        }
         self
     }
 
@@ -382,6 +393,13 @@ impl EventSource {
         let mut v: Vec<String> = self.desired_collections.iter().cloned().collect();
         v.sort();
         v
+    }
+
+    /// Lose every buffered and future notification until the source
+    /// resubscribes on its next rescan tick. Test-only.
+    #[cfg(test)]
+    pub(crate) fn drop_subscription(&mut self) {
+        self.subscription = None;
     }
 
     #[cfg(test)]
@@ -935,6 +953,17 @@ impl EventSource {
         collection: &str,
         source_doc_id: &str,
     ) -> anyhow::Result<serde_json::Value> {
+        self.read_source_doc(collection, source_doc_id)
+            .await?
+            .with_context(|| format!("source doc {source_doc_id} not found in {collection}"))
+    }
+
+    /// The hydrated source document, or `None` when this reader sees no row.
+    pub(super) async fn read_source_doc(
+        &self,
+        collection: &str,
+        source_doc_id: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
         // `fields_for` validates this same binding and `?`-propagates before
         // the query below is built, so it is the one gate for both sites.
         let fields = self
@@ -968,14 +997,7 @@ impl EventSource {
                 collection
             );
         };
-        let Some(row) = rows.first() else {
-            anyhow::bail!(
-                "source doc {} not found in {} (empty rows)",
-                source_doc_id,
-                collection
-            );
-        };
-        Ok(row.clone())
+        Ok(rows.first().cloned())
     }
 
     fn trigger_context_for_doc(
@@ -1588,7 +1610,8 @@ impl EventSource {
                 crate::trigger_engine::FireResult::Skipped { reason } => {
                     ("skipped", Some(reason.clone()), None)
                 }
-                crate::trigger_engine::FireResult::Errored { error } => {
+                crate::trigger_engine::FireResult::Errored { error }
+                | crate::trigger_engine::FireResult::Rejected { error } => {
                     ("error", Some(error.clone()), None)
                 }
             };
@@ -2022,6 +2045,8 @@ impl TriggerSource for EventSource {
                 if !self.desired_collections.contains(&collection_name) {
                     continue;
                 }
+                self.release_parked_document(&collection_name, &doc_id)
+                    .await;
                 if self
                     .subscription_seed_failures
                     .contains_key(&collection_name)

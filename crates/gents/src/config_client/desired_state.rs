@@ -371,7 +371,56 @@ pub(crate) async fn validate_desired_state_plan(
                 .map(|((collection, _), value)| (collection, value)),
         )?;
         references.validate()?;
+        validate_outcome_source_fields(txn, plan, owner, &references, &mut introspected).await?;
         validate_advertised_profiles(txn, plan, owner, &references).await?;
+    }
+    Ok(())
+}
+
+/// A `FireOutcome` is itself a handoff document: its `source_handoff_id` is
+/// copied from the delivered document's `handoff_id`, and fire admission
+/// refuses an opted-in delivery whose document has none. A Trigger that
+/// delivers a collection without a `String` `handoff_id` field to an
+/// `emit_outcome` Task could therefore never admit a fire, so publication
+/// refuses it. Only deliveries whose Trigger, Task or EventSource this plan
+/// writes are checked, and a collection the schema does not have yet cannot
+/// refute the document; admission still refuses each document without a
+/// `handoff_id` value.
+async fn validate_outcome_source_fields(
+    txn: &ConfigApplyTxn<'_>,
+    plan: &DesiredStateApplyPlan,
+    owner: &str,
+    references: &crate::ConfigReferences,
+    introspected: &mut IntrospectedFields,
+) -> Result<()> {
+    let mut written = BTreeSet::new();
+    for document in plan.documents() {
+        let (document_owner, id) = document_identity(document.collection, &document.add)?;
+        if document_owner == owner {
+            written.insert((document.collection, id.to_owned()));
+        }
+    }
+    for (trigger_id, task_id, event_source_id, collection) in references.outcome_event_deliveries()
+    {
+        if !written.contains(&(Collection::Trigger, trigger_id.clone()))
+            && !written.contains(&(Collection::Task, task_id.clone()))
+            && !written.contains(&(Collection::EventSource, event_source_id.clone()))
+        {
+            continue;
+        }
+        let Some(fields) = declared_fields(txn, &collection, introspected).await? else {
+            continue;
+        };
+        match fields.get("handoff_id") {
+            Some(declared) if declared.named_type() == "String" => {}
+            Some(declared) => anyhow::bail!(
+                "Trigger {trigger_id} delivers {collection} to Task {task_id}, which sets emit_outcome, but {collection}.handoff_id is {}, not String; a FireOutcome copies the delivered document's handoff_id",
+                declared.type_name
+            ),
+            None => anyhow::bail!(
+                "Trigger {trigger_id} delivers {collection} to Task {task_id}, which sets emit_outcome, but {collection} has no handoff_id field; a FireOutcome copies the delivered document's handoff_id, so every fire would be refused. Set emit_outcome false or deliver a handoff collection with a String handoff_id"
+            ),
+        }
     }
     Ok(())
 }
@@ -1090,6 +1139,7 @@ pub async fn apply_desired_state_plan(
     for owner in owners {
         let references = crate::ConfigReferences::load_in_txn(txn, owner).await?;
         references.validate()?;
+        validate_outcome_source_fields(txn, plan, owner, &references, &mut introspected).await?;
         validate_advertised_profiles(txn, plan, owner, &references).await?;
     }
     Ok(counts)

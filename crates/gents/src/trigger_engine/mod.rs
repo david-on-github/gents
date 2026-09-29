@@ -147,6 +147,15 @@ pub enum FireResult {
     Errored {
         error: String,
     },
+    /// The intent cannot be admitted under the configuration snapshot it was
+    /// dispatched against: rendering or preparing it failed on the Task,
+    /// Trigger or source document alone, so repeating it under the same
+    /// snapshot repeats the refusal. Nothing was admitted; an event arrival
+    /// stays pending (`EventDelivery.Durable.unadmitted_prefix_match_cannot_advance`)
+    /// and its source retries it only after the configuration changes.
+    Rejected {
+        error: String,
+    },
 }
 
 pub trait TriggerSource: Send + Sync {
@@ -296,7 +305,7 @@ impl TriggerEngine {
     #[allow(dead_code)]
     async fn dispatch(&self, intent: FireIntent) -> FireResult {
         if let Some(error) = intent.well_formed_error() {
-            let result = FireResult::Errored {
+            let result = FireResult::Rejected {
                 error: error.to_string(),
             };
             (intent.on_result)(result.clone());
@@ -398,7 +407,7 @@ impl TriggerEngine {
         let trigger_doc_id = match intent.trigger_kind {
             TriggerKind::Schedule => {
                 let Some(trigger_id) = intent.trigger_id.as_deref() else {
-                    let result = FireResult::Errored {
+                    let result = FireResult::Rejected {
                         error: "Schedule trigger missing trigger_id".to_string(),
                     };
                     (intent.on_result)(result.clone());
@@ -415,7 +424,7 @@ impl TriggerEngine {
             }
             TriggerKind::Event => {
                 let Some(trigger_id) = intent.trigger_id.as_deref() else {
-                    let result = FireResult::Errored {
+                    let result = FireResult::Rejected {
                         error: "Event trigger missing trigger_id".to_string(),
                     };
                     (intent.on_result)(result.clone());
@@ -466,7 +475,7 @@ impl TriggerEngine {
                 intent.concurrency,
                 unsupported_session,
             ) {
-                let result = FireResult::Errored {
+                let result = FireResult::Rejected {
                     error: error.to_string(),
                 };
                 (intent.on_result)(result.clone());
@@ -514,6 +523,15 @@ impl TriggerEngine {
             node: node_scope,
             ctx: ctx_scope,
         };
+        if intent.trigger_kind == TriggerKind::Event
+            && snapshot.behavior(&intent.task.behavior_id).is_none()
+        {
+            let result = FireResult::Errored {
+                error: "prepare fire: trigger behavior unavailable".into(),
+            };
+            (intent.on_result)(result.clone());
+            return result;
+        }
         let mut delivery = if intent.trigger_kind == TriggerKind::Event {
             let prepared = (|| -> anyhow::Result<gents_protocol::trigger_delivery::TriggerFire> {
                 let trigger = snapshot
@@ -633,7 +651,7 @@ impl TriggerEngine {
                     })
                 }
                 Err(error) => {
-                    let result = FireResult::Errored {
+                    let result = FireResult::Rejected {
                         error: format!("prepare fire: {error}"),
                     };
                     (intent.on_result)(result.clone());
@@ -651,7 +669,7 @@ impl TriggerEngine {
         ) {
             Ok(rendered) => rendered,
             Err(error) => {
-                let result = FireResult::Errored { error };
+                let result = FireResult::Rejected { error };
                 (intent.on_result)(result.clone());
                 return result;
             }

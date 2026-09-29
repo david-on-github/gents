@@ -149,7 +149,7 @@ async fn dispatch_rejects_goal_budget_without_an_objective() {
         .await;
 
     match result {
-        FireResult::Errored { error } => {
+        FireResult::Rejected { error } => {
             assert!(error.contains("requires a goal objective"), "{error}")
         }
         other => panic!("expected invalid goal configuration error, got {other:?}"),
@@ -598,8 +598,8 @@ async fn dispatch_latest_only_lock_blocks_second_supersede_until_first_materiali
 async fn dispatch_errors_and_skips_materialize_on_template_render_failure() {
     // Template references `event.missing_field`, but the intent's event_vars
     // has no such key. With strict-undefined semantics, rendering must fail,
-    // and dispatch must return Errored (with a "template:" prefix), skip the
-    // materializer entirely, and invoke `on_result` with the same Errored
+    // and dispatch must return Rejected (with a "template:" prefix), skip the
+    // materializer entirely, and invoke `on_result` with the same Rejected
     // value so the upstream source can write back `last_status = "error"`.
     let task = resolved_task("{{ event.missing_field }}");
     let schedule = resolved_schedule("sched-1", task.clone());
@@ -632,11 +632,11 @@ async fn dispatch_errors_and_skips_materialize_on_template_render_failure() {
     let result = engine.dispatch(intent).await;
 
     match result.clone() {
-        FireResult::Errored { error } => assert!(
+        FireResult::Rejected { error } => assert!(
             error.starts_with("template:"),
             "expected template-render error, got: {error}"
         ),
-        other => panic!("expected Errored, got {other:?}"),
+        other => panic!("expected Rejected, got {other:?}"),
     }
 
     assert!(
@@ -650,11 +650,11 @@ async fn dispatch_errors_and_skips_materialize_on_template_render_failure() {
 
     let captured = result_captured.lock().unwrap().clone();
     match captured {
-        Some(FireResult::Errored { error }) => assert!(
+        Some(FireResult::Rejected { error }) => assert!(
             error.starts_with("template:"),
-            "expected callback Errored with template prefix, got: {error}"
+            "expected callback Rejected with template prefix, got: {error}"
         ),
-        other => panic!("expected callback Errored, got {other:?}"),
+        other => panic!("expected callback Rejected, got {other:?}"),
     }
 }
 

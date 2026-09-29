@@ -232,6 +232,17 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Fixed
 
+- A document trigger whose fire cannot be admitted no longer re-fires the same
+  document without bound (#2094). A refused fire, such as an `emit_outcome`
+  Task delivered a document without `handoff_id` or a template that fails to
+  render, is recorded once on the Trigger (`last_status: error`,
+  `last_error`), and the document stays pending until the configuration
+  changes, the document is updated or the runtime restarts; it is never
+  skipped. Transient admission
+  failures retry on a capped backoff. Publication now refuses a Trigger that
+  delivers a collection without a `String` `handoff_id` field to an
+  `emit_outcome` Task.
+
 - `max_request_hop` bounds call depth again, not the number of calls (#2065).
   An `agent_new`/`agent_message` result returned to the calling session keeps
   that session's hop; only the outward call climbs. A caller can make any
