@@ -183,6 +183,25 @@ fn discovery_error_is_auth(error: &anyhow::Error) -> bool {
     })
 }
 
+/// Connection of a stored backend. Principal OAuth resolves the invoking
+/// principal's OAuthCredential separately; it has no shared key here.
+fn stored_backend_target(backend: &InferenceBackend) -> Result<ResolvedBackendConfig> {
+    backend.validate()?;
+    Ok(ResolvedBackendConfig {
+        provider_kind: backend.provider_kind,
+        openai_wire_api: backend.openai_wire_api,
+        endpoint: backend.endpoint.clone(),
+        api_key: match &backend.auth {
+            BackendAuth::PrincipalOAuth => None,
+            auth => auth.resolve_api_key()?,
+        },
+        api_key_env_var: match &backend.auth {
+            BackendAuth::Environment { variable } => Some(variable.clone()),
+            _ => None,
+        },
+    })
+}
+
 async fn resolve_backend_discovery_target(
     args: &BackendDiscoverModelsArgs,
 ) -> Result<(Option<InferenceBackend>, ResolvedBackendConfig)> {
@@ -214,17 +233,7 @@ async fn resolve_backend_discovery_target(
                 })
             })
             .await?;
-        backend.validate()?;
-        let target = ResolvedBackendConfig {
-            provider_kind: backend.provider_kind,
-            openai_wire_api: backend.openai_wire_api,
-            endpoint: backend.endpoint.clone(),
-            api_key: backend.auth.resolve_api_key()?,
-            api_key_env_var: match &backend.auth {
-                BackendAuth::Environment { variable } => Some(variable.clone()),
-                _ => None,
-            },
-        };
+        let target = stored_backend_target(&backend)?;
         return Ok((Some(backend), target));
     }
     let mut target = crate::resolve_helpers::resolve_backend_config_with_preset(
@@ -265,5 +274,22 @@ mod tests {
             value[field] = json!("invalid");
             assert!(backend_plan(&serde_json::to_vec(&value).unwrap()).is_err());
         }
+    }
+
+    #[test]
+    fn stored_subscription_backend_resolves_without_a_shared_key() {
+        let backend: InferenceBackend = serde_json::from_value(json!({
+            "agent_did": "did:key:owner", "backend_id": "claude", "name": "Claude",
+            "provider_kind": "ClaudeCliSubscription",
+            "endpoint": "https://api.anthropic.com/v1",
+            "auth": {"kind": "principal_oauth"},
+        }))
+        .unwrap();
+        let target = stored_backend_target(&backend).unwrap();
+        assert_eq!(
+            target.provider_kind,
+            BackendProviderKind::ClaudeCliSubscription
+        );
+        assert!(target.api_key.is_none() && target.api_key_env_var.is_none());
     }
 }
