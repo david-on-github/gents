@@ -551,6 +551,16 @@ pub fn compile_graph(
                 format!("entry {:?} is declared more than once", entry.name),
             );
         }
+        if let Some(schema) = entry.input_schema.as_ref() {
+            if let Err(error) = super::entry_input::validate_input_schema(schema) {
+                diagnostic(
+                    &mut diagnostics,
+                    DiagnosticCode::InvalidInputSchema,
+                    format!("{path}/input_schema"),
+                    format!("{error:#}"),
+                );
+            }
+        }
         let target_node = nodes.contains(entry.to.node_id.as_str());
         if !target_node {
             diagnostic(
