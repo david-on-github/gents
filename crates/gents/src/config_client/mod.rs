@@ -55,6 +55,7 @@ pub use common::{mint_recreate_identity, mint_recreate_identity_timestamp};
 #[cfg(test)]
 pub(crate) use desired_state::canonical_struct_fields;
 pub use desired_state::read_record as read_desired_state_record_in_txn;
+pub use desired_state::read_records as read_desired_state_records_in_txn;
 pub use desired_state::{
     apply_desired_state_plan, config_projection, desired_state_document_digest, stale_expectation,
     DesiredStateApplyCounts, DesiredStateApplyDocument, DesiredStateApplyPlan,

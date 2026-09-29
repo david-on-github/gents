@@ -65,20 +65,60 @@ impl CollectionSchema {
     }
 }
 
+/// The selection every introspection query asks of a `__type`.
+const TYPE_FIELDS: &str = "fields { name type { name kind ofType { name kind } } }";
+
 /// Build the `__type` introspection query for a collection. The name is
 /// validated as an identifier and escaped, so untrusted input cannot inject.
 pub fn introspection_query(collection: &str) -> Result<String> {
     validate_identifier(collection).map_err(|e| anyhow!("invalid collection name: {e}"))?;
     Ok(format!(
-        r#"{{ __type(name: "{name}") {{ fields {{ name type {{ name kind ofType {{ name kind }} }} }} }} }}"#,
+        r#"{{ __type(name: "{name}") {{ {TYPE_FIELDS} }} }}"#,
         name = escape_graphql_string(collection)
     ))
+}
+
+/// One query introspecting every collection in `collections`, aliased
+/// `c0`, `c1`, ... in order; [`parse_collection_schemas`] reads it back.
+/// DefraDB builds its whole introspection schema for every introspection
+/// query it executes, so asking once costs one build instead of one per
+/// collection.
+pub fn introspection_query_many(collections: &[&str]) -> Result<String> {
+    let mut query = String::from("{");
+    for (index, collection) in collections.iter().enumerate() {
+        validate_identifier(collection).map_err(|e| anyhow!("invalid collection name: {e}"))?;
+        query.push_str(&format!(
+            r#" c{index}: __type(name: "{name}") {{ {TYPE_FIELDS} }}"#,
+            name = escape_graphql_string(collection)
+        ));
+    }
+    query.push_str(" }");
+    Ok(query)
 }
 
 /// Parse the `data` of an introspection response into a [`CollectionSchema`].
 /// Returns `None` when the type does not exist (`__type` is `null`).
 pub fn parse_collection_schema(data: Option<&Value>) -> Option<CollectionSchema> {
-    let fields = data?.get("__type")?.get("fields")?.as_array()?;
+    parse_type(data?.get("__type")?)
+}
+
+/// Parse the response to [`introspection_query_many`] for `count`
+/// collections, in the order they were asked for; `None` for a collection
+/// the schema does not have.
+pub fn parse_collection_schemas(
+    data: Option<&Value>,
+    count: usize,
+) -> Vec<Option<CollectionSchema>> {
+    (0..count)
+        .map(|index| {
+            data.and_then(|data| data.get(format!("c{index}")))
+                .and_then(parse_type)
+        })
+        .collect()
+}
+
+fn parse_type(ty: &Value) -> Option<CollectionSchema> {
+    let fields = ty.get("fields")?.as_array()?;
     Some(CollectionSchema {
         fields: fields
             .iter()
@@ -291,6 +331,22 @@ mod tests {
             q.contains("ofType"),
             "a non-null field needs its inner type: {q}"
         );
+    }
+
+    #[test]
+    fn many_collections_are_introspected_in_one_aliased_query() {
+        let q = introspection_query_many(&["AgentToolCall", "Missing"]).unwrap();
+        assert!(q.contains(r#"c0: __type(name: "AgentToolCall")"#), "{q}");
+        assert!(q.contains(r#"c1: __type(name: "Missing")"#), "{q}");
+        assert!(introspection_query_many(&["X\") { } evil"]).is_err());
+        let data = json!({
+            "c0": { "fields": [ { "name": "status", "type": { "kind": "SCALAR", "name": "String" } } ] },
+            "c1": null
+        });
+        let parsed = parse_collection_schemas(Some(&data), 2);
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].as_ref().unwrap().fields[0].name, "status");
+        assert!(parsed[1].is_none());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //! complete retained reference set; callers own commit/discard.
 use super::{mint_recreate_identity, ConfigApplyTxn};
 use crate::defra_query::SchemaField;
-use crate::graphql::escape_graphql_string;
+use crate::graphql::{escape_graphql_string, graphql_string_list_literal};
 use crate::{Collection, DESIRED_STATE_APPLY_ORDER};
 use anyhow::{Context, Result};
 use gents_protocol::graphql::{extract_mutation_doc_id, graphql_rows_from_response};
@@ -161,28 +161,111 @@ fn reference_filter(collection: Collection, owner: &str, id: &str) -> Result<Str
     }
 }
 
+/// One query loads at most this many logical IDs, so a page's query size
+/// never scales with the plan being read.
+const READ_RECORDS_PAGE_SIZE: usize = 256;
+
 pub async fn read_record(
     txn: &ConfigApplyTxn<'_>,
     collection: Collection,
     owner: &str,
     id: &str,
 ) -> Result<Option<(String, Value)>> {
-    let filter = reference_filter(collection, owner, id)?;
+    Ok(read_records(txn, collection, owner, &[id])
+        .await?
+        .remove(id))
+}
+
+/// Batched form of [`read_record`]: one query per page of `ids` (bounded by
+/// [`READ_RECORDS_PAGE_SIZE`]) rather than one query per document. A missing
+/// ID is simply absent from the result map. Two live documents sharing an
+/// owner and ID still fail loudly, naming them, exactly as [`read_record`]
+/// does for a single ID.
+pub async fn read_records(
+    txn: &ConfigApplyTxn<'_>,
+    collection: Collection,
+    owner: &str,
+    ids: &[&str],
+) -> Result<BTreeMap<String, (String, Value)>> {
+    read_records_paged(txn, collection, owner, ids, READ_RECORDS_PAGE_SIZE).await
+}
+
+/// Test-only entry point exercising the pager at a page size smaller than
+/// [`READ_RECORDS_PAGE_SIZE`], so a multi-page read can be tested without a
+/// multi-hundred-document fixture.
+#[cfg(test)]
+pub(crate) async fn read_records_with_page_size(
+    txn: &ConfigApplyTxn<'_>,
+    collection: Collection,
+    owner: &str,
+    ids: &[&str],
+    page_size: usize,
+) -> Result<BTreeMap<String, (String, Value)>> {
+    read_records_paged(txn, collection, owner, ids, page_size).await
+}
+
+async fn read_records_paged(
+    txn: &ConfigApplyTxn<'_>,
+    collection: Collection,
+    owner: &str,
+    ids: &[&str],
+    page_size: usize,
+) -> Result<BTreeMap<String, (String, Value)>> {
+    let mut unique_ids = BTreeSet::new();
+    for id in ids {
+        anyhow::ensure!(
+            !owner.trim().is_empty() && !id.trim().is_empty(),
+            "configuration reference requires owner and ID"
+        );
+        if collection == Collection::AgentPrincipal {
+            anyhow::ensure!(*id == owner, "principal reference must match owner");
+        }
+        unique_ids.insert(*id);
+    }
+    let mut out = BTreeMap::new();
+    if unique_ids.is_empty() {
+        return Ok(out);
+    }
     let (fields, _) = config_projection(collection, None)?;
     let name = collection.graphql_type();
-    let response = txn
-        .execute(&format!(
-            "{{ {name}(filter: {filter}, limit: 2) {{ _docID {} }} }}",
-            fields.join(" ")
-        ))
-        .await?;
-    let mut rows = graphql_rows_from_response(&response, name);
-    anyhow::ensure!(
-        rows.len() <= 1,
-        "multiple live {name} documents share owner {owner:?} and ID {id:?}"
-    );
-    rows.pop()
-        .map(|mut row| {
+    let unique_field = collection.unique_field();
+    let ordered: Vec<&str> = unique_ids.into_iter().collect();
+    for page in ordered.chunks(page_size.max(1)) {
+        let filter = if collection == Collection::AgentPrincipal {
+            // The unique field IS `agent_did` here; an `_in` clause on it
+            // would duplicate the `_eq` key in the same filter object.
+            format!(
+                r#"{{ agent_did: {{ _eq: "{}" }} }}"#,
+                escape_graphql_string(owner)
+            )
+        } else {
+            format!(
+                r#"{{ agent_did: {{ _eq: "{}" }}, {unique_field}: {{ _in: {} }} }}"#,
+                escape_graphql_string(owner),
+                graphql_string_list_literal(page.iter().copied())
+            )
+        };
+        let response = txn
+            .execute(&format!(
+                "{{ {name}(filter: {filter}) {{ _docID {} }} }}",
+                fields.join(" ")
+            ))
+            .await?;
+        let mut by_id: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+        for row in graphql_rows_from_response(&response, name) {
+            let id = row
+                .get(unique_field)
+                .and_then(Value::as_str)
+                .context("configuration row missing logical ID")?
+                .to_owned();
+            by_id.entry(id).or_default().push(row);
+        }
+        for (id, mut rows) in by_id {
+            anyhow::ensure!(
+                rows.len() <= 1,
+                "multiple live {name} documents share owner {owner:?} and ID {id:?}"
+            );
+            let mut row = rows.pop().context("grouped configuration row is empty")?;
             let doc_id = row
                 .as_object_mut()
                 .context("configuration row must be an object")?
@@ -190,9 +273,10 @@ pub async fn read_record(
                 .and_then(|value| value.as_str().map(str::to_owned))
                 .context("configuration row missing physical ID")?;
             let (_, value) = config_projection(collection, Some(&row))?;
-            Ok((doc_id, value.context("canonical projection missing")?))
-        })
-        .transpose()
+            out.insert(id, (doc_id, value.context("canonical projection missing")?));
+        }
+    }
+    Ok(out)
 }
 
 pub(crate) async fn read_desired_state_document_in_txn(
@@ -245,6 +329,7 @@ pub(crate) async fn validate_desired_state_plan(
     }
     owners.extend(plan.removals().iter().map(|(_, owner, _)| owner.as_str()));
     let mut introspected = IntrospectedFields::new();
+    prefetch_declared_fields(txn, plan, &mut introspected).await?;
     for owner in owners {
         let retained = crate::ConfigReferences::load_in_txn(txn, owner).await?;
         let mut candidate: BTreeMap<_, _> = retained
@@ -337,6 +422,130 @@ async fn validate_advertised_profiles(
 /// schema does not have yet.
 type IntrospectedFields = BTreeMap<String, Option<BTreeMap<String, SchemaField>>>;
 
+/// Collections one introspection query asks about at most, so a plan's size
+/// never grows a single query without bound.
+const INTROSPECTION_PAGE: usize = 64;
+
+/// The correlation and expected-count fields `source` asks the schema about;
+/// both `None` means its validation needs no schema.
+fn event_source_schema_fields(
+    source: &crate::document_config::EventSource,
+) -> (Option<&str>, Option<&str>) {
+    let correlation = source
+        .correlation_field
+        .as_deref()
+        .map(str::trim)
+        .filter(|field| !field.is_empty());
+    let count_field = source
+        .group
+        .as_ref()
+        .and_then(|group| group.expected_count.as_ref())
+        .and_then(|count| match count {
+            crate::document_config::EventGroupCount::SourceField { source_field } => {
+                Some(source_field.as_str())
+            }
+            crate::document_config::EventGroupCount::Fixed(_) => None,
+        })
+        .map(str::trim)
+        .filter(|field| !field.is_empty());
+    (correlation, count_field)
+}
+
+/// Every create tool of the surface `candidate` whose output obligation names
+/// an expected-count field: `(tool_name, collection, field)`.
+fn obligation_count_fields(candidate: &Value) -> Result<Vec<(String, String, String)>> {
+    let entries = crate::document_config::deserialize_optional_surface_tools(
+        candidate.get("entries").cloned().unwrap_or(Value::Null),
+    )?;
+    Ok(entries
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|entry| {
+            let crate::document_config::SurfaceToolDecl::Create(decl) = entry else {
+                return None;
+            };
+            let field = decl
+                .output_obligation
+                .as_ref()
+                .and_then(|obligation| obligation.expected_count_field.clone())?;
+            Some((decl.tool_name.clone(), decl.collection.clone(), field))
+        })
+        .collect())
+}
+
+/// The collections the schema checks of a `collection` document would
+/// introspect for `candidate`. A payload that does not decode names none: the
+/// check that reads it reports that failure itself.
+fn schema_targets(collection: Collection, candidate: &Value) -> Vec<String> {
+    match collection {
+        Collection::EventSource => {
+            serde_json::from_value::<crate::document_config::EventSource>(candidate.clone())
+                .ok()
+                .filter(|source| event_source_schema_fields(source) != (None, None))
+                .map(|source| source.source_collection)
+                .into_iter()
+                .collect()
+        }
+        Collection::DatastoreToolSurface => obligation_count_fields(candidate)
+            .map(|fields| {
+                fields
+                    .into_iter()
+                    .map(|(_, collection, _)| collection)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => Vec::new(),
+    }
+}
+
+/// Introspects, a page of collections per query, every collection the schema
+/// checks of `plan` may read, so [`declared_fields`] answers each from
+/// `introspected`. Both payloads of a document are covered: which one is
+/// written depends on the row's presence, decided later in the transaction.
+async fn prefetch_declared_fields(
+    txn: &ConfigApplyTxn<'_>,
+    plan: &DesiredStateApplyPlan,
+    introspected: &mut IntrospectedFields,
+) -> Result<()> {
+    let wanted: Vec<String> = plan
+        .documents()
+        .iter()
+        .flat_map(|document| {
+            [&document.add, &document.update]
+                .into_iter()
+                .flat_map(|payload| schema_targets(document.collection, payload))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        // A name that is not an identifier is the structural owner's
+        // diagnostic; `declared_fields` reports no collection for it.
+        .filter(|collection| {
+            !introspected.contains_key(collection)
+                && crate::defra_query::schema::introspection_query(collection).is_ok()
+        })
+        .collect();
+    for page in wanted.chunks(INTROSPECTION_PAGE) {
+        let names: Vec<&str> = page.iter().map(String::as_str).collect();
+        let query = crate::defra_query::schema::introspection_query_many(&names)?;
+        let response = txn.execute(&query).await?;
+        let schemas =
+            crate::defra_query::schema::parse_collection_schemas(response.get("data"), names.len());
+        for (name, schema) in names.into_iter().zip(schemas) {
+            introspected.insert(
+                name.to_owned(),
+                schema.map(|schema| {
+                    schema
+                        .fields
+                        .into_iter()
+                        .map(|field| (field.name.clone(), field))
+                        .collect()
+                }),
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The declared fields of one collection, or `None` when introspection cannot
 /// see the collection. A malformed collection name is the structural owner's
 /// diagnostic, not an introspection failure, so it reports no collection
@@ -391,20 +600,8 @@ async fn validate_output_obligation_count_fields(
         .get("surface_id")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let entries = crate::document_config::deserialize_optional_surface_tools(
-        candidate.get("entries").cloned().unwrap_or(Value::Null),
-    )?;
-    for entry in entries.unwrap_or_default() {
-        let crate::document_config::SurfaceToolDecl::Create(decl) = entry else {
-            continue;
-        };
-        let Some(field) = decl
-            .output_obligation
-            .as_ref()
-            .and_then(|obligation| obligation.expected_count_field.as_deref())
-        else {
-            continue;
-        };
+    for (tool_name, collection, field) in obligation_count_fields(candidate)? {
+        let field = field.as_str();
         // Introspection cannot see a collection that does not exist yet,
         // and publishing a surface ahead of its schema is legitimate.
         // Nothing revalidates the obligation when that schema arrives, so a
@@ -412,7 +609,7 @@ async fn validate_output_obligation_count_fields(
         // that installs the target collection's own schema takes this path
         // in its preflight, because `ensure_package_schemas` runs after it;
         // only the publishing transaction sees the installed schema.
-        let Some(fields) = declared_fields(txn, &decl.collection, introspected).await? else {
+        let Some(fields) = declared_fields(txn, &collection, introspected).await? else {
             continue;
         };
         match fields.get(field) {
@@ -420,14 +617,14 @@ async fn validate_output_obligation_count_fields(
                 if crate::defra_write::can_hold_canonical_count(declared.named_type()) => {}
             Some(declared) => anyhow::bail!(
                 "DatastoreToolSurface {surface_id} tool {:?} output_obligation.expected_count_field {field:?} names a {} field of {}, which cannot carry the count; the runtime parses an integer or its canonical decimal spelling out of the call argument",
-                decl.tool_name,
+                tool_name,
                 declared.type_name,
-                decl.collection,
+                collection,
             ),
             None => anyhow::bail!(
                 "DatastoreToolSurface {surface_id} tool {:?} output_obligation.expected_count_field {field:?} does not exist on {}",
-                decl.tool_name,
-                decl.collection,
+                tool_name,
+                collection,
             ),
         }
     }
@@ -456,23 +653,7 @@ async fn validate_event_source_live_fields(
 ) -> Result<()> {
     let source: crate::document_config::EventSource = serde_json::from_value(candidate.clone())
         .context("decoding EventSource for live-field validation")?;
-    let correlation = source
-        .correlation_field
-        .as_deref()
-        .map(str::trim)
-        .filter(|field| !field.is_empty());
-    let count_field = source
-        .group
-        .as_ref()
-        .and_then(|group| group.expected_count.as_ref())
-        .and_then(|count| match count {
-            crate::document_config::EventGroupCount::SourceField { source_field } => {
-                Some(source_field.as_str())
-            }
-            crate::document_config::EventGroupCount::Fixed(_) => None,
-        })
-        .map(str::trim)
-        .filter(|field| !field.is_empty());
+    let (correlation, count_field) = event_source_schema_fields(&source);
     if correlation.is_none() && count_field.is_none() {
         return Ok(());
     }
@@ -807,6 +988,7 @@ pub async fn apply_desired_state_plan(
 ) -> Result<DesiredStateApplyCounts> {
     ensure_expectations_hold(txn, plan).await?;
     let mut introspected = IntrospectedFields::new();
+    prefetch_declared_fields(txn, plan, &mut introspected).await?;
     let mut counts = DesiredStateApplyCounts::default();
     for document in plan.documents() {
         let (owner, id) = document_identity(document.collection, &document.add)?;

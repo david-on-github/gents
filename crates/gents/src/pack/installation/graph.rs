@@ -32,6 +32,15 @@ use super::{key, PackIdentity, Record, RecordedDocument, Retained};
 /// names a handful of offending runs and says there may be more.
 const UNFINISHED_RUN_REPORT_LIMIT: usize = 8;
 
+/// A retained-run report is bounded the same way: it names a handful of runs
+/// pinned to a removed revision and reports the exact remaining total via a
+/// bounded `COUNT` rather than scanning the rest.
+const RETAINED_RUN_REPORT_LIMIT: usize = 20;
+
+/// Revisions are deleted in pages of this size, one mutation per page,
+/// instead of one mutation per row.
+const REVISION_DELETE_PAGE_SIZE: usize = 256;
+
 /// Whether `document` is owned by the graph runtime rather than authored by
 /// a pack.
 pub(super) fn is_graph_owned(document: &RecordedDocument) -> bool {
@@ -69,15 +78,22 @@ pub(crate) async fn observe_graph_install_in_txn(
     graph_id: &str,
 ) -> Result<ObservedGraphInstall> {
     let prior = super::read_record(txn, owner, coordinate).await?;
+    let desired_ids: Vec<(crate::Collection, &str)> = desired
+        .iter()
+        .map(|document| {
+            let id = document.add[document.collection.unique_field()]
+                .as_str()
+                .context("package document is missing its logical ID")?;
+            Ok((document.collection, id))
+        })
+        .collect::<Result<_>>()?;
+    let desired_live = super::live_digests(txn, owner, desired_ids).await?;
     let mut preexisting = BTreeSet::new();
     for document in desired {
         let id = document.add[document.collection.unique_field()]
             .as_str()
             .context("package document is missing its logical ID")?;
-        if super::live_digest(txn, document.collection, owner, id)
-            .await?
-            .is_some()
-        {
+        if desired_live.contains_key(&(document.collection, id.to_owned())) {
             preexisting.insert(key(document.collection.graphql_type(), id));
         }
     }
@@ -215,6 +231,17 @@ pub(crate) async fn record_graph_install_in_txn(
         },
     );
 
+    let desired_ids: Vec<(crate::Collection, &str)> = desired
+        .iter()
+        .map(|document| {
+            let id = document.add[document.collection.unique_field()]
+                .as_str()
+                .context("package document is missing its logical ID")?;
+            Ok((document.collection, id))
+        })
+        .collect::<Result<_>>()?;
+    let desired_live = super::live_digests(txn, owner, desired_ids).await?;
+
     for document in desired {
         let id = document.add[document.collection.unique_field()]
             .as_str()
@@ -224,8 +251,9 @@ pub(crate) async fn record_graph_install_in_txn(
             .get(&name)
             .map(|document| document.created)
             .unwrap_or(!preexisting.contains(&name));
-        let digest = super::live_digest(txn, document.collection, owner, id)
-            .await?
+        let digest = desired_live
+            .get(&(document.collection, id.to_owned()))
+            .cloned()
             .or_else(|| documents.get(&name).map(|document| document.digest.clone()))
             .unwrap_or_default();
         documents.insert(
@@ -319,6 +347,7 @@ pub(super) async fn delete_revisions_in_txn(
         .clone();
     let mut removed = Vec::new();
     let mut retained_schemas = BTreeSet::new();
+    let mut doc_ids = Vec::new();
     for row in &rows {
         let digest = row["digest"].as_str().context("revision missing digest")?;
         let doc_id = row["_docID"].as_str().context("revision missing _docID")?;
@@ -332,12 +361,16 @@ pub(super) async fn delete_revisions_in_txn(
                 retained_schemas.extend(schema.collection_contract_digests.keys().cloned());
             }
         }
+        doc_ids.push(doc_id.to_owned());
+        removed.push(key("GraphRevision", digest));
+    }
+    for page in doc_ids.chunks(REVISION_DELETE_PAGE_SIZE) {
+        let page_ids = graphql_string_list_literal(page.iter().map(String::as_str));
         txn.execute(&format!(
-            r#"mutation {{ delete_GraphRevision(filter: {{ _docID: {{ _eq: "{}" }} }}) {{ _docID }} }}"#,
-            escape_graphql_string(doc_id)
+            r#"mutation {{ delete_GraphRevision(filter: {{ owner_did: {{ _eq: "{}" }}, _docID: {{ _in: {page_ids} }} }}) {{ _docID }} }}"#,
+            escape_graphql_string(owner)
         ))
         .await?;
-        removed.push(key("GraphRevision", digest));
     }
     let mut retained: Vec<Retained> = retained_schemas
         .into_iter()
@@ -349,21 +382,46 @@ pub(super) async fn delete_revisions_in_txn(
 
     // GraphRun history stays (it is never part of this record), but its
     // pinned revision is gone: `graph result`/`graph watch` need the graph
-    // reinstalled before that run's view can be read again.
+    // reinstalled before that run's view can be read again. The report is
+    // bounded to a handful of runs plus, past the limit, one item naming the
+    // exact remaining total from a `COUNT` aggregate over the same filter,
+    // never a full scan of a graph's run history.
     let runs = txn
         .execute(&format!(
-            r#"{{ GraphRun(filter: {{ owner_did: {{ _eq: "{}" }}, revision_digest: {{ _in: {list} }} }}) {{ run_id }} }}"#,
-            escape_graphql_string(owner)
+            r#"{{ GraphRun(filter: {{ owner_did: {{ _eq: "{}" }}, revision_digest: {{ _in: {list} }} }}, limit: {}) {{ run_id }} }}"#,
+            escape_graphql_string(owner),
+            RETAINED_RUN_REPORT_LIMIT + 1,
         ))
         .await?;
-    for run in runs["data"]["GraphRun"]
+    let run_rows = runs["data"]["GraphRun"]
         .as_array()
-        .context("reading graph runs pinned to a removed revision")?
-    {
+        .context("reading graph runs pinned to a removed revision")?;
+    for run in run_rows.iter().take(RETAINED_RUN_REPORT_LIMIT) {
         let run_id = run["run_id"].as_str().context("run missing run_id")?;
         retained.push(Retained {
             item: format!("run {run_id}"),
             reason: "result view needs the graph reinstalled".to_owned(),
+        });
+    }
+    if run_rows.len() > RETAINED_RUN_REPORT_LIMIT {
+        let count_response = txn
+            .execute(&format!(
+                r#"{{ COUNT(GraphRun: {{ filter: {{ owner_did: {{ _eq: "{}" }}, revision_digest: {{ _in: {list} }} }} }}) }}"#,
+                escape_graphql_string(owner),
+            ))
+            .await?;
+        let more = match count_response["data"]["COUNT"].as_i64() {
+            Some(total) => {
+                format!(
+                    "{} more run(s)",
+                    (total - RETAINED_RUN_REPORT_LIMIT as i64).max(0)
+                )
+            }
+            None => format!("more than {RETAINED_RUN_REPORT_LIMIT} run(s)"),
+        };
+        retained.push(Retained {
+            item: format!("{more} pinned to a removed revision"),
+            reason: "result view needs the graph reinstalled; list truncated".to_owned(),
         });
     }
 

@@ -7,6 +7,7 @@ use serde_json::json;
 use crate::config_client::ConfigAccess;
 use crate::graph_package::GraphPackageInstallBindings;
 use crate::graph_pipeline::activate_graph_revision;
+use crate::graphql::escape_graphql_string;
 use crate::pack::{remove_pack, DriftPolicy};
 use crate::test_support::{
     install_test_graph_package, install_test_graph_package_explicit, load_test_graph_package,
@@ -362,5 +363,70 @@ async fn an_untracked_graph_is_adopted_on_reinstall_and_survives_removal() {
         count(&access, "GraphRevision", "owner_did", OWNER).await,
         1,
         "its pre-existing revision must survive too"
+    );
+}
+
+#[tokio::test]
+async fn removal_reports_an_exact_truncated_count_past_the_retained_run_limit() {
+    let (node, access, options) = fixture().await;
+    let receipt = install_test_graph_package(&access, OWNER, "code_review", &options)
+        .await
+        .unwrap();
+    activate_graph_revision(
+        &node,
+        None,
+        OWNER,
+        &receipt.graph_id,
+        &receipt.revision_digest,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // More terminal runs pinned to the removed revision than the retained-run
+    // report's bound: the report must still name the exact total, not just
+    // "more than N".
+    let run_count = super::RETAINED_RUN_REPORT_LIMIT + 2;
+    for index in 0..run_count {
+        access
+            .write(
+                "test.seed_retained_run",
+                &format!(
+                    r#"mutation {{ create_GraphRun(input: {{run_id: "retained-{index}",
+                        graph_id: "{graph_id}", owner_did: "{owner}",
+                        revision_digest: "{digest}", status: "succeeded",
+                        correlation: "retained-{index}", created_at: "2026-08-25T00:00:00Z"}}) {{_docID}} }}"#,
+                    graph_id = escape_graphql_string(&receipt.graph_id),
+                    owner = escape_graphql_string(OWNER),
+                    digest = escape_graphql_string(&receipt.revision_digest),
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let report = remove_pack(&access, OWNER, "gents/code_review", DriftPolicy::Refuse)
+        .await
+        .unwrap();
+
+    let named_runs = report
+        .retained
+        .iter()
+        .filter(|retained| retained.item.starts_with("run retained-"))
+        .count();
+    assert_eq!(
+        named_runs,
+        super::RETAINED_RUN_REPORT_LIMIT,
+        "{:?}",
+        report.retained
+    );
+    let summary = report
+        .retained
+        .iter()
+        .find(|retained| retained.reason.contains("truncated"))
+        .unwrap_or_else(|| panic!("expected a truncated summary entry: {:?}", report.retained));
+    assert!(
+        summary.item.contains('2'),
+        "the summary must name the exact remaining total: {summary:?}"
     );
 }

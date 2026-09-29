@@ -234,6 +234,36 @@ async fn live_digest(
     }
 }
 
+/// Batched form of [`live_digest`]: one query per collection (through
+/// [`read_desired_state_records_in_txn`]'s own paging) instead of one query
+/// per document, grouping `docs` by collection first. A document absent from
+/// the result is simply missing from the map, the same as `live_digest`
+/// returning `None`.
+async fn live_digests<'a>(
+    txn: &ConfigApplyTxn<'_>,
+    owner: &str,
+    docs: impl IntoIterator<Item = (Collection, &'a str)>,
+) -> Result<BTreeMap<(Collection, String), String>> {
+    let mut grouped: BTreeMap<Collection, BTreeSet<&str>> = BTreeMap::new();
+    for (collection, id) in docs {
+        grouped.entry(collection).or_default().insert(id);
+    }
+    let mut out = BTreeMap::new();
+    for (collection, ids) in grouped {
+        let ids: Vec<&str> = ids.into_iter().collect();
+        let records =
+            crate::config_client::read_desired_state_records_in_txn(txn, collection, owner, &ids)
+                .await?;
+        for (id, (_, live)) in records {
+            out.insert(
+                (collection, id),
+                super::pack_artifact_document_digest(&live)?,
+            );
+        }
+    }
+    Ok(out)
+}
+
 fn edited_error(coordinate: &str, edited: &[String]) -> anyhow::Error {
     anyhow::anyhow!(
         "{} of {coordinate}'s documents were edited since it was installed: {}; \
@@ -331,6 +361,17 @@ pub(crate) async fn install_in_txn(
     let mut edited = Vec::new();
     let mut keep = Vec::new();
 
+    let document_ids: Vec<(Collection, &str)> = documents
+        .iter()
+        .map(|document| {
+            let id = document.add[document.collection.unique_field()]
+                .as_str()
+                .context("pack document is missing its logical ID")?;
+            Ok((document.collection, id))
+        })
+        .collect::<Result<_>>()?;
+    let live_before = live_digests(txn, owner, document_ids).await?;
+
     for document in &documents {
         let collection = document.collection.graphql_type();
         let id = document.add[document.collection.unique_field()]
@@ -338,7 +379,9 @@ pub(crate) async fn install_in_txn(
             .context("pack document is missing its logical ID")?;
         let name = key(collection, id);
         let previous = prior.documents.get(&name);
-        let live = live_digest(txn, document.collection, owner, id).await?;
+        let live = live_before
+            .get(&(document.collection, id.to_owned()))
+            .cloned();
         let created = match (&live, previous) {
             (None, _) => {
                 report.created.push(name.clone());
@@ -377,13 +420,26 @@ pub(crate) async fn install_in_txn(
         );
     }
 
+    let stale: Vec<(Collection, &str)> = prior
+        .documents
+        .iter()
+        .filter(|(name, previous)| !recorded.contains_key(*name) && previous.created)
+        .map(|(_, previous)| {
+            Ok((
+                collection_named(&previous.collection)?,
+                previous.id.as_str(),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let live_stale = live_digests(txn, owner, stale).await?;
+
     let mut removals = Vec::new();
     for (name, previous) in &prior.documents {
         if recorded.contains_key(name) || !previous.created {
             continue;
         }
         let collection = collection_named(&previous.collection)?;
-        match live_digest(txn, collection, owner, &previous.id).await? {
+        match live_stale.get(&(collection, previous.id.clone())).cloned() {
             None => {}
             Some(live) if live != previous.digest && policy == DriftPolicy::Refuse => {
                 edited.push(name.clone());
@@ -419,13 +475,25 @@ pub(crate) async fn install_in_txn(
     // The record holds what is stored, not what was authored: the stored
     // document carries merged tags and normalized fields, and drift is judged
     // against it.
+    let written: Vec<(Collection, &str)> = recorded
+        .iter()
+        .filter(|(name, _)| !keep.contains(name))
+        .map(|(_, document)| {
+            Ok((
+                collection_named(&document.collection)?,
+                document.id.as_str(),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let live_after = live_digests(txn, owner, written).await?;
     for (name, document) in recorded.iter_mut() {
         if keep.contains(name) {
             continue;
         }
         let collection = collection_named(&document.collection)?;
-        document.digest = live_digest(txn, collection, owner, &document.id)
-            .await?
+        document.digest = live_after
+            .get(&(collection, document.id.clone()))
+            .cloned()
             .with_context(|| format!("{name} is missing after install"))?;
     }
 
@@ -489,6 +557,22 @@ async fn remove_record_in_txn(
     let mut removals = Vec::new();
     let mut revision_digests = Vec::new();
 
+    // Every created document that needs a live check (everything except an
+    // adopted one and a `GraphRevision`, checked separately below), read in
+    // one batched pass instead of one query per document.
+    let checked: Vec<(Collection, &str)> = record
+        .documents
+        .values()
+        .filter(|document| document.created && document.collection != "GraphRevision")
+        .map(|document| {
+            Ok((
+                collection_named(&document.collection)?,
+                document.id.as_str(),
+            ))
+        })
+        .collect::<Result<_>>()?;
+    let live = live_digests(txn, owner, checked).await?;
+
     for (name, document) in &record.documents {
         if graph::is_graph_owned(document) {
             if !document.created {
@@ -500,10 +584,7 @@ async fn remove_record_in_txn(
                 continue;
             }
             let collection = collection_named(&document.collection)?;
-            if live_digest(txn, collection, owner, &document.id)
-                .await?
-                .is_some()
-            {
+            if live.contains_key(&(collection, document.id.clone())) {
                 report.documents.removed.push(name.clone());
                 removals.push((collection, owner.to_owned(), document.id.clone()));
             }
@@ -514,7 +595,7 @@ async fn remove_record_in_txn(
             continue;
         }
         let collection = collection_named(&document.collection)?;
-        match live_digest(txn, collection, owner, &document.id).await? {
+        match live.get(&(collection, document.id.clone())).cloned() {
             None => continue,
             Some(live) if live != document.digest => match policy {
                 DriftPolicy::Refuse => {
