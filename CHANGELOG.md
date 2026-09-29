@@ -66,7 +66,7 @@ source consistency checks, not a separate runtime compatibility version.
 ### Added
 
 - `gents pack remove` works for every pack kind, not only documents packs
-  (#1721). Assets and plugins packs record their install at
+  (#2067). Assets and plugins packs record their install at
   `<home>/pack-installs/<namespace>/<name>.json` and remove locally, with no
   node and no initialized home required; removal releases the cache version
   (keeping one with run history, reported under `retained`), the plugin
