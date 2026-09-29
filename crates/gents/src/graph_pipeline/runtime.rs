@@ -1475,7 +1475,7 @@ async fn start_run_in_txn(
         EntryInputOrigin::Operator => {
             anyhow::ensure!(
                 entry.prepare.is_none(),
-                "entry {entry_name} prepares its input on the host; start it with `gents graph run`"
+                "entry {entry_name} prepares its input on the host; start it through its package"
             );
             crate::graph_pipeline::admit_operator_input(entry, input.clone())?
         }
@@ -1664,6 +1664,16 @@ mod tests {
     }
 
     fn test_plan(configuration: &str) -> GraphPlan {
+        test_plan_with_entry(configuration, None, None)
+    }
+
+    /// [`test_plan`], with the entry's `input_schema`/`prepare` set to
+    /// whatever a start-guard test needs to exercise.
+    fn test_plan_with_entry(
+        configuration: &str,
+        input_schema: Option<Value>,
+        prepare: Option<crate::graph_pipeline::EntryPrepare>,
+    ) -> GraphPlan {
         let input = PortSpec {
             name: "input".to_owned(),
             collection: "PipelineInput".to_owned(),
@@ -1697,8 +1707,8 @@ mod tests {
                     collection: input.collection.clone(),
                     schema: input.schema.clone(),
                     input_contract: None,
-                    input_schema: None,
-                    prepare: None,
+                    input_schema,
+                    prepare,
                     to: PortRef {
                         node_id: "worker".to_owned(),
                         port: input.name.clone(),
@@ -2371,6 +2381,193 @@ mod tests {
         .await
         .is_err());
 
+        node.shutdown().await;
+    }
+
+    fn test_prepare(configuration: &str) -> crate::graph_pipeline::EntryPrepare {
+        crate::graph_pipeline::EntryPrepare {
+            host: vec![],
+            plugin: format!("team/prepare-{configuration}"),
+            digest: Some(format!("sha256:{}", "a".repeat(64))),
+            writes: vec!["PipelineResult".to_owned()],
+        }
+    }
+
+    /// The Lean `start_requires_admitted_input` guard: `Operator` on an
+    /// entry that prepares its input on the host is refused before it ever
+    /// reaches `admit_operator_input`.
+    #[tokio::test]
+    async fn start_run_refuses_operator_origin_when_the_entry_declares_prepare() {
+        let node = EmbeddedNode::builder().build().await.unwrap();
+        crate::ensure_runtime_schemas(&node).await.unwrap();
+        for schema in [
+            "type PipelineInput { graph_run_id: String @index(unique: true) payload: String }",
+            "type PipelineResult { graph_run_id: String @index report: String }",
+        ] {
+            node.add_schema(schema).await.unwrap();
+        }
+        let plan = test_plan_with_entry("prepare-guard", None, Some(test_prepare("prepare-guard")));
+        install_plan_tasks(&node, &plan).await;
+        materialize_graph_revision(&node, None, graph_test_owner(), &plan)
+            .await
+            .unwrap();
+        activate_graph_revision(
+            &node,
+            None,
+            graph_test_owner(),
+            "pipeline",
+            &plan.digest,
+            None,
+        )
+        .await
+        .unwrap();
+        let error = start_graph_run(
+            &node,
+            None,
+            graph_test_owner(),
+            "pipeline",
+            None,
+            "input",
+            json!({"payload": "operator-supplied"}),
+            EntryInputOrigin::Operator,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("prepares its input on the host"),
+            "{error:#}"
+        );
+        let runs = node.execute("{ GraphRun { run_id } }").await;
+        assert!(!runs.has_errors(), "{:?}", runs.errors);
+        assert!(runs.data.unwrap()["GraphRun"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        node.shutdown().await;
+    }
+
+    /// `Prepared` on an entry that does not declare `prepare` is refused: a
+    /// caller cannot claim host-shaped input for an entry that never asked
+    /// for it.
+    #[tokio::test]
+    async fn start_run_refuses_prepared_origin_when_the_entry_has_no_prepare() {
+        let node = EmbeddedNode::builder().build().await.unwrap();
+        crate::ensure_runtime_schemas(&node).await.unwrap();
+        for schema in [
+            "type PipelineInput { graph_run_id: String @index(unique: true) payload: String }",
+            "type PipelineResult { graph_run_id: String @index report: String }",
+        ] {
+            node.add_schema(schema).await.unwrap();
+        }
+        let plan = test_plan("no-prepare-guard");
+        install_plan_tasks(&node, &plan).await;
+        materialize_graph_revision(&node, None, graph_test_owner(), &plan)
+            .await
+            .unwrap();
+        activate_graph_revision(
+            &node,
+            None,
+            graph_test_owner(),
+            "pipeline",
+            &plan.digest,
+            None,
+        )
+        .await
+        .unwrap();
+        let error = start_graph_run(
+            &node,
+            None,
+            graph_test_owner(),
+            "pipeline",
+            None,
+            "input",
+            json!({"payload": "host-shaped"}),
+            EntryInputOrigin::Prepared,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("does not declare a host prepare step"),
+            "{error:#}"
+        );
+        node.shutdown().await;
+    }
+
+    /// `Operator` input that violates the entry's `input_schema` is refused
+    /// inside `start_run_in_txn`, and an admitted default fills a field the
+    /// operator left out.
+    #[tokio::test]
+    async fn start_run_validates_operator_input_against_the_entry_schema() {
+        let node = EmbeddedNode::builder().build().await.unwrap();
+        crate::ensure_runtime_schemas(&node).await.unwrap();
+        for schema in [
+            "type PipelineInput { graph_run_id: String @index(unique: true) payload: String }",
+            "type PipelineResult { graph_run_id: String @index report: String }",
+        ] {
+            node.add_schema(schema).await.unwrap();
+        }
+        let schema = json!({
+            "type": "object",
+            "properties": {"payload": {"type": "string", "default": "auto-filled"}},
+        });
+        let plan = test_plan_with_entry("schema-guard", Some(schema), None);
+        install_plan_tasks(&node, &plan).await;
+        materialize_graph_revision(&node, None, graph_test_owner(), &plan)
+            .await
+            .unwrap();
+        activate_graph_revision(
+            &node,
+            None,
+            graph_test_owner(),
+            "pipeline",
+            &plan.digest,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let error = start_graph_run(
+            &node,
+            None,
+            graph_test_owner(),
+            "pipeline",
+            None,
+            "input",
+            json!({"payload": 42}),
+            EntryInputOrigin::Operator,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("does not satisfy its schema"),
+            "{error:#}"
+        );
+
+        let run = start_graph_run(
+            &node,
+            None,
+            graph_test_owner(),
+            "pipeline",
+            None,
+            "input",
+            json!({}),
+            EntryInputOrigin::Operator,
+        )
+        .await
+        .unwrap();
+        let seed = node
+            .execute(&format!(
+                "{{ PipelineInput(filter: {{graph_run_id: {{_eq: \"{}\"}}}}) {{ payload }} }}",
+                run.run_id
+            ))
+            .await;
+        assert!(!seed.has_errors(), "{:?}", seed.errors);
+        assert_eq!(
+            seed.data.unwrap()["PipelineInput"][0]["payload"],
+            "auto-filled"
+        );
         node.shutdown().await;
     }
 
