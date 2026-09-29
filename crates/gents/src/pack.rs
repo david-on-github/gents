@@ -19,8 +19,9 @@ pub use inference::{
     PackInferenceProfileOption,
 };
 pub use installation::{
-    installed_packs, list_installed_packs, referenced_pack_digests, remove_pack, DriftPolicy,
-    InstallReport, InstalledPack, InstalledPackPlugin, PackIdentity, RemoveReport, Retained,
+    installed_packs, list_installed_packs, read_installed_pack, referenced_pack_digests,
+    remove_pack, DriftPolicy, InstallReport, InstalledPack, InstalledPackPlugin, PackIdentity,
+    RemoveReport, Retained,
 };
 pub(crate) use installation::{observe_graph_install_in_txn, record_graph_install_in_txn};
 pub use loader::{decode_pack_config, load_pack_config, pin_pack_plugins};

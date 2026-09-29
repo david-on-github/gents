@@ -98,6 +98,23 @@ async fn install_then_remove_leaves_no_pack_documents_and_keeps_adopted_ones() {
             digest: identity("1").digest,
         }]
     );
+    assert_eq!(
+        read_installed_pack(&access, OWNER, "acme/demo")
+            .await
+            .unwrap(),
+        Some(InstalledPack {
+            coordinate: "acme/demo".into(),
+            version: "1".into(),
+            digest: identity("1").digest,
+        })
+    );
+    assert_eq!(
+        read_installed_pack(&access, OWNER, "acme/missing")
+            .await
+            .unwrap(),
+        None,
+        "an uninstalled coordinate resolves to nothing, not an error"
+    );
     let removed = remove_pack(&access, OWNER, "acme/demo", DriftPolicy::Refuse)
         .await
         .unwrap();
@@ -117,6 +134,13 @@ async fn install_then_remove_leaves_no_pack_documents_and_keeps_adopted_ones() {
         .await
         .unwrap();
     assert_eq!(record["data"]["PackInstallation"], json!([]));
+    assert_eq!(
+        read_installed_pack(&access, OWNER, "acme/demo")
+            .await
+            .unwrap(),
+        None,
+        "removal leaves no installed record behind"
+    );
     assert!(
         remove_pack(&access, OWNER, "acme/demo", DriftPolicy::Refuse)
             .await
@@ -286,6 +310,30 @@ async fn list_installed_packs_fails_loudly_on_a_malformed_record() {
     let error = list_installed_packs(&access, OWNER).await.unwrap_err();
     assert!(
         format!("{error:#}").contains("malformed version field"),
+        "{error:#}"
+    );
+}
+
+/// Same as above, for `read_installed_pack`'s single-coordinate lookup.
+#[tokio::test]
+async fn read_installed_pack_fails_loudly_on_a_malformed_record() {
+    let access = access().await;
+    install(
+        &access,
+        "1",
+        &config(&[("alpha", "Alpha")]),
+        DriftPolicy::Refuse,
+    )
+    .await
+    .unwrap();
+    let doc_id = installation_doc_id(&access).await;
+    corrupt_installation_field(&access, &doc_id, "digest", Value::Null).await;
+
+    let error = read_installed_pack(&access, OWNER, "acme/demo")
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("malformed digest field"),
         "{error:#}"
     );
 }
