@@ -4,7 +4,7 @@
   "reducer": "all",
   "fixtures": {
     "schemas": [
-      "type ComboNote { message: String }"
+      "type ComboNote { message: String handoff_id: String }"
     ]
   },
   "stages": [
@@ -168,7 +168,8 @@
       "seed": {
         "collection": "ComboNote",
         "document": {
-          "message": "combo-echo-71"
+          "message": "combo-echo-71",
+          "handoff_id": "serial-session-combo-1"
         }
       },
       "deadline_secs": 600,

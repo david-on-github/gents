@@ -4,7 +4,7 @@
   "reducer": "all",
   "fixtures": {
     "schemas": [
-      "type FallbackNote { message: String note: String }"
+      "type FallbackNote { message: String note: String handoff_id: String }"
     ]
   },
   "stages": [
@@ -172,7 +172,8 @@
       "seed": {
         "collection": "FallbackNote",
         "document": {
-          "note": "no-message-here"
+          "note": "no-message-here",
+          "handoff_id": "default-filter-missing-field-1"
         }
       },
       "deadline_secs": 600,

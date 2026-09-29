@@ -4,7 +4,7 @@
   "reducer": "all",
   "fixtures": {
     "schemas": [
-      "type TrainPing { message: String }"
+      "type TrainPing { message: String handoff_id: String }"
     ]
   },
   "stages": [
@@ -164,7 +164,8 @@
       "seed": {
         "collection": "TrainPing",
         "document": {
-          "message": "train-echo-11"
+          "message": "train-echo-11",
+          "handoff_id": "train-parallel-baseline-1"
         }
       },
       "deadline_secs": 600,

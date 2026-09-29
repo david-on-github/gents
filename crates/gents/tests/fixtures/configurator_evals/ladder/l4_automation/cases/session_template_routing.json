@@ -4,7 +4,7 @@
   "reducer": "all",
   "fixtures": {
     "schemas": [
-      "type LeadNote { message: String }"
+      "type LeadNote { message: String handoff_id: String }"
     ]
   },
   "stages": [
@@ -168,7 +168,8 @@
       "seed": {
         "collection": "LeadNote",
         "document": {
-          "message": "lead-echo-29"
+          "message": "lead-echo-29",
+          "handoff_id": "session-template-routing-1"
         }
       },
       "deadline_secs": 600,
