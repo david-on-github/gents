@@ -1,0 +1,170 @@
+{
+  "case_id": "val-reasoning-effort-high",
+  "split": "validation",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Create an execution exec-precise with max_turns 40 and max_total_tokens 300000. Then create a profile profile-precise on my existing backend pointing at exec-precise, with reasoning_effort high, and bind engineer to profile-precise.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "profile_bound",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "profile_fields",
+            "expect": [
+              {
+                "field": "reasoning_effort",
+                "equals": "high"
+              },
+              {
+                "field": "execution_id",
+                "equals": "exec-precise"
+              },
+              {
+                "field": "backend_id",
+                "matches": ".+"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "profile_bound",
+          "collection": "InferenceProfile",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "profile_id": {
+              "_eq": "profile-precise"
+            },
+            "execution_id": {
+              "_eq": "exec-precise"
+            }
+          },
+          "fields": [
+            "profile_id",
+            "execution_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "profile_fields",
+          "collection": "InferenceProfile",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "profile_id": {
+              "_eq": "profile-precise"
+            }
+          },
+          "fields": [
+            "profile_id",
+            "execution_id",
+            "backend_id",
+            "reasoning_effort"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "exercise",
+      "prompt": "Report what you configured; change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "limited_requests",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "behavior_bound",
+            "expect": [
+              {
+                "field": "inference_profile_id",
+                "equals": "profile-precise"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "limited_requests",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "engineer"
+            },
+            "max_total_tokens": {
+              "_eq": 300000
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "max_total_tokens"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "behavior_bound",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "engineer"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "inference_profile_id"
+          ]
+        }
+      ]
+    }
+  ]
+}

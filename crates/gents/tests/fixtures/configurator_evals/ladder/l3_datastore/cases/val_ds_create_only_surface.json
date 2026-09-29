@@ -1,0 +1,137 @@
+{
+  "case_id": "val-ds-create-only-surface",
+  "split": "validation",
+  "reducer": "all",
+  "fixtures": {
+    "schemas": [
+      "type EvalAutomationInput {\n  correlation: String\n  message: String\n}",
+      "type EvalAutomationOutput {\n  correlation: String\n  result: String\n}"
+    ]
+  },
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "The EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"IngestDocs\" for the EvalAutomationOutput collection with only a create entry \u2014 no query entry, and no unscoped defra_query \u2014 and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "surfaces",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "IngestDocs"
+              },
+              {
+                "field": "entries",
+                "contains": "EvalAutomationOutput"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "IngestDocs"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "display_name",
+            "entries",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "exercise",
+      "prompt": "Using the datastore tool you configured, create one EvalAutomationOutput document with correlation \"val-bravo-003\" and result \"queued\". Change nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "outputs",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "val-bravo-003"
+              },
+              {
+                "field": "result",
+                "equals": "queued"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "val-bravo-003"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        }
+      ]
+    }
+  ]
+}

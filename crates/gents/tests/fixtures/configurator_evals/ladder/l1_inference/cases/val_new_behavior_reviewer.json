@@ -1,0 +1,170 @@
+{
+  "case_id": "val-new-behavior-reviewer",
+  "split": "validation",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Set up a code-review role: create an execution exec-review with max_turns 30, max_total_tokens 100000, and deadline_duration_secs 900, and a profile profile-review on my existing backend pointing at exec-review. Then create a new behavior called reviewer bound to profile-review. Don't change engineer's own profile or execution.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "reviewer_profile",
+            "expect": [
+              {
+                "field": "execution_id",
+                "equals": "exec-review"
+              },
+              {
+                "field": "backend_id",
+                "matches": ".+"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "reviewer_bound",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "reviewer_profile",
+          "collection": "InferenceProfile",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "profile_id": {
+              "_eq": "profile-review"
+            }
+          },
+          "fields": [
+            "profile_id",
+            "execution_id",
+            "backend_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "reviewer_bound",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "reviewer"
+            },
+            "inference_profile_id": {
+              "_eq": "profile-review"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "inference_profile_id"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "confirm",
+      "prompt": "Report both bindings; change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "engineer_untouched",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "reviewer_behavior",
+            "expect": [
+              {
+                "field": "behavior_id",
+                "equals": "reviewer"
+              },
+              {
+                "field": "inference_profile_id",
+                "equals": "profile-review"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "engineer_untouched",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "engineer"
+            },
+            "inference_profile_id": {
+              "_ne": "profile-review"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "reviewer_behavior",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "reviewer"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "inference_profile_id",
+            "context_id"
+          ]
+        }
+      ]
+    }
+  ]
+}

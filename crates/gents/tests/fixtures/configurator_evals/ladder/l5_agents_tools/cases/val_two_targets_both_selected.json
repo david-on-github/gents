@@ -1,0 +1,223 @@
+{
+  "case_id": "val-two-targets-both-selected",
+  "split": "validation",
+  "reducer": "weighted_mean",
+  "stages": [
+    {
+      "stage_id": "configure-two",
+      "prompt": "Set up two subagents. Create helper behaviors with id 'beh-alpha-01' (display name 'helper-alpha') and id 'beh-beta-01' (display name 'helper-beta'), both minimal. Create SubagentTarget 'tgt-alpha-01' (name 'alpha-target') pointing at 'beh-alpha-01' and SubagentTarget 'tgt-beta-01' (name 'beta-target') pointing at 'beh-beta-01', both with target_agent_did set to this node's own DID. Select both targets in your own Tools.subagents.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "all-targets",
+            "min": 2,
+            "max": 2
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "alpha-target",
+            "expect": [
+              {
+                "field": "name",
+                "equals": "alpha-target"
+              },
+              {
+                "field": "target_agent_did",
+                "equals": "$trial"
+              },
+              {
+                "field": "behavior_id",
+                "equals": "beh-alpha-01"
+              }
+            ],
+            "max_rows": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "all-targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "name",
+            "behavior_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "alpha-target",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "target_id": {
+              "_eq": "tgt-alpha-01"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "target_agent_did",
+            "behavior_id",
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify-both-selected",
+      "prompt": "Report what you configured; change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "tools-row",
+            "expect": [
+              {
+                "field": "subagents",
+                "contains": "tgt-alpha-01"
+              },
+              {
+                "field": "subagents",
+                "contains": "tgt-beta-01"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "tools-row",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "display_name",
+            "subagents"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "delegate-to-beta",
+      "prompt": "Delegate a task to subagent target 'tgt-beta-01' specifically: have helper-beta reply with exactly BETA-777 and nothing else. Wait for the result and tell me when it has arrived.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "agent_new",
+              "agent_message"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "beta-session",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "beta-request",
+            "expect": [
+              {
+                "field": "input",
+                "contains": "BETA-777"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "beta-session",
+          "collection": "AgentSession",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "beh-beta-01"
+            }
+          },
+          "fields": [
+            "session_id",
+            "behavior_id",
+            "agent_did"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "beta-request",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "beh-beta-01"
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "session_id",
+            "input",
+            "lifecycle_state"
+          ]
+        }
+      ]
+    }
+  ]
+}

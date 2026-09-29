@@ -1,0 +1,206 @@
+{
+  "case_id": "val-ds-automation-seed-to-output",
+  "split": "validation",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Set up an automation pipeline on this node. Register these application schemas:\n\ntype EvalAutomationInput {\n  correlation: String\n  message: String\n}\n\ntype EvalAutomationOutput {\n  correlation: String\n  result: String\n}\n\nThen:\n1. Create a DatastoreToolSurface named \"AutoDocs\" for the EvalAutomationOutput collection with a create entry and a query entry (scoped, no unscoped defra_query), and select it in The Engineer's Tools under datastore.datastore_tool_surface_ids.\n2. Create an EventSource named \"AutoIngress\" watching EvalAutomationInput for created documents.\n3. Create a Task named \"AutoProcess\" that runs the engineer behavior with a prompt template that renders the source document's correlation and message values (not just their id), and instructs the run to create one EvalAutomationOutput document with the same correlation and result \"processed\" through the datastore tool.\n4. Create a Trigger named \"AutoFire\" linking the AutoIngress source to the AutoProcess task.\nDon't change anything else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "surfaces",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "AutoDocs"
+              },
+              {
+                "field": "entries",
+                "contains": "EvalAutomationOutput"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "AutoDocs"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "display_name",
+            "entries",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "seed_input",
+      "seed": {
+        "collection": "EvalAutomationInput",
+        "document": {
+          "correlation": "val-seed-006",
+          "message": "process this"
+        }
+      },
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "outputs",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "val-seed-006"
+              },
+              {
+                "field": "result",
+                "equals": "processed"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "val-seed-006"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify_automation",
+      "prompt": "Report the automation's run status: whether the AutoFire trigger is enabled and whether a fire was recorded for the seeded input. Read-only, change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "fires",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "triggers",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "AutoFire"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "fires",
+          "collection": "FireOutcome",
+          "filter": {
+            "owner_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "fire_key",
+            "trigger_id",
+            "terminal_state"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "triggers",
+          "collection": "Trigger",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "AutoFire"
+            }
+          },
+          "fields": [
+            "trigger_id",
+            "display_name",
+            "enabled"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,168 @@
+{
+  "case_id": "val-ds-finish-partial-setup",
+  "split": "validation",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "setup_partial",
+      "prompt": "Register this application schema on this node:\n\ntype EvalAutomationInput {\n  correlation: String\n  message: String\n}\n\ntype EvalAutomationOutput {\n  correlation: String\n  result: String\n}\n\nThen create a DatastoreToolSurface named \"HalfWired\" for the EvalAutomationOutput collection with a create entry and a query entry \u2014 scoped, no unscoped defra_query. Do not select the surface anywhere yet; that's all for now.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "surfaces",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "HalfWired"
+              },
+              {
+                "field": "entries",
+                "contains": "EvalAutomationOutput"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "HalfWired"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "display_name",
+            "entries",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "finish_and_exercise",
+      "prompt": "The HalfWired surface still isn't callable. Finish the wiring by selecting it in The Engineer's Tools under datastore.datastore_tool_surface_ids, then create one EvalAutomationOutput document with correlation \"val-delta-005\" and result \"resumed\" through it and confirm the row with a query. Change nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "outputs",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "val-delta-005"
+              },
+              {
+                "field": "result",
+                "equals": "resumed"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "val-delta-005"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify_selection",
+      "prompt": "Report what you configured: read the current Tools selection and tell me which datastore surface ids are set. Change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "tools",
+            "expect": [
+              {
+                "field": "datastore",
+                "matches": "datastore_tool_surface_ids\\s*:\\s*\\[\\s*\"[^\"]+\""
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "datastore"
+          ]
+        }
+      ]
+    }
+  ]
+}

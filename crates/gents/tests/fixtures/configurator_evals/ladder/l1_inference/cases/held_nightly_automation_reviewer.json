@@ -1,0 +1,294 @@
+{
+  "case_id": "held-nightly-automation-reviewer",
+  "split": "held_out",
+  "reducer": "all",
+  "fixtures": {
+    "schemas": [
+      "type NightlyJob { job: String }"
+    ]
+  },
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Build out a nightly review setup: create an execution exec-nightly with max_turns 25, max_total_tokens 120000, and deadline_duration_secs 1200, and a profile profile-nightly on my existing backend pointing at exec-nightly with reasoning_effort medium. Then create a new behavior called nightly-reviewer bound to profile-nightly, and wire automation so that when a new NightlyJob document appears, a task runs the nightly-reviewer behavior with the job's content rendered into its request. Leave engineer's own binding unchanged.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "profile_fields",
+            "expect": [
+              {
+                "field": "reasoning_effort",
+                "equals": "medium"
+              },
+              {
+                "field": "execution_id",
+                "equals": "exec-nightly"
+              },
+              {
+                "field": "backend_id",
+                "matches": ".+"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "behavior_bound",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "profile_fields",
+          "collection": "InferenceProfile",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "profile_id": {
+              "_eq": "profile-nightly"
+            }
+          },
+          "fields": [
+            "profile_id",
+            "execution_id",
+            "backend_id",
+            "reasoning_effort"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "behavior_bound",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "nightly-reviewer"
+            },
+            "inference_profile_id": {
+              "_eq": "profile-nightly"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "inference_profile_id"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "fire",
+      "seed": {
+        "collection": "NightlyJob",
+        "document": {
+          "job": "nightly-digest"
+        }
+      },
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "trigger_fired",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "fire_outcome",
+            "expect": [
+              {
+                "field": "terminal_state",
+                "matches": "."
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "trigger_fired",
+          "collection": "TriggerFire",
+          "filter": {
+            "owner_did": {
+              "_eq": "$trial"
+            },
+            "source_collection": {
+              "_eq": "NightlyJob"
+            }
+          },
+          "fields": [
+            "fire_key",
+            "trigger_id",
+            "source_collection",
+            "request_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "fire_outcome",
+          "collection": "FireOutcome",
+          "filter": {
+            "owner_did": {
+              "_eq": "$trial"
+            },
+            "source_collection": {
+              "_eq": "NightlyJob"
+            }
+          },
+          "fields": [
+            "fire_key",
+            "terminal_state",
+            "request_id"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "confirm",
+      "prompt": "Report what the automation produced; change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "reviewer_request",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "request_outcome",
+            "expect": [
+              {
+                "field": "caused_by_trigger_id",
+                "matches": ".+"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "reviewer_request",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "nightly-reviewer"
+            },
+            "max_total_tokens": {
+              "_eq": 120000
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "max_total_tokens",
+            "caused_by_trigger_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "request_outcome",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "nightly-reviewer"
+            },
+            "max_total_tokens": {
+              "_eq": 120000
+            }
+          },
+          "fields": [
+            "request_id",
+            "caused_by_trigger_id",
+            "caused_by_source_doc_id",
+            "lifecycle_state"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "guard",
+      "prompt": "Confirm engineer's own binding is unchanged; change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "engineer_untouched",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "engineer_untouched",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "engineer"
+            },
+            "inference_profile_id": {
+              "_ne": "profile-nightly"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "inference_profile_id"
+          ]
+        }
+      ]
+    }
+  ]
+}

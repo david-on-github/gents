@@ -1,0 +1,131 @@
+{
+  "case_id": "val-ds-baseline",
+  "split": "validation",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Set up document automation for my pipeline on this node. Register this application schema:\n\ntype EvalAutomationInput {\n  correlation: String\n  message: String\n}\n\ntype EvalAutomationOutput {\n  correlation: String\n  result: String\n}\n\nThen create a DatastoreToolSurface named \"PipelineDocs\" for the EvalAutomationOutput collection with a create entry and a query entry \u2014 scoped to that collection, no unscoped defra_query \u2014 and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Don't touch anything else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "surfaces",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "PipelineDocs"
+              },
+              {
+                "field": "entries",
+                "contains": "EvalAutomationOutput"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "PipelineDocs"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "display_name",
+            "entries",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "exercise",
+      "prompt": "Now prove the setup works end to end: using the datastore tool you just wired up, create one EvalAutomationOutput document with correlation \"val-alpha-002\" and result \"ok\", then query EvalAutomationOutput to confirm the row is there. Change nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "outputs",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "val-alpha-002"
+              },
+              {
+                "field": "result",
+                "equals": "ok"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "val-alpha-002"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        }
+      ]
+    }
+  ]
+}

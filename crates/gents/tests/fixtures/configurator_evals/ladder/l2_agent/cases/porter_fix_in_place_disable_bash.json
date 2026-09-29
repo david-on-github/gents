@@ -1,0 +1,217 @@
+{
+  "case_id": "porter-fix-in-place-disable-bash",
+  "split": "validation",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure_with_bash",
+      "prompt": "Create a new behavior with the exact id \"porter\" and display name \"Porter\", its own AgentContext with the exact id \"porter-context\" and system prompt exactly: You are Porter, a build-and-fetch helper. Its own Tools document has the exact id \"porter-tools\" granting read_file and bash. Do not touch your own configuration. Apply it and confirm.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "porter_behavior",
+            "max_rows": 1,
+            "expect": [
+              {
+                "field": "behavior_id",
+                "equals": "porter"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              },
+              {
+                "field": "context_id",
+                "matches": ".+"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "porter_behavior",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "porter"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "disable_bash_in_place",
+      "prompt": "Change of plan: porter must not run shell commands. Edit porter's Tools document \"porter-tools\" in place: keep read_file, set bash off. Do not create a second Tools document or a second porter behavior, and do not touch anything else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "porter_tools",
+            "max_rows": 1,
+            "expect": [
+              {
+                "field": "host",
+                "contains": "read_file"
+              },
+              {
+                "field": "host.bash",
+                "matches": "off|false"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "tools_all",
+            "min": 2,
+            "max": 2
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "porter_tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tools_id": {
+              "_eq": "porter-tools"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools_all",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify_final_state",
+      "prompt": "Read back porter's configuration with the config tool and confirm read_file is still granted and bash is off, then confirm the node still holds exactly two Tools documents and two behaviors. Change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "tools_with_readfile",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "behaviors_all",
+            "min_rows": 2,
+            "max_rows": 2,
+            "expect": [
+              {
+                "field": "behavior_id",
+                "matches": ".+"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "tools_with_readfile",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "host": {
+              "_like": "%read_file%"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "behaviors_all",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "context_id",
+            "enabled"
+          ]
+        }
+      ]
+    }
+  ]
+}
