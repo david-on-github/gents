@@ -139,7 +139,7 @@
             "expect": [
               {
                 "field": "datastore",
-                "matches": "datastore_tool_surface_ids\\s*:\\s*\\[\\s*\"[^\"]+\""
+                "matches": "\"datastore_tool_surface_ids\":\\[\\s*\"[^\"]+\""
               }
             ]
           },

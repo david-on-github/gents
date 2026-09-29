@@ -94,7 +94,7 @@
               },
               {
                 "field": "host.bash",
-                "matches": "off|false"
+                "matches": "^\\{\\}$|\"mode\":\"Off\""
               }
             ]
           },
