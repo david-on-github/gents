@@ -1796,7 +1796,10 @@ async fn datastore_preview_create_and_sparse_edit_use_owned_patch_path() {
     .await
     .unwrap();
     // The Engineer may edit surfaces its own Tools select (#1796).
-    for verb in [&["datastore", "preview", "edit"][..], &["datastore", "edit"]] {
+    for verb in [
+        &["datastore", "preview", "edit"][..],
+        &["datastore", "edit"],
+    ] {
         call_config_tool(
             &tools,
             command(&[verb, &["jobs", "--set", "display_name=\"Engineer jobs\""]].concat()),
