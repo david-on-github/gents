@@ -557,3 +557,22 @@ fn admission_reads_one_program_pass_for_many_name_carrying_filters() {
     assert_eq!(counted.program_passes, 1, "{counted:?}");
     assert!(counted.candidates <= 2 * counted.indices, "{counted:?}");
 }
+
+#[test]
+fn authoring_rejects_a_bare_variable_that_is_not_a_context_root() {
+    for template in ["{{ message }}", "Do {{ correlation }} now"] {
+        let error = check_template_vocabulary(template).unwrap_err();
+        assert!(
+            matches!(&error, TemplateError::UnknownName { kind, .. } if *kind == "variable"),
+            "{template}: {error}"
+        );
+    }
+    for template in [
+        "{{ doc.message }} {{ event.correlation }} {{ args.x }}",
+        "{% for item in doc.items %}{{ item }} {{ loop.index }}{% endfor %}",
+        "{% set name = doc.name %}{{ name }}",
+        "{{ range(3) | list }}",
+    ] {
+        check_template_vocabulary(template).unwrap_or_else(|error| panic!("{template}: {error}"));
+    }
+}

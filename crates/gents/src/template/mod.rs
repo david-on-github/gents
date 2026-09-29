@@ -122,6 +122,7 @@ enum NameUse {
     Function,
     FilterArgument,
     TestArgument,
+    Variable,
 }
 
 impl NameUse {
@@ -130,6 +131,7 @@ impl NameUse {
             NameUse::Filter | NameUse::FilterArgument => "filter",
             NameUse::Test | NameUse::TestArgument => "test",
             NameUse::Function => "function",
+            NameUse::Variable => "variable",
         }
     }
 }
@@ -203,13 +205,18 @@ pub fn check_template_vocabulary(template: &str) -> Result<(), TemplateError> {
             Instruction::PushLoop(_) => {
                 bound.insert("loop".to_string());
             }
+            // A bare variable resolves through the frames, then the render
+            // context roots, then the environment's globals; strict undefined
+            // fails every fire on anything else (#1970).
+            Instruction::Lookup(name) => {
+                used.push((NameUse::Variable, (*name).to_string()));
+            }
             // Judged by the filter that resolves a name from it, not here.
             Instruction::LoadConst(_) => {}
             // Named exhaustively: a MiniJinja instruction set that grows a new
             // name-carrying instruction, or changes the arity of one above,
             // must fail to compile rather than leave the walk silently partial.
             Instruction::EmitRaw(_)
-            | Instruction::Lookup(_)
             | Instruction::GetAttr(_)
             | Instruction::SetAttr(_)
             | Instruction::GetItem
@@ -273,7 +280,7 @@ pub fn check_template_vocabulary(template: &str) -> Result<(), TemplateError> {
             NameUse::Test => engine_resolves(&env, &format!("{{{{ 0 is {name} }}}}"), None),
             NameUse::FilterArgument => engine_resolves(&env, "{{ [] | map(probe) }}", Some(&name)),
             NameUse::TestArgument => engine_resolves(&env, "{{ [] | select(probe) }}", Some(&name)),
-            NameUse::Function => {
+            NameUse::Function | NameUse::Variable => {
                 bound.contains(&name) || env.globals().any(|(global, _)| global == name)
             }
         };
