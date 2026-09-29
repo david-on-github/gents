@@ -106,7 +106,7 @@ json.dump({"manifest_version": 1, "name": "ladder_inference", "version": "0.1.0"
            "description": "The ladder's trial inference binding", "authors": ["gents-ai contributors"],
            "tags": ["eval"], "kind": "documents", "assets": ["pack_config.json"], "config": "pack_config.json"},
           open(f"{root}/manifest.json", "w"))
-json.dump({"agent_principal": {}, "inference_backends": [backend], "inference_sampling": [sampling],
+json.dump({"agent_principal": {"default_behavior_id": f"{did}:default"}, "inference_backends": [backend], "inference_sampling": [sampling],
            "inference_profiles": [profile]}, open(f"{root}/pack_config.json", "w"), indent=2)
 PY
 "$GENTS" config apply --root "$INFERENCE" --bind-agent-did home --home "$EVAL_HOME" >/dev/null
@@ -127,7 +127,13 @@ PY
 
 STAMP=$(date +%Y%m%d-%H%M)
 for level in "${SELECTED[@]}"; do
-  "$GENTS" config apply --root "$LADDER/${level//-/_}" --bind-agent-did home --home "$EVAL_HOME" >/dev/null
+  # A definition pack's empty agent_principal would clear the home's default
+  # behavior, and the served home then refuses to restart; keep the default.
+  DEFINITION="$EVAL_HOME/definitions/$level"
+  rm -rf "$DEFINITION" && mkdir -p "$EVAL_HOME/definitions" && cp -R "$LADDER/${level//-/_}" "$DEFINITION"
+  python3 -c 'import json,sys; p=sys.argv[1]; c=json.load(open(p)); c["agent_principal"]={"default_behavior_id": sys.argv[2]}; json.dump(c, open(p,"w"), indent=2)' \
+    "$DEFINITION/pack_config.json" "$DID:default"
+  "$GENTS" config apply --root "$DEFINITION" --bind-agent-did home --home "$EVAL_HOME" >/dev/null
   for split in $SPLITS; do
     [ "$split" != none ] || continue
     RUN_ID="ladder-$level-$SHA-$split-$STAMP"
