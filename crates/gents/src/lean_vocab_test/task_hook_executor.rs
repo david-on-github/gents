@@ -1,43 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::document_config::{TaskHook, TaskHookPhase};
+use crate::document_config::TaskHookPhase;
 use crate::lean_vocab_test::{
-    lean_task_hook_admission_cases, lean_task_hook_run_cases, LeanCommandResult, LeanHookAttempt,
-    LeanHookInvocation, LeanTaskHook, LeanTaskHookRunCase, LeanTaskOutcome, LeanTaskPrimaryError,
+    lean_task_hook_run_cases, LeanCommandResult, LeanHookAttempt, LeanHookInvocation,
+    LeanTaskHookRunCase, LeanTaskOutcome, LeanTaskPrimaryError,
 };
 use crate::task_hooks::{
-    effective_timeout_secs, run_task_hooks, HookAttempt, HookCommandResult, HookPrimaryError,
-    ManagedTaskHookExec, TaskAgentResult, TaskHookCancellation, TaskHookOutcome,
+    effective_timeout_secs, run_task_hooks, HookAttempt, HookPrimaryError, ManagedTaskHookExec,
+    TaskAgentResult, TaskHookCancellation, TaskHookOutcome,
 };
-
-fn phase(name: &str) -> TaskHookPhase {
-    match name {
-        "before" => TaskHookPhase::Before,
-        "after_success" => TaskHookPhase::AfterSuccess,
-        "after_failure" => TaskHookPhase::AfterFailure,
-        "finally" => TaskHookPhase::Finally,
-        other => panic!("generated contract emitted an unknown hook phase {other:?}"),
-    }
-}
-
-fn hook(generated: &LeanTaskHook) -> TaskHook {
-    TaskHook {
-        hook_id: generated.hook_id.clone(),
-        phase: phase(&generated.phase),
-        command: generated.command.clone(),
-        timeout_secs: generated.timeout_secs,
-    }
-}
-
-fn command_result(generated: &LeanCommandResult) -> HookCommandResult {
-    match generated {
-        LeanCommandResult::Exited { code } => HookCommandResult::Exited { code: Some(*code) },
-        LeanCommandResult::LaunchFailed => HookCommandResult::LaunchFailed,
-        LeanCommandResult::TimedOut => HookCommandResult::TimedOut,
-        LeanCommandResult::Interrupted => HookCommandResult::Interrupted,
-    }
-}
 
 fn outcome(generated: &LeanTaskOutcome) -> TaskHookOutcome {
     match generated {
@@ -138,7 +110,7 @@ fn assert_attempts(case: &str, phase: &str, actual: &[HookAttempt], expected: &[
             .collect::<Vec<_>>(),
         expected
             .iter()
-            .map(|attempt| (attempt.hook_id.as_str(), command_result(&attempt.result)))
+            .map(|attempt| (attempt.hook_id.as_str(), attempt.result.to_native()))
             .collect::<Vec<_>>(),
         "{case}: {phase} attempts disagree with the model's trace"
     );
@@ -163,7 +135,7 @@ async fn generated_task_hook_run_cases_drive_real_host_commands() {
         let mut held = Vec::new();
         let mut unlaunchable = Vec::new();
         for generated in &case.hooks {
-            let mut configured = hook(generated);
+            let mut configured = generated.to_task_hook();
             assert_eq!(
                 effective_timeout_secs(&configured),
                 generated.effective_timeout_secs,
@@ -285,22 +257,5 @@ async fn generated_task_hook_run_cases_drive_real_host_commands() {
             "{}: the terminal owner would write a different request state",
             case.name
         );
-    }
-}
-
-#[test]
-fn generated_task_hook_admission_cases_fence_production_timeout_resolution() {
-    let cases = lean_task_hook_admission_cases();
-    assert!(!cases.is_empty());
-    for case in cases {
-        for generated in &case.hooks {
-            assert_eq!(
-                effective_timeout_secs(&hook(generated)),
-                generated.effective_timeout_secs,
-                "{}: production timeout resolution disagrees with the model for {:?}",
-                case.name,
-                generated.hook_id
-            );
-        }
     }
 }

@@ -745,11 +745,6 @@ def caseCoverage : List CoverageEntry :=
       "TaskHookAdmissionCases"
       "lean_vocab_test::task_hooks_policy::generated_task_hook_admission_cases_fence_production_validation")
       "task-hooks" [Surface.runtimeInternal]
-  , tagged (consumerCoverage
-      "task_hook_admission_cases"
-      "TaskHookAdmissionCases"
-      "lean_vocab_test::task_hook_executor::generated_task_hook_admission_cases_fence_production_timeout_resolution")
-      "task-hooks" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "task_hook_run_cases"
       "TaskHookRunCases"

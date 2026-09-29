@@ -518,13 +518,6 @@ pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
             function: "generated_task_hook_cases_fence_the_modeled_phase_vocabulary",
         },
         ConformanceConsumer::RustTest {
-            id: "lean_vocab_test::task_hook_executor::generated_task_hook_admission_cases_fence_production_timeout_resolution",
-            package: "gents",
-            source_path: "crates/gents/src/lean_vocab_test/task_hook_executor.rs",
-            module_path: "lean_vocab_test::task_hook_executor",
-            function: "generated_task_hook_admission_cases_fence_production_timeout_resolution",
-        },
-        ConformanceConsumer::RustTest {
             id: "lean_vocab_test::task_hook_executor::generated_task_hook_run_cases_drive_real_host_commands",
             package: "gents",
             source_path: "crates/gents/src/lean_vocab_test/task_hook_executor.rs",

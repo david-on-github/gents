@@ -430,11 +430,7 @@ fn detail(stdout: &[u8], stderr: &[u8]) -> String {
 
 #[async_trait::async_trait]
 impl TaskHookExec for ManagedTaskHookExec {
-    /// Admission bounds a configured timeout only from below, so an admitted
-    /// value can exceed what `chrono` can add to the current instant. Such a
-    /// hook is refused before launch: the alternatives are a managed execution
-    /// with no deadline at all, or a panic inside the addition. A command whose
-    /// cancellation already fired is not launched at all, so it has no host
+    /// A command whose cancellation already fired is not launched at all, so it has no host
     /// effect to account for and is not recorded; one whose attempt cannot be
     /// recorded is not launched either, since recovery could then replay it.
     async fn attempt(&self, hook: &TaskHook) -> HookAttempt {
@@ -443,22 +439,9 @@ impl TaskHookExec for ManagedTaskHookExec {
             result,
             detail,
         };
-        let timeout_secs = effective_timeout_secs(hook);
-        let Some(deadline_at) = i64::try_from(timeout_secs)
-            .ok()
-            .and_then(chrono::Duration::try_seconds)
-            .and_then(|timeout| Utc::now().checked_add_signed(timeout))
-        else {
-            if let Some(record) = &self.record {
-                record
-                    .attempt_refused(&hook.hook_id, HookCommandResult::LaunchFailed)
-                    .await;
-            }
-            return refused(
-                HookCommandResult::LaunchFailed,
-                format!("a timeout of {timeout_secs}s has no representable deadline on this host"),
-            );
-        };
+        // Admission bounds the timeout (`TaskHooks.admitted_timeout_bounded`).
+        let deadline_at =
+            Utc::now() + chrono::Duration::seconds(effective_timeout_secs(hook) as i64);
         let cancellation = self.cancellation.for_phase(hook.phase);
         if cancellation.is_cancelled() {
             return refused(

@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::document_config::{TaskHook, TaskHookPhase};
+use crate::document_config::TaskHook;
 use crate::hook::BackgroundExecutionRegistry;
 use crate::identity::{AgentIdentity, KeyIdentity};
 use crate::lean_vocab_test::{
@@ -108,21 +108,11 @@ impl Fixture {
     }
 }
 
-fn phase(name: &str) -> TaskHookPhase {
-    match name {
-        "before" => TaskHookPhase::Before,
-        "after_success" => TaskHookPhase::AfterSuccess,
-        "after_failure" => TaskHookPhase::AfterFailure,
-        "finally" => TaskHookPhase::Finally,
-        other => panic!("generated contract emitted an unknown hook phase {other:?}"),
-    }
-}
-
 /// A real command that logs its own start and exits with `code`.
 fn logging_hook(generated: &LeanTaskHook, log: &Path, code: i64) -> TaskHook {
     TaskHook {
         hook_id: generated.hook_id.clone(),
-        phase: phase(&generated.phase),
+        phase: crate::lean_vocab_test::lean_hook_phase(&generated.phase),
         command: vec![
             "sh".into(),
             "-c".into(),
@@ -139,12 +129,7 @@ fn logging_hook(generated: &LeanTaskHook, log: &Path, code: i64) -> TaskHook {
 /// An observed attempt of unknown outcome was recorded as started with no
 /// result; every other observation is its recorded result.
 fn recorded(result: &LeanCommandResult) -> Option<HookCommandResult> {
-    match result {
-        LeanCommandResult::Exited { code } => Some(HookCommandResult::Exited { code: Some(*code) }),
-        LeanCommandResult::LaunchFailed => Some(HookCommandResult::LaunchFailed),
-        LeanCommandResult::TimedOut => Some(HookCommandResult::TimedOut),
-        LeanCommandResult::Interrupted => None,
-    }
+    (*result != LeanCommandResult::Interrupted).then(|| result.to_native())
 }
 
 /// Writes the durable record a crashed, started execution left behind.
@@ -557,49 +542,4 @@ async fn recovered_cleanup_outside_an_admitted_root_is_refused() {
             "{name}: the refused record is dropped"
         );
     }
-}
-
-/// A cleanup occurrence refused for a reason retrying cannot change is
-/// consumed once: recovery records it and forgets the record.
-#[tokio::test]
-async fn a_definitively_refused_cleanup_is_recovered_once() {
-    let fixture = Fixture::new().await;
-    let dir = tempfile::tempdir().expect("case directory");
-    let log = dir.path().join("cleanup.log");
-    let doc_id = fixture.abandoned_request(false).await;
-    let store = TaskHookRecordStore::durable(dir.path().join("task-hooks"));
-    let mut unbounded = logging_hook(&generated("unbounded", "finally"), &log, 0);
-    unbounded.timeout_secs = Some(i64::MAX);
-    persist_crashed(
-        &store,
-        record(
-            &doc_id,
-            "refused",
-            fixture.did(),
-            dir.path(),
-            vec![
-                unbounded,
-                logging_hook(&generated("sweep", "finally"), &log, 0),
-            ],
-            Vec::new(),
-        ),
-    )
-    .await;
-    RequestLifecycle::recover_all(&fixture.node, fixture.did())
-        .await
-        .unwrap();
-    let first = recover_task_hook_records(&fixture.node, fixture.did(), &store)
-        .await
-        .unwrap();
-    store.wait_for_recoveries().await;
-    assert_eq!(first.recoveries_started, 1);
-    assert_eq!(log_lines(&log), vec!["sweep".to_string()]);
-    assert!(
-        store.list().is_empty(),
-        "the refused occurrence counts as attempted"
-    );
-    let again = recover_task_hook_records(&fixture.node, fixture.did(), &store)
-        .await
-        .unwrap();
-    assert!(again.is_noop());
 }

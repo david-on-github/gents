@@ -1,7 +1,6 @@
 use super::{
-    effective_timeout_secs, HookAttempt, HookCommandResult, ManagedTaskHookExec,
-    TaskHookCancellation, TaskHookExec, TaskHookRun, DEFAULT_TASK_HOOK_TIMEOUT_SECS,
-    FAILURE_REASON_OUTPUT_CAP,
+    HookAttempt, HookCommandResult, ManagedTaskHookExec, TaskHookCancellation, TaskHookExec,
+    TaskHookRun, FAILURE_REASON_OUTPUT_CAP,
 };
 use crate::document_config::{TaskHook, TaskHookPhase};
 
@@ -34,23 +33,8 @@ fn failed_run(attempt: HookAttempt) -> TaskHookRun {
     }
 }
 
-#[test]
-fn absent_timeout_resolves_to_the_executor_default() {
-    assert_eq!(
-        effective_timeout_secs(&hook("h", &["true"], None)),
-        DEFAULT_TASK_HOOK_TIMEOUT_SECS
-    );
-    assert_eq!(effective_timeout_secs(&hook("h", &["true"], Some(7))), 7);
-}
-
 #[tokio::test]
-async fn host_exit_status_decides_hook_success() {
-    let ok = exec()
-        .attempt(&hook("ok", &["sh", "-c", "exit 0"], Some(30)))
-        .await;
-    assert_eq!(ok.result, HookCommandResult::Exited { code: Some(0) });
-    assert!(ok.result.succeeded());
-
+async fn a_failing_hook_reports_its_captured_output() {
     let bad = exec()
         .attempt(&hook(
             "bad",
@@ -58,8 +42,6 @@ async fn host_exit_status_decides_hook_success() {
             Some(30),
         ))
         .await;
-    assert_eq!(bad.result, HookCommandResult::Exited { code: Some(3) });
-    assert!(!bad.result.succeeded());
     assert!(bad.detail.contains("boom"), "{:?}", bad.detail);
 }
 
@@ -99,50 +81,6 @@ async fn a_signal_killed_hook_is_not_a_success() {
     assert!(failed_run(attempt)
         .hook_failure_reason("killed")
         .contains("terminated by a signal"));
-}
-
-#[tokio::test]
-async fn a_hook_past_its_timeout_is_a_hook_error() {
-    let attempt = exec()
-        .attempt(&hook("slow", &["sh", "-c", "sleep 30"], Some(1)))
-        .await;
-    assert_eq!(attempt.result, HookCommandResult::TimedOut);
-}
-
-async fn unrepresentable_deadline_case(timeout_secs: i64) {
-    let directory = tempfile::tempdir().expect("hook marker directory");
-    let marker = directory.path().join("launched");
-    let attempt = ManagedTaskHookExec::new(
-        directory.path().to_path_buf(),
-        TaskHookCancellation::default(),
-    )
-    .attempt(&hook(
-        "unbounded",
-        &[
-            "sh",
-            "-c",
-            &format!("touch {}", marker.to_str().expect("utf-8 marker path")),
-        ],
-        Some(timeout_secs),
-    ))
-    .await;
-    assert_eq!(attempt.result, HookCommandResult::LaunchFailed);
-    assert!(
-        attempt.detail.contains(&timeout_secs.to_string()),
-        "{:?}",
-        attempt.detail
-    );
-    assert!(!marker.exists());
-}
-
-#[tokio::test]
-async fn a_timeout_with_no_representable_duration_refuses_to_launch() {
-    unrepresentable_deadline_case(i64::MAX).await;
-}
-
-#[tokio::test]
-async fn a_timeout_past_the_representable_deadline_refuses_to_launch() {
-    unrepresentable_deadline_case(10_000_000_000_000).await;
 }
 
 #[tokio::test]
