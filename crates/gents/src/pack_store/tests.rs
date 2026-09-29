@@ -12,6 +12,25 @@ fn mailbox_pack() -> (Vec<u8>, PackHeader) {
     crate::pack_archive::pack_dir(dir.path()).expect("packing")
 }
 
+/// The mailbox fixture, renamed and re-versioned, for name-index tests: a
+/// coordinate and version chosen by the test rather than fixed content.
+fn mailbox_pack_named(name: &str, version: &str) -> (Vec<u8>, PackHeader) {
+    let pack = crate::pack::resolve_pack("mailbox").expect("a bundled pack");
+    let dir = tempfile::tempdir().expect("tempdir");
+    for path in declared_paths(&pack.manifest) {
+        let target = dir.path().join(&path);
+        std::fs::create_dir_all(target.parent().expect("a parent")).expect("mkdir");
+        std::fs::write(&target, pack.asset(&path).expect("asset")).expect("write");
+    }
+    let manifest_path = dir.path().join("manifest.json");
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["name"] = serde_json::json!(name);
+    manifest["version"] = serde_json::json!(version);
+    std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    crate::pack_archive::pack_dir(dir.path()).expect("packing")
+}
+
 fn store_files(store: &PackStore) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(&store.root)
         .expect("store dir")
@@ -135,4 +154,142 @@ fn release_removes_the_archive_and_its_unpacked_copy() {
 
     // Idempotent: nothing left to release the second time.
     assert!(!store.release(&header.digest).unwrap());
+}
+
+// --- name index (design D1) ---------------------------------------------
+
+#[test]
+fn an_import_indexes_the_pack_by_coordinate_and_version() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (bytes, header) = mailbox_pack_named("name_index_a", "1.0.0");
+    store.import(bytes.as_slice(), None).unwrap();
+
+    let found = store.lookup("gents", "name_index_a", None).unwrap();
+    assert_eq!(
+        found,
+        Some(StoredName {
+            version: "1.0.0".into(),
+            digest: header.digest.clone(),
+        })
+    );
+    assert_eq!(
+        store
+            .lookup("gents", "name_index_a", Some("1.0.0"))
+            .unwrap(),
+        found
+    );
+    assert_eq!(
+        store
+            .lookup("gents", "name_index_a", Some("9.9.9"))
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store.names().unwrap(),
+        vec![(
+            "gents/name_index_a".to_owned(),
+            vec![StoredName {
+                version: "1.0.0".into(),
+                digest: header.digest,
+            }]
+        )]
+    );
+}
+
+#[test]
+fn lookup_prefers_the_highest_semver_not_the_lexicographically_largest() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (v1, _) = mailbox_pack_named("name_index_b", "1.2.0");
+    let (v2, v2_header) = mailbox_pack_named("name_index_b", "1.10.0");
+    store.import(v1.as_slice(), None).unwrap();
+    store.import(v2.as_slice(), None).unwrap();
+
+    // Lexicographically "1.2.0" > "1.10.0", but 1.10.0 is the newer release.
+    let found = store.lookup("gents", "name_index_b", None).unwrap();
+    assert_eq!(found.map(|entry| entry.version), Some("1.10.0".to_owned()));
+    assert_eq!(
+        store
+            .lookup("gents", "name_index_b", Some("1.10.0"))
+            .unwrap()
+            .map(|entry| entry.digest),
+        Some(v2_header.digest)
+    );
+}
+
+#[test]
+fn non_semver_versions_sort_after_every_semver_version() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (semver_bytes, semver_header) = mailbox_pack_named("name_index_c", "1.0.0");
+    let (other_bytes, _) = mailbox_pack_named("name_index_c", "latest");
+    store.import(semver_bytes.as_slice(), None).unwrap();
+    store.import(other_bytes.as_slice(), None).unwrap();
+
+    assert_eq!(
+        store
+            .lookup("gents", "name_index_c", None)
+            .unwrap()
+            .map(|entry| entry.digest),
+        Some(semver_header.digest)
+    );
+}
+
+#[test]
+fn a_version_with_a_path_separator_is_stored_but_not_indexed() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (bytes, header) = mailbox_pack_named("name_index_d", "../escape");
+    let stored = store.import(bytes.as_slice(), None).unwrap();
+
+    assert_eq!(stored.header.digest, header.digest);
+    assert!(
+        store.contains(&header.digest).unwrap(),
+        "still content-addressed"
+    );
+    assert_eq!(store.lookup("gents", "name_index_d", None).unwrap(), None);
+    assert!(store.names().unwrap().is_empty());
+}
+
+#[test]
+fn a_bare_dot_or_dot_dot_version_is_stored_but_not_indexed() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    for (name, version) in [("name_index_f", ".."), ("name_index_g", ".")] {
+        let (bytes, header) = mailbox_pack_named(name, version);
+        store.import(bytes.as_slice(), None).unwrap();
+        assert!(store.contains(&header.digest).unwrap());
+        assert_eq!(store.lookup("gents", name, None).unwrap(), None);
+    }
+    // Neither entry escaped its own `by-name/gents/<name>` directory to
+    // land as a sibling of it or higher up the tree.
+    assert!(store.names().unwrap().is_empty());
+}
+
+#[test]
+fn release_deletes_the_matching_name_index_entry_and_keeps_the_rest() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (v1_bytes, v1_header) = mailbox_pack_named("name_index_e", "1.0.0");
+    let (v2_bytes, v2_header) = mailbox_pack_named("name_index_e", "2.0.0");
+    store.import(v1_bytes.as_slice(), None).unwrap();
+    store.import(v2_bytes.as_slice(), None).unwrap();
+
+    store.release(&v1_header.digest).unwrap();
+
+    assert_eq!(
+        store
+            .lookup("gents", "name_index_e", Some("1.0.0"))
+            .unwrap(),
+        None,
+        "the released version's archive is gone, so it no longer resolves"
+    );
+    assert_eq!(
+        store
+            .lookup("gents", "name_index_e", Some("2.0.0"))
+            .unwrap()
+            .map(|entry| entry.digest),
+        Some(v2_header.digest)
+    );
 }

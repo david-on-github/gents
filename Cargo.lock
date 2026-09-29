@@ -4652,6 +4652,7 @@ dependencies = [
  "schema",
  "schemars 1.2.1",
  "security-framework 3.7.0",
+ "semver 1.0.28",
  "serde",
  "serde_json",
  "serde_yaml",

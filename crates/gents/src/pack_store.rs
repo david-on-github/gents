@@ -6,13 +6,24 @@
 //! equals both the file's own header and the digest the caller asked for, so
 //! a reader never sees a partial or unverified pack under a digest's name.
 //! Because a name is its content, an existing file is never replaced.
+//!
+//! Beside the digest-addressed store sits a name index,
+//! `{home}/packs/store/by-name/{namespace}/{name}/{version}`, a file
+//! holding that version's digest. [`Self::import_accepting`] writes it for
+//! every import (registry fetch, `.pack` file or directory alike), so
+//! [`Self::lookup`] can resolve a bare `namespace/name[@version]` to a
+//! stored archive without opening any of them.
 
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 
 use anyhow::{ensure, Context, Result};
 
+use crate::pack::is_valid_pack_name;
 use crate::pack_archive::{digest_hex, read_pack, Bounds, PackArchive, PackHeader, EXTENSION};
+
+/// The name index directory, sibling of `sha256/` under the store root.
+const NAME_INDEX_DIR_NAME: &str = "by-name";
 
 /// The verified header an unpacked pack keeps beside its files; a dotfile,
 /// so it can never be mistaken for a pack asset.
@@ -29,6 +40,45 @@ pub struct PackStore {
 pub struct StoredPack {
     pub header: PackHeader,
     pub path: PathBuf,
+}
+
+/// One version the name index has recorded for a `namespace/name`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredName {
+    pub version: String,
+    pub digest: String,
+}
+
+/// A version string's sort key: a valid semantic version orders by
+/// [`semver::Version`]; anything else orders after every semantic version,
+/// lexicographically among themselves, so a real release always outranks
+/// an oddball tag like `latest`. Declaring `Other` first is load bearing:
+/// the derived `Ord` compares the variant before its payload, so every
+/// `Other` sorts below every `Semver` regardless of their text.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum VersionKey {
+    Other(String),
+    Semver(semver::Version),
+}
+
+impl VersionKey {
+    fn parse(version: &str) -> Self {
+        semver::Version::parse(version)
+            .map(VersionKey::Semver)
+            .unwrap_or_else(|_| VersionKey::Other(version.to_owned()))
+    }
+}
+
+/// Whether `version` is safe as one path segment of the name index: ASCII
+/// alphanumeric plus `.`, `+`, `-`, non-empty, and never a bare `.` or `..`
+/// (otherwise a valid-looking version could name the parent directory).
+fn is_valid_index_version(version: &str) -> bool {
+    version != "."
+        && version != ".."
+        && !version.is_empty()
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
 }
 
 impl PackStore {
@@ -108,6 +158,7 @@ impl PackStore {
                     .with_context(|| format!("storing the pack at {}", path.display()))
             }
         }
+        self.record_name(&verified.header)?;
         Ok(StoredPack {
             header: verified.header,
             path,
@@ -166,6 +217,239 @@ impl PackStore {
             || self.root.join("unpacked"),
             |packs| packs.join("unpacked"),
         )
+    }
+
+    /// `{home}/packs/store/by-name`, the name index root.
+    fn by_name_root(&self) -> PathBuf {
+        self.root.parent().map_or_else(
+            || self.root.join(NAME_INDEX_DIR_NAME),
+            |store| store.join(NAME_INDEX_DIR_NAME),
+        )
+    }
+
+    /// Records `header` in the name index, replacing any prior entry for the
+    /// same namespace/name/version. Called only from
+    /// [`Self::import_accepting`], after the archive itself is persisted,
+    /// which is the one place every import passes through.
+    ///
+    /// A coordinate or version this store cannot use as a path segment is
+    /// logged and left out of the index: the archive is still stored under
+    /// its digest either way, so only the by-name lookup misses it.
+    fn record_name(&self, header: &PackHeader) -> Result<()> {
+        let Some((namespace, name)) = header.coordinate.split_once('/') else {
+            tracing::warn!(
+                coordinate = %header.coordinate,
+                "pack coordinate is not namespace/name; not indexing it by name"
+            );
+            return Ok(());
+        };
+        if !is_valid_pack_name(namespace) || !is_valid_pack_name(name) {
+            tracing::warn!(
+                coordinate = %header.coordinate,
+                "pack coordinate is not snake_case; not indexing it by name"
+            );
+            return Ok(());
+        }
+        if !is_valid_index_version(&header.version) {
+            tracing::warn!(
+                coordinate = %header.coordinate,
+                version = %header.version,
+                "pack version cannot be indexed by name"
+            );
+            return Ok(());
+        }
+        let dir = self.by_name_root().join(namespace).join(name);
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("creating the pack name index at {}", dir.display()))?;
+        let mut staged = tempfile::Builder::new()
+            .prefix(".staging-")
+            .tempfile_in(&dir)
+            .with_context(|| format!("staging a pack name index entry in {}", dir.display()))?;
+        staged
+            .write_all(header.digest.as_bytes())
+            .context("writing a pack name index entry")?;
+        staged
+            .as_file()
+            .sync_all()
+            .context("syncing a pack name index entry")?;
+        let target = dir.join(&header.version);
+        staged
+            .persist(&target)
+            .map_err(|error| error.error)
+            .with_context(|| {
+                format!("storing the pack name index entry at {}", target.display())
+            })?;
+        Ok(())
+    }
+
+    /// The versions indexed under `dir` (one `namespace/name` directory)
+    /// whose archive is still present in the store, in arbitrary order. A
+    /// stale entry (raced with [`Self::release`]) or a corrupt one (a
+    /// malformed digest) is logged and skipped rather than failing the
+    /// whole lookup.
+    fn read_indexed_versions(&self, dir: &Path) -> Result<Vec<StoredName>> {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).with_context(|| format!("reading {}", dir.display())),
+        };
+        let mut versions = Vec::new();
+        for entry in entries {
+            let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
+            let Some(version) = entry.file_name().to_str().map(str::to_owned) else {
+                continue; // never written by this store
+            };
+            if version.starts_with(".staging-") {
+                continue; // an in-flight write
+            }
+            let digest = match std::fs::read_to_string(entry.path()) {
+                Ok(digest) => digest.trim().to_owned(),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue, // raced with a release
+                Err(error) => {
+                    return Err(error)
+                        .with_context(|| format!("reading {}", entry.path().display()))
+                }
+            };
+            let present = match self.contains(&digest) {
+                Ok(present) => present,
+                Err(error) => {
+                    tracing::warn!(
+                        entry = %entry.path().display(),
+                        %error,
+                        "pack name index entry has a malformed digest; skipping it"
+                    );
+                    false
+                }
+            };
+            if present {
+                versions.push(StoredName { version, digest });
+            }
+        }
+        Ok(versions)
+    }
+
+    /// The store's resolution for `namespace/name`: `version` exactly when
+    /// it was indexed and its archive is still present, otherwise the
+    /// highest semantic version among indexed entries whose archive is
+    /// present (non-semver versions sort after every semantic one,
+    /// lexicographically).
+    pub fn lookup(
+        &self,
+        namespace: &str,
+        name: &str,
+        version: Option<&str>,
+    ) -> Result<Option<StoredName>> {
+        let dir = self.by_name_root().join(namespace).join(name);
+        let mut versions = self.read_indexed_versions(&dir)?;
+        if let Some(version) = version {
+            return Ok(versions.into_iter().find(|entry| entry.version == version));
+        }
+        versions.sort_by(|a, b| VersionKey::parse(&a.version).cmp(&VersionKey::parse(&b.version)));
+        Ok(versions.pop())
+    }
+
+    /// Every `namespace/name` the name index has an entry for, each with its
+    /// indexed versions whose archive is still present, newest first
+    /// (non-semver versions last, lexicographically), sorted by coordinate.
+    pub fn names(&self) -> Result<Vec<(String, Vec<StoredName>)>> {
+        let root = self.by_name_root();
+        let namespace_entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error).with_context(|| format!("reading {}", root.display())),
+        };
+        let mut names = Vec::new();
+        for namespace_entry in namespace_entries {
+            let namespace_entry =
+                namespace_entry.with_context(|| format!("reading {}", root.display()))?;
+            if !namespace_entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            let Some(namespace) = namespace_entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let namespace_dir = namespace_entry.path();
+            let name_entries = std::fs::read_dir(&namespace_dir)
+                .with_context(|| format!("reading {}", namespace_dir.display()))?;
+            for name_entry in name_entries {
+                let name_entry =
+                    name_entry.with_context(|| format!("reading {}", namespace_dir.display()))?;
+                if !name_entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
+                let Some(name) = name_entry.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let mut versions = self.read_indexed_versions(&name_entry.path())?;
+                if versions.is_empty() {
+                    continue;
+                }
+                versions.sort_by(|a, b| {
+                    VersionKey::parse(&b.version).cmp(&VersionKey::parse(&a.version))
+                });
+                names.push((format!("{namespace}/{name}"), versions));
+            }
+        }
+        names.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(names)
+    }
+
+    /// Deletes every name-index entry that records `digest`, wherever it was
+    /// filed: a pack's bytes, not the coordinate that first stored them,
+    /// are its identity, so two coordinates or versions can share a digest
+    /// and both must be forgotten when it is released.
+    fn remove_name_entries_for_digest(&self, digest: &str) -> Result<()> {
+        let root = self.by_name_root();
+        let namespace_entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error).with_context(|| format!("reading {}", root.display())),
+        };
+        for namespace_entry in namespace_entries {
+            let namespace_dir = namespace_entry
+                .with_context(|| format!("reading {}", root.display()))?
+                .path();
+            if !namespace_dir.is_dir() {
+                continue;
+            }
+            for name_entry in std::fs::read_dir(&namespace_dir)
+                .with_context(|| format!("reading {}", namespace_dir.display()))?
+            {
+                let name_dir = name_entry
+                    .with_context(|| format!("reading {}", namespace_dir.display()))?
+                    .path();
+                if !name_dir.is_dir() {
+                    continue;
+                }
+                for version_entry in std::fs::read_dir(&name_dir)
+                    .with_context(|| format!("reading {}", name_dir.display()))?
+                {
+                    let path = version_entry
+                        .with_context(|| format!("reading {}", name_dir.display()))?
+                        .path();
+                    let recorded = match std::fs::read_to_string(&path) {
+                        Ok(recorded) => recorded,
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                        Err(error) => {
+                            return Err(error)
+                                .with_context(|| format!("reading {}", path.display()))
+                        }
+                    };
+                    if recorded.trim() != digest {
+                        continue;
+                    }
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(error)
+                                .with_context(|| format!("removing {}", path.display()))
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn unpack(&self, digest: &str, target: &Path) -> Result<()> {
@@ -251,6 +535,7 @@ impl PackStore {
                 return Err(error).with_context(|| format!("removing {}", unpacked.display()))
             }
         }
+        self.remove_name_entries_for_digest(digest)?;
         Ok(released)
     }
 

@@ -108,6 +108,10 @@ kovan-map = "0.1.22"
 tar = "0.4"
 flate2 = "1"
 
+# The pack store's name index (src/pack_store.rs): orders a name's stored
+# versions to resolve a bare `namespace/name` to its highest one.
+semver = "1"
+
 # `afterburner_afb::Afb` parses a plugin's compiled `.afb` (src/pack_archive.rs
 # reads a pack's declared assets, one of which may be a plugin's artifact;
 # src/plugin.rs parses that artifact to classify it before ever running it).
