@@ -119,11 +119,13 @@ pub async fn desktop_client_start<R: Runtime>(
             .map_err(BridgeError::untyped);
     }
 
+    // Opening the stale store would resume the pairing this retires.
     if let Err(error) = super::managed_server::retire_orphaned_client_state(&state).await {
         tracing::warn!(
             error = %error.message,
             "could not archive client state paired with a node that is no longer here"
         );
+        return Err(error);
     }
 
     let progress_rx = claim_or_join_client_start(&app, &state);

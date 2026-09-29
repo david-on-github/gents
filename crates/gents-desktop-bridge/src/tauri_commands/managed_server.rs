@@ -1076,6 +1076,7 @@ pub(super) async fn retire_orphaned_client_state(
     )?;
     let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
     let backup = plan.backup_path(&stamp)?;
+    plan.preflight(&backup)?;
     let result = plan.retire(HomeResetDisposition::Archive, Some(&backup))?;
     tracing::info!(
         target: "gents_desktop::managed_server",
@@ -1505,8 +1506,14 @@ impl HomeResetPlan {
     /// Deletion is offered only for stores known to come from an older
     /// release; a store another, possibly newer, build wrote may still be
     /// wanted by that build.
+    ///
+    /// A paired runtime retired without a refusal was never opened, so its
+    /// store is unclassified and may belong to a newer build: archive only.
     fn deletable(&self) -> bool {
-        self.refused_stores().next().is_some()
+        self.runtime
+            .as_ref()
+            .is_none_or(|(_, store)| store.is_some())
+            && self.refused_stores().next().is_some()
             && self.refused_stores().all(|store| store.kind.is_older())
     }
 
@@ -4255,12 +4262,17 @@ mod tests {
             Some(home.to_str().unwrap())
         );
         assert!(preview
-            .delete_paths
+            .planned_paths
             .contains(&home.join("data").to_string_lossy().into_owned()));
-        let confirmation = preview.delete_confirmation.clone().unwrap();
-        plan.check_confirmation(&confirmation, HomeResetDisposition::Delete)
+        assert!(
+            preview.delete_confirmation.is_none(),
+            "an unopened paired home may belong to a newer build: archive only"
+        );
+        plan.check_confirmation(&preview.confirmation, HomeResetDisposition::Archive)
             .unwrap();
-        plan.retire(HomeResetDisposition::Delete, None).unwrap();
+        let backup = plan.backup_path("20260928T000000.000Z").unwrap();
+        plan.retire(HomeResetDisposition::Archive, Some(&backup))
+            .unwrap();
 
         // What a relaunched runtime would find: no store, no init marker, and
         // no desktop pairing; another agent's home is left alone.
@@ -4396,6 +4408,35 @@ mod tests {
                 .is_none(),
             "nothing is left to retire"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn orphaned_state_that_cannot_be_archived_fails_without_moving_anything() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temp, state) = orchestration_state();
+        let desktop = state.policy.desktop_paths.clone();
+        write(&desktop.node_data_dir().join("MANIFEST"), "REGOMAN");
+        let stored = serde_json::json!({
+            "agentName": "Mandrake",
+            "reviewedFor": {
+                "home": temp.path().join("agent").to_string_lossy(),
+                "agentDid": "did:key:gone"
+            }
+        });
+        write(
+            &desktop.root().join(MANAGED_SERVER_CONFIG),
+            &stored.to_string(),
+        );
+        let parent = desktop.root().parent().unwrap().to_path_buf();
+        let original = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = retire_orphaned_client_state(&state).await;
+        std::fs::set_permissions(&parent, original).unwrap();
+
+        assert!(result.is_err(), "startup must not reopen state it failed to retire");
+        assert!(desktop.node_data_dir().join("MANIFEST").is_file());
+        assert!(desktop.root().join(MANAGED_SERVER_CONFIG).is_file());
     }
 
     #[tokio::test]
