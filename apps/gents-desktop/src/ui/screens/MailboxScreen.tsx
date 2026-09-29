@@ -32,6 +32,7 @@ import { BehaviorAvatar } from "./parts";
 import { BehaviorHoverCard } from "./HoverCards";
 import { behaviorName } from "./behavior";
 import { Markdown } from "./Markdown";
+import { parseQuestion, QuestionAnswer } from "./MailboxQuestion";
 import { when } from "./time";
 
 type BadgeVariant = ComponentProps<typeof Badge>["variant"];
@@ -147,7 +148,10 @@ function Item({
   const session = m.sessionId
     ? shell.selectedDeployment?.sessions.find((s) => s.sessionId === m.sessionId)
     : undefined;
-  const body = [m.summary, m.payload ? payloadMarkdown(m.payload) : null]
+  /* a kind with its own answer surface renders it; any other item keeps
+     the generic reading view */
+  const question = parseQuestion(m);
+  const body = [m.summary, m.payload && !question ? payloadMarkdown(m.payload) : null]
     .filter((part): part is string => Boolean(part?.trim()))
     .join("\n\n");
   const foldable = body.length > FOLD_CHARS || body.split("\n").length > FOLD_LINES;
@@ -285,6 +289,12 @@ function Item({
                   </Button>
                 )}
               </div>
+            )}
+            {question && (
+              <QuestionAnswer
+                question={question}
+                onAnswer={(answer) => shell.answerMailboxQuestion(m, answer)}
+              />
             )}
             {m.action === "write_document" && m.expectedCollection && (
               <p className="mt-2 text-xs text-muted-foreground">

@@ -13,6 +13,9 @@ export type { DesktopRuntimeSnapshot as RuntimeSnapshot } from "../generated/Des
 export type { TriggerView } from "../generated/TriggerView.js";
 export type { InferenceBackendView } from "../generated/InferenceBackendView.js";
 export type { MailboxItemView } from "../generated/MailboxItemView.js";
+export type { MailboxQuestion } from "../generated/MailboxQuestion.js";
+export type { MailboxQuestionAnswer } from "../generated/MailboxQuestionAnswer.js";
+export type { MailboxQuestionOption } from "../generated/MailboxQuestionOption.js";
 export type { NetworkReplicatorView } from "../generated/NetworkReplicatorView.js";
 export type { NetworkSavedPeerView } from "../generated/NetworkSavedPeerView.js";
 export type { NetworkStatusView } from "../generated/NetworkStatusView.js";

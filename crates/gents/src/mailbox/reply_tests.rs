@@ -265,6 +265,7 @@ async fn modeled_handoff_positive_sequence_maps_to_native_owners() {
                 title: modeled.content.clone(),
                 summary: None,
                 payload: None,
+                question: None,
             }),
         ),
     )

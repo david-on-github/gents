@@ -38,8 +38,12 @@ const item = (over: Partial<MailboxItemView> = {}): MailboxItemView => ({
   ...over,
 });
 
-const shellWith = (items: MailboxItemView[]) =>
+const shellWith = (
+  items: MailboxItemView[],
+  answerMailboxQuestion: Shell["answerMailboxQuestion"] = vi.fn(),
+) =>
   ({
+    answerMailboxQuestion,
     selectedDeployment: {
       mailboxItems: items,
       behaviors: [{ behaviorId: "engineer", displayName: "Engineer" }],
@@ -118,5 +122,84 @@ describe("mailbox item", () => {
     render(<MailboxScreen shell={shellWith([item({ summary: "short" })])} />);
     expect(screen.queryByRole("button", { name: "Show more" })).toBeNull();
     expect(screen.getByTestId("mailbox-item-body")).not.toHaveClass("max-h-48");
+  });
+});
+
+const questionItem = (question: Record<string, unknown>) =>
+  item({
+    kind: "ask",
+    action: "start_request",
+    title: "Backend",
+    payload: JSON.stringify({
+      version: 1,
+      prompt: "Which backend should the crew use?",
+      options: [
+        { id: "local", label: "Local model", description: "Runs on this Mac" },
+        { id: "claude", label: "Claude" },
+      ],
+      multi_select: false,
+      allow_free_text: false,
+      ...question,
+    }),
+  });
+
+describe("mailbox question", () => {
+  it("sends a single choice on click and hides the raw payload", async () => {
+    const answer = vi.fn().mockResolvedValue(undefined);
+    const ask = questionItem({});
+    render(<MailboxScreen shell={shellWith([ask], answer)} />);
+    expect(screen.getByText("Which backend should the crew use?")).toBeVisible();
+    expect(screen.queryByText(/"version"/)).toBeNull();
+    expect(screen.getByText("Runs on this Mac")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Send" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Claude" }));
+    expect(answer).toHaveBeenCalledWith(ask, {
+      option_ids: ["claude"],
+      free_text: null,
+    });
+  });
+
+  it("toggles several choices and sends them with an Other note", () => {
+    const answer = vi.fn().mockResolvedValue(undefined);
+    const ask = questionItem({ multi_select: true, allow_free_text: true });
+    render(<MailboxScreen shell={shellWith([ask], answer)} />);
+    const send = screen.getByRole("button", { name: "Send" });
+    expect(send).toBeDisabled();
+    const local = screen.getByRole("button", { name: "Local model" });
+    fireEvent.click(local);
+    fireEvent.click(screen.getByRole("button", { name: "Claude" }));
+    fireEvent.click(local);
+    expect(local).toHaveAttribute("aria-pressed", "false");
+    fireEvent.change(screen.getByLabelText("Other"), {
+      target: { value: "and a fallback" },
+    });
+    fireEvent.click(send);
+    expect(answer).toHaveBeenCalledWith(ask, {
+      option_ids: ["claude"],
+      free_text: "and a fallback",
+    });
+  });
+
+  it("sends a free-text-only answer", () => {
+    const answer = vi.fn().mockResolvedValue(undefined);
+    const ask = questionItem({ allow_free_text: true });
+    render(<MailboxScreen shell={shellWith([ask], answer)} />);
+    fireEvent.change(screen.getByLabelText("Other"), { target: { value: "Ollama" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(answer).toHaveBeenCalledWith(ask, { option_ids: [], free_text: "Ollama" });
+  });
+
+  it("keeps the generic view for a payload that is not a question", () => {
+    render(
+      <MailboxScreen
+        shell={shellWith([
+          item({ kind: "ask", action: "start_request", payload: '{"pr":42}' }),
+        ])}
+      />,
+    );
+    expect(screen.queryByTestId("mailbox-question")).toBeNull();
+    expect(
+      screen.getByTestId("mailbox-item-body").querySelector("pre"),
+    ).toHaveTextContent('"pr": 42');
   });
 });

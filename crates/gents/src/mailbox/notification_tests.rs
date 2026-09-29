@@ -296,6 +296,7 @@ async fn content_tool_stamps_current_request_and_reuses_configured_condition() {
             title: title.into(),
             summary: None,
             payload: None,
+            question: None,
         };
         let receipt = scope_tool_request_identity(
             Some(context.requester_did.clone()),
@@ -395,5 +396,106 @@ async fn provenance_keeps_execution_owner_resolved_selection() {
             .await
             .is_err()
     );
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn question_files_an_ask_whatever_the_surface_policy_and_refuses_invalid_payloads() {
+    use crate::llm::tool::Tool;
+    use crate::tool_call_lifecycle::runtime::{
+        scope_request_tool_execution, scope_tool_request_identity,
+    };
+    use gents_protocol::mailbox_question::{
+        MailboxQuestion, MailboxQuestionOption, MAILBOX_QUESTION_VERSION,
+    };
+    let node = tests::test_node().await;
+    let context = tests::context("did:test:owner");
+    let result = node.execute(
+        "mutation { create_AgentRequest(input: {request_id: \"ask\", purpose: \"normal\", agent_did: \"did:test:agent\", requester_did: \"did:test:owner\", behavior_id: \"operator\"}) {_docID} }"
+    ).await;
+    assert!(!result.has_errors(), "{:?}", result.errors);
+    // The surface's default is an informational flag.
+    let tool = MailboxCreateTool::new(node.clone(), MailboxNotificationPolicy::default());
+    let question = |prompt: &str, options: &[&str]| MailboxQuestion {
+        version: MAILBOX_QUESTION_VERSION,
+        prompt: prompt.into(),
+        options: options
+            .iter()
+            .map(|id| MailboxQuestionOption {
+                id: (*id).into(),
+                label: id.to_uppercase(),
+                description: None,
+            })
+            .collect(),
+        multi_select: false,
+        allow_free_text: true,
+    };
+    let call = |args: MailboxContentArgs| {
+        scope_tool_request_identity(
+            Some(context.requester_did.clone()),
+            Some(context.agent_did.clone()),
+            Some(context.behavior_id.clone()),
+            Some("ask".into()),
+            scope_request_tool_execution(
+                None,
+                tokio_util::sync::CancellationToken::new(),
+                tool.call(args),
+            ),
+        )
+    };
+    let content = |title: &str, payload: Option<&str>, question: Option<MailboxQuestion>| {
+        MailboxContentArgs {
+            title: title.into(),
+            summary: None,
+            payload: payload.map(str::to_owned),
+            question,
+        }
+    };
+    for invalid in [
+        content("One option", None, Some(question("Ship?", &["yes"]))),
+        content("Duplicate", None, Some(question("Ship?", &["yes", "yes"]))),
+        content(
+            "Both",
+            Some("extra"),
+            Some(question("Ship?", &["yes", "no"])),
+        ),
+    ] {
+        assert!(call(invalid).await.is_err());
+    }
+    assert!(list_mailbox_items(&node, &context.requester_did, None)
+        .await
+        .unwrap()
+        .is_empty());
+
+    let first = question("Ship the release?", &["yes", "no"]);
+    let receipt: Value = serde_json::from_str(
+        &call(content("Release", None, Some(first.clone())))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(receipt["outcome"], "created");
+    assert_eq!(receipt["item"]["kind"], "ask");
+    assert_eq!(receipt["item"]["action"], "start_request");
+    let stored = MailboxQuestion::from_payload(receipt["item"]["payload"].as_str().unwrap());
+    assert_eq!(stored.unwrap(), first);
+    // A second question in the same request is its own item; an ordinary
+    // filing keeps the surface policy.
+    let second: Value = serde_json::from_str(
+        &call(content(
+            "Backend",
+            None,
+            Some(question("Which backend?", &["a", "b"])),
+        ))
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(second["outcome"], "created");
+    assert_ne!(second["item"]["_docID"], receipt["item"]["_docID"]);
+    let flag: Value =
+        serde_json::from_str(&call(content("Note", Some("fyi"), None)).await.unwrap()).unwrap();
+    assert_eq!(flag["item"]["kind"], "flag");
+    assert_eq!(flag["item"]["action"], "ack");
     node.shutdown().await;
 }

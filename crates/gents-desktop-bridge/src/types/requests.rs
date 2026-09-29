@@ -80,6 +80,11 @@ pub struct ChatSendRequest {
     pub content: String,
     #[serde(default)]
     pub caused_by_source_doc_id: Option<String>,
+    /// An answer to the question on the `caused_by_source_doc_id` item. The
+    /// bridge renders the reply content from the item, so `content` is empty.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub answer: Option<gents_protocol::mailbox_question::MailboxQuestionAnswer>,
 }
 
 #[derive(Debug, Clone, Deserialize, TS)]

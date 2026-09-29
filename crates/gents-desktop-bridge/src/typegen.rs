@@ -188,6 +188,7 @@ fn export_all(dir: &Path) -> Result<(), String> {
         EnrollmentStatusRequest,
         ChatSendRequest,
         MailboxItemRequest,
+        gents_protocol::mailbox_question::MailboxQuestion,
         SessionRenameRequest,
         AgentConfigSaveRequest,
         DefaultBehaviorSetRequest,

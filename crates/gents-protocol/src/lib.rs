@@ -5,6 +5,7 @@ pub mod client_protocol;
 pub mod enrollment;
 pub mod event_delivery;
 pub mod graphql;
+pub mod mailbox_question;
 pub mod message;
 pub mod network_token;
 pub mod output;

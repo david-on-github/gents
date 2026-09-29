@@ -15,7 +15,21 @@ pub async fn send_chat_message(
         bail!("agent_did is required");
     }
 
-    let content = request.content.trim().to_string();
+    let content = match &request.answer {
+        Some(answer) => {
+            if !request.content.trim().is_empty() {
+                bail!("an answer renders its own content; send empty content");
+            }
+            super::mailbox::question_reply_content(
+                core,
+                request.caused_by_source_doc_id.as_deref(),
+                request.session_id.as_deref(),
+                &agent_did,
+                answer,
+            )?
+        }
+        None => request.content.trim().to_string(),
+    };
     if content.is_empty() {
         bail!("content is required");
     }
