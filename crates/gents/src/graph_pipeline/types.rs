@@ -233,7 +233,8 @@ pub struct EntryPrepare {
 
 /// One host-computed fact a prepare step hands to the plugin.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub enum HostInput {
     /// The Git diff between two admitted operator input fields.
@@ -361,6 +362,7 @@ pub enum DiagnosticCode {
     ReadOnlyWorkspaceRequiresGitDiff,
     InvalidPrepareWrites,
     InvalidPrepareLimits,
+    InvalidInputSchema,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

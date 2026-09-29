@@ -3,4 +3,4 @@
 /**
  * One host-computed fact a prepare step hands to the plugin.
  */
-export type HostInput = { "GitDiff": { repository_field: string, base_field: string, head_field: string, unified_context_lines: number, rename_similarity_percent: number, } } | "ReadOnlyWorkspace";
+export type HostInput = { "kind": "git_diff", repository_field: string, base_field: string, head_field: string, unified_context_lines: number, rename_similarity_percent: number, } | { "kind": "read_only_workspace" };
