@@ -455,8 +455,7 @@ mod tests {
         let schema = schema_from(&[
             ("backend_id", "String"),
             ("endpoint", "String"),
-            ("api_key", "String"),
-            ("api_key_env_var", "String"),
+            ("auth", "JSON"),
         ]);
         let visible: Vec<&str> = schema
             .visible_fields("InferenceBackend")
@@ -509,17 +508,13 @@ mod tests {
     fn suggestions_never_include_restricted_fields() {
         // Candidates come from the visible set, so a near-miss on a secret
         // field must not resurrect it.
-        let schema = schema_from(&[
-            ("backend_id", "String"),
-            ("api_key", "String"),
-            ("api_key_env_var", "String"),
-        ]);
+        let schema = schema_from(&[("backend_id", "String"), ("auth", "JSON")]);
         let candidates: Vec<String> = schema
             .visible_fields("InferenceBackend")
             .iter()
             .map(|f| f.name.clone())
             .collect();
-        assert!(suggest_fields("api_keys", &candidates).is_empty());
+        assert!(suggest_fields("auths", &candidates).is_empty());
     }
 
     #[test]

@@ -396,7 +396,7 @@ pub struct CompactionEntryRow {
     pub created_at: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OAuthCredentialRow {
     #[serde(default, rename = "_docID")]
     pub doc_id: Option<String>,
@@ -423,6 +423,28 @@ pub struct OAuthCredentialRow {
     pub last_refresh: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
+}
+
+/// Token values never reach logs or error text through `Debug`.
+impl std::fmt::Debug for OAuthCredentialRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let redacted = |token: &Option<String>| token.as_ref().map(|_| "[redacted]");
+        f.debug_struct("OAuthCredentialRow")
+            .field("doc_id", &self.doc_id)
+            .field("credential_id", &self.credential_id)
+            .field("agent_did", &self.agent_did)
+            .field("provider", &self.provider)
+            .field("access_token", &redacted(&self.access_token))
+            .field("refresh_token", &redacted(&self.refresh_token))
+            .field("id_token", &redacted(&self.id_token))
+            .field("account_id", &self.account_id)
+            .field("chatgpt_plan_type", &self.chatgpt_plan_type)
+            .field("is_fedramp", &self.is_fedramp)
+            .field("access_token_expires_at", &self.access_token_expires_at)
+            .field("last_refresh", &self.last_refresh)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -502,6 +524,28 @@ pub struct ToolServiceHealthStateRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oauth_credential_row_debug_redacts_tokens() {
+        let row = OAuthCredentialRow {
+            doc_id: None,
+            credential_id: "claude-oauth:did:key:zA".into(),
+            agent_did: Some("did:key:zA".into()),
+            provider: Some("claude-oauth".into()),
+            access_token: Some("secret-access-token".into()),
+            refresh_token: Some("secret-refresh-token".into()),
+            id_token: Some("secret-id-token".into()),
+            account_id: None,
+            chatgpt_plan_type: None,
+            is_fedramp: None,
+            access_token_expires_at: None,
+            last_refresh: None,
+            enabled: Some(true),
+        };
+        let debug = format!("{row:?} {row:#?}");
+        assert!(!debug.contains("secret-"), "{debug}");
+        assert!(debug.contains("claude-oauth:did:key:zA"), "{debug}");
+    }
 
     #[test]
     fn agent_request_row_roundtrips() {

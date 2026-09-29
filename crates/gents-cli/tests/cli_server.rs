@@ -2555,7 +2555,7 @@ async fn query_command_reconstructs_a_trace() -> Result<()> {
             "--collection",
             "InferenceBackend",
             "--field",
-            "api_key",
+            "auth",
         ],
     )?;
     assert!(
@@ -2606,7 +2606,7 @@ async fn query_command_reconstructs_a_trace() -> Result<()> {
         .collect();
     assert!(field_names.contains(&"backend_id"), "{field_names:?}");
     assert!(
-        !field_names.contains(&"api_key") && !field_names.contains(&"api_key_env_var"),
+        !field_names.contains(&"auth"),
         "secret leaked into discovery inventory: {field_names:?}"
     );
 
@@ -2700,8 +2700,7 @@ async fn mcp_endpoint_serves_defra_query() -> Result<()> {
     assert_eq!(tc["tool_name"].as_str(), Some("defra_query"));
     assert_eq!(tc["request_id"].as_str(), Some("mcp-req"));
 
-    let denied_args =
-        serde_json::json!({ "collection": "InferenceBackend", "fields": ["api_key"] });
+    let denied_args = serde_json::json!({ "collection": "InferenceBackend", "fields": ["auth"] });
     let denied_params = CallToolRequestParams::new("defra_query")
         .with_arguments(denied_args.as_object().unwrap().clone());
     let denied = mcp.peer().call_tool(denied_params).await;
@@ -2720,7 +2719,7 @@ async fn mcp_endpoint_serves_defra_query() -> Result<()> {
     };
     assert!(
         blocked,
-        "expected MCP defra_query to block api_key selection"
+        "expected MCP defra_query to block backend auth selection"
     );
 
     let _ = mcp.cancel().await;

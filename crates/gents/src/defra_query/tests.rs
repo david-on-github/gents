@@ -366,11 +366,8 @@ async fn discovery_excludes_restricted_fields() {
         .map(|f| f["name"].as_str().unwrap())
         .collect();
     assert!(names.contains(&"backend_id"), "{names:?}");
-    assert!(!names.contains(&"api_key"), "secret leaked: {names:?}");
-    assert!(
-        !names.contains(&"api_key_env_var"),
-        "secret leaked: {names:?}"
-    );
+    assert!(names.contains(&"endpoint"), "{names:?}");
+    assert!(!names.contains(&"auth"), "secret leaked: {names:?}");
 }
 
 /// Discovery still honors the collection scope.
