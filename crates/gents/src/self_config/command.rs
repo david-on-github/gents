@@ -1010,7 +1010,13 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             matches!(verb, "create" | "edit"),
             "unknown {resource} command {verb:?}; run config help {resource}"
         );
-        let mut request = ApplyRequest::new(target, parse_patch(&argv[2..], target)?);
+        // Creation may rely entirely on canonical defaults; edits need a field.
+        let patch = if verb == "create" && argv.len() == 2 {
+            Vec::new()
+        } else {
+            parse_patch(&argv[2..], target)?
+        };
+        let mut request = ApplyRequest::new(target, patch);
         let unique = id.clone();
         request.resolve_unique = Box::new(move |_| Ok(unique.clone()));
         request.allow_create = verb == "create";

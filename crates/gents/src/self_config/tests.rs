@@ -4095,6 +4095,21 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     assert!(disable.contains("no-lockout"), "{disable}");
 
     // #2059: create an execution, bind it, then edit its limits normally.
+    for verb in [
+        &["execution", "preview", "create"][..],
+        &["execution", "create"],
+    ] {
+        ok(call_config_tool(&tools, command(&[verb, &["default-execution"]].concat())).await);
+    }
+    let defaults =
+        ok(call_config_tool(&tools, command(&["execution", "get", "default-execution"])).await);
+    assert_eq!(defaults["document"]["execution_id"], "default-execution");
+    assert!(
+        call_config_tool(&tools, command(&["execution", "edit", "default-execution"]))
+            .await
+            .unwrap_err()
+            .contains("empty patch")
+    );
     ok(call_config_tool(
         &tools,
         command(&[
