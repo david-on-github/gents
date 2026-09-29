@@ -338,6 +338,52 @@ async fn read_installed_pack_fails_loudly_on_a_malformed_record() {
     );
 }
 
+/// A DefraDB unique index is a single-node guarantee, not a distributed one
+/// (see [`crate::goal::delete_goals_for_session`]'s doc comment): a
+/// replicated home can still end up with two `PackInstallation` records for
+/// the same owner and coordinate. `read_installed_pack`'s `limit: 2` plus
+/// `ensure!` exists for exactly that state, so this pins it by registering
+/// the schema with its unique index dropped and creating the duplicate
+/// directly, the same way `register_config_schemas_dropping_unique_indexes`
+/// does for desired-state collections.
+#[tokio::test]
+async fn read_installed_pack_fails_loudly_on_more_than_one_record() {
+    let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
+    let schema = gents_protocol::schemas::PACK_INSTALLATION.replace(
+        r#"@index(fields: ["agent_did", "coordinate"], unique: true)"#,
+        "",
+    );
+    node.add_schema(&schema).await.unwrap();
+    let access = ConfigAccess::Local(node);
+
+    for digest_seed in ["1", "2"] {
+        let input = json!({
+            "agent_did": OWNER,
+            "coordinate": "acme/duplicated",
+            "version": "1",
+            "digest": format!("sha256:{}", digest_seed.repeat(64)),
+        });
+        access
+            .write(
+                "test.duplicate_installation",
+                &format!(
+                    "mutation {{ create_{RECORD}(input: {}) {{ _docID }} }}",
+                    gents_protocol::graphql::graphql_input_literal(&input).unwrap()
+                ),
+            )
+            .await
+            .unwrap();
+    }
+
+    let error = read_installed_pack(&access, OWNER, "acme/duplicated")
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("has more than one installation record"),
+        "{error:#}"
+    );
+}
+
 // --- Dependency bookkeeping (design C) ---------------------------------
 
 async fn dependency_fixture() -> (
