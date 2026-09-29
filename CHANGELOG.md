@@ -8,6 +8,17 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- `gents server` (and the desktop's managed runtime) turns on DefraDB node
+  access control owned by the home's principal. Anonymous HTTP writes, schema
+  changes and P2P administration are refused; HTTP reads are still anonymous.
+  The CLI signs as the home's principal only toward that home's own runtime
+  endpoint or a loopback address, and the desktop only toward a runtime it
+  hosts, so a client that cannot sign as the principal (another host, another
+  home's key, the DefraDB Explorer) loses write and P2P admin access. A home
+  whose identity backend is `macos-secure-enclave` can no longer be served;
+  re-initialize it with a file or `macos-keychain` identity. Existing stores
+  enable access control in place on their next start.
+
 - `Tools.self_config.self_config_dry_run` is renamed `self_config_preview`
   (#2062). It grants the `config` preview verb; it never blocked writes. There
   is no alias: rewrite stored Tools documents and manifests that set the old

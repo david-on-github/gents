@@ -198,45 +198,66 @@ pub(crate) fn resolve_graphql_endpoint(
     ))
 }
 
-/// `url` acting as the home's principal when this process can load that
-/// principal's signing key.
+/// `url` acting as the home's principal when it is this home's own runtime
+/// endpoint or a loopback address and this process can load the principal's
+/// signing key; otherwise anonymous.
 ///
 /// A served home admits HTTP writes, schema changes and P2P administration
-/// only from its own principal. A home that is not initialized, or whose key
-/// cannot sign a DefraDB bearer, reaches the endpoint anonymously, which such
-/// a node limits to reads and refuses everything else with an authorization
-/// error.
+/// only from its own principal. DefraDB checks a bearer's audience against
+/// the `Host` header the sender chose, and bearers carry no nonce, so a
+/// bearer handed to another host could be replayed against any node that
+/// trusts this DID until it expires. Anonymous access reads, and a served
+/// home refuses everything else with an authorization error.
 pub(crate) fn home_graphql_endpoint(home_dir: &Path, url: impl Into<String>) -> GraphqlEndpoint {
     let url = url.into();
-    let principal = match read_init_config(home_dir) {
-        Ok(Some(config)) if !config.agent_did.trim().is_empty() => {
-            match load_initialized_home_identity(home_dir, &config) {
-                Ok(identity) if gents::identity::can_mint_defradb_bearer(identity.did()) => {
-                    Some(identity.did().to_string())
-                }
-                Ok(identity) => {
-                    tracing::warn!(
-                        did = identity.did(),
-                        "home identity cannot sign DefraDB bearers; using anonymous HTTP access"
-                    );
-                    None
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        home = %home_dir.display(),
-                        error = %format!("{error:#}"),
-                        "home identity unavailable; using anonymous HTTP access"
-                    );
-                    None
-                }
-            }
-        }
-        _ => None,
+    let config = match read_init_config(home_dir) {
+        Ok(Some(config)) if !config.agent_did.trim().is_empty() => config,
+        _ => return GraphqlEndpoint::anonymous(url),
     };
-    match principal {
-        Some(did) => GraphqlEndpoint::as_principal(url, did),
-        None => GraphqlEndpoint::anonymous(url),
+    if !endpoint_serves_home(home_dir, &url) {
+        eprintln!(
+            "warning: not authenticating to {url} as {}: it is neither this home's runtime nor a loopback address; writes and P2P administration there will be refused",
+            config.agent_did.trim()
+        );
+        return GraphqlEndpoint::anonymous(url);
     }
+    match load_initialized_home_identity(home_dir, &config) {
+        Ok(identity) if gents::identity::can_mint_defradb_bearer(identity.did()) => {
+            GraphqlEndpoint::as_principal(url, identity.did())
+        }
+        Ok(identity) => {
+            eprintln!(
+                "warning: identity {} has no exportable signing key, so requests to {url} are anonymous; writes and P2P administration will be refused",
+                identity.did()
+            );
+            GraphqlEndpoint::anonymous(url)
+        }
+        Err(error) => {
+            eprintln!(
+                "warning: could not load the identity of home {} ({error:#}), so requests to {url} are anonymous; writes and P2P administration will be refused",
+                home_dir.display()
+            );
+            GraphqlEndpoint::anonymous(url)
+        }
+    }
+}
+
+/// Whether `url` is this home's recorded runtime endpoint or on loopback.
+fn endpoint_serves_home(home_dir: &Path, url: &str) -> bool {
+    let url = url.trim();
+    if read_runtime_state(home_dir)
+        .ok()
+        .flatten()
+        .is_some_and(|state| state.graphql.trim() == url)
+    {
+        return true;
+    }
+    reqwest::Url::parse(url).is_ok_and(|parsed| match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    })
 }
 
 pub(crate) fn resolve_agent_did(home: Option<&Path>, explicit: Option<&str>) -> Result<String> {
@@ -261,5 +282,56 @@ pub(crate) fn display_host(host: IpAddr) -> String {
     match host {
         IpAddr::V4(addr) if addr == Ipv4Addr::UNSPECIFIED => "127.0.0.1".to_string(),
         _ => host.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::endpoint_serves_home;
+
+    #[test]
+    fn bearers_go_only_to_the_homes_runtime_or_loopback() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(endpoint_serves_home(
+            home.path(),
+            "http://127.0.0.1:9191/api/v0/graphql"
+        ));
+        assert!(endpoint_serves_home(
+            home.path(),
+            "http://localhost:9191/api/v0/graphql"
+        ));
+        assert!(endpoint_serves_home(
+            home.path(),
+            "http://[::1]:9191/api/v0/graphql"
+        ));
+        assert!(!endpoint_serves_home(
+            home.path(),
+            "http://100.69.4.79:9191/api/v0/graphql"
+        ));
+        assert!(!endpoint_serves_home(
+            home.path(),
+            "https://runtime.example.com/api/v0/graphql"
+        ));
+
+        std::fs::write(
+            home.path().join(crate::RUNTIME_STATE_FILE_NAME),
+            serde_json::to_vec(&serde_json::json!({
+                "home": home.path(),
+                "graphql": "http://100.69.4.79:9191/api/v0/graphql",
+                "agent_name": "a",
+                "agent_did": "did:key:z6Mk",
+                "default_behavior_id": "b",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(endpoint_serves_home(
+            home.path(),
+            "http://100.69.4.79:9191/api/v0/graphql"
+        ));
+        assert!(!endpoint_serves_home(
+            home.path(),
+            "http://100.69.4.80:9191/api/v0/graphql"
+        ));
     }
 }

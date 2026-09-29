@@ -400,7 +400,10 @@ async fn execute_graphql_async_with_tx(
             request = request.header("x-defradb-tx", id);
         }
         if let Some(authorization) = authorization {
-            request = request.header(reqwest::header::AUTHORIZATION, authorization);
+            let mut value = reqwest::header::HeaderValue::from_str(authorization)
+                .context("encoding Authorization header")?;
+            value.set_sensitive(true);
+            request = request.header(reqwest::header::AUTHORIZATION, value);
         }
         let response = request.send().await;
         let response = match response {

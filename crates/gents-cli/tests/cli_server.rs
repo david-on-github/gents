@@ -470,10 +470,54 @@ async fn ready_json_without_recovery_still_fails_on_a_held_port() -> Result<()> 
     Ok(())
 }
 
+/// A Secure Enclave key cannot own the served node's access control, so
+/// `gents server` refuses the home before building a node, naming the
+/// backend and the remedy.
+#[test]
+fn server_refuses_a_secure_enclave_home_before_building_a_node() -> Result<()> {
+    let tempdir = tempfile::tempdir().context("creating tempdir")?;
+    let home_dir = tempdir.path().join("home");
+    let gents_home = home_dir.join(".gents");
+    fs::create_dir_all(&gents_home)?;
+    fs::write(
+        gents_home.join("init.json"),
+        serde_json::json!({
+            "home": gents_home,
+            "agent_name": "enclave",
+            "agent_did": "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
+            "key_path": null,
+            "identity_backend": "macos-secure-enclave",
+            "secure_enclave_label": "gents-test-enclave",
+            "tool_ceiling": "Readonly",
+            "tool_root": null,
+        })
+        .to_string(),
+    )?;
+    let port = allocate_port()?;
+    let stderr = run_cli_failure_stderr(
+        &home_dir,
+        &[
+            "server",
+            "--http-port",
+            &port.to_string(),
+            "--no-codex-shim",
+        ],
+    )?;
+    assert!(stderr.contains("macos-secure-enclave"), "{stderr}");
+    assert!(stderr.contains("--identity-backend file"), "{stderr}");
+    let store_entries = fs::read_dir(gents_home.join("data"))
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    assert_eq!(store_entries, 0, "no store was opened: {stderr}");
+    Ok(())
+}
+
 /// `gents server` turns on DefraDB node access control owned by the home's
 /// principal: anonymous HTTP writes are refused, the principal's signed
 /// writes and the CLI's P2P administration through the runtime state are
-/// admitted, and a restart of the same store keeps both.
+/// admitted, anonymous reads and `/self` and `/sessions` keep working, and a
+/// restart of the same store keeps all of it. `/mcp` is covered by
+/// `mcp_endpoint_serves_defra_query` on the same served-home setup.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn served_home_admits_only_its_principal_over_http() -> Result<()> {
     let tempdir = tempfile::tempdir().context("creating tempdir")?;
@@ -516,6 +560,31 @@ async fn served_home_admits_only_its_principal_over_http() -> Result<()> {
         let replicators = run_cli_json(&home_dir, &["p2p", "admin", "replicators", "list"])
             .with_context(|| format!("{phase}: CLI P2P administration over HTTP"))?;
         assert_eq!(replicators["status"], "ok", "{phase}: {replicators}");
+        // Reads stay anonymous: DefraDB's HTTP server does not gate them, and
+        // the runtime's unauthenticated read surfaces read as anonymous.
+        let rows = gents::config_client::ConfigAccess::graphql(graphql.clone())
+            .execute(r#"{ CompactionEntry(filter: { agent_did: { _eq: "did:test:nac" } }) { compaction_key } }"#)
+            .await
+            .with_context(|| format!("{phase}: anonymous HTTP read"))?;
+        assert!(
+            rows["data"]["CompactionEntry"]
+                .as_array()
+                .is_some_and(|rows| rows
+                    .iter()
+                    .any(|row| row["compaction_key"] == format!("nac-{phase}"))),
+            "{phase}: {rows}"
+        );
+        for surface in ["self", "sessions"] {
+            let response = reqwest::Client::new()
+                .get(format!("http://127.0.0.1:{port}/{surface}"))
+                .send()
+                .await?;
+            assert!(
+                response.status().is_success(),
+                "{phase}: /{surface} returned {}",
+                response.status()
+            );
+        }
         drop(serve);
     }
     Ok(())

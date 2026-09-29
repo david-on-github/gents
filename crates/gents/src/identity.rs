@@ -160,9 +160,11 @@ pub fn commit_signer_identity_for_did(did: &str) -> Result<String> {
     Ok(lowercase_hex(&public_key_bytes))
 }
 
-/// Lifetime of one minted DefraDB HTTP bearer. DefraDB also tolerates 60s of
-/// clock skew on either side.
-const DEFRADB_BEARER_LIFETIME: std::time::Duration = std::time::Duration::from_secs(300);
+/// Lifetime of one minted DefraDB HTTP bearer. Every request mints its own,
+/// and DefraDB tolerates a further 60s of clock skew, so a bearer replayed by
+/// the host it was sent to stays usable for at most two minutes. DefraDB
+/// bearers carry no nonce.
+const DEFRADB_BEARER_LIFETIME: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Mint an `Authorization` header value that authenticates one DefraDB HTTP
 /// request as `did`.

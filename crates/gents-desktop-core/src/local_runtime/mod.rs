@@ -101,19 +101,35 @@ pub fn operator_endpoint(
     })
 }
 
-/// Loads a local runtime's signing key so this process can act as its
-/// principal.
+/// Loads a co-hosted runtime's signing key so this process can act as its
+/// principal toward that runtime's own endpoint.
+///
+/// Only a record for a runtime this desktop hosts qualifies, and only when
+/// its home's live `runtime.json` names both the record's endpoint and
+/// agent, so a bearer is never sent to a remote or re-pointed endpoint.
 pub(crate) fn load_operator_principal(record: &crate::client::PeerRecord) -> Result<()> {
-    if gents::identity::can_mint_defradb_bearer(&record.agent_did) {
-        return Ok(());
-    }
+    let endpoint = record
+        .operator_graphql()
+        .context("runtime record is not a runtime this desktop hosts")?;
     let home = record
         .local_agent_home
         .as_deref()
         .map(str::trim)
         .filter(|home| !home.is_empty())
         .context("runtime record has no local agent home")?;
-    let identity = load_standard_runtime_identity(Path::new(home))?;
+    let home = Path::new(home);
+    let runtime = read_json::<StoredRuntimeState>(&home.join(RUNTIME_STATE_FILE_NAME))
+        .context("reading the co-hosted runtime's state")?;
+    anyhow::ensure!(
+        runtime.graphql.trim() == endpoint && runtime.agent_did.trim() == record.agent_did,
+        "runtime home {} does not serve {endpoint} for {}",
+        home.display(),
+        record.agent_did
+    );
+    if gents::identity::can_mint_defradb_bearer(&record.agent_did) {
+        return Ok(());
+    }
+    let identity = load_standard_runtime_identity(home)?;
     anyhow::ensure!(
         identity.did() == record.agent_did,
         "runtime home identity does not match the recorded agent"

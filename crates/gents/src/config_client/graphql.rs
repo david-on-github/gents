@@ -10,9 +10,14 @@ use super::{graphql_api_base, GraphqlEndpoint};
 
 const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-fn http_client(endpoint: &GraphqlEndpoint) -> Result<reqwest::Client> {
-    endpoint
-        .http_client(Some(HTTP_TIMEOUT))
+/// Unauthenticated transport: every request attaches its own bearer through
+/// [`GraphqlEndpoint::authorize`], because DefraDB binds a transaction to
+/// the acting DID rather than to one token, and a transaction may outlive a
+/// single bearer.
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(HTTP_TIMEOUT)
+        .build()
         .context("building DefraDB transaction HTTP client")
 }
 
@@ -20,8 +25,8 @@ fn http_client(endpoint: &GraphqlEndpoint) -> Result<reqwest::Client> {
 /// conflict retry inside this request; replay after an ambiguous transport
 /// result could apply a mutation twice.
 pub(super) async fn auto_commit(endpoint: &GraphqlEndpoint, mutation: &str) -> Result<Value> {
-    let response = http_client(endpoint)?
-        .post(endpoint.url())
+    let response = endpoint
+        .authorize(http_client()?.post(endpoint.url()))?
         .json(&serde_json::json!({"query": mutation}))
         .send()
         .await
@@ -50,9 +55,9 @@ pub(super) async fn query_with_options(
 }
 
 pub(super) async fn txn_begin(endpoint: &GraphqlEndpoint) -> Result<(reqwest::Client, String)> {
-    let client = http_client(endpoint)?;
-    let response = client
-        .post(format!("{}/tx", graphql_api_base(endpoint.url())?))
+    let client = http_client()?;
+    let response = endpoint
+        .authorize(client.post(format!("{}/tx", graphql_api_base(endpoint.url())?)))?
         .send()
         .await
         .with_context(|| format!("posting tx begin to {endpoint}"))?;
@@ -81,14 +86,14 @@ pub(super) async fn txn_begin(endpoint: &GraphqlEndpoint) -> Result<(reqwest::Cl
 /// retry. A conflict invalidates the snapshot and must replay the whole owner
 /// callback in a newly begun transaction.
 pub(super) async fn txn_execute(
-    endpoint: &str,
+    endpoint: &GraphqlEndpoint,
     id: &str,
     client: &reqwest::Client,
     query: &str,
     variables: &Value,
 ) -> Result<Value> {
-    let response = client
-        .post(endpoint)
+    let response = endpoint
+        .authorize(client.post(endpoint.url()))?
         .header("x-defradb-tx", id)
         .json(&serde_json::json!({"query": query, "variables": variables}))
         .send()
@@ -120,13 +125,14 @@ pub(super) enum TxnCommitError {
 }
 
 pub(super) async fn txn_commit(
-    endpoint: &str,
+    endpoint: &GraphqlEndpoint,
     id: &str,
     client: &reqwest::Client,
 ) -> std::result::Result<(), TxnCommitError> {
-    let api_base = graphql_api_base(endpoint).map_err(TxnCommitError::CleanupRequired)?;
-    let response = client
-        .post(format!("{api_base}/tx/{id}"))
+    let api_base = graphql_api_base(endpoint.url()).map_err(TxnCommitError::CleanupRequired)?;
+    let response = endpoint
+        .authorize(client.post(format!("{api_base}/tx/{id}")))
+        .map_err(TxnCommitError::CleanupRequired)?
         .send()
         .await
         .with_context(|| format!("posting tx commit to {endpoint}"))
@@ -151,9 +157,13 @@ pub(super) async fn txn_commit(
     )))
 }
 
-pub(super) async fn txn_discard(endpoint: &str, id: &str, client: &reqwest::Client) -> Result<()> {
-    let response = client
-        .delete(format!("{}/tx/{id}", graphql_api_base(endpoint)?))
+pub(super) async fn txn_discard(
+    endpoint: &GraphqlEndpoint,
+    id: &str,
+    client: &reqwest::Client,
+) -> Result<()> {
+    let response = endpoint
+        .authorize(client.delete(format!("{}/tx/{id}", graphql_api_base(endpoint.url())?)))?
         .send()
         .await
         .with_context(|| format!("posting tx discard to {endpoint}"))?;
@@ -244,15 +254,99 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         let result = txn_execute(
-            &endpoint,
+            &GraphqlEndpoint::anonymous(endpoint),
             "same-transaction",
-            &http_client(&GraphqlEndpoint::anonymous(endpoint.clone())).unwrap(),
+            &http_client().unwrap(),
             "mutation($input: JSON) { test(input: $input) { _docID } }",
             &expected,
         )
         .await;
         server.abort();
         assert_eq!(result.unwrap()["data"]["test"][0]["_docID"], "written");
+    }
+
+    /// A transaction can outlive one bearer, so begin, statements and commit
+    /// each carry a bearer minted when they are sent.
+    #[tokio::test]
+    async fn http_transaction_mints_a_bearer_per_request() {
+        use axum::{extract::State, http::HeaderMap, routing::post, Json, Router};
+        use base64::Engine as _;
+        use std::sync::{Arc, Mutex};
+
+        type Seen = Arc<Mutex<Vec<(&'static str, String)>>>;
+        fn record(seen: &Seen, step: &'static str, headers: &HeaderMap) {
+            let bearer = headers
+                .get(axum::http::header::AUTHORIZATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default()
+                .to_string();
+            seen.lock().unwrap().push((step, bearer));
+        }
+        let seen: Seen = Arc::default();
+        let app = Router::new()
+            .route(
+                "/api/v0/tx",
+                post(|State(seen): State<Seen>, headers: HeaderMap| async move {
+                    record(&seen, "begin", &headers);
+                    Json(serde_json::json!({"id": 7}))
+                }),
+            )
+            .route(
+                "/api/v0/graphql",
+                post(|State(seen): State<Seen>, headers: HeaderMap| async move {
+                    record(&seen, "execute", &headers);
+                    Json(serde_json::json!({"data": {"create_X": [{"_docID": "x"}]}}))
+                }),
+            )
+            .route(
+                "/api/v0/tx/{id}",
+                post(|State(seen): State<Seen>, headers: HeaderMap| async move {
+                    record(&seen, "commit", &headers);
+                    ""
+                }),
+            )
+            .with_state(Arc::clone(&seen));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/api/v0/graphql", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let key = tempfile::tempdir().unwrap();
+        let identity =
+            crate::identity::KeyIdentity::load_or_create(key.path().join("principal.key"), None)
+                .unwrap();
+        let did = crate::identity::AgentIdentity::did(&identity).to_string();
+        super::super::ConfigAccess::graphql_as(endpoint, &did)
+            .transact("test.per_request_bearer", |txn| {
+                Box::pin(async move {
+                    // Bearers carry second-resolution issue times.
+                    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+                    txn.execute("mutation { create_X(input: {}) { _docID } }")
+                        .await
+                })
+            })
+            .await
+            .unwrap();
+        server.abort();
+
+        let issued_at = |bearer: &str| -> u64 {
+            let payload = bearer
+                .strip_prefix("Bearer ")
+                .and_then(|token| token.split('.').nth(1))
+                .expect("a JWT bearer");
+            let claims: Value = serde_json::from_slice(
+                &base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .decode(payload)
+                    .unwrap(),
+            )
+            .unwrap();
+            assert_eq!(claims["iss"], did.as_str());
+            claims["iat"].as_u64().unwrap()
+        };
+        let seen = seen.lock().unwrap().clone();
+        let steps: Vec<_> = seen.iter().map(|(step, _)| *step).collect();
+        assert_eq!(steps, ["begin", "execute", "commit"]);
+        assert!(issued_at(&seen[1].1) > issued_at(&seen[0].1), "{seen:?}");
+        assert!(issued_at(&seen[2].1) >= issued_at(&seen[1].1), "{seen:?}");
     }
 
     #[test]

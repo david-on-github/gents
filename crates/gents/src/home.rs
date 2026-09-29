@@ -275,6 +275,29 @@ pub fn read_init_config<ToolPackage: DeserializeOwned, ToolCeiling: DeserializeO
     Ok(Some(state))
 }
 
+/// Identity backend whose key never leaves the Secure Enclave.
+pub const SECURE_ENCLAVE_IDENTITY_BACKEND: &str = "macos-secure-enclave";
+
+/// Refuse to serve a home whose principal cannot own DefraDB node access
+/// control.
+///
+/// Node access control needs the node DID's private key bytes, which a
+/// Secure Enclave key never exports. Serving such a home without access
+/// control is undecided, so it is refused before any node is built.
+pub fn ensure_home_identity_can_serve(home_dir: &Path) -> Result<()> {
+    let Some(config) = read_init_config::<serde_json::Value, serde_json::Value>(home_dir)? else {
+        return Ok(());
+    };
+    if config.identity_backend.as_deref().map(str::trim) == Some(SECURE_ENCLAVE_IDENTITY_BACKEND) {
+        anyhow::bail!(
+            "home {} uses the {SECURE_ENCLAVE_IDENTITY_BACKEND} identity backend, whose key cannot own the served node's access control; re-initialize the home with a file or macos-keychain identity (`gents init --home {} --dangerously-overwrite --identity-backend file`) to serve it",
+            home_dir.display(),
+            home_dir.display()
+        );
+    }
+    Ok(())
+}
+
 /// The top-level entries of a gents home, split into those the home's
 /// runtime owns and those left in place.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -549,6 +572,36 @@ fn retire_entries_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secure_enclave_homes_are_refused_before_serving() {
+        let home = tempfile::tempdir().unwrap();
+        super::ensure_home_identity_can_serve(home.path()).unwrap();
+        let init = |backend: serde_json::Value| {
+            std::fs::write(
+                super::init_config_path(home.path()),
+                serde_json::json!({
+                    "home": home.path(),
+                    "agent_name": "a",
+                    "agent_did": "did:key:z6Mk",
+                    "key_path": null,
+                    "identity_backend": backend,
+                    "tool_ceiling": "readonly",
+                    "tool_root": null,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        init(serde_json::json!("macos-keychain"));
+        super::ensure_home_identity_can_serve(home.path()).unwrap();
+        init(serde_json::json!(super::SECURE_ENCLAVE_IDENTITY_BACKEND));
+        let refused = super::ensure_home_identity_can_serve(home.path())
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("macos-secure-enclave"), "{refused}");
+        assert!(refused.contains("--identity-backend file"), "{refused}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_lock_path_that_is_not_a_regular_file_is_refused() {

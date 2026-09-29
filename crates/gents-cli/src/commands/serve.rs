@@ -621,6 +621,7 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
         .clone()
         .or_else(|| init_config.as_ref().map(|config| config.agent_name.clone()))
         .unwrap_or_else(|| DEFAULT_AGENT_NAME.to_string());
+    gents::home::ensure_home_identity_can_serve(&home_dir)?;
     let server_identity =
         resolve_server_identity(&args, init_config.as_ref(), &home_dir, &agent_name)?;
     let identity = server_identity.identity;
@@ -737,6 +738,12 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
         bind_probe_token.clone(),
     ))
     .merge(crate::http::explorer::explorer_router());
+    if let Some(node_identity_did) = server_identity.node_identity_did.as_deref() {
+        anyhow::ensure!(
+            gents::identity::can_mint_defradb_bearer(node_identity_did),
+            "identity {node_identity_did} has no exportable private key, so it cannot own the served node's access control; re-initialize the home with a file or macos-keychain identity to serve it"
+        );
+    }
     let mut node_builder = crate::persistent_node_builder(&data_dir)?
         .with_http(defra_node::HttpConfig::with_addr(http_addr).with_extra_routes(extra_routes));
     if let Some(node_identity_did) = server_identity.node_identity_did.as_ref() {

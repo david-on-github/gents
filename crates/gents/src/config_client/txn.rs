@@ -26,7 +26,7 @@ use super::{graphql_api_base, ConfigAccess, GraphqlEndpoint};
 
 enum TxnBackend<'a> {
     Http {
-        endpoint: &'a str,
+        endpoint: &'a GraphqlEndpoint,
         id: String,
         client: reqwest::Client,
     },
@@ -315,7 +315,7 @@ fn mutation_write_gate(node: &EmbeddedNode) -> Arc<MutationWriteGate> {
 
 enum RollbackOnDrop {
     Http {
-        endpoint: String,
+        endpoint: GraphqlEndpoint,
         id: String,
         client: reqwest::Client,
         armed: bool,
@@ -458,7 +458,7 @@ async fn begin_http_owned(
         .await
         .map_err(retry::transaction_storage_failure)?;
     let rollback = RollbackOnDrop::Http {
-        endpoint: endpoint.url().to_owned(),
+        endpoint: endpoint.clone(),
         id: id.clone(),
         client: client.clone(),
         armed: true,
@@ -756,7 +756,7 @@ impl<'a> ConfigApplyTxn<'a> {
         .context("begin HTTP transaction task")??;
         let txn = Self {
             backend: TxnBackend::Http {
-                endpoint: endpoint.url(),
+                endpoint,
                 id: id.clone(),
                 client: client.clone(),
             },
@@ -855,9 +855,9 @@ impl<'a> ConfigApplyTxn<'a> {
             TxnBackend::Http {
                 endpoint, client, ..
             } => {
-                let url = format!("{}/collections/versions", graphql_api_base(endpoint)?);
-                let versions: Value = client
-                    .get(&url)
+                let url = format!("{}/collections/versions", graphql_api_base(endpoint.url())?);
+                let versions: Value = endpoint
+                    .authorize(client.get(&url))?
                     .send()
                     .await?
                     .error_for_status()?

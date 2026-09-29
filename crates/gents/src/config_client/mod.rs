@@ -150,17 +150,33 @@ impl GraphqlEndpoint {
         crate::identity::defradb_bearer_authorization(did, &audience).map(Some)
     }
 
-    /// HTTP client whose requests carry this endpoint's authorization. The
-    /// bearer is minted now, so the client serves one bounded operation.
+    fn authorization_header(&self) -> Result<Option<reqwest::header::HeaderValue>> {
+        let Some(authorization) = self.authorization()? else {
+            return Ok(None);
+        };
+        let mut value = reqwest::header::HeaderValue::from_str(&authorization)
+            .context("encoding DefraDB bearer header")?;
+        value.set_sensitive(true);
+        Ok(Some(value))
+    }
+
+    /// Attach a bearer minted now to one request.
+    pub fn authorize(&self, request: reqwest::RequestBuilder) -> Result<reqwest::RequestBuilder> {
+        Ok(match self.authorization_header()? {
+            Some(value) => request.header(reqwest::header::AUTHORIZATION, value),
+            None => request,
+        })
+    }
+
+    /// Client whose requests all carry one bearer minted now, for a one-shot
+    /// command that finishes within the bearer's lifetime. Long-lived or
+    /// multi-step owners use [`Self::authorize`] per request instead.
     pub fn http_client(&self, timeout: Option<std::time::Duration>) -> Result<reqwest::Client> {
         let mut builder = reqwest::Client::builder();
         if let Some(timeout) = timeout {
             builder = builder.timeout(timeout);
         }
-        if let Some(authorization) = self.authorization()? {
-            let mut value = reqwest::header::HeaderValue::from_str(&authorization)
-                .context("encoding DefraDB bearer header")?;
-            value.set_sensitive(true);
+        if let Some(value) = self.authorization_header()? {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(reqwest::header::AUTHORIZATION, value);
             builder = builder.default_headers(headers);
@@ -235,9 +251,11 @@ impl ConfigAccess {
             Self::Graphql(graphql) => {
                 let api_base = graphql_api_base(graphql.url())?;
                 let url = format!("{api_base}/schema");
-                let client = graphql.http_client(Some(std::time::Duration::from_secs(30)))?;
-                let response = client
-                    .post(&url)
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()?;
+                let response = graphql
+                    .authorize(client.post(&url))?
                     .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
                     .body(sdl.to_owned())
                     .send()
@@ -290,9 +308,11 @@ impl ConfigAccess {
             Self::Graphql(graphql) => {
                 let api_base = graphql_api_base(graphql.url())?;
                 let url = format!("{api_base}/collections/versions");
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()?;
                 let versions: Value = graphql
-                    .http_client(Some(std::time::Duration::from_secs(30)))?
-                    .get(&url)
+                    .authorize(client.get(&url))?
                     .send()
                     .await
                     .with_context(|| format!("fetching collection versions from {url}"))?
