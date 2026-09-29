@@ -64,11 +64,44 @@ function Table({ children }: { children?: ReactNode }) {
   );
 }
 
-export const Markdown = memo(function Markdown({ children }: { children: string }) {
+type MdNode = { type: string; value?: string; children?: MdNode[] };
+
+/* a single newline in a paragraph ends the line, as it does in a note a
+   person or an agent types, rather than folding into a space; code keeps
+   its own newlines because its value is not a text node */
+function softBreaks(node: MdNode) {
+  if (!node.children) return;
+  node.children = node.children.flatMap((child) => {
+    if (child.type !== "text" || !child.value?.includes("\n")) {
+      softBreaks(child);
+      return [child];
+    }
+    return child.value
+      .split("\n")
+      .flatMap((value, i) =>
+        i === 0
+          ? [{ type: "text", value }]
+          : [{ type: "break" }, { type: "text", value }],
+      );
+  });
+}
+const remarkSoftBreaks = () => softBreaks;
+
+const PLUGINS = [remarkGfm];
+const PLUGINS_WITH_BREAKS = [remarkGfm, remarkSoftBreaks];
+const COMPONENTS = { pre: CodeBlock, table: Table };
+
+export const Markdown = memo(function Markdown({
+  children,
+  breaks = false,
+}: {
+  children: string;
+  breaks?: boolean;
+}) {
   return (
     <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={{ pre: CodeBlock, table: Table }}
+      remarkPlugins={breaks ? PLUGINS_WITH_BREAKS : PLUGINS}
+      components={COMPONENTS}
     >
       {children}
     </ReactMarkdown>

@@ -4,6 +4,7 @@ import type {
   DesktopApiAdapter,
   DesktopSessionSnapshot,
   MailboxItemView,
+  MailboxQuestionAnswer,
 } from "@source-inc/gents-desktop-client";
 import { dismissMailboxItemAndClearMatchingRoute } from "./desktopShellRuntime";
 import { acceptsAsyncResult } from "./desktopShellRuntime";
@@ -125,6 +126,34 @@ export function useDesktopMailboxRoute({
     }
   }
 
+  /* The answer is the item's ordinary reply request; the bridge renders its
+     content from the question so the runtime reply claim consumes the item. */
+  async function onAnswerMailboxQuestion(
+    item: MailboxItemView,
+    answer: MailboxQuestionAnswer,
+  ) {
+    try {
+      await api.sendChatMessage({
+        agentDid: item.targetAgentDid,
+        behaviorId: item.targetBehaviorId,
+        sessionId: item.sessionId ?? null,
+        content: "",
+        causedBySourceDocId: item.itemId,
+        answer,
+      });
+      /* the reply consumed the item, so a compose route opened on it must
+         not carry it as the next message's source */
+      if (pendingMailboxRouteRef.current?.itemId === item.itemId) {
+        clearPendingMailboxCause();
+      }
+      setError(null);
+      await refreshSnapshot();
+    } catch (error) {
+      setError(String(error));
+      throw error;
+    }
+  }
+
   function selectAgent(agentDid: string | null) {
     if (agentDid !== selectedAgentDid) {
       advanceComposeIntent();
@@ -164,6 +193,7 @@ export function useDesktopMailboxRoute({
     clearPendingMailboxCause,
     onOpenMailboxItem,
     onDismissMailboxItem,
+    onAnswerMailboxQuestion,
     selectAgent,
     selectSession,
     selectBehavior,

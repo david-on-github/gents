@@ -128,6 +128,7 @@ export function useShell(
       resolveHold: async (_id: string, _approve: boolean) => {},
       dismissMailboxItem: d.onDismissMailboxItem,
       openMailboxItem: d.onOpenMailboxItem,
+      answerMailboxQuestion: d.onAnswerMailboxQuestion,
       mailboxCause: d.pendingMailboxCauseId
         ? {
             itemId: d.pendingMailboxCauseId,

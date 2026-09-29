@@ -641,7 +641,7 @@ impl crate::llm::tool::Tool for MailboxCreateTool {
         ToolDefinition {
             name: FILE_MAILBOX_ITEM_TOOL_NAME.to_string(),
             description: format!(
-                "{} Configured policy: {}. Supply findings only; never supply IDs or routing. Receipt reports created, reused, or updated and the stored item.",
+                "{} Configured policy: {}. Supply findings only; never supply IDs or routing. Receipt reports created, reused, or updated and the stored item. To ask the person to decide, pass `question` instead of `payload`: the item becomes an `ask` they answer with a button, and the answer arrives later in this session as a new user message starting \"Decision on <title>:\". Filing never waits: keep working if you can proceed without the answer, or end your turn to wait for it.",
                 canonical_mailbox_write_decl().description,
                 serde_json::to_string(&self.policy).expect("serialize policy")
             ),
@@ -651,7 +651,33 @@ impl crate::llm::tool::Tool for MailboxCreateTool {
                 "properties": {
                     "title": {"type": "string"},
                     "summary": {"type": "string"},
-                    "payload": {"type": "string"}
+                    "payload": {"type": "string"},
+                    "question": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "version": {"type": "integer", "enum": [gents_protocol::mailbox_question::MAILBOX_QUESTION_VERSION]},
+                            "prompt": {"type": "string"},
+                            "options": {
+                                "type": "array",
+                                "minItems": gents_protocol::mailbox_question::MAILBOX_QUESTION_MIN_OPTIONS,
+                                "maxItems": gents_protocol::mailbox_question::MAILBOX_QUESTION_MAX_OPTIONS,
+                                "items": {
+                                    "type": "object",
+                                    "additionalProperties": false,
+                                    "properties": {
+                                        "id": {"type": "string"},
+                                        "label": {"type": "string"},
+                                        "description": {"type": "string"}
+                                    },
+                                    "required": ["id", "label"]
+                                }
+                            },
+                            "multi_select": {"type": "boolean"},
+                            "allow_free_text": {"type": "boolean", "description": "Offer an \"Other\" free-text answer."}
+                        },
+                        "required": ["version", "prompt", "options"]
+                    }
                 },
                 "required": ["title"]
             }),
@@ -668,38 +694,93 @@ impl crate::llm::tool::Tool for MailboxCreateTool {
             behavior_id: runtime.behavior_id.context("missing behavior_id")?,
             session_id: runtime.session_id,
         };
+        self.policy.validate()?;
+        let question = QuestionFiling::from_args(&args, &request_id)?;
         let request = notification::request_provenance(&self.node, &request_id, &context).await?;
-        let source_id = self.policy.identity.source_id(
+        let (identity, event_id, kind, action, expected_collection, payload) = match &question {
+            Some(question) => (
+                &NotificationIdentity::Event,
+                question.event_id.as_str(),
+                MailboxKind::Ask,
+                MailboxAction::StartRequest,
+                None,
+                Some(question.payload.clone()),
+            ),
+            None => (
+                &self.policy.identity,
+                request_id.as_str(),
+                self.policy.kind,
+                self.policy.action,
+                self.policy.expected_collection.clone(),
+                args.payload,
+            ),
+        };
+        let source_id = identity.source_id(
             &context.agent_did,
             &context.requester_did,
             &context.behavior_id,
-            &request_id,
+            event_id,
         )?;
-        self.policy.validate()?;
         let receipt = stamp_notification(
             &self.node,
             &context,
             FileMailboxItemArgs {
-                kind: self.policy.kind,
-                action: self.policy.action,
+                kind,
+                action,
                 title: args.title,
                 summary: args.summary,
-                payload: args.payload,
+                payload,
                 source_kind: MailboxSourceKind::Agent,
                 source_id,
                 session_id: None,
                 request_id: Some(request_id),
                 graph_run_id: None,
                 cause_doc_id: request.caused_by_source_doc_id,
-                expected_collection: self.policy.expected_collection.clone(),
+                expected_collection,
                 parent_item_id: None,
                 deadline_at: None,
             },
-            &self.policy.identity,
+            identity,
             MAILBOX_CLOSE_COLLECTIONS,
         )
         .await?;
         Ok(serde_json::to_string(&receipt).context("serialize notification receipt")?)
+    }
+}
+
+/// A question filed through `file_mailbox_item`. It is always an `ask` that
+/// the person answers with an interactive reply request, whatever the
+/// surface's default kind and action. Its event identity covers the request,
+/// title and whole question, so a different question is a new item and a
+/// filed question is never rewritten under a pending answer.
+struct QuestionFiling {
+    event_id: String,
+    payload: String,
+}
+
+impl QuestionFiling {
+    fn from_args(args: &MailboxContentArgs, request_id: &str) -> Result<Option<Self>> {
+        let Some(question) = &args.question else {
+            return Ok(None);
+        };
+        anyhow::ensure!(
+            nonempty(args.payload.clone()).is_none(),
+            "a question is the item's payload; omit `payload` when passing `question`"
+        );
+        question.validate()?;
+        let payload = serde_json::to_string(question).context("serialize mailbox question")?;
+        use sha2::Digest;
+        let digest = sha2::Sha256::digest(
+            serde_json::to_vec(&(args.title.trim(), &payload)).context("digest question")?,
+        );
+        let question_key: String = digest[..8]
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        Ok(Some(Self {
+            event_id: format!("{request_id}:question:{question_key}"),
+            payload,
+        }))
     }
 }
 

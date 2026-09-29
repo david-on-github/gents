@@ -113,6 +113,8 @@ pub struct MailboxContentArgs {
     pub summary: Option<String>,
     #[serde(default)]
     pub payload: Option<String>,
+    #[serde(default)]
+    pub question: Option<gents_protocol::mailbox_question::MailboxQuestion>,
 }
 
 #[derive(Debug, Clone, Serialize)]

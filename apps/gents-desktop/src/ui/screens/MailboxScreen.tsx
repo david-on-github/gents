@@ -20,27 +20,51 @@ import {
   X,
 } from "lucide-react";
 import type { MailboxItemView } from "@source-inc/gents-desktop-client";
+import { Badge } from "@gents/ui/components/badge";
 import { Button } from "@gents/ui/components/button";
 import { ScrollArea } from "@gents/ui/components/scroll-area";
 import { cn } from "@gents/ui/lib/utils";
 import type { Shell } from "@/hooks/useShell";
 import { href, navigate } from "@/lib/router";
 import { toast } from "sonner";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
 import { BehaviorAvatar } from "./parts";
 import { BehaviorHoverCard } from "./HoverCards";
 import { behaviorName } from "./behavior";
+import { Markdown } from "./Markdown";
+import { parseQuestion, QuestionAnswer } from "./MailboxQuestion";
 import { when } from "./time";
 
-/* the kind glyph on the rail, and its word */
-const KIND: Record<string, { icon: typeof CircleHelp; label: string; tone?: string }> =
-  {
-    ask: { icon: CircleHelp, label: "Question" },
-    gate: { icon: OctagonPause, label: "Gate" },
-    finished: { icon: CircleCheck, label: "Finished" },
-    failed: { icon: CircleX, label: "Failed", tone: "text-destructive" },
-    flag: { icon: Flag, label: "Flag" },
-  };
+type BadgeVariant = ComponentProps<typeof Badge>["variant"];
+
+/* the kind glyph on the rail, its word, and its badge */
+const KIND: Record<
+  string,
+  { icon: typeof CircleHelp; label: string; tone?: string; badge: BadgeVariant }
+> = {
+  ask: { icon: CircleHelp, label: "Question", badge: "purple" },
+  gate: { icon: OctagonPause, label: "Gate", badge: "yellow" },
+  finished: { icon: CircleCheck, label: "Finished", badge: "success" },
+  failed: {
+    icon: CircleX,
+    label: "Failed",
+    tone: "text-destructive",
+    badge: "destructive",
+  },
+  flag: { icon: Flag, label: "Flag", badge: "secondary" },
+};
+
+const STATUS: Record<string, { label: string; badge: BadgeVariant }> = {
+  open: { label: "Open", badge: "outline" },
+  acted: { label: "Acted on", badge: "secondary" },
+  dismissed: { label: "Dismissed", badge: "secondary" },
+  expired: { label: "Expired", badge: "destructive" },
+};
+
+/* a body longer than this folds behind "Show more"; counted rather than
+   measured so the fold does not depend on layout having happened */
+const FOLD_CHARS = 600;
+const FOLD_LINES = 10;
 
 export function MailboxScreen({ shell }: { shell: Shell }) {
   const deployment = shell.selectedDeployment;
@@ -112,7 +136,26 @@ function Item({
   shell: Shell;
   behavior: string;
 }) {
-  const kind = KIND[m.kind] ?? { icon: CircleHelp, label: m.kind };
+  const kind = KIND[m.kind] ?? {
+    icon: CircleHelp,
+    label: m.kind,
+    badge: "secondary" as BadgeVariant,
+  };
+  const status = STATUS[m.status] ?? {
+    label: m.status,
+    badge: "outline" as BadgeVariant,
+  };
+  const session = m.sessionId
+    ? shell.selectedDeployment?.sessions.find((s) => s.sessionId === m.sessionId)
+    : undefined;
+  /* a kind with its own answer surface renders it; any other item keeps
+     the generic reading view */
+  const question = parseQuestion(m);
+  const body = [m.summary, m.payload && !question ? payloadMarkdown(m.payload) : null]
+    .filter((part): part is string => Boolean(part?.trim()))
+    .join("\n\n");
+  const foldable = body.length > FOLD_CHARS || body.split("\n").length > FOLD_LINES;
+  const [expanded, setExpanded] = useState(false);
   const Icon = kind.icon;
   /* ack: there is nothing to do but read it, so the arrow opens its source;
      anything else opens a conversation on it (the desktop's "Open compose") */
@@ -145,6 +188,14 @@ function Item({
         : `due in ${span(deadline - openedAt)}`;
   const openable = Boolean(m.sessionId) || !acknowledge;
   const age = when(m.createdAt);
+  const created = Number.isNaN(Date.parse(m.createdAt))
+    ? undefined
+    : new Date(m.createdAt).toLocaleString();
+  const time = (className: string) => (
+    <time dateTime={m.createdAt} title={created} className={className}>
+      {age}
+    </time>
+  );
   return (
     <li className="relative">
       <span
@@ -177,41 +228,82 @@ function Item({
               />
             </BehaviorHoverCard>
           </div>
-          <span className="col-start-2 row-start-1 self-center justify-self-end text-xs text-muted-foreground md:hidden">
-            {age}
-          </span>
+          {time(
+            "col-start-2 row-start-1 self-center justify-self-end text-xs text-muted-foreground md:hidden",
+          )}
           <div className="min-w-0 max-md:col-span-full max-md:row-start-2 md:col-start-2 md:row-start-1">
             <div className="flex items-baseline gap-3">
               <h2 className="min-w-0 flex-1 font-heading text-sm font-medium text-pretty wrap-break-word text-heading">
                 {m.title}
               </h2>
-              <span className="shrink-0 text-xs text-muted-foreground max-md:hidden">
-                {age}
-              </span>
+              {time("shrink-0 text-xs text-muted-foreground max-md:hidden")}
             </div>
-            {m.summary && (
-              <p className="mt-0.5 text-sm text-muted-foreground">{m.summary}</p>
-            )}
-            <p className="mt-1.5 font-mono text-[11px] wrap-anywhere text-muted-foreground">
-              {kind.label.toLowerCase()} · {m.sourceKind} · {m.sourceId}
-              {m.action === "write_document" && m.expectedCollection
-                ? ` · expects ${m.expectedCollection}`
-                : ""}
+            <div
+              className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground"
+              data-testid="mailbox-item-meta"
+            >
+              <Badge variant={kind.badge}>{kind.label}</Badge>
+              <Badge variant={status.badge}>{status.label}</Badge>
+              <span>
+                from <span className="text-foreground">{behavior}</span>
+              </span>
+              {m.sessionId && (
+                <a
+                  href={href({ name: "session", sessionId: m.sessionId })}
+                  className="max-w-64 truncate underline-offset-2 hover:text-foreground hover:underline"
+                >
+                  in {session?.title?.trim() || "session"}
+                </a>
+              )}
               {due && (
                 <span
                   className={cn("whitespace-nowrap", overdue && "text-destructive")}
                 >
-                  {" "}
-                  · {due}
+                  {due}
                 </span>
               )}
-            </p>
-            {m.payload && (
-              <ScrollArea className="mt-2 max-h-40 rounded-md bg-surface [&_[data-slot=scroll-area-viewport]]:max-h-[inherit]">
-                <pre className="w-max min-w-full px-3 py-2 font-mono text-[11px] leading-relaxed text-foreground">
-                  {pretty(m.payload)}
-                </pre>
-              </ScrollArea>
+            </div>
+            {body && (
+              <div className="mt-2 max-w-prose">
+                <div
+                  data-testid="mailbox-item-body"
+                  className={cn(
+                    "prose-app relative",
+                    foldable && !expanded && "max-h-48 overflow-hidden",
+                  )}
+                >
+                  <Markdown breaks>{body}</Markdown>
+                  {foldable && !expanded && (
+                    <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-gradient-to-t from-raised to-transparent" />
+                  )}
+                </div>
+                {foldable && (
+                  <Button
+                    variant="quiet"
+                    size="xs"
+                    className="mt-1 -ml-2"
+                    aria-expanded={expanded}
+                    onClick={() => setExpanded((v) => !v)}
+                  >
+                    {expanded ? "Show less" : "Show more"}
+                  </Button>
+                )}
+              </div>
+            )}
+            {question && (
+              <QuestionAnswer
+                question={question}
+                onAnswer={(answer) => shell.answerMailboxQuestion(m, answer)}
+              />
+            )}
+            {m.action === "write_document" && m.expectedCollection && (
+              <p className="mt-2 text-xs text-muted-foreground">
+                Answer with a{" "}
+                <span className="font-mono text-foreground">
+                  {m.expectedCollection}
+                </span>{" "}
+                document
+              </p>
             )}
           </div>
           {openable && (
@@ -246,12 +338,20 @@ function Item({
   );
 }
 
-const pretty = (value: string) => {
+/* a payload that is JSON reads as a fenced block; anything else is the
+   agent's own markdown */
+const payloadMarkdown = (value: string) => {
+  let json: string;
   try {
-    return JSON.stringify(JSON.parse(value), null, 2);
+    const parsed: unknown = JSON.parse(value);
+    if (typeof parsed === "string") return parsed;
+    json = JSON.stringify(parsed, null, 2);
   } catch {
     return value;
   }
+  let fence = "```";
+  while (json.includes(fence)) fence += "`";
+  return `${fence}json\n${json}\n${fence}`;
 };
 
 /* a span ahead, as a person would say it */

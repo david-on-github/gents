@@ -41,6 +41,7 @@ import type {
   InitSummary,
   InterruptRequestResult,
   MailboxItemView,
+  MailboxQuestionAnswer,
   MCPServiceHealthView,
   McpServiceProbeResult,
   NetworkStatusView,
@@ -158,6 +159,9 @@ export type DesktopApiAdapter = {
     sessionId?: string | null;
     content: string;
     causedBySourceDocId?: string | null;
+    /** An answer to the question on the `causedBySourceDocId` item; the
+        bridge renders the content, so `content` is empty. */
+    answer?: MailboxQuestionAnswer | null;
   }) => Promise<ChatSendResult>;
   listMailbox: () => Promise<MailboxItemView[]>;
   startMailboxRequest: (itemId: string) => Promise<MailboxItemView>;
