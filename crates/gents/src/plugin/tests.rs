@@ -343,8 +343,8 @@ fn a_slow_plugin_is_stopped_by_its_wall_clock_budget() {
 
     let budget = PluginBudget {
         fuel: Some(5_000_000_000),
-        memory_bytes: PluginBudget::default().memory_bytes,
         wall_clock: std::time::Duration::from_millis(30),
+        ..PluginBudget::default()
     };
     let outcome = runner
         .call(&serde_json::json!({}), &budget)
@@ -511,6 +511,8 @@ fn plugin_named(name: &str, language: &str) -> PackPlugin {
         input_schema: serde_json::json!({"type": "object"}),
         manifold: None,
         instructions: None,
+        bind_dir: None,
+        limits: None,
     }
 }
 
@@ -574,6 +576,30 @@ fn a_default_budget_is_raised_to_what_the_artifact_needs_to_start() {
     );
 }
 
+#[test]
+fn for_plugin_raises_the_default_to_declared_limits() {
+    let wasi = source_only_afb("rs_plugin", "rust", "source/main.rs", b"fn main() {}");
+    let wasi = afterburner_afb::Afb::from_bytes(&wasi).expect("readable .afb");
+
+    let mut plugin = plugin_named("rs_plugin", "rust");
+    plugin.limits = Some(crate::pack::PluginLimits {
+        memory_mib: Some(512),
+        wall_clock_secs: Some(120),
+        max_output_mib: Some(16),
+    });
+    let budget = PluginBudget::for_plugin(&wasi, &plugin);
+    assert_eq!(budget.memory_bytes, 512 * 1024 * 1024);
+    assert_eq!(budget.wall_clock, std::time::Duration::from_secs(120));
+    assert_eq!(budget.max_output_bytes, 16 * 1024 * 1024);
+
+    // A plugin that declares nothing gets exactly `for_artifact`'s answer.
+    let no_limits = plugin_named("rs_plugin", "rust");
+    assert_eq!(
+        PluginBudget::for_plugin(&wasi, &no_limits).memory_bytes,
+        PluginBudget::for_artifact(&wasi).memory_bytes
+    );
+}
+
 /// The same gate, the other way round: Python is admitted, because its
 /// dispatch path really does enforce every axis a call asks for.
 ///
@@ -603,6 +629,8 @@ fn a_plugin_whose_artifact_is_not_a_readable_afb_is_refused() {
         input_schema: serde_json::json!({"type": "object"}),
         manifold: None,
         instructions: None,
+        bind_dir: None,
+        limits: None,
     };
     let error = PluginRunner::compile(b"not an afb", &plugin).expect_err("must be refused");
     assert!(format!("{error:#}").contains("broken"), "{error:#}");
@@ -782,4 +810,93 @@ fn masked_trap_startup_uses_the_plugin_request_engine() {
     let request = plugin_run_request(Vec::new(), Manifold::sealed(), &PluginBudget::default());
     let selected = afterburner::wasi::embedder_vm::shared_epoch_vm_with(request.nan_mode).unwrap();
     assert!(std::ptr::eq(startup, selected));
+}
+
+// ---- BoundDir and PluginRunner::call_bound (D5) --------------------
+
+#[test]
+fn bound_dir_requires_a_directory() {
+    let file = tempfile::NamedTempFile::new().expect("tempfile");
+    BoundDir::new(file.path(), None).expect_err("a file is not a directory");
+}
+
+#[test]
+fn bound_dir_refuses_a_path_outside_within() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let within = root.path().join("within");
+    let outside = root.path().join("outside");
+    std::fs::create_dir_all(&within).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    let error = BoundDir::new(&outside, Some(&within)).expect_err("outside must be refused within");
+    let message = format!("{error:#}");
+    assert!(message.contains("outside"), "{message}");
+}
+
+#[test]
+fn bound_dir_allows_a_path_inside_within() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let within = root.path().join("within");
+    let nested = within.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    let bound = BoundDir::new(&nested, Some(&within)).expect("nested is inside within");
+    assert_eq!(bound.path(), nested.canonicalize().unwrap().as_path());
+}
+
+#[test]
+fn call_bound_refuses_a_plugin_that_declares_no_bind_dir() {
+    let (plugin, afb) = build_plugin_pack("no_bind_pack", ECHO_WAT, None);
+    let runner = PluginRunner::compile(&afb, &plugin).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let bound = BoundDir::new(dir.path(), None).unwrap();
+
+    let error = runner
+        .call_bound(&serde_json::json!({}), &PluginBudget::default(), &bound)
+        .expect_err("a plugin with no bind_dir cannot be bound");
+    assert!(format!("{error:#}").contains("bind_dir"));
+}
+
+#[test]
+fn call_bound_overwrites_the_declared_input_field_with_the_canonical_bound_path() {
+    let (mut plugin, afb) = build_plugin_pack("bind_pack", ECHO_WAT, None);
+    plugin.bind_dir = Some(crate::pack::PluginDirBinding {
+        input_field: "root".to_owned(),
+        description: "a directory".to_owned(),
+    });
+    let runner = PluginRunner::compile(&afb, &plugin).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let bound = BoundDir::new(dir.path(), None).unwrap();
+
+    let outcome = runner
+        .call_bound(
+            &serde_json::json!({"root": "whatever-the-caller-wrote", "other": 1}),
+            &PluginBudget::default(),
+            &bound,
+        )
+        .expect("a bind_dir plugin can be called bound");
+    assert_eq!(outcome.verdict, PluginVerdict::Success);
+    assert_eq!(
+        outcome.output,
+        serde_json::json!({
+            "root": bound.path().to_str().unwrap(),
+            "other": 1,
+        })
+    );
+}
+
+#[test]
+fn admission_refuses_a_bind_dir_plugin_whose_dispatch_path_cannot_enforce_read_only_fs() {
+    let afb_bytes = source_only_afb("py_plugin", "python", "source/main.py", b"print(1)");
+    let mut plugin = plugin_named("py_plugin", "python");
+    plugin.bind_dir = Some(crate::pack::PluginDirBinding {
+        input_field: "root".to_owned(),
+        description: "a directory".to_owned(),
+    });
+
+    let error = PluginRunner::compile(&afb_bytes, &plugin)
+        .expect_err("python cannot enforce a read-only filesystem grant");
+    let message = format!("{error:#}");
+    assert!(message.contains("py_plugin"), "{message}");
+    assert!(message.contains("read-only"), "{message}");
 }

@@ -12,8 +12,10 @@
 //! its typed [`gents::plugin::PluginOutcome`] into either the plugin's own
 //! JSON value or a clear refusal naming which bound was hit.
 
+use std::path::Path;
+
 use anyhow::{Context, Result};
-use gents::plugin::{PluginBudget, PluginRunner, PluginVerdict};
+use gents::plugin::{BoundDir, PluginBudget, PluginRunner, PluginVerdict};
 
 use crate::cli::args::PluginRunArgs;
 
@@ -40,6 +42,7 @@ pub(crate) async fn run(args: PluginRunArgs) -> Result<()> {
             .with_context(|| format!("--input is not valid JSON: {raw:?}"))?,
         None => serde_json::Value::Null,
     };
+    let bind_dir = args.bind_dir.clone();
 
     // On a blocking thread, never on the async executor's own. Running a
     // guest is synchronous, and the WASI runtime under it blocks on its own
@@ -48,10 +51,12 @@ pub(crate) async fn run(args: PluginRunArgs) -> Result<()> {
     // guest produces a byte. `spawn_blocking` uses tokio's existing
     // blocking pool, so this costs no thread of its own.
     let coordinate = format!("{namespace}/{name}");
-    let output = tokio::task::spawn_blocking(move || run_plugin(&bytes, &record, &input))
-        .await
-        .with_context(|| format!("running plugin {coordinate}"))?
-        .with_context(|| format!("running plugin {coordinate}"))?;
+    let output = tokio::task::spawn_blocking(move || {
+        run_plugin(&bytes, &record, &input, bind_dir.as_deref())
+    })
+    .await
+    .with_context(|| format!("running plugin {coordinate}"))?
+    .with_context(|| format!("running plugin {coordinate}"))?;
     crate::print_json(&output)
 }
 
@@ -60,10 +65,14 @@ pub(crate) async fn run(args: PluginRunArgs) -> Result<()> {
 ///
 /// Admission uses the declaration retained at installation. Artifact capability
 /// metadata is not a substitute for a pack author's narrower declaration.
+/// `bind_dir` is the operator's own directory (`--bind-dir`, `within =
+/// None`: the operator already named it directly, so nothing here narrows
+/// it further); `None` calls ordinarily.
 fn run_plugin(
     bytes: &[u8],
     record: &InstalledPlugin,
     input: &serde_json::Value,
+    bind_dir: Option<&Path>,
 ) -> Result<serde_json::Value> {
     let afb =
         afterburner_cloud::Afb::from_bytes(bytes).context("this is not a readable plugin .afb")?;
@@ -71,13 +80,20 @@ fn run_plugin(
     // Declared authority, narrowed to what the operator granted at install.
     let runner = PluginRunner::compile_within(bytes, &record.declaration, &record.ceiling())
         .with_context(|| format!("admitting plugin {coordinate}"))?;
-    // The default budget for *this* artifact, not the generic one: a
-    // plugin that has to boot an interpreter needs a memory ceiling its
-    // runtime can instantiate under and a wall clock that covers the boot,
-    // or it is admitted and then fails every call.
-    let outcome = runner
-        .call(input, &PluginBudget::for_artifact(&afb))
-        .with_context(|| format!("calling plugin {coordinate}"))?;
+    // The default budget for *this* artifact raised to what it declared in
+    // `limits`: a plugin that has to boot an interpreter needs a memory
+    // ceiling its runtime can instantiate under and a wall clock that
+    // covers the boot, or it is admitted and then fails every call.
+    let budget = PluginBudget::for_plugin(&afb, &record.declaration);
+    let outcome = match bind_dir {
+        Some(dir) => {
+            let bound = BoundDir::new(dir, None)
+                .with_context(|| format!("binding {} for {coordinate}", dir.display()))?;
+            runner.call_bound(input, &budget, &bound)
+        }
+        None => runner.call(input, &budget),
+    }
+    .with_context(|| format!("calling plugin {coordinate}"))?;
 
     match outcome.verdict {
         PluginVerdict::Success => Ok(outcome.output),
@@ -146,16 +162,21 @@ mod tests {
     fn plugin_run_returns_the_plugins_own_output() {
         let bytes = build_echo_plugin();
         let input = serde_json::json!({"hello": "world", "n": 42});
-        let output =
-            run_plugin(&bytes, &sample_record(&bytes), &input).expect("the echo plugin must run");
+        let output = run_plugin(&bytes, &sample_record(&bytes), &input, None)
+            .expect("the echo plugin must run");
         assert_eq!(output, input);
     }
 
     #[test]
     fn plugin_run_defaults_to_null_input() {
         let bytes = build_echo_plugin();
-        let output =
-            run_plugin(&bytes, &sample_record(&bytes), &serde_json::Value::Null).expect("must run");
+        let output = run_plugin(
+            &bytes,
+            &sample_record(&bytes),
+            &serde_json::Value::Null,
+            None,
+        )
+        .expect("must run");
         assert_eq!(output, serde_json::Value::Null);
     }
 
@@ -188,7 +209,7 @@ mod tests {
         let runner = PluginRunner::compile(&bytes, &record.declaration).unwrap();
         assert_eq!(runner.definition(), &declaration);
         assert_eq!(
-            run_plugin(&bytes, &record, &serde_json::json!({"message": "ok"})).unwrap(),
+            run_plugin(&bytes, &record, &serde_json::json!({"message": "ok"}), None).unwrap(),
             serde_json::json!({"message": "ok"})
         );
 
@@ -196,7 +217,7 @@ mod tests {
         // replaced by the valid manifold embedded in the artifact.
         let mut invalid = record;
         invalid.declaration.manifold = Some(serde_json::json!({"fs": "invalid"}));
-        assert!(run_plugin(&bytes, &invalid, &serde_json::Value::Null).is_err());
+        assert!(run_plugin(&bytes, &invalid, &serde_json::Value::Null, None).is_err());
         let empty_home = tempfile::tempdir().unwrap();
         assert!(super::super::install_from_pack(
             empty_home.path(),
@@ -226,6 +247,7 @@ mod tests {
             name: "gents/echo".to_owned(),
             input: Some(r#"{"ok":true}"#.to_owned()),
             home: Some(home.path().to_owned()),
+            bind_dir: None,
         })
         .await
         .expect("running an installed plugin by name must succeed");
@@ -238,12 +260,60 @@ mod tests {
             name: "gents/does_not_exist".to_owned(),
             input: None,
             home: Some(home.path().to_owned()),
+            bind_dir: None,
         })
         .await
         .expect_err("an uninstalled plugin must be refused");
         let message = format!("{error:#}");
         assert!(message.contains("gents/does_not_exist"), "{message}");
         assert!(message.contains("not installed"), "{message}");
+    }
+
+    /// The `bind_plugin_fixture` plugin lists whatever directory it is
+    /// bound to, and nothing without a binding: with `--bind-dir` it lists
+    /// exactly the files this test put there, and without one it has no
+    /// filesystem access at all (its declared manifold has no standing
+    /// `fs` grant - binding is the only way in).
+    #[tokio::test]
+    async fn run_with_bind_dir_reads_only_the_bound_directory() {
+        let fixture = crate::commands::plugin::testing::build_bind_plugin_fixture();
+        let manifest: gents::pack::PackManifest =
+            serde_json::from_slice(&std::fs::read(fixture.path().join("manifest.json")).unwrap())
+                .unwrap();
+        let (archive_bytes, _) = gents::pack_archive::pack_dir(fixture.path()).unwrap();
+        let archive = gents::pack_archive::PackArchive::from_bytes(&archive_bytes).unwrap();
+        let home = tempfile::tempdir().unwrap();
+        gents::plugin::install::install_pack_plugins(
+            home.path(),
+            &manifest,
+            archive.digest(),
+            |path| archive.asset(path),
+            false,
+        )
+        .unwrap();
+
+        let listing = tempfile::tempdir().unwrap();
+        std::fs::write(listing.path().join("one.txt"), b"1").unwrap();
+        std::fs::write(listing.path().join("two.txt"), b"2").unwrap();
+
+        run(PluginRunArgs {
+            name: "fixture/list_files".to_owned(),
+            input: Some(r#"{"root":"unused"}"#.to_owned()),
+            home: Some(home.path().to_owned()),
+            bind_dir: Some(listing.path().to_owned()),
+        })
+        .await
+        .expect("running with --bind-dir must succeed");
+
+        let error = run(PluginRunArgs {
+            name: "fixture/list_files".to_owned(),
+            input: Some(r#"{"root":"unused"}"#.to_owned()),
+            home: Some(home.path().to_owned()),
+            bind_dir: None,
+        })
+        .await
+        .expect_err("without --bind-dir the plugin has no filesystem access at all");
+        assert!(format!("{error:#}").contains("list_files"), "{error:#}");
     }
 
     /// A plugin that asks for access is refused without consent, and the

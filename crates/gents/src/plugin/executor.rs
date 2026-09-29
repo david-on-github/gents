@@ -67,6 +67,11 @@ impl PluginExecutor {
         }
     }
 
+    /// The home this executor calls installed plugins from, when it has one.
+    pub fn home(&self) -> Option<&std::path::Path> {
+        self.home.as_deref()
+    }
+
     /// The installed record for `coordinate`, which must still be the
     /// artifact `pinned` names when a pin is given.
     pub fn resolve(&self, coordinate: &str, pinned: Option<&str>) -> Result<InstalledPlugin> {
@@ -129,7 +134,7 @@ impl PluginExecutor {
                 record.name
             )
         })?;
-        let budget = PluginBudget::for_artifact(&afb);
+        let budget = PluginBudget::for_plugin(&afb, &record.declaration);
         let runner = PluginRunner::compile_within(&bytes, &record.declaration, &record.ceiling())?;
         let admitted = Arc::new(Admitted {
             granted: record.granted.clone(),

@@ -160,6 +160,48 @@ pub struct PackPlugin {
     /// `plugins/<name>/TOOL.md`. Absent, the description is all it gets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Lets an operator bind one read-only directory into this call, named
+    /// fresh at every call site rather than granted once at install (see
+    /// `crate::plugin::BoundDir`). Absent means the plugin can never be
+    /// bound. No `deny_unknown_fields` on [`PackPlugin`] itself, so an
+    /// older gents ignores this field entirely on a manifest that declares
+    /// it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bind_dir: Option<PluginDirBinding>,
+    /// Resource ceiling this plugin declares it needs, raising
+    /// [`crate::plugin::PluginBudget::for_plugin`]'s default rather than
+    /// capping a caller's own budget. Each field must not exceed this
+    /// module's host ceiling; see [`PackPlugin::validate`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limits: Option<PluginLimits>,
+}
+
+/// Where a plugin's `bind_dir` binds: which input field carries the
+/// canonical bound path, and what a consenting operator is shown for it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PluginDirBinding {
+    /// A property of `input_schema` (or of each `oneOf` branch that
+    /// declares properties): the argument
+    /// [`crate::plugin::PluginRunner::call_bound`] overwrites with the
+    /// canonical bound path, so a plugin can never point itself at a
+    /// different directory than the one its caller named.
+    pub input_field: String,
+    /// Shown to an operator deciding whether to bind this plugin.
+    pub description: String,
+}
+
+/// A plugin's declared resource ceiling: what
+/// [`crate::plugin::PluginBudget::for_plugin`] raises the default to.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct PluginLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_clock_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_mib: Option<u32>,
 }
 
 /// Largest `TOOL.md` a plugin may ship: a model reads it on every turn the
@@ -296,7 +338,94 @@ impl PackPlugin {
                 self.name
             );
         }
+        if let Some(bind_dir) = &self.bind_dir {
+            anyhow::ensure!(
+                !bind_dir.input_field.trim().is_empty(),
+                "plugin {:?} bind_dir.input_field must not be blank",
+                self.name
+            );
+            anyhow::ensure!(
+                !bind_dir.description.trim().is_empty(),
+                "plugin {:?} bind_dir needs a description; it is what an operator is shown",
+                self.name
+            );
+            anyhow::ensure!(
+                schema_declares_property(&self.input_schema, &bind_dir.input_field),
+                "plugin {:?} bind_dir.input_field {:?} is not a property of input_schema",
+                self.name,
+                bind_dir.input_field
+            );
+            // The directory a caller binds is authority granted fresh at
+            // every call (see `crate::plugin::BoundDir`), never a standing
+            // one; a plugin that also declared its own `fs` grant would
+            // read both, which is not a ceiling this field can express, so
+            // the two are mutually exclusive.
+            let declares_fs = self
+                .manifold
+                .as_ref()
+                .and_then(|manifold| manifold.get("fs"))
+                .is_some_and(|fs| fs != &serde_json::json!("None"));
+            anyhow::ensure!(
+                !declares_fs,
+                "plugin {:?} declares both bind_dir and a manifold fs grant; a directory bound \
+                 per call and a standing filesystem grant cannot be expressed together",
+                self.name
+            );
+        }
+        if let Some(limits) = &self.limits {
+            if let Some(memory_mib) = limits.memory_mib {
+                anyhow::ensure!(
+                    (1..=crate::plugin::MAX_DECLARED_MEMORY_MIB).contains(&memory_mib),
+                    "plugin {:?} declares memory_mib {memory_mib}, over the host ceiling of {} MiB",
+                    self.name,
+                    crate::plugin::MAX_DECLARED_MEMORY_MIB
+                );
+            }
+            if let Some(wall_clock_secs) = limits.wall_clock_secs {
+                anyhow::ensure!(
+                    (1..=crate::plugin::MAX_DECLARED_WALL_CLOCK_SECS).contains(&wall_clock_secs),
+                    "plugin {:?} declares wall_clock_secs {wall_clock_secs}, over the host ceiling \
+                     of {}s",
+                    self.name,
+                    crate::plugin::MAX_DECLARED_WALL_CLOCK_SECS
+                );
+            }
+            if let Some(max_output_mib) = limits.max_output_mib {
+                anyhow::ensure!(
+                    (1..=crate::plugin::MAX_DECLARED_OUTPUT_MIB).contains(&max_output_mib),
+                    "plugin {:?} declares max_output_mib {max_output_mib}, over the host ceiling \
+                     of {} MiB",
+                    self.name,
+                    crate::plugin::MAX_DECLARED_OUTPUT_MIB
+                );
+            }
+        }
         Ok(())
+    }
+}
+
+/// Whether `field` is a property `input_schema` declares directly, or that
+/// every one of its `oneOf` branches declaring properties declares. A
+/// schema with neither shape declares nothing, so `field` is refused.
+fn schema_declares_property(input_schema: &serde_json::Value, field: &str) -> bool {
+    if input_schema
+        .get("properties")
+        .and_then(|properties| properties.get(field))
+        .is_some()
+    {
+        return true;
+    }
+    match input_schema
+        .get("oneOf")
+        .and_then(serde_json::Value::as_array)
+    {
+        Some(branches) if !branches.is_empty() => branches.iter().all(|branch| {
+            branch
+                .get("properties")
+                .and_then(|properties| properties.get(field))
+                .is_some()
+        }),
+        _ => false,
     }
 }
 
@@ -723,6 +852,8 @@ mod tests {
             input_schema: serde_json::json!({"type": "object"}),
             manifold: None,
             instructions: None,
+            bind_dir: None,
+            limits: None,
         }
     }
 
@@ -801,5 +932,106 @@ mod tests {
                 .validate()
                 .unwrap_or_else(|error| panic!("{language:?} must be accepted: {error:#}"));
         }
+    }
+
+    fn bindable_plugin() -> PackPlugin {
+        PackPlugin {
+            input_schema: serde_json::json!({"type": "object", "properties": {"root": {"type": "string"}}}),
+            bind_dir: Some(PluginDirBinding {
+                input_field: "root".to_owned(),
+                description: "the directory to scan".to_owned(),
+            }),
+            ..valid_plugin()
+        }
+    }
+
+    #[test]
+    fn bind_dir_requires_its_input_field_to_be_a_schema_property() {
+        bindable_plugin()
+            .validate()
+            .expect("root is a declared property");
+
+        let mut missing = bindable_plugin();
+        missing.input_schema = serde_json::json!({"type": "object"});
+        let error = missing.validate().expect_err("root is not declared");
+        assert!(format!("{error:#}").contains("root"));
+    }
+
+    #[test]
+    fn bind_dir_accepts_a_property_common_to_every_one_of_schema() {
+        let mut plugin = bindable_plugin();
+        plugin.input_schema = serde_json::json!({
+            "oneOf": [
+                {"properties": {"root": {"type": "string"}}},
+                {"properties": {"root": {"type": "string"}, "extra": {"type": "boolean"}}},
+            ]
+        });
+        plugin.validate().expect("every branch declares root");
+
+        plugin.input_schema = serde_json::json!({
+            "oneOf": [
+                {"properties": {"root": {"type": "string"}}},
+                {"properties": {"other": {"type": "string"}}},
+            ]
+        });
+        assert!(
+            plugin.validate().is_err(),
+            "a branch missing root must be refused"
+        );
+    }
+
+    #[test]
+    fn bind_dir_and_a_standing_fs_grant_are_mutually_exclusive() {
+        let mut plugin = bindable_plugin();
+        plugin.manifold = Some(serde_json::json!({
+            "fs": {"ReadOnly": ["/data"]}, "net": "None", "env": "None",
+            "crypto": false, "child_process": false
+        }));
+        let error = plugin
+            .validate()
+            .expect_err("bind_dir plus a standing fs grant must be refused");
+        assert!(format!("{error:#}").contains("bind_dir"));
+
+        // A manifold that asks for something else, but not fs, is fine.
+        let mut plugin = bindable_plugin();
+        plugin.manifold = Some(serde_json::json!({
+            "fs": "None", "net": "None", "env": {"AllowList": ["HOME"]},
+            "crypto": false, "child_process": false
+        }));
+        plugin
+            .validate()
+            .expect("a non-fs grant alongside bind_dir is fine");
+    }
+
+    #[test]
+    fn limits_must_not_exceed_the_host_ceiling() {
+        let mut plugin = valid_plugin();
+        plugin.limits = Some(PluginLimits {
+            memory_mib: Some(crate::plugin::MAX_DECLARED_MEMORY_MIB),
+            wall_clock_secs: Some(crate::plugin::MAX_DECLARED_WALL_CLOCK_SECS),
+            max_output_mib: Some(crate::plugin::MAX_DECLARED_OUTPUT_MIB),
+        });
+        plugin.validate().expect("exactly the ceiling is fine");
+
+        plugin.limits = Some(PluginLimits {
+            memory_mib: Some(crate::plugin::MAX_DECLARED_MEMORY_MIB + 1),
+            ..Default::default()
+        });
+        let error = plugin
+            .validate()
+            .expect_err("over the ceiling must be refused");
+        assert!(format!("{error:#}").contains("memory_mib"));
+
+        plugin.limits = Some(PluginLimits {
+            wall_clock_secs: Some(crate::plugin::MAX_DECLARED_WALL_CLOCK_SECS + 1),
+            ..Default::default()
+        });
+        assert!(plugin.validate().is_err());
+
+        plugin.limits = Some(PluginLimits {
+            max_output_mib: Some(crate::plugin::MAX_DECLARED_OUTPUT_MIB + 1),
+            ..Default::default()
+        });
+        assert!(plugin.validate().is_err());
     }
 }

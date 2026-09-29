@@ -71,7 +71,7 @@
 //!    precompiled artifact) is a hard `Err` from [`PluginRunner::compile`]
 //!    or [`PluginRunner::call`], never swallowed into a generic verdict.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use afterburner::afb_run::{run_afb_bytes, AfbRunOutcome, AfbRunRequest};
@@ -81,12 +81,21 @@ use anyhow::{Context, Result};
 
 use crate::pack::PackPlugin;
 
-/// Bytes of a plugin's JSON result kept before the call is judged
+/// Default bytes of a plugin's JSON result kept before the call is judged
 /// [`PluginVerdict::BadOutput`] for running past this bound. A result is a
 /// small JSON value describing one call's outcome, not a file; anything
 /// larger is treated as a bad result rather than silently accepted
-/// truncated (rules 5 and 6 in this module's own doc).
-const MAX_STDOUT_BYTES: usize = 1024 * 1024;
+/// truncated (rules 5 and 6 in this module's own doc). [`PluginBudget::for_plugin`]
+/// raises this to a plugin's declared `limits.max_output_mib`.
+const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Host ceiling on what a plugin's `limits` may declare, enforced by
+/// [`crate::pack::PackPlugin::validate`] at manifest load. Independent of
+/// [`PluginBudget::default`]: that is what a call gets when a plugin
+/// declares nothing, this is the most a pack may ask for at all.
+pub const MAX_DECLARED_MEMORY_MIB: u32 = 4096;
+pub const MAX_DECLARED_WALL_CLOCK_SECS: u32 = 900;
+pub const MAX_DECLARED_OUTPUT_MIB: u32 = 1024;
 
 /// Bytes of a plugin's stderr kept for a human to read. Diagnostics, not a
 /// log archive.
@@ -112,6 +121,12 @@ pub struct PluginBudget {
     /// `AfbRunRequest::timeout`'s own doc). Granularity is one epoch tick,
     /// 10 ms today, so a guest can overshoot by up to a tick.
     pub wall_clock: std::time::Duration,
+    /// Bytes of a plugin's JSON result kept before the call is judged
+    /// [`PluginVerdict::BadOutput`] for running past this bound (see
+    /// [`outcome_from_exit`]). [`Self::default`] carries
+    /// [`DEFAULT_MAX_OUTPUT_BYTES`]; [`Self::for_plugin`] raises it to a
+    /// plugin's declared `limits.max_output_mib`.
+    pub max_output_bytes: usize,
 }
 
 impl PluginBudget {
@@ -150,6 +165,36 @@ impl PluginBudget {
             None => default,
         }
     }
+
+    /// [`Self::for_artifact`], raised to what `plugin` declares in
+    /// `limits`.
+    ///
+    /// A declared limit only ever raises the floor, mirroring exactly how
+    /// [`Self::for_artifact`] raises [`Self::default`] to an interpreter's
+    /// own startup cost: a pack that declares less than the artifact needs
+    /// to start would otherwise admit a plugin that can never run. The host
+    /// ceiling a declared limit may not exceed is enforced once, at
+    /// manifest load, by [`crate::pack::PackPlugin::validate`], not
+    /// re-checked here.
+    pub fn for_plugin(afb: &afterburner_afb::Afb, plugin: &PackPlugin) -> Self {
+        let mut budget = Self::for_artifact(afb);
+        if let Some(limits) = &plugin.limits {
+            if let Some(memory_mib) = limits.memory_mib {
+                budget.memory_bytes = budget.memory_bytes.max(u64::from(memory_mib) * 1024 * 1024);
+            }
+            if let Some(wall_clock_secs) = limits.wall_clock_secs {
+                budget.wall_clock = budget
+                    .wall_clock
+                    .max(std::time::Duration::from_secs(u64::from(wall_clock_secs)));
+            }
+            if let Some(max_output_mib) = limits.max_output_mib {
+                budget.max_output_bytes = budget
+                    .max_output_bytes
+                    .max(max_output_mib as usize * 1024 * 1024);
+            }
+        }
+        budget
+    }
 }
 
 /// What a plugin that has to boot an interpreter before its own code runs
@@ -173,6 +218,7 @@ impl Default for PluginBudget {
             fuel: None,
             memory_bytes: 64 * 1024 * 1024,
             wall_clock: std::time::Duration::from_secs(5),
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
         }
     }
 }
@@ -318,6 +364,21 @@ impl PluginRunner {
                 plugin.name
             );
         }
+        if plugin.bind_dir.is_some() {
+            // `bind_dir` grants a read-only directory per call ([`Self::call_bound`]),
+            // outside the declared/ceiling manifold this admission just
+            // narrowed - so the one axis that matters for it is whether
+            // this artifact's dispatch path can honour a read-only grant at
+            // all, independent of whether one was declared here.
+            let supported = afterburner::afb_run::bounds_for(&afb);
+            anyhow::ensure!(
+                supported.manifold_fs_ro,
+                "plugin {:?} declares bind_dir, but its dispatch path cannot enforce a \
+                 read-only filesystem grant, so a caller-bound directory would not actually be \
+                 contained",
+                plugin.name
+            );
+        }
 
         Ok(Self {
             afb_bytes: afb_bytes.to_vec(),
@@ -326,26 +387,91 @@ impl PluginRunner {
         })
     }
 
-    /// Runs it once with the given arguments.
+    /// Runs it once with the given arguments, under the manifold this
+    /// runner was admitted with.
     pub fn call(
         &self,
         arguments: &serde_json::Value,
         budget: &PluginBudget,
     ) -> Result<PluginOutcome> {
+        self.call_with_manifold(arguments, budget, self.manifold.clone())
+    }
+
+    /// Runs it once, binding `bound` into `plugin.bind_dir`'s declared
+    /// input field: read-only, and only for this one call (this module's
+    /// own doc, D5's authority model). Refuses outright when the plugin
+    /// declares no `bind_dir` - the field it would overwrite does not exist,
+    /// so there is nothing this call could bind.
+    ///
+    /// `arguments[bind_dir.input_field]` is overwritten with `bound`'s own
+    /// canonical path regardless of what the caller passed, so a plugin can
+    /// never point the binding at a directory other than the one its
+    /// caller named. The manifold this call actually runs under is the
+    /// admitted one with `fs` replaced by exactly `bound`'s directory,
+    /// read-only - never wider, and never recorded as a standing grant
+    /// (the install record's `granted` is untouched; see [`BoundDir`]'s own
+    /// doc).
+    pub fn call_bound(
+        &self,
+        arguments: &serde_json::Value,
+        budget: &PluginBudget,
+        bound: &BoundDir,
+    ) -> Result<PluginOutcome> {
+        let bind_dir = self.plugin.bind_dir.as_ref().with_context(|| {
+            format!(
+                "plugin {:?} does not declare bind_dir; it cannot be bound to a directory",
+                self.plugin.name
+            )
+        })?;
+        let canonical = bound.path().to_str().with_context(|| {
+            format!(
+                "bound directory {} is not valid UTF-8",
+                bound.path().display()
+            )
+        })?;
+        let mut arguments = arguments.clone();
+        let object = arguments.as_object_mut().with_context(|| {
+            format!(
+                "plugin {:?} arguments must be a JSON object to bind {:?}",
+                self.plugin.name, bind_dir.input_field
+            )
+        })?;
+        object.insert(
+            bind_dir.input_field.clone(),
+            serde_json::Value::String(canonical.to_owned()),
+        );
+        let manifold = Manifold {
+            fs: FsAccess::ReadOnly(vec![bound.path().to_path_buf()]),
+            ..self.manifold.clone()
+        };
+        self.call_with_manifold(&arguments, budget, manifold)
+    }
+
+    /// [`Self::call`] and [`Self::call_bound`]'s shared implementation: the
+    /// only difference between an ordinary call and a bound one is which
+    /// manifold the guest actually runs under.
+    fn call_with_manifold(
+        &self,
+        arguments: &serde_json::Value,
+        budget: &PluginBudget,
+        manifold: Manifold,
+    ) -> Result<PluginOutcome> {
         // Re-checked at every call, not just once at `compile` time: a
         // plugin is called, never a server (rule 3), so a granted manifold
         // that somehow carried a listen grant must never reach a run.
-        // `narrow_manifold` already guarantees this; this is the second,
-        // independent place that would have to break for it to matter.
+        // `narrow_manifold` already guarantees this for `self.manifold`,
+        // and [`Self::call_bound`] never touches `listen`; this is the
+        // second, independent place that would have to break for it to
+        // matter.
         debug_assert!(
-            matches!(self.manifold.listen, ListenAccess::None),
+            matches!(manifold.listen, ListenAccess::None),
             "a granted manifold must never carry a listen capability"
         );
 
         start_wasm_trap_handler_with_signals_blocked()?;
         let stdin =
             serde_json::to_vec(arguments).context("encoding plugin arguments as canonical JSON")?;
-        let request = plugin_run_request(stdin, self.manifold.clone(), budget);
+        let request = plugin_run_request(stdin, manifold, budget);
 
         let started = Instant::now();
         let output = run_afb_bytes(&self.afb_bytes, request)
@@ -387,7 +513,12 @@ impl PluginRunner {
                 "plugin {:?} trapped: {message}",
                 self.plugin.name
             )),
-            AfbRunOutcome::Exited(code) => Ok(outcome_from_exit(code, output, wall_ms)),
+            AfbRunOutcome::Exited(code) => Ok(outcome_from_exit(
+                code,
+                output,
+                wall_ms,
+                budget.max_output_bytes,
+            )),
         }
     }
 
@@ -422,6 +553,62 @@ fn plugin_run_request(stdin: Vec<u8>, manifold: Manifold, budget: &PluginBudget)
 /// observation, not a promise of byte-identical recomputation on another host.
 /// The macOS startup must select this same engine mode before installing handlers.
 const PLUGIN_NAN_MODE: NanMode = NanMode::Native;
+
+/// A single directory an operator named for one plugin call, admitted
+/// read-only and never wider than the ceiling [`Self::new`]'s `within`
+/// names.
+///
+/// The inner path is private: the only way to build one is [`Self::new`],
+/// which canonicalizes and validates it, so nothing downstream can hand
+/// [`PluginRunner::call_bound`] an unverified or non-canonical path. Binding
+/// grants nothing standing - it is authority for exactly one call, decided
+/// fresh by whichever operator call site asks for it (`gents plugin run
+/// --bind-dir`, a `gents pack test` case's own `bind` field, or a scenario
+/// `prepare` step), never recorded in an install's `granted` manifold.
+#[derive(Debug, Clone)]
+pub struct BoundDir(PathBuf);
+
+impl BoundDir {
+    /// Canonicalizes `requested` (resolving it against the process's
+    /// current directory first when it is relative, and resolving symlinks),
+    /// and requires it to be a directory.
+    ///
+    /// When `within` is given, the canonical path must have `within`'s own
+    /// canonical form as a component-wise prefix: a `..` or a symlink that
+    /// would otherwise step outside it is refused here, before any plugin
+    /// runs, rather than left to WASI's own preopen resolution (which
+    /// refuses it too, but only at read time, deep inside a call). `within`
+    /// is canonicalized independently so a host-specific symlink in its own
+    /// path (macOS's `/tmp` -> `/private/tmp`, for one) resolves the same
+    /// way on both sides of the comparison.
+    pub fn new(requested: &Path, within: Option<&Path>) -> Result<Self> {
+        let canonical = requested
+            .canonicalize()
+            .with_context(|| format!("{} does not exist or cannot be read", requested.display()))?;
+        anyhow::ensure!(
+            canonical.is_dir(),
+            "{} is not a directory",
+            canonical.display()
+        );
+        if let Some(within) = within {
+            let within = within.canonicalize().with_context(|| {
+                format!("{} does not exist or cannot be read", within.display())
+            })?;
+            anyhow::ensure!(
+                canonical.starts_with(&within),
+                "{} is outside {}, the only directory this call may bind",
+                canonical.display(),
+                within.display()
+            );
+        }
+        Ok(Self(canonical))
+    }
+
+    /// The canonical, absolute path this binding grants read-only access to.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
 
 /// Creates Afterburner's first Wasmtime engine on a thread that blocks every
 /// signal, before any plugin runs.
@@ -538,10 +725,14 @@ fn unbounded_dispatch_reason(afb: &afterburner_afb::Afb, granted: &Manifold) -> 
 }
 
 /// Validates and bounds a completed run's stdout/stderr (rules 5 and 6).
+/// `max_output_bytes` is the calling [`PluginBudget`]'s own bound, not a
+/// fixed constant, so a plugin that declared `limits.max_output_mib` is
+/// judged against what it asked for.
 fn outcome_from_exit(
     code: i32,
     output: afterburner::afb_run::AfbRunOutput,
     wall_ms: u64,
+    max_output_bytes: usize,
 ) -> PluginOutcome {
     let mut notes = Vec::new();
     let stderr = bound(&output.stderr, MAX_STDERR_BYTES, "stderr", &mut notes);
@@ -557,9 +748,9 @@ fn outcome_from_exit(
         };
     }
 
-    if output.stdout.len() > MAX_STDOUT_BYTES {
+    if output.stdout.len() > max_output_bytes {
         notes.push(format!(
-            "stdout truncated to {MAX_STDOUT_BYTES} of {} bytes; a plugin result is a small JSON \
+            "stdout truncated to {max_output_bytes} of {} bytes; a plugin result is a small JSON \
              value, not a file, so a result this large is refused rather than accepted partial",
             output.stdout.len()
         ));
@@ -735,6 +926,7 @@ pub fn retry_backoff(attempts: u32) -> std::time::Duration {
         .min(std::time::Duration::from_secs(60))
 }
 pub mod executor;
+pub mod install;
 pub mod store;
 pub mod tool;
 

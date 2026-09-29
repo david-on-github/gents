@@ -387,6 +387,8 @@ mod tests {
                 input_schema: serde_json::json!({"type": "object"}),
                 manifold: None,
                 instructions: None,
+                bind_dir: None,
+                limits: None,
             },
             granted: None,
             instructions: None,
