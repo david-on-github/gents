@@ -73,7 +73,12 @@ fi
 DID=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["agent_did"])' "$EVAL_HOME/init.json")
 
 GRAPHQL="http://127.0.0.1:$PORT/api/v0/graphql"
-served() { curl -fsS -m 3 -H 'content-type: application/json' -d '{"query":"{ AgentPrincipal { agent_did } }"}' "$GRAPHQL" >/dev/null 2>&1; }
+# Served means the endpoint answers and runtime.json names it: CLI commands
+# with --home fall back to opening the store themselves until runtime.json does.
+served() {
+  grep -qF "127.0.0.1:$PORT/" "$EVAL_HOME/runtime.json" 2>/dev/null &&
+    curl -fsS -m 3 -H 'content-type: application/json' -d '{"query":"{ AgentPrincipal { agent_did } }"}' "$GRAPHQL" >/dev/null 2>&1
+}
 if ! served; then
   echo "serving $EVAL_HOME on $PORT (log $EVAL_HOME/server.log) ..." >&2
   (cd "$EVAL_HOME/work" && exec nohup "$GENTS" server --home "$EVAL_HOME" --http-port "$PORT" \
