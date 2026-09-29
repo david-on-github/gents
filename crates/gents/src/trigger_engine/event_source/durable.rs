@@ -72,13 +72,14 @@ impl EventSource {
             })
             .collect::<Vec<_>>();
         for (trigger_id, collection, doc_id) in refused {
-            let Ok(current) = self.fetch_source_doc(&collection, &doc_id).await else {
-                continue;
-            };
+            // An unreadable document (deleted, or hidden by ACP) is released
+            // too: the arrival owner then excludes or retries it without a
+            // fire, so this costs at most one read per rescan.
+            let current = self.fetch_source_doc(&collection, &doc_id).await.ok();
             if self
                 .parked_arrivals
                 .get(&trigger_id)
-                .is_some_and(|parked| parked.source_document.as_ref() != Some(&current))
+                .is_some_and(|parked| current.is_none() || parked.source_document != current)
             {
                 self.parked_arrivals.remove(&trigger_id);
             }

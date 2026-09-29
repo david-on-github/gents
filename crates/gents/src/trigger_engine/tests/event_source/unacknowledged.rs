@@ -310,3 +310,28 @@ async fn repaired_document_is_delivered_once(drop_notification: bool) {
     assert_eq!(delivery.drain(Duration::from_secs(1), |_| None).await, 0);
     assert!(delivery.pending_documents().await.is_empty());
 }
+
+/// A refused document deleted while notifications are lost releases its
+/// trigger: the arrival owner excludes it without a fire.
+#[tokio::test]
+async fn deleted_refused_document_releases_its_trigger() {
+    let (mut delivery, intent) = first_delivery(true).await;
+    assert!(matches!(
+        delivery.engine.dispatch(intent).await,
+        FireResult::Rejected { .. }
+    ));
+    assert_eq!(delivery.drain(Duration::from_secs(1), |_| None).await, 0);
+    crate::config_client::ConfigAccess::Local(delivery.node.clone())
+        .write(
+            "test.delete_outcome_ping",
+            &format!(
+                r#"mutation {{ delete_OutcomePing(docID: "{}") {{ _docID }} }}"#,
+                escape_graphql_string(&delivery.doc_id)
+            ),
+        )
+        .await
+        .unwrap();
+    delivery.source.drop_subscription();
+    assert_eq!(delivery.drain(Duration::from_secs(2), |_| None).await, 0);
+    assert!(delivery.pending_documents().await.is_empty());
+}
