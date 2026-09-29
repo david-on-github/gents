@@ -214,6 +214,165 @@ async fn production_materializer_persists_event_source_document_lineage() {
     verifier.verify_fresh(&queued, "general").await.unwrap();
 }
 
+/// #2064 and Lean `Triggers.resolveSession`: an event fire rendered into an
+/// existing session that a paired desktop started is written under the
+/// desktop's requester (`Enrollment.runtimeRequesterScope`), passes final
+/// admission, claims into that same session and resumes it.
+#[tokio::test]
+async fn production_event_fire_into_a_paired_client_session_adopts_its_requester() {
+    use crate::identity::AgentIdentity;
+    let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
+    ensure_runtime_schemas(node.as_ref()).await.unwrap();
+    let behavior = integration_test_behavior("general");
+    let identity = behavior.principal_identity().clone();
+    let owner = behavior.agent_did().to_owned();
+    crate::test_support::install_test_behavior(node.as_ref(), &owner, "general").await;
+    let config = serde_json::from_value(serde_json::json!({
+        "agent_principal":{"agent_did":owner},
+        "tasks":[{"agent_did":owner,"task_id":"task-lead","behavior_id":"general","prompt_template":"continue the lead"}],
+        "event_sources":[{"agent_did":owner,"event_source_id":"outcomes","source_collection":"AgentRequest","event_kind":"created"}],
+        "triggers":[{"agent_did":owner,"trigger_id":"lead-outcomes","task_id":"task-lead","source":{"kind":"event","event_source_id":"outcomes"},"session_id_template":"{{ doc.session_id }}"}]
+    })).unwrap();
+    let plan = crate::config_client::DesiredStateApplyPlan::from_pack_config(&config).unwrap();
+    let trigger_doc_id = crate::config_client::ConfigAccess::transact_local(
+        node.as_ref(),
+        None,
+        "test.paired_session_fire.fixture",
+        |txn| {
+            let plan = &plan;
+            let owner = &owner;
+            Box::pin(async move {
+                crate::config_client::apply_desired_state_plan(txn, plan).await?;
+                let (id, _) = crate::config_client::read_desired_state_record_in_txn(
+                    txn,
+                    crate::Collection::Trigger,
+                    owner,
+                    "lead-outcomes",
+                )
+                .await?
+                .expect("created trigger");
+                Ok(id)
+            })
+        },
+    )
+    .await
+    .unwrap();
+    let desktop = KeyIdentity::load_or_create(
+        std::env::temp_dir().join(format!("paired-desktop-{}.key", uuid::Uuid::new_v4())),
+        None,
+    )
+    .unwrap();
+    let session_id = "paired-client-console";
+    crate::session::ensure_session_with_behavior_id_and_requester_did(
+        node.as_ref(),
+        session_id,
+        "general",
+        &owner,
+        "general",
+        Some(desktop.did()),
+    )
+    .await
+    .unwrap();
+    let fire_identity = gents_protocol::trigger_delivery::FireIdentity {
+        owner_did: owner.clone(),
+        trigger_id: "lead-outcomes".into(),
+        source_collection: "AgentRequest".into(),
+        source_doc_id: "outcome-doc".into(),
+    };
+    let fire = gents_protocol::trigger_delivery::TriggerFire {
+        request_id: fire_identity.request_id(),
+        fire_key: fire_identity.fire_key(),
+        identity: fire_identity,
+        task_id: "task-lead".into(),
+        session_id: session_id.into(),
+        goal_id: None,
+        goal_objective: None,
+        goal_token_budget: None,
+        goal_assignment_applied: false,
+        emit_outcome: false,
+        queued_serial: false,
+        source_handoff_id: None,
+        reply_session_id: None,
+        shard_id: None,
+        attempt: None,
+        created_at: chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true),
+    };
+    let prepared = crate::trigger_engine::durable::PreparedFire {
+        receipt: fire.clone(),
+        target_existing: true,
+    };
+    let snapshot = snapshot_with_behavior_and_schedules(behavior, HashMap::new());
+    let (_tx, rx) = watch::channel(snapshot);
+    let materializer = ProductionMaterializer::new(node.clone(), rx);
+    let task = resolved_task_for_test("task-lead", "general", "continue the lead");
+    let request_id = materializer
+        .materialize(
+            &task,
+            Some("lead-outcomes"),
+            TriggerKind::Event,
+            Some(&trigger_doc_id),
+            Some("outcome-doc"),
+            None,
+            None,
+            "continue the lead",
+            None,
+            &fire.fire_key,
+            Some(&prepared),
+            None,
+        )
+        .await
+        .expect("a fire into the paired client's session is delivered");
+    assert_eq!(request_id, fire.request_id);
+    let response = node
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{}" }} }}) {{ _docID requester_did session_id }} }}"#,
+            escape_graphql_string(&request_id)
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let row = &response.data.unwrap()["AgentRequest"][0];
+    assert_eq!(row["requester_did"], desktop.did());
+    assert_eq!(row["session_id"], session_id);
+    let queued = crate::request_admission::load_request_for_admission_test(
+        node.as_ref(),
+        row["_docID"].as_str().unwrap(),
+    )
+    .await
+    .unwrap();
+    let (_authority_owner, authority) = crate::agent::p2p_reconcile::enrollment_authority_channel();
+    let verified = crate::request_admission::AgentRequestAdmissionVerifier::new(
+        node.clone(),
+        identity,
+        authority,
+    )
+    .verify_fresh(&queued, "general")
+    .await
+    .unwrap();
+    let mut lifecycle = crate::RequestLifecycle::new_with_execution_binding(
+        node.clone(),
+        "general",
+        &owner,
+        verified.clone(),
+        60,
+        crate::lifecycle::ExecutionOrigin::Scheduled,
+        "backend-test",
+    );
+    assert_eq!(
+        lifecycle.claim_with_identity().await.unwrap(),
+        crate::lifecycle::ClaimOutcome::Claimed
+    );
+    crate::hook::DefraSessionHook::resume_with_identity_policy(
+        node.clone(),
+        session_id,
+        "general",
+        &owner,
+        verified.requester_did.as_deref(),
+        crate::hook::FailurePolicy::FailClosed,
+    )
+    .await
+    .expect("the fire resumes the paired client's session");
+}
+
 #[tokio::test]
 async fn production_schedule_materialization_passes_final_exact_config_admission() {
     let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());

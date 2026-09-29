@@ -389,8 +389,8 @@ impl BehaviorBuilder {
         self
     }
 
-    pub fn self_config_dry_run(mut self, dry_run: bool) -> Self {
-        self.behavior.tool_selection.self_config_dry_run = dry_run;
+    pub fn self_config_preview(mut self, preview: bool) -> Self {
+        self.behavior.tool_selection.self_config_preview = preview;
         self
     }
 

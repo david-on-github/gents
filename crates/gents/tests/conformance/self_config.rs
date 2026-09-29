@@ -1,6 +1,7 @@
 //! Generated field tables and patch results checked against the existing patch owner.
-//! Reference validation, nested Tools no-lockout, and transactional rejection
-//! need an end-to-end ConfigApplyTxn consumer; this test does not simulate them.
+//! Guarded rows replay the Lean no-lockout verdict through the production Tools
+//! guard. Reference validation and transactional rejection need an end-to-end
+//! ConfigApplyTxn consumer; this test does not simulate them.
 use crate::lean_vocab_test::{
     lean_self_config_cases, lean_self_config_field_tables, LeanSelfConfigCase,
 };
@@ -100,5 +101,56 @@ pub(super) fn generated_self_config_cases_fence_patch_merge() {
                 case.name
             );
         }
+        if case.guarded && case.admissible && case.validates {
+            let stored = typed_doc(target, &case.doc);
+            let patch = patch
+                .into_iter()
+                .map(|(field, value)| (field, value.map(parse_nested)))
+                .collect();
+            let candidate = apply_patch(target, &stored, &patch);
+            let verdict = match target {
+                SelfConfigTarget::Tools => {
+                    gents::self_config::guard_tools_keep_control(&stored, &candidate)
+                }
+                SelfConfigTarget::AgentBehavior => {
+                    gents::self_config::guard_behavior_keeps_reach(&stored, &candidate)
+                }
+                other => panic!("{}: no no-lockout guard for {other:?}", case.name),
+            };
+            assert_eq!(
+                verdict.is_ok(),
+                case.accepted,
+                "{}: runtime no-lockout guard",
+                case.name
+            );
+        }
     }
+}
+
+/// Lean rows abstract nested Tools groups as their canonical JSON text.
+fn parse_nested(value: Value) -> Value {
+    let text = value.as_str().expect("Lean group value is text");
+    serde_json::from_str(text).unwrap_or_else(|error| panic!("{text}: {error}"))
+}
+
+fn typed_doc(
+    target: SelfConfigTarget,
+    entries: &[crate::lean_vocab_test::LeanSelfConfigFieldValue],
+) -> Map<String, Value> {
+    let mut doc: Map<String, Value> = entries
+        .iter()
+        .map(|entry| {
+            let value = Value::String(entry.value.clone());
+            let value = if entry.field == target.unique_field() {
+                value
+            } else {
+                parse_nested(value)
+            };
+            (entry.field.clone(), value)
+        })
+        .collect();
+    doc.entry(target.unique_field())
+        .or_insert_with(|| Value::String("doc-1".into()));
+    doc.insert("agent_did".into(), Value::String("did:key:agent-a".into()));
+    doc
 }

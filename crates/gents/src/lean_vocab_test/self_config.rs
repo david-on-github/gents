@@ -45,5 +45,5 @@ pub(crate) struct LeanSelfConfigCase {
     pub(crate) protected_preserved: bool,
     pub(crate) containment_holds: bool,
     pub(crate) unchanged_on_reject: bool,
-    pub(crate) gate_on_after_accept: bool,
+    pub(crate) control_kept_after_accept: bool,
 }

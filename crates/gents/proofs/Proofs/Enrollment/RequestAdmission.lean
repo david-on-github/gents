@@ -174,6 +174,8 @@ structure RuntimeInternalEvidence where
   authenticated source via requestWorkspaceWithinSource. -/
   sourceBindingCurrent : Bool
   triggerConfigDocumentBindingCurrent : Bool
+  /-- The local-control parent exactly owns the source; for a normal
+  continuation it is in the same session under the same requester. -/
   sourceDocumentBindingCurrent : Bool
   targetPolicyAllows : Bool
   /-- Existing Goal physical-edge validator authenticates this exact receipt's
@@ -181,7 +183,26 @@ structure RuntimeInternalEvidence where
   identity. This is reconstructed evidence, never copied from input unchecked. -/
   verifiedGoalContinuation : Option GoalContinuationInput := none
   titleParent : Option TitleParentEvidence := none
+  /-- The requester that owns the existing `AgentSession` of
+  `(targetAgent, sessionId)`, read by the session owner; `none` for a new
+  session. -/
+  sessionScope : Option Did := none
   deriving DecidableEq, Repr
+
+/-- The requester a runtime-authored request is written under. A completion
+wake, control continuation or trigger fire delivered into an existing session
+adopts the requester that owns that session, so it lands in the session a
+paired client started instead of a node-scoped copy that cannot find it
+(#2064); a new session is the target's own. The runtime can choose no other
+requester. Local-control continuations additionally bind a parent in the same
+session under the same requester (`sourceDocumentBindingCurrent`). A title
+audit is audit-only and never delivered into a session, so it keeps the target
+runtime's requester. -/
+def runtimeRequesterScope (request : AgentRequestSemantics)
+    (evidence : RuntimeInternalEvidence) : Did :=
+  match request.purpose with
+  | .titleAudit => request.targetAgent
+  | .normal => evidence.sessionScope.getD request.targetAgent
 
 def exactRuntimeInternalEvidence
     (request : AgentRequestSemantics) (admission : AgentRequestAdmission)
@@ -194,12 +215,11 @@ def exactRuntimeInternalEvidence
   admission.signerDid = request.targetAgent ∧
   evidence.targetRuntimeAttestationValid = true ∧
   evidence.sourceBindingCurrent = true ∧
+  request.requesterDid = runtimeRequesterScope request evidence ∧
   match admission.runtimeSourceKind with
   | .localControl =>
-      request.requesterDid = request.targetAgent ∧
       evidence.sourceDocumentBindingCurrent = true
   | .automatedTrigger =>
-      request.requesterDid = request.targetAgent ∧
       evidence.triggerConfigDocumentBindingCurrent = true ∧
       evidence.targetPolicyAllows = true
 
@@ -456,7 +476,9 @@ structure AgentRequestAdmissionObservation where
   requesterMatchesTarget : Bool
   signerMatchesTarget : Bool
   signerMatchesIssuer : Bool
-  requesterMatchesIssuer : Bool
+  /-- The requester is `runtimeRequesterScope`: the owner of the existing
+  target session, or the target for a new session or a title audit. -/
+  requesterMatchesSessionScope : Bool
   currentApproval : Bool
   exactGeneration : Bool
   authorizationFresh : Bool
@@ -491,10 +513,10 @@ def projectAgentRequestAdmission (observation : AgentRequestAdmissionObservation
       observation.targetRuntimeAttestationValid && observation.sourceBindingCurrent &&
       match observation.runtimeSourceKind with
       | .localControl =>
-          observation.requesterMatchesIssuer && observation.requesterMatchesTarget &&
+          observation.requesterMatchesSessionScope &&
           observation.sourceDocumentBindingCurrent
       | .automatedTrigger =>
-          observation.requesterMatchesIssuer && observation.requesterMatchesTarget &&
+          observation.requesterMatchesSessionScope &&
           observation.triggerConfigDocumentBindingCurrent && observation.targetPolicyAllows
 
 /--
@@ -665,6 +687,24 @@ theorem runtime_internal_requires_owned_issue
       exactRuntimeInternalEvidence request admission evidence := by
   simp only [agentRequestAdmissible, hkind] at hadmit
   rcases runtimeEvidence with _ | evidence <;> simp_all
+
+/-- A runtime-authored request delivered into an existing session is written
+under that session's owning requester, and a new session under the target's
+own; no other requester is admissible. -/
+theorem runtime_internal_adopts_session_scope
+    {s : State} {request : AgentRequestSemantics} {admission : AgentRequestAdmission}
+    {enrollmentRequest : Option Request} {decision : Option Decision} {fresh : Bool}
+    {runtimeEvidence : Option RuntimeInternalEvidence}
+    {branchFieldsExact pendingDeadlineAbsent : Bool} {target : TargetAuthority}
+    (hkind : admission.kind = .runtimeInternal) (hnormal : request.purpose = .normal)
+    (hadmit : agentRequestAdmissible s request admission enrollmentRequest decision fresh
+      runtimeEvidence branchFieldsExact pendingDeadlineAbsent target) :
+    ∃ evidence, runtimeEvidence = some evidence ∧
+      request.requesterDid = evidence.sessionScope.getD request.targetAgent := by
+  obtain ⟨evidence, hsome, hexact⟩ := runtime_internal_requires_owned_issue hkind hadmit
+  refine ⟨evidence, hsome, ?_⟩
+  have h := hexact.2.2.2.2.2.2.2.2.1
+  simpa [runtimeRequesterScope, hnormal] using h
 
 /-- Target-runtime attestation, not a principal's enrollment history, owns internal admission. -/
 theorem runtime_internal_admission_is_independent_of_enrollment_state

@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
-use gents::agent::p2p_reconcile::session_hydration::ClientHydrationProgress;
+use gents::agent::p2p_reconcile::session_hydration::{
+    ClientHydrationPhase, ClientHydrationProgress, SESSION_OWNERSHIP_MISMATCH,
+};
 use gents_desktop_core::client::{
     load_peer_records, project_sync_health, ClientCore, ClientSyncStateSnapshot, DesktopPaths,
     P2PHealth, PairingCollectionStatus, SyncHealth,
@@ -48,14 +50,51 @@ fn to_health_view(health: &P2PHealth) -> P2PHealthView {
     }
 }
 
-pub(crate) fn to_hydration_view(progress: &ClientHydrationProgress) -> SessionHydrationView {
+/// A refusal because another requester owns the session is not a sync
+/// failure to retry: it is presented as a session this client cannot read.
+pub(crate) fn to_hydration_view(
+    progress: &ClientHydrationProgress,
+    rejection_detail: Option<String>,
+) -> SessionHydrationView {
+    let ownership_refused = progress.phase == ClientHydrationPhase::Failed
+        && rejection_detail.as_deref() == Some(SESSION_OWNERSHIP_MISMATCH);
     SessionHydrationView {
         session_id: progress.session_id.clone(),
         agent_did: progress.agent_did.clone(),
-        phase: progress.phase.as_str().to_string(),
+        phase: if ownership_refused {
+            "unreadable".to_string()
+        } else {
+            progress.phase.as_str().to_string()
+        },
         merged_count: progress.merged_count,
         covered_count: progress.covered_count,
         served_count: progress.served_count,
+        detail: if ownership_refused {
+            Some(UNREADABLE_OWNERSHIP_REASON.to_string())
+        } else {
+            rejection_detail.filter(|_| progress.phase == ClientHydrationPhase::Failed)
+        },
+    }
+}
+
+const UNREADABLE_OWNERSHIP_REASON: &str =
+    "The agent reports that this session belongs to another requester, so this client cannot read it.";
+
+/// A session whose replicated header already shows this client cannot read
+/// it. No hydration request is made for it (`SessionHydration.canStart`).
+pub(crate) fn unreadable_hydration_view(
+    session_id: &str,
+    agent_did: &str,
+    reason: &str,
+) -> SessionHydrationView {
+    SessionHydrationView {
+        session_id: session_id.to_string(),
+        agent_did: agent_did.to_string(),
+        phase: "unreadable".to_string(),
+        merged_count: 0,
+        covered_count: 0,
+        served_count: None,
+        detail: Some(reason.to_string()),
     }
 }
 

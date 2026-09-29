@@ -35,7 +35,7 @@ private def requestAdmissionCase (name : String)
   , requesterMatchesTarget := observation.requesterMatchesTarget
   , signerMatchesTarget := observation.signerMatchesTarget
   , signerMatchesIssuer := observation.signerMatchesIssuer
-  , requesterMatchesIssuer := observation.requesterMatchesIssuer
+  , requesterMatchesSessionScope := observation.requesterMatchesSessionScope
   , currentApproval := observation.currentApproval
   , exactGeneration := observation.exactGeneration
   , authorizationFresh := observation.authorizationFresh
@@ -63,7 +63,7 @@ private def requestAdmissionBase (kind : AgentRequestAdmissionKind) :
   , requesterMatchesTarget := true
   , signerMatchesTarget := true
   , signerMatchesIssuer := true
-  , requesterMatchesIssuer := true
+  , requesterMatchesSessionScope := true
   , currentApproval := true
   , exactGeneration := true
   , authorizationFresh := true
@@ -94,6 +94,29 @@ def agentRequestAdmissionCases : List AgentRequestAdmissionCase :=
       { requestAdmissionBase .runtimeInternal with
           runtimeEvidencePresent := true, targetRuntimeAttestationValid := true
           sourceBindingCurrent := true, sourceDocumentBindingCurrent := true }
+  , requestAdmissionCase "runtime-local-control-adopts-paired-session-requester"
+      { requestAdmissionBase .runtimeInternal with
+          runtimeEvidencePresent := true, targetRuntimeAttestationValid := true
+          sourceBindingCurrent := true, sourceDocumentBindingCurrent := true
+          signerMatchesRequester := false, requesterMatchesTarget := false }
+  , requestAdmissionCase "runtime-trigger-adopts-paired-session-requester"
+      { requestAdmissionBase .runtimeInternal with
+          runtimeSourceKind := .automatedTrigger
+          runtimeEvidencePresent := true, targetRuntimeAttestationValid := true
+          sourceBindingCurrent := true, triggerConfigDocumentBindingCurrent := true
+          targetPolicyAllows := true
+          signerMatchesRequester := false, requesterMatchesTarget := false }
+  , requestAdmissionCase "runtime-local-control-cannot-choose-foreign-requester"
+      { requestAdmissionBase .runtimeInternal with
+          runtimeEvidencePresent := true, targetRuntimeAttestationValid := true
+          sourceBindingCurrent := true, sourceDocumentBindingCurrent := true
+          requesterMatchesSessionScope := false }
+  , requestAdmissionCase "runtime-trigger-into-foreign-session-scope-denied"
+      { requestAdmissionBase .runtimeInternal with
+          runtimeSourceKind := .automatedTrigger
+          runtimeEvidencePresent := true, targetRuntimeAttestationValid := true
+          sourceBindingCurrent := true, triggerConfigDocumentBindingCurrent := true
+          targetPolicyAllows := true, requesterMatchesSessionScope := false }
   , requestAdmissionCase "valid-peer"
       { requestAdmissionBase .peer with
           requesterMatchesTarget := false, peerAuthorityAllows := true }

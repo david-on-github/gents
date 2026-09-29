@@ -175,7 +175,13 @@ impl Fixture {
                 .as_deref()
                 .is_some_and(|k| k.starts_with("goal-continuation:"))
         }) {
-            verify_runtime_local_control_receipt(child, self.identity.did(), PARENT).unwrap();
+            verify_runtime_local_control_receipt(
+                child,
+                self.identity.did(),
+                PARENT,
+                self.identity.did(),
+            )
+            .unwrap();
             let input = child.input.as_ref().unwrap();
             let queue = input.queue.as_ref().unwrap();
             let continuation = input.goal_continuation.as_ref().unwrap();

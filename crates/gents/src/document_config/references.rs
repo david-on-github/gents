@@ -294,8 +294,8 @@ impl ConfigReferences {
                     &cli_names,
                     &eth_names,
                 )?;
-                if let Some(remote) = doc.remote {
-                    for service in remote.services {
+                if let Some(remote) = &doc.remote {
+                    for service in &remote.services {
                         require(
                             Collection::ToolServiceRegistry,
                             &service.mcp_service_id,
@@ -303,10 +303,21 @@ impl ConfigReferences {
                         )?;
                     }
                 }
-                if let Some(subagents) = doc.subagents {
-                    for target in subagents.target_ids {
-                        require(Collection::SubagentTarget, &target, "subagents.target_ids")?;
+                if let Some(subagents) = &doc.subagents {
+                    for target in &subagents.target_ids {
+                        require(Collection::SubagentTarget, target, "subagents.target_ids")?;
                     }
+                    // Reject a selection the runtime snapshot cannot resolve
+                    // (blank or duplicate agent names) before it is published.
+                    let targets = self
+                        .documents
+                        .iter()
+                        .filter(|((collection, _), _)| *collection == Collection::SubagentTarget)
+                        .map(|(_, value)| decode::<SubagentTargetDocument>(value))
+                        .collect::<Result<Vec<_>>>()?;
+                    crate::tool_surface::SubagentToolConfig::from_document_with_targets(
+                        &doc, &targets,
+                    )?;
                 }
                 if let Some(datastore) = doc.datastore {
                     for surface in datastore.datastore_tool_surface_ids.unwrap_or_default() {

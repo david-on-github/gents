@@ -38,7 +38,7 @@ impl ConfigCommandTool {
         );
         let digest = parsed.one("digest")?;
         let plan = if preview {
-            anyhow::ensure!(self.dry_run, "schema preview is not granted");
+            anyhow::ensure!(self.preview, "schema preview is not granted");
             anyhow::ensure!(
                 digest.is_none(),
                 "preview returns the digest; do not supply --digest"

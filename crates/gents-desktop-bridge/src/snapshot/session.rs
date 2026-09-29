@@ -145,9 +145,14 @@ pub async fn build_session_snapshot_for_agent_with_transcript(
     include_live_tail: bool,
 ) -> Option<DesktopSessionSnapshot> {
     let (store, projection_revision) = core.store().snapshot_with_revision();
+    let unreadable = agent_did.and_then(|agent_did| {
+        core.session_unreadable_reason(session_id, agent_did)
+            .map(|reason| super::unreadable_hydration_view(session_id, agent_did, reason))
+    });
     let hydration = match agent_did {
-        Some(agent_did) => match core.session_hydration_progress(session_id, agent_did).await {
-            Ok(progress) => Some(super::to_hydration_view(&progress)),
+        Some(_) if unreadable.is_some() => unreadable,
+        Some(agent_did) => match core.session_hydration_status(session_id, agent_did).await {
+            Ok((progress, detail)) => Some(super::to_hydration_view(&progress, detail)),
             Err(error) => {
                 tracing::warn!(
                     error = %error,
@@ -286,6 +291,7 @@ mod hydration_only_tests {
                 merged_count: 0,
                 covered_count: 0,
                 served_count: None,
+                detail: None,
             },
             true,
         );

@@ -162,6 +162,55 @@ describe("session loading projection", () => {
     });
   });
 
+  it("presents a session this client cannot read without a retry", () => {
+    expect(
+      project({
+        session: session({
+          hydration: {
+            sessionId: "session-1",
+            agentDid: "did:test:agent",
+            phase: "unreadable",
+            mergedCount: 0,
+            coveredCount: 0,
+            servedCount: null,
+            detail:
+              "Started by the agent itself and owned by its node, so this client cannot read it.",
+          },
+        }),
+      }),
+    ).toEqual({
+      layer: "sessionSync",
+      phase: "blocked",
+      title: "Not readable from this client",
+      detail:
+        "Started by the agent itself and owned by its node, so this client cannot read it.",
+      action: null,
+    });
+  });
+
+  it("shows the signed refusal reason on a retryable sync failure", () => {
+    expect(
+      project({
+        session: session({
+          hydration: {
+            sessionId: "session-1",
+            agentDid: "did:test:agent",
+            phase: "failed",
+            mergedCount: 0,
+            coveredCount: 0,
+            servedCount: null,
+            detail: "peer pairing does not match requester and agent",
+          },
+        }),
+      }),
+    ).toMatchObject({
+      phase: "failed",
+      detail:
+        "The agent refused the session history: peer pairing does not match requester and agent.",
+      action: "retryHydration",
+    });
+  });
+
   it("attributes requested hydration to P2P when the enrolled agent is offline", () => {
     expect(
       project({

@@ -5,9 +5,11 @@ namespace SelfConfig
 abbrev Target := ConfigDocuments.Collection
 /-- Existing self-config families plus their extracted subdocuments. Pack-owned
 callback modules, keys, graph definitions, and placements do not become writable
-merely because the shared catalog knows about them. -/
+merely because the shared catalog knows about them. `SubagentTarget` is a
+`tools` document (#2058): the configurator authors the agents allowlist through
+the same desired-state owner `config apply` uses for `PackConfig.subagent_targets`. -/
 def allTargets : List Target :=
-  [.agentBehavior, .agentContext, .compaction, .tools, .inferenceProfile,
+  [.agentBehavior, .agentContext, .compaction, .tools, .subagentTarget, .inferenceProfile,
    .inferenceSampling, .inferenceExecution, .inferenceRetryPolicy,
    .inferenceBackend, .toolServiceRegistry, .task, .schedule, .trigger, .eventSource,
    .datastoreToolSurface, .skill]

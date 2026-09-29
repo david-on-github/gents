@@ -16,7 +16,7 @@ struct ProposedDocument {
 
 impl ConfigCommandTool {
     pub(super) async fn plan(&self, argv: &[String]) -> Result<String> {
-        anyhow::ensure!(self.dry_run, "preview is not granted for this behavior");
+        anyhow::ensure!(self.preview, "preview is not granted for this behavior");
         self.ensure_behavior_catalog("plan", None)?;
         anyhow::ensure!(
             argv.first().is_some_and(|word| word == "preview"),
@@ -47,7 +47,10 @@ impl ConfigCommandTool {
                 .context("unknown canonical collection")?;
             let category = match collection {
                 Collection::AgentBehavior | Collection::AgentContext => "persona",
-                Collection::Tools | Collection::DatastoreToolSurface => "tools",
+                Collection::Tools
+                | Collection::DatastoreToolSurface
+                | Collection::SubagentTarget => "tools",
+                Collection::InferenceExecution => "profile",
                 Collection::Task
                 | Collection::Schedule
                 | Collection::Trigger

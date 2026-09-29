@@ -686,6 +686,13 @@ pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
             function: "generated_session_hydration_apply_cases_match_terminal_delivery_core",
         },
         ConformanceConsumer::RustTest {
+            id: "conformance::session_hydration::generated_session_hydration_start_cases_match_receiver_start",
+            package: "gents",
+            source_path: "crates/gents/tests/conformance/session_hydration.rs",
+            module_path: "conformance::session_hydration",
+            function: "generated_session_hydration_start_cases_match_receiver_start",
+        },
+        ConformanceConsumer::RustTest {
             id: "conformance::enrollment::generated_enrollment_cases_match_production_transition_core",
             package: "gents",
             source_path: "crates/gents/tests/conformance/enrollment.rs",

@@ -569,3 +569,131 @@ async fn catalog_transaction_preserves_explicit_empty_lists_and_rollback() -> Re
     node.shutdown().await;
     Ok(())
 }
+
+/// Serve one `/v1/models` response whose rows carry the request's bearer back
+/// in unrelated fields, as a hostile or careless provider might.
+async fn spawn_echoing_models_server(secret: &'static str) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = vec![0; 8192];
+        let count = stream.read(&mut request).await.unwrap();
+        let request = String::from_utf8_lossy(&request[..count]).to_ascii_lowercase();
+        assert!(request.contains(&format!("authorization: bearer {secret}")));
+        let body = serde_json::json!({"data": [{
+            "id": "claude-opus-5-5",
+            "display_name": "Claude Opus 5.5",
+            "max_input_tokens": 1_000_000,
+            "max_tokens": 128_000,
+            "capabilities": {"effort": {"supported": true, "low": {"supported": true}, "high": {"supported": true}}},
+            "access_token": secret,
+            "authorization": format!("Bearer {secret}"),
+        }], "has_more": false})
+        .to_string();
+        stream
+            .write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .await
+            .unwrap();
+    });
+    format!("http://{address}/v1")
+}
+
+#[tokio::test]
+async fn operator_discovery_publishes_scoped_credential_free_catalog() -> Result<()> {
+    const SECRET: &str = "subscription-access-token-never-stored";
+    let node = std::sync::Arc::new(EmbeddedNode::builder().build().await?);
+    crate::ensure_runtime_schemas(&node).await?;
+    let owner = base_backend().agent_did;
+    crate::ensure_agent_principal(&node, &owner).await?;
+    let access = crate::config_client::ConfigAccess::Local(node.clone());
+    let endpoint = spawn_echoing_models_server(SECRET).await;
+    let mut claude = base_backend();
+    claude.backend_id = "claude".into();
+    claude.provider_kind = BackendProviderKind::ClaudeCliSubscription;
+    claude.auth = BackendAuth::PrincipalOAuth;
+    claude.endpoint = endpoint.clone();
+    let mut elsewhere = claude.clone();
+    elsewhere.backend_id = "claude-elsewhere".into();
+    elsewhere.endpoint = "http://127.0.0.1:1/v1".into();
+    for backend in [&claude, &elsewhere] {
+        crate::config_client::write_inference_backend_document(&access, backend).await?;
+    }
+    let credential = crate::oauth_credential::OAuthCredential {
+        doc_id: None,
+        credential_id: format!("claude-subscription:{owner}"),
+        agent_did: owner.clone(),
+        provider: crate::claude_oauth::CLAUDE_OAUTH_PROVIDER.into(),
+        access_token: SECRET.into(),
+        refresh_token: format!("{SECRET}-refresh"),
+        id_token: None,
+        account_id: None,
+        chatgpt_plan_type: None,
+        is_fedramp: false,
+        access_token_expires_at: chrono::Utc::now() + chrono::Duration::hours(1),
+        last_refresh: None,
+        enabled: true,
+    };
+    let models = crate::backend_provider::discover_models(
+        &reqwest::Client::new(),
+        claude.provider_kind,
+        &endpoint,
+        None,
+        Some(&credential),
+    )
+    .await?;
+
+    let recorded = record_connection_catalog_on(
+        &access,
+        &owner,
+        claude.provider_kind,
+        &endpoint,
+        &BackendAuth::PrincipalOAuth,
+        models,
+    )
+    .await?;
+    assert_eq!(recorded, 1, "only the backend on this exact connection");
+
+    let observation = lookup_backend_observation(&node, &owner, "claude")
+        .await?
+        .unwrap();
+    let catalog = observation.catalog_for(Some(&owner))?.expect("OAuth scope");
+    assert_eq!(catalog.models[0].model_name, "claude-opus-5-5");
+    assert_eq!(catalog.models[0].context_window, Some(1_000_000));
+    assert_eq!(
+        catalog.models[0].reasoning_efforts.as_deref(),
+        Some(
+            [
+                crate::config::ReasoningEffort::Low,
+                crate::config::ReasoningEffort::High
+            ]
+            .as_slice()
+        )
+    );
+    assert!(observation.catalog_for(None)?.is_none());
+    assert!(
+        lookup_backend_observation(&node, &owner, "claude-elsewhere")
+            .await?
+            .unwrap()
+            .catalogs
+            .is_empty()
+    );
+
+    let stored = node.execute("{ InferenceBackend { catalogs } }").await;
+    assert!(!stored.has_errors(), "{:?}", stored.errors);
+    let stored = serde_json::to_string(&stored.data)?;
+    assert!(stored.contains("claude-opus-5-5"));
+    assert!(
+        !stored.contains(SECRET),
+        "credential material persisted: {stored}"
+    );
+    node.shutdown().await;
+    Ok(())
+}

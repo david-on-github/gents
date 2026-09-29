@@ -148,6 +148,23 @@ theorem pending_request_without_session_waits (hasDocuments : Bool) :
     canStartInitial false hasDocuments true = false := by
   simp [canStartInitial]
 
+/-- A replicated session header whose requester differs from the scope this
+reader reads under belongs to that requester. The server's ownership check
+refuses such a request, so the receiver never starts one: the header alone is
+enough to present the session as unreadable (#2066). -/
+def canStart (foreignHeader ownedSession hasDocuments nonterminalRequest : Bool) : Bool :=
+  !foreignHeader && canStartInitial ownedSession hasDocuments nonterminalRequest
+
+theorem foreign_header_never_starts (ownedSession hasDocuments nonterminalRequest : Bool) :
+    canStart true ownedSession hasDocuments nonterminalRequest = false := by
+  simp [canStart]
+
+theorem readable_header_keeps_initial_start
+    (ownedSession hasDocuments nonterminalRequest : Bool) :
+    canStart false ownedSession hasDocuments nonterminalRequest =
+      canStartInitial ownedSession hasDocuments nonterminalRequest := by
+  simp [canStart]
+
 /-- An explicit retry is legal only for the same failed target. -/
 def canRetry (prev : ClientProgress) (session agent : String) : Bool :=
   decide (prev.session = session ∧ prev.agent = agent ∧ prev.phase = .failed)

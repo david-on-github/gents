@@ -89,7 +89,7 @@ pub struct SelfConfigToolConfig {
     pub behavior_id: String,
     pub categories: std::collections::BTreeSet<String>,
     pub no_lockout: bool,
-    pub dry_run: bool,
+    pub preview: bool,
     pub enable_pack_install: bool,
     pub enable_graph_tools: bool,
     /// Runtime-owned host ceiling captured when this behavior's tool surface

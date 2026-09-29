@@ -33,6 +33,12 @@ describe("visibleSessionHydration", () => {
     expect(
       visibleSessionHydration(hydration({ phase: "failed" }), "session-1")?.phase,
     ).toBe("failed");
+    const unreadable = visibleSessionHydration(
+      hydration({ phase: "unreadable" }),
+      "session-1",
+    );
+    expect(unreadable?.phase).toBe("unreadable");
+    expect(unreadable && sessionHydrationNeedsRetry(unreadable)).toBe(false);
   });
 
   it("suppresses idle, empty complete, and other-session updates", () => {

@@ -394,8 +394,10 @@ theorem terminal_publication_gap (state : State) (id : Identity)
     (missing : id ∉ state.outcomes) : id ∉ (terminalize state id).outcomes := missing
 
 /-- A configured destination must resolve to a session of the same owner and
-behavior. Being busy does not invalidate it; the request claim queue owns that
-occupancy. The chosen ID is fixed before either Task template is rendered. -/
+behavior, whichever requester owns it; the fire is written under that
+session's requester (`Enrollment.runtimeRequesterScope`). Being busy does not
+invalidate it; the request claim queue owns that occupancy. The chosen ID is
+fixed before either Task template is rendered. -/
 def resolveSession (id : Identity) (target : Option String)
     (ownedSameBehavior : Bool) : Option String :=
   match target with

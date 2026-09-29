@@ -11,8 +11,9 @@ use gents::config_client::{
     DesiredStateApplyPlan,
 };
 use gents::document_config::{
-    AgentBehavior, AgentContext, BackendAuth, BashTools, BuiltInTools, DatastoreTools, FileTools,
-    HostTools, InferenceBackend, InferenceExecution, Tools,
+    AgentBehavior, AgentContext, BackendAuth, BashTools, BuiltInTools,
+    DatastoreToolSurfaceDocument, DatastoreTools, FileTools, HostTools, InferenceBackend,
+    InferenceExecution, SubagentTools, SurfaceToolDecl, Tools,
 };
 use gents::{
     default_behavior_id_for_agent, default_inference_profile_id_for_behavior, load_agent_behavior,
@@ -797,6 +798,9 @@ async fn initialize_runtime_home(
         .built_ins
         .get_or_insert_with(Default::default)
         .enable_graph_tools = Some(true);
+    let engineer_mailbox = args
+        .setup_steward
+        .then(|| engineer_tools(&mut tools, agent_did, !args.disable_defra_query));
     let context = AgentContext {
         context_id: default_context_id_for_behavior(&default_behavior_id),
         agent_did: agent_did.to_string(),
@@ -870,7 +874,7 @@ async fn initialize_runtime_home(
     inference_execution.validate()?;
     inference_profile.validate()?;
     let wide_open_preset_id = wide_open_tools_id_for_agent(agent_did);
-    let documents = vec![
+    let mut documents = vec![
         replacement(Collection::InferenceBackend, &backend_doc)?,
         replacement(Collection::Tools, &tools)?,
         replacement(Collection::AgentContext, &context)?,
@@ -879,6 +883,9 @@ async fn initialize_runtime_home(
         replacement(Collection::AgentBehavior, &behavior)?,
         replacement(Collection::Tools, &wide_open_tools_document(agent_did))?,
     ];
+    if let Some(surface) = &engineer_mailbox {
+        documents.push(replacement(Collection::DatastoreToolSurface, surface)?);
+    }
     publish_home_config(
         access,
         agent_did,
@@ -1101,6 +1108,41 @@ fn wide_open_tools_document(agent_did: &str) -> Tools {
             ..Default::default()
         }),
         ..Default::default()
+    }
+}
+
+/// The Engineer builds, starts, observes and steers its crew (#1796): the
+/// agents tools, the sessions tool, read-only query and an escalation surface
+/// holding the canonical `file_mailbox_item` declaration (default event/flag/ack
+/// policy). `agent_new` appears once these Tools select a SubagentTarget, which
+/// the Engineer creates through self-config.
+fn engineer_tools(
+    tools: &mut Tools,
+    agent_did: &str,
+    enable_defra_query: bool,
+) -> DatastoreToolSurfaceDocument {
+    let surface_id = "engineer-mailbox".to_string();
+    tools.subagents = Some(SubagentTools {
+        target_ids: Vec::new(),
+        enabled: Some(true),
+    });
+    tools
+        .built_ins
+        .get_or_insert_with(Default::default)
+        .enable_session_history_tool = Some(true);
+    let datastore = tools.datastore.get_or_insert_with(Default::default);
+    datastore.enable_defra_query = Some(enable_defra_query);
+    datastore.datastore_tool_surface_ids = Some(vec![surface_id.clone()]);
+    DatastoreToolSurfaceDocument {
+        surface_id,
+        agent_did: agent_did.to_string(),
+        display_name: Some("Engineer escalations".to_string()),
+        enabled: true,
+        entries: Some(vec![SurfaceToolDecl::Create(
+            gents::mailbox::canonical_mailbox_write_decl(),
+        )]),
+        created_at: None,
+        tags: Vec::new(),
     }
 }
 
@@ -2010,6 +2052,43 @@ mod tests {
             ])
         );
         assert_eq!(setup_steward_self_config().enable_pack_install, Some(true));
+    }
+
+    #[test]
+    fn engineer_ships_agents_sessions_query_and_mailbox_tools() {
+        let mut tools = tools_for_package(
+            "did:key:z-init",
+            "setup-tools",
+            ToolPackageArg::Write,
+            None,
+            false,
+            false,
+            Vec::new(),
+        );
+        let surface = engineer_tools(&mut tools, "did:key:z-init", true);
+        assert!(tools.validation_violations().is_empty());
+        assert_eq!(tools.subagents.as_ref().unwrap().enabled, Some(true));
+        assert_eq!(
+            tools
+                .built_ins
+                .as_ref()
+                .unwrap()
+                .enable_session_history_tool,
+            Some(true)
+        );
+        let datastore = tools.datastore.as_ref().unwrap();
+        assert_eq!(datastore.enable_defra_query, Some(true));
+        assert_eq!(
+            datastore.datastore_tool_surface_ids,
+            Some(vec![surface.surface_id.clone()])
+        );
+        assert_eq!(surface.agent_did, "did:key:z-init");
+        assert_eq!(
+            surface.entries,
+            Some(vec![SurfaceToolDecl::Create(
+                gents::mailbox::canonical_mailbox_write_decl()
+            )])
+        );
     }
 
     #[test]

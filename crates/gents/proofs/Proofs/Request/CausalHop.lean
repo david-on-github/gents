@@ -9,24 +9,34 @@ signed, immutable `AgentRequest.subagent_depth`, written once by
 `lifecycle::materialize` and checked at admission against the target's
 `AgentPrincipal.max_request_hop`.
 
-Each session has a *current hop*: the hop of its latest request. A request
-(or continuation) caused by *another* session's action is strictly further
-than its cause: `hop = max current (cause + 1)`. That covers a tool-caused new
-request, a tool-caused steering continuation and a session-message completion
-wake (whose cause is the caused request that finished). Same-session
-continuations (retries, goal continuations, user steering, native process
-completion wakes) copy the session's current hop, never the hop of an older
-request that scheduled them. A user-authored root request is hop zero and so
-resets its session. There is no separate refusal path: a request over the
-bound is written like any other, becomes its session's latest request, and is
-refused at admission, so every later same-session continuation copies a hop
-over the bound and is refused too; the session waits for its user. Every chain of agent-to-agent causes
-therefore climbs by at least one per send, so a loop between agents — two
-sessions messaging each other, or one agent waking itself through a session
-it started — is refused after a bounded number of sends, with no cascade,
-fence or tree walk. An `agent_message` to the caller's own current session is
-refused outright: it would be a same-session steering continuation with no
-hop increase.
+Each session has a *current hop*: the hop of its latest request. The hop
+bounds call *depth*, not how many calls a session makes, so it separates the
+edges between sessions:
+
+* An *outward* edge — a tool-caused new request or steering continuation of
+  another session (`agent_new`, `agent_message`) — is strictly further than
+  its cause: `hop = max current (cause + 1)`.
+* A *return* edge — the completion wake that delivers a caused request's
+  result back to the session that made the call, along `caused_by_parent_*` —
+  keeps the caller's current hop. Counting it as `cause + 1` made every
+  question-and-answer round trip climb two hops, so a caller exhausted the
+  bound after a few sequential calls (#2065).
+* Same-session continuations (retries, goal continuations, user steering,
+  native process completion wakes) copy the session's current hop, never the
+  hop of an older request that scheduled them.
+* A user-authored or trigger root request is hop zero and so resets its
+  session.
+
+There is no separate refusal path: a request over the bound is written like
+any other, becomes its session's latest request, and is refused at admission,
+so every later return or same-session continuation copies a hop over the
+bound and is refused too; the session waits for its user. Return edges never
+change a hop, so a loop between agents — two sessions messaging each other —
+still climbs by at least one per send and is refused after a bounded number of
+sends, with no cascade, fence or tree walk. The hop deliberately does not
+bound how many times a caller acts on its own returned results. An
+`agent_message` to the caller's own current session is refused outright: it
+would be a same-session steering continuation with no hop increase.
 -/
 
 namespace CausalHop
@@ -38,11 +48,13 @@ def defaultMaxRequestHop : Nat := 8
 inductive Cause where
   /-- A user, trigger or schedule root. -/
   | root
-  /-- Caused by another session's action at hop `causeHop`: a
-  `agent_new`/`agent_message` request or steering continuation (the cause
-  is the calling request), or a session-message completion wake (the cause is
-  the caused request that finished). -/
+  /-- Outward: caused by another session's action at hop `causeHop`, a
+  `agent_new`/`agent_message` request or steering continuation whose cause is
+  the calling request. -/
   | crossSession (causeHop : Nat)
+  /-- Return: a session-message completion wake delivering a caused request's
+  result back to the calling session. -/
+  | returnEdge
   /-- A same-session continuation: retry, goal continuation, user steering or
   a native process completion wake. It cannot extend a chain. -/
   | continuation
@@ -53,6 +65,7 @@ inductive Cause where
 def nextHop : Cause → Nat → Nat
   | .root, _ => 0
   | .crossSession causeHop, own => max own (causeHop + 1)
+  | .returnEdge, own => own
   | .continuation, own => own
 
 /-- Admission refuses a request whose hop exceeds the target principal's
@@ -68,6 +81,16 @@ theorem root_hop_is_zero (own : Nat) : nextHop .root own = 0 := rfl
 
 theorem continuation_preserves_hop (own : Nat) :
     nextHop .continuation own = own := rfl
+
+/-- A returned result keeps the caller's current hop, whatever the hop of the
+caused request that produced it. -/
+theorem return_keeps_caller_hop (own : Nat) : nextHop .returnEdge own = own := rfl
+
+/-- A return into a session whose current hop is over the bound is refused,
+like every other continuation of that session. -/
+theorem return_into_refused_session_is_refused (maxHop own : Nat) (h : maxHop < own) :
+    admitHop maxHop (nextHop .returnEdge own) = false := by
+  simp [nextHop, admitHop]; omega
 
 /-- A cross-session cause is strictly behind what it causes, whatever the
 target session's own history. -/
@@ -148,9 +171,9 @@ admitted. -/
 theorem continuation_preserves_admission (maxHop hop : Nat) :
     admitHop maxHop (nextHop .continuation hop) = admitHop maxHop hop := rfl
 
-/-- Two sessions messaging each other from a root at hop zero: each send (or
-the completion wake it returns) continues the other session, whose current hop
-is that of the request two links back. -/
+/-- Two sessions messaging each other from a root at hop zero: each send
+continues the other session, whose current hop is that of the request two
+links back. Returns do not appear: they change no hop (`run_erases_returns`). -/
 def pingPongHops (n : Nat) : List Nat :=
   (List.range n).foldl
     (fun hops _ =>
@@ -158,6 +181,73 @@ def pingPongHops (n : Nat) : List Nat :=
       let cause := hops.getLast?.getD 0
       hops ++ [nextHop (.crossSession cause) own])
     [0]
+
+/-! ## Calls and returns between two sessions
+
+A caller `a` and a callee `b`, each at its current hop. An outward send from
+one session is materialized in the other; a return is materialized in the
+session that made the call. -/
+
+structure Pair where
+  a : Nat
+  b : Nat
+  deriving DecidableEq, Repr
+
+inductive Event where
+  | aSendsB
+  | bSendsA
+  | returnToA
+  | returnToB
+  deriving DecidableEq, Repr
+
+def Event.isReturn : Event → Bool
+  | .returnToA | .returnToB => true
+  | _ => false
+
+/-- The hop of the request an event materializes. -/
+def Event.hop : Event → Pair → Nat
+  | .aSendsB, p => nextHop (.crossSession p.a) p.b
+  | .bSendsA, p => nextHop (.crossSession p.b) p.a
+  | .returnToA, p => nextHop .returnEdge p.a
+  | .returnToB, p => nextHop .returnEdge p.b
+
+def Event.apply (e : Event) (p : Pair) : Pair :=
+  match e with
+  | .aSendsB | .returnToB => { p with b := e.hop p }
+  | .bSendsA | .returnToA => { p with a := e.hop p }
+
+def run (p : Pair) (events : List Event) : Pair := events.foldl (fun p e => e.apply p) p
+
+/-- Returns are invisible to the hop: a trace with its returns erased reaches
+the same hops, so interleaving results never lowers or raises a chain. -/
+theorem run_erases_returns (p : Pair) (events : List Event) :
+    run p events = run p (events.filter (fun e => !e.isReturn)) := by
+  induction events generalizing p with
+  | nil => rfl
+  | cons e rest ih =>
+    cases e <;> simp [run, List.foldl, Event.isReturn, Event.apply, Event.hop, nextHop] at ih ⊢ <;>
+      exact ih _
+
+/-- `n` sequential calls from a root caller to one callee, each followed by
+its returned result. -/
+def sequentialCalls (n : Nat) : List Event :=
+  (List.replicate n [Event.aSendsB, Event.returnToA]).flatten
+
+/-- A caller making any number of sequential calls stays at hop zero and its
+callee at hop one, so every call is admitted under any bound of at least one. -/
+theorem sequential_calls_stay_at_depth_one (n : Nat) :
+    run ⟨0, 1⟩ (sequentialCalls n) = ⟨0, 1⟩ ∧
+      run ⟨0, 0⟩ (sequentialCalls (n + 1)) = ⟨0, 1⟩ := by
+  have h : ∀ n, run ⟨0, 1⟩ (sequentialCalls n) = ⟨0, 1⟩ := by
+    intro n
+    induction n with
+    | zero => rfl
+    | succ k ih =>
+      simp only [sequentialCalls, List.replicate_succ, List.flatten_cons] at ih ⊢
+      simpa [run, List.foldl_append, Event.apply, Event.hop, nextHop] using ih
+  refine ⟨h n, ?_⟩
+  simpa [sequentialCalls, List.replicate_succ, List.flatten_cons, run, List.foldl_append,
+    Event.apply, Event.hop, nextHop] using h n
 
 /-! ## The session current hop
 

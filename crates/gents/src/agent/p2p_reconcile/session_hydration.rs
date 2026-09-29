@@ -19,6 +19,10 @@ pub const HYDRATION_COLLECTIONS: &[SessionHydrationCollection] = &[
     SessionHydrationCollection::CompactionEntry,
 ];
 
+/// Signed rejection detail for a request whose session another requester
+/// owns. Receivers present it as an unreadable session rather than a retry.
+pub const SESSION_OWNERSHIP_MISMATCH: &str = "session ownership does not match request";
+
 pub fn hydration_collection_name(collection: SessionHydrationCollection) -> &'static str {
     match collection {
         SessionHydrationCollection::AgentRequest => "AgentRequest",
@@ -214,7 +218,7 @@ pub fn decide_hydration(
         agent_did: request.agent_did.clone(),
     };
     if !catalog.sessions.contains(&owner) {
-        return HydrationVerdict::Reject("session ownership does not match request");
+        return HydrationVerdict::Reject(SESSION_OWNERSHIP_MISMATCH);
     }
 
     HydrationVerdict::Admit(
@@ -324,6 +328,19 @@ pub fn begin_hydration_request(session_id: &str, agent_did: &str) -> ClientHydra
         merged_documents: BTreeSet::new(),
         served_documents: None,
     }
+}
+
+/// Whether a receiver may start its first request (`SessionHydration.canStart`).
+/// A header naming another requester never starts: the server's ownership
+/// check would refuse it. Otherwise an owned header permits a start during a
+/// live turn, and local rows permit one only once no request is in flight.
+pub fn can_start_hydration(
+    foreign_header: bool,
+    owned_session: bool,
+    has_documents: bool,
+    nonterminal_request: bool,
+) -> bool {
+    !foreign_header && (owned_session || (has_documents && !nonterminal_request))
 }
 
 /// Retry admission is target-specific and terminal-state-specific.

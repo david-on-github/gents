@@ -226,7 +226,7 @@ impl BehaviorToolConfig {
             enable_self_config: _,
             self_config_categories: _,
             self_config_no_lockout,
-            self_config_dry_run,
+            self_config_preview,
             enable_pack_install,
             enable_lsp: _,
             lsp_config,
@@ -382,7 +382,7 @@ impl BehaviorToolConfig {
                 behavior_id: behavior_name.to_string(),
                 categories: static_policy.self_config_category_set(),
                 no_lockout: self_config_no_lockout,
-                dry_run: self_config_dry_run,
+                preview: self_config_preview,
                 enable_pack_install,
                 enable_graph_tools,
                 process_ceiling: super::SelfConfigProcessCeiling {

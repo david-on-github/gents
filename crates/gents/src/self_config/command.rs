@@ -28,6 +28,9 @@ const CONFIG_USAGE: &str = r#"config commands (argv excludes the tool name):
   ["backend", "preview"|"edit", [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]]
   ["profile", "get"|"preview"|"edit", [profile|sampling|execution|retry-policy|compaction], [--behavior BEHAVIOR_ID] PATCH_FLAGS]
   ["mcp-service", "get", SERVICE_ID]
+  ["subagent-target"|"execution", "list", "--limit", N, "--cursor", ID]
+  ["subagent-target"|"execution", "get", ID]
+  ["subagent-target"|"execution", ["preview"], "create"|"edit", ID, PATCH_FLAGS]
   ["datastore", "get"|"create"|"edit", SURFACE_ID, PATCH_FLAGS]
   ["datastore", "preview", "create"|"edit", SURFACE_ID, PATCH_FLAGS]
   ["skill", "get", SKILL_ID]
@@ -58,7 +61,7 @@ top-level set object for commands whose help accepts PATCH_FLAGS (including
 datastore create/edit), removals in clear, and named options in options (keys
 without --). Behavior create/clone options use options, not set. JSON-valued
 options use native JSON objects.
-For datastore, automation and mcp-service document commands, target_id supplies
+For datastore, subagent-target, execution, automation and mcp-service document commands, target_id supplies
 the document ID instead of its positional argv operand. Never supply both.
 Example: {"argv":["automation","preview","task","ID"],"options":{"behavior":"BEHAVIOR_ID"},"set":{"prompt_template":"Read {{ doc.message }}","enabled":true}}
 Do not JSON-stringify values inside set. The --set/--clear/--mailbox forms below
@@ -98,12 +101,12 @@ impl ConfigCommandParams {
             required_resource_id(Some(&id), "target_id")?;
             let words = argv.iter().map(String::as_str).collect::<Vec<_>>();
             let position = match words.as_slice() {
-                ["datastore", "preview", "create" | "edit", ..] => 3,
-                ["datastore", "get" | "create" | "edit", ..]
+                ["datastore" | "subagent-target" | "execution", "preview", "create" | "edit", ..] => 3,
+                ["datastore" | "subagent-target" | "execution", "get" | "create" | "edit", ..]
                 | ["mcp-service", "get" | "preview" | "edit", ..] => 2,
                 ["automation", "get" | "preview" | "edit", _, ..] => 3,
                 _ => bail!(
-                    "target_id is supported for datastore, automation and mcp-service document commands; use --help for the command path"
+                    "target_id is supported for datastore, subagent-target, execution, automation and mcp-service document commands; use --help for the command path"
                 ),
             };
             anyhow::ensure!(
@@ -184,7 +187,7 @@ pub struct ConfigCommandTool {
     pub(super) core: SelfConfigCore,
     pub(super) categories: BTreeSet<String>,
     pub(super) no_lockout: bool,
-    pub(super) dry_run: bool,
+    pub(super) preview: bool,
     pub(super) allow_pack_install: bool,
     pub(super) process_ceiling: crate::tool_surface::SelfConfigProcessCeiling,
     pub(super) execution: Arc<super::execution::ExecutionObservation>,
@@ -276,7 +279,9 @@ fn model_resources(categories: &BTreeSet<String>, pack: bool) -> Vec<&'static st
         ("tools", "tools"),
         ("tools", "datastore"),
         ("tools", "skill"),
+        ("tools", "subagent-target"),
         ("profile", "profile"),
+        ("profile", "execution"),
         ("backend", "backend"),
         ("mcp_service", "mcp-service"),
         ("automation", "automation"),
@@ -319,13 +324,21 @@ impl ConfigCommandTool {
                 );
                 let core = self.target_core(behavior_id.as_deref(), "get")?;
                 let value = core
-                    .read_effective_config(&self.categories, self.no_lockout, self.dry_run)
+                    .read_effective_config(&self.categories, self.no_lockout, self.preview)
                     .await?;
                 Ok(serde_json::to_string_pretty(&value)?)
             }
             "behavior" => self.behavior(&argv[1..]).await,
             "tools" => self.bound_document("tools", &argv[1..]).await,
             "datastore" => self.datastore(&argv[1..]).await,
+            "subagent-target" => {
+                self.exact_document("subagent-target", SelfConfigTarget::SubagentTarget, &argv[1..])
+                    .await
+            }
+            "execution" => {
+                self.exact_document("execution", SelfConfigTarget::InferenceExecution, &argv[1..])
+                    .await
+            }
             "profile" => self.profile(&argv[1..]).await,
             "backend" => self.backend(&argv[1..]).await,
             "mcp-service" => self.mcp_service(&argv[1..]).await,
@@ -348,7 +361,7 @@ impl ConfigCommandTool {
             None => CONFIG_USAGE,
             Some("plan") => {
                 r#"plan preview --documents DOCUMENTS_JSON
-Preview a connected set of NEW canonical configuration documents without publishing any of them. Put an array of {"collection":"AgentBehavior", "document":{...}} entries in options.documents as native JSON. Use exact IDs and include all proposed Behavior, Context, Tools, datastore and automation dependencies. Existing same-principal references may be reused. Every new document must include agent_did. Existing documents cannot be replaced by this command.
+Preview a connected set of NEW canonical configuration documents without publishing any of them. Put an array of {"collection":"AgentBehavior", "document":{...}} entries in options.documents as native JSON. Use exact IDs and include all proposed Behavior, Context, Tools, SubagentTarget, InferenceExecution, datastore and automation dependencies. Existing same-principal references may be reused. Every new document must include agent_did. Existing documents cannot be replaced by this command.
 For a mailbox surface, add "mailbox": POLICY alongside "collection" and "document" in that proposal entry, and omit document.entries. This uses the same canonical declaration as datastore --mailbox; do not reconstruct file_mailbox_item fields yourself.
 This uses the publication owner's canonical type and retained-reference validation; it does not register application schemas, grant approval, publish documents, or prove live tool/service readiness. After explicit approval, use the normal resource commands to create the configuration and verify effective state. Schema preview is separate. Never create temporary documents just to make a preview pass."#
             }
@@ -385,7 +398,23 @@ Fields come from DatastoreToolSurface: display_name, enabled, entries, tags.
 The --mailbox and --set forms above are CLI argv notation. Native calls use target_id, options.mailbox, and set.
 Model example: {"argv":["datastore","preview","create"],"target_id":"monitor-notifications","set":{"display_name":"Monitor notifications"}}
 SURFACE_ID names the tool-surface configuration (monitor-notifications here), not a mailbox or collection. For the existing MailboxItem collection, use options.mailbox with a notification policy; the runtime supplies the protected canonical file_mailbox_item declaration. Example: {"argv":["datastore","preview","create"],"target_id":"monitor-notifications","options":{"mailbox":{"identity":{"mode":"condition","key":"host-health"},"kind":"flag","action":"ack"}},"set":{"enabled":true}}. --mailbox replaces entries with that one canonical declaration and cannot be combined with setting or clearing entries; use a separate surface for observation tools. Do not create a replacement mailbox collection. Create with the same ID and fields after preview, then select that ID in the working Tools.datastore.datastore_tool_surface_ids. Definition, selection and runtime execution are separate checks.
-Entries are canonical schema-bounded create/query declarations. Owner and surface_id are immutable. Bind an existing surface using config tools edit --behavior BEHAVIOR_ID --set datastore=JSON, preserving the other datastore settings. Editing a surface used by protected Setup is rejected. Schema registration is a separate operation."#
+Entries are canonical schema-bounded create/query declarations. Owner and surface_id are immutable. Bind an existing surface using config tools edit --behavior BEHAVIOR_ID --set datastore=JSON, preserving the other datastore settings. Schema registration is a separate operation."#
+            }
+            Some("subagent-target") => {
+                r#"subagent-target commands (requires tools permission):
+  list [--limit N] [--cursor TARGET_ID]
+  get TARGET_ID
+  preview create|edit TARGET_ID --set FIELD=JSON [--clear FIELD]
+  create|edit TARGET_ID --set FIELD=JSON [--clear FIELD]
+A SubagentTarget names one behavior that agent_new may start: name (the model-facing agent name), target_agent_did, behavior_id, description, tags. Create requires an unused exact ID; a same-principal target must reference an existing behavior. Select it with tools edit --behavior BEHAVIOR_ID --set subagents=JSON, preserving the existing target_ids. Delete with cleanup --target subagent-target=ID after removing it from every Tools selection."#
+            }
+            Some("execution") => {
+                r#"execution commands (requires profile permission):
+  list [--limit N] [--cursor EXECUTION_ID]
+  get EXECUTION_ID
+  preview create|edit EXECUTION_ID [--set FIELD=JSON] [--clear FIELD]
+  create|edit EXECUTION_ID [--set FIELD=JSON] [--clear FIELD]
+An InferenceExecution owns run limits (max_turns, deadline_duration_secs, token budget, stream timeouts, retry_policy_id). Create requires an unused exact ID; omitted fields use the canonical defaults. Bind it with profile edit --behavior BEHAVIOR_ID --set execution_id=JSON (or profile create ... --set execution_id=JSON), then preview/edit limits with profile edit execution --behavior BEHAVIOR_ID or execution edit EXECUTION_ID. Delete with cleanup --target execution=ID once no profile references it."#
             }
             Some("behavior") => {
                 r#"behavior commands:
@@ -431,7 +460,7 @@ The profile selects backend/model/effort. Creation requires an unused exact ID p
   get [BACKEND_ID] [--behavior BEHAVIOR_ID]
   preview [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
   edit [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-Create is deliberately limited to an enabled, unauthenticated OpenAI-compatible server and never accepts a credential. Discover contacts only that exact persisted backend through the canonical provider/catalog owner, records its advertised model catalog, and does not create a profile or select a model. Preview creation before applying it. Without BACKEND_ID, get/edit targets the backend referenced by the selected behavior's profile. Raw credentials cannot be read or changed; OAuth and API-key setup remain operator-owned."#
+Create is deliberately limited to an enabled, unauthenticated OpenAI-compatible server and never accepts a credential. List, get and discover include the backend's last credential-free catalog observation (model IDs, context windows, supported reasoning efforts). For an unauthenticated OpenAI-compatible backend, discover contacts only that exact persisted backend through the canonical provider/catalog owner and records its advertised catalog; for a credentialed or subscription backend it returns the catalog last published by operator discovery or the runtime prober without contacting the provider. Discover never creates a profile or selects a model. Preview creation before applying it. Without BACKEND_ID, get/edit targets the backend referenced by the selected behavior's profile. Raw credentials cannot be read or changed; OAuth and API-key setup remain operator-owned."#
             }
             Some("mcp-service") => {
                 r#"mcp-service commands:
@@ -460,7 +489,7 @@ Results can feed later stages. Use canonical graph tools or graph packs for coor
                 r#"cleanup commands:
   preview --target RESOURCE=ID [--target RESOURCE=ID ...]
   remove --digest SHA256 --target RESOURCE=ID [--target RESOURCE=ID ...]
-Resources: behavior, context, tools, profile, sampling, execution, retry-policy, compaction, backend, mcp-service, task, schedule, trigger, event-source.
+Resources: behavior, context, tools, subagent-target, profile, sampling, execution, retry-policy, compaction, backend, mcp-service, task, schedule, trigger, event-source.
 Cleanup is exact-ID, same-principal, and reference-aware. Preview performs the same complete retained-reference validation without writing and returns the digest required by remove. Remove requires the same target set and refuses if any target changed, then revalidates and deletes the whole set atomically, so related unreferenced cycles can be removed together. A retained document may never be left with a missing reference. Behavior/context cleanup requires the behavior catalog grant; the protected Setup behavior cannot be removed."#
             }
             Some("pack") if self.allow_pack_install => {
@@ -512,7 +541,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
     }
 
     fn connected_preview_contract(&self) -> Value {
-        if !self.dry_run || !self.categories.contains("persona") {
+        if !self.preview || !self.categories.contains("persona") {
             return Value::Null;
         }
         json!({
@@ -635,6 +664,12 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 let params = behavior_params(verb, None, &argv[1..])?;
                 self.ensure_behavior_operation(verb, params.behavior_id.as_deref())?;
                 self.ensure_default_selection(&params)?;
+                anyhow::ensure!(
+                    !(self.no_lockout
+                        && verb == "disable"
+                        && params.behavior_id.as_deref() == Some(self.core.behavior_id())),
+                    "no-lockout guard: behavior must remain enabled"
+                );
                 self.execution.enter_mutation();
                 persona_mutate(
                     &self.node,
@@ -690,7 +725,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     "behavior context get accepts only --behavior BEHAVIOR_ID"
                 );
                 let effective = core
-                    .read_effective_config(&self.categories, self.no_lockout, self.dry_run)
+                    .read_effective_config(&self.categories, self.no_lockout, self.preview)
                     .await?;
                 Ok(serde_json::to_string_pretty(&json!({
                     "resource": "AgentContext",
@@ -839,17 +874,35 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 "no unique enabled backend with ID {backend_id:?}; inspect config backend list"
             );
             let backend = &matches[0];
-            anyhow::ensure!(
-                backend.provider_kind == crate::BackendProviderKind::OpenAiCompatible
-                    && matches!(
-                        backend.auth,
-                        crate::document_config::BackendAuth::Unauthenticated
-                    ),
-                "backend discover is limited to unauthenticated OpenAI-compatible servers; credentials and OAuth remain operator-owned"
-            );
+            if backend.provider_kind != crate::BackendProviderKind::OpenAiCompatible
+                || !matches!(
+                    backend.auth,
+                    crate::document_config::BackendAuth::Unauthenticated
+                )
+            {
+                // Credentialed discovery stays with the operator paths and the
+                // runtime prober; the agent reads what they last published.
+                let observation = self
+                    .backend_observation_view(backend_id, backend.provider_kind)
+                    .await?;
+                return Ok(serde_json::to_string_pretty(&json!({
+                    "resource": "InferenceBackend",
+                    "backend_id": backend_id,
+                    "endpoint": backend.endpoint,
+                    "provider_kind": backend.provider_kind,
+                    "observation": observation,
+                    "refreshed": false,
+                    "note": "This backend is credentialed, so self-config did not contact the provider. The catalog is the last credential-free observation published by operator discovery (desktop setup, gents config backend discover-models --backend-id) or the runtime prober; null means none has been recorded yet."
+                }))?);
+            }
             self.execution.enter_mutation();
             let observation =
                 crate::backend_registry::discover_shared_backend(&self.node, backend).await?;
+            let observation = crate::backend_registry::scoped_observation_view(
+                Some(&observation),
+                &self.agent_did,
+                backend.provider_kind,
+            )?;
             return Ok(serde_json::to_string_pretty(&json!({
                 "resource": "InferenceBackend",
                 "backend_id": backend_id,
@@ -949,6 +1002,63 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         }
     }
 
+    /// Exact-ID documents selected by reference rather than through a behavior
+    /// anchor: SubagentTarget (#2058) and InferenceExecution (#2059). Preview
+    /// and publication go through the desired-state owner `config apply` uses
+    /// for `PackConfig.subagent_targets` and `PackConfig.inference_execution`.
+    async fn exact_document(
+        &self,
+        resource: &str,
+        target: SelfConfigTarget,
+        argv: &[String],
+    ) -> Result<String> {
+        self.ensure_resource(target.category())?;
+        let preview = argv.first().is_some_and(|arg| arg == "preview");
+        let argv = if preview { &argv[1..] } else { argv };
+        let verb = argv.first().map(String::as_str).with_context(|| {
+            format!("{resource} command is required; run config help {resource}")
+        })?;
+        if verb == "list" && !preview {
+            let parsed = ParsedArgs::parse(&argv[1..])?;
+            parsed.reject_mutation_flags()?;
+            return self
+                .inference_inventory(target, parse_limit(&parsed)?, parsed.one("cursor")?)
+                .await;
+        }
+        let id = required_resource_id(argv.get(1), &format!("{resource} ID"))?;
+        if verb == "get" && !preview {
+            anyhow::ensure!(argv.len() == 2, "{resource} get accepts only one ID");
+            return self.exact_read(target, id).await;
+        }
+        anyhow::ensure!(
+            matches!(verb, "create" | "edit"),
+            "unknown {resource} command {verb:?}; run config help {resource}"
+        );
+        // Creation may rely entirely on canonical defaults; edits need a field.
+        let patch = if verb == "create" && argv.len() == 2 {
+            Vec::new()
+        } else {
+            parse_patch(&argv[2..], target)?
+        };
+        let mut request = ApplyRequest::new(target, patch);
+        let unique = id.clone();
+        request.resolve_unique = Box::new(move |_| Ok(unique.clone()));
+        request.allow_create = verb == "create";
+        request.require_create = verb == "create";
+        let owner = self.agent_did.clone();
+        request.on_create = Box::new(move |id, doc| {
+            doc.insert(target.unique_field().into(), json!(id));
+            doc.insert("agent_did".into(), json!(owner));
+            Ok(())
+        });
+        self.patch(
+            &self.core,
+            if preview { "preview" } else { "edit" },
+            request,
+        )
+        .await
+    }
+
     async fn mcp_service(&self, argv: &[String]) -> Result<String> {
         self.ensure_resource("mcp-service")?;
         let verb = argv
@@ -1020,7 +1130,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         );
         if verb == "preview" {
             anyhow::ensure!(
-                self.dry_run,
+                self.preview,
                 "cleanup preview is not granted for this behavior"
             );
         }
@@ -1296,7 +1406,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
     ) -> Result<String> {
         let outcome = match verb {
             "preview" => {
-                anyhow::ensure!(self.dry_run, "preview is not granted for this behavior");
+                anyhow::ensure!(self.preview, "preview is not granted for this behavior");
                 core.preview(request).await?
             }
             "edit" => {
@@ -1310,7 +1420,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
 
     async fn bound_read(&self, core: &SelfConfigCore, target: SelfConfigTarget) -> Result<String> {
         let effective = core
-            .read_effective_config(&self.categories, self.no_lockout, self.dry_run)
+            .read_effective_config(&self.categories, self.no_lockout, self.preview)
             .await?;
         let value = match target {
             SelfConfigTarget::Tools => effective.pointer("/documents/Tools"),
@@ -1337,10 +1447,68 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 core.behavior_id()
             )
         })?;
+        if target == SelfConfigTarget::InferenceBackend {
+            let observation = self.backend_document_observation(value).await?;
+            return Ok(serde_json::to_string_pretty(&json!({
+                "resource": target.collection_name(),
+                "document": value,
+                "observation": observation,
+            }))?);
+        }
         Ok(serde_json::to_string_pretty(&json!({
             "resource": target.collection_name(),
             "document": value,
         }))?)
+    }
+
+    /// Credential-free observation of one owned backend in its own
+    /// authentication scope, read under the invoking principal's identity.
+    async fn backend_observation_view(
+        &self,
+        backend_id: &str,
+        provider_kind: crate::BackendProviderKind,
+    ) -> Result<Value> {
+        let owner = self.agent_did.clone();
+        let backend_id = backend_id.to_owned();
+        let observation = crate::config_client::ConfigAccess::transact_local(
+            &self.node,
+            Some(self.core.identity()?),
+            "self_config.backend_observation",
+            |txn| {
+                let owner = owner.clone();
+                let backend_id = backend_id.clone();
+                Box::pin(async move {
+                    crate::backend_registry::lookup_backend_observation_in_txn(
+                        txn,
+                        &owner,
+                        &backend_id,
+                    )
+                    .await
+                })
+            },
+        )
+        .await?;
+        crate::backend_registry::scoped_observation_view(
+            observation.as_ref(),
+            &self.agent_did,
+            provider_kind,
+        )
+    }
+
+    async fn backend_document_observation(&self, document: &Value) -> Result<Value> {
+        let backend_id = document
+            .get("backend_id")
+            .and_then(Value::as_str)
+            .context("backend document has no backend_id")?;
+        let provider_kind = serde_json::from_value(
+            document
+                .get("provider_kind")
+                .cloned()
+                .context("backend document has no provider_kind")?,
+        )
+        .context("decoding backend provider_kind")?;
+        self.backend_observation_view(backend_id, provider_kind)
+            .await
     }
 
     async fn exact_read(&self, target: SelfConfigTarget, id: &str) -> Result<String> {
@@ -1366,6 +1534,13 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 "auth".into(),
                 json!({"redacted": true, "owner": "operator credential/login flow"}),
             );
+            let document = Value::Object(document);
+            let observation = self.backend_document_observation(&document).await?;
+            return Ok(serde_json::to_string_pretty(&json!({
+                "resource": target.collection_name(),
+                "document": document,
+                "observation": observation,
+            }))?);
         }
         Ok(serde_json::to_string_pretty(&json!({
             "resource": target.collection_name(),
@@ -1380,7 +1555,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         id: &str,
     ) -> Result<String> {
         let effective = core
-            .read_effective_config(&self.categories, self.no_lockout, self.dry_run)
+            .read_effective_config(&self.categories, self.no_lockout, self.preview)
             .await?;
         let document = effective
             .pointer(&format!("/automation/{}", target.collection_name()))
@@ -1421,9 +1596,20 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             SelfConfigTarget::InferenceBackend => (
                 "InferenceBackend",
                 "backend_id",
-                "backend_id name provider_kind openai_wire_api endpoint connect_timeout_secs discovery_timeout_secs max_concurrent max_queue_depth enabled probe_status last_probe",
+                "backend_id name provider_kind openai_wire_api endpoint connect_timeout_secs discovery_timeout_secs max_concurrent max_queue_depth enabled catalogs probe_status last_probe",
+            ),
+            SelfConfigTarget::SubagentTarget | SelfConfigTarget::InferenceExecution => (
+                target.collection_name(),
+                target.unique_field(),
+                "",
             ),
             _ => unreachable!("inference inventory target"),
+        };
+        let all_fields = target.all_fields().join(" ");
+        let fields = if fields.is_empty() {
+            all_fields.as_str()
+        } else {
+            fields
         };
         let owner = escape_graphql_string(&self.agent_did);
         let query =
@@ -1444,6 +1630,28 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             .and_then(Value::as_array)
             .context("inventory query returned no rows array")?
             .clone();
+        if target == SelfConfigTarget::InferenceBackend {
+            for row in &mut rows {
+                let observation: crate::document_config::InferenceBackendObservation =
+                    serde_json::from_value(row.clone()).context("decoding backend observation")?;
+                let provider_kind = serde_json::from_value(
+                    row.get("provider_kind")
+                        .cloned()
+                        .context("backend row has no provider_kind")?,
+                )
+                .context("decoding backend provider_kind")?;
+                let view = crate::backend_registry::scoped_observation_view(
+                    Some(&observation),
+                    &self.agent_did,
+                    provider_kind,
+                )?;
+                let object = row
+                    .as_object_mut()
+                    .context("backend row must be an object")?;
+                object.remove("catalogs");
+                object.insert("catalog".into(), view["catalog"].clone());
+            }
+        }
         rows.sort_by(|left, right| {
             left.get(id_field)
                 .and_then(Value::as_str)
@@ -1511,6 +1719,7 @@ fn cleanup_target(name: &str) -> Result<SelfConfigTarget> {
         "behavior" => Ok(SelfConfigTarget::AgentBehavior),
         "context" => Ok(SelfConfigTarget::AgentContext),
         "tools" => Ok(SelfConfigTarget::Tools),
+        "subagent-target" => Ok(SelfConfigTarget::SubagentTarget),
         "profile" => Ok(SelfConfigTarget::InferenceProfile),
         "sampling" => Ok(SelfConfigTarget::InferenceSampling),
         "execution" => Ok(SelfConfigTarget::InferenceExecution),
@@ -1651,11 +1860,11 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
                 "display_name": "string|null",
                 "host": {"root":"string|null; absent uses runtime cwd", "files":{"mode":"Off|ReadOnly|ReadWrite (default Off)","max_read_chars":"integer 1..1000000|null; default 32000; read_file bytes, default and maximum","max_list_entries":"integer 1..5000|null; default 200","max_matches":"integer 1..5000|null; default 200; glob and grep"}, "bash":{"mode":"Off|ReadOnly|Unrestricted (default Off)","execution_mode":"read_only|workspace_write|artifact_write|unrestricted|null","network_mode":"inherit|disabled|enabled|null","allowed_argv_prefixes":"array<array<string>>|null","forbidden_argv_prefixes":"array<array<string>>|null","read_only_commands":"array<string>|null","background_enabled":"boolean; default false","timeout_secs":"positive integer|null; default host --command-timeout-secs (120); clamped to the host maximum","max_timeout_secs":"positive integer|null; default timeout_secs if set, else host maximum; clamped to host --command-timeout-max-secs","background_timeout_secs":"positive integer|null; default 36000; clamped to 36000","wait_timeout_secs":"positive integer|null; default 30","max_wait_timeout_secs":"positive integer|null; default 600; clamped to 600","max_output_chars":"integer 1..1000000|null; default 16000; stdout and stderr each"}, "cli":[{"name":"string; host-registered CLI tool name (cli default [])","timeout_secs":"positive integer|null; default host registration (10); clamped to host --command-timeout-max-secs","max_output_chars":"integer 1..1000000|null; default host registration (16000); stdout and stderr each"}]},
                 "remote": {"services":"array<{mcp_service_id:string,tool_names:array<string>,style:flat|discovery(default),required:boolean(default false),background_tool_names:array<string>,connect_timeout_secs?:integer,discovery_timeout_secs?:integer,timeout_secs?:integer,stale_timeout_secs?:integer,background_timeout_secs?:integer (default 36000; clamped to 36000),wait_timeout_secs?:integer (default 30),max_wait_timeout_secs?:integer (default 600; clamped to 600)}>; default []"},
-                "subagents": {"target_ids":"array<existing same-principal SubagentTarget ID>; default []; the agents agent_new may address","enabled":"boolean|null; enables the agents tools: agent_new, agent_message, agent_interrupt and agent_list"},
+                "subagents": {"target_ids":"array<existing same-principal SubagentTarget ID>; default []; the agents agent_new may address (create them with subagent-target)","enabled":"boolean|null; enables the agents tools: agent_message, agent_interrupt and agent_list, plus agent_new when target_ids selects a target"},
                 "built_ins": {"enable_graph_tools":"boolean|null","enable_goal_tools":"boolean|null","enable_goal_creation":"boolean|null","enable_memory":"boolean|null","enable_session_history_tool":"boolean|null","enable_context_budget":"boolean|null"},
                 "datastore": {"enable_defra_query":"boolean|null","defra_query_collections":"array<string>|null","datastore_tool_surface_ids":"array<existing same-principal DatastoreToolSurface ID>|null"},
                 "integrations": {"lsp":{"config":"JSON encoded as a string|null","timeout_secs":"positive integer|null; default 20","max_timeout_secs":"positive integer|null; default 300; clamped to 300"},"eth_tool_ids":"array<existing same-principal EthTool ID>|null","plugins":"array<{plugin: installed namespace/name, digest: sha256:<hex>|null}>|null"},
-                "self_config": {"enable_self_config":"boolean|null; absent is disabled","self_config_categories":"array<behavior|tools|profile|backend|mcp_service|automation|persona>|null; absent selects behavior, tools, profile","self_config_no_lockout":"boolean|null","self_config_dry_run":"boolean|null","enable_pack_install":"boolean|null; cannot be self-granted"},
+                "self_config": {"enable_self_config":"boolean|null; absent is disabled","self_config_categories":"array<behavior|tools|profile|backend|mcp_service|automation|persona>|null; absent selects behavior, tools, profile","self_config_no_lockout":"boolean|null","self_config_preview":"boolean|null; grants the preview verb","enable_pack_install":"boolean|null; cannot be self-granted"},
                 "tags": "array<string>; default []",
             }),
         )],
@@ -1729,6 +1938,19 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
                 }),
             ),
         ],
+        Some("subagent-target") => vec![patch_contract(
+            SelfConfigTarget::SubagentTarget,
+            json!({
+                "name":"string; the agent name agent_new exposes","target_agent_did":"principal DID that owns the behavior; this principal for local agents","behavior_id":"behavior ID on target_agent_did; must exist when local","description":"string|null","tags":"array<string>; default []"
+            }),
+        )],
+        Some("execution") => help_patch_contracts(Some("profile"))
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter(|contract| contract["collection"] == "InferenceExecution")
+            .cloned()
+            .collect(),
         _ => Vec::new(),
     };
     Value::Array(contracts)

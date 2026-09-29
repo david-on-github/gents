@@ -7,4 +7,8 @@ export type SessionSummary = { startedBy: LinkedSessionView | null, sessionId: s
  * Absent when the bounded deployment projection did not query transcript
  * aggregates. Never inferred from resident transcript rows.
  */
-messageCount: number | null, toolCallCount: number | null, };
+messageCount: number | null, toolCallCount: number | null,
+/**
+ * Why this client cannot read the session, when it cannot.
+ */
+unreadableReason?: string | null, };

@@ -706,14 +706,6 @@ pub(crate) async fn observe_caused_request(
     Ok(CausedObservation::Bound(caused))
 }
 
-/// The hop of a bound caused request, which its completion wake climbs past.
-pub(crate) fn caused_hop(caused: &gents_protocol::row::AgentRequestRow) -> u32 {
-    caused
-        .subagent_depth
-        .and_then(|hop| u32::try_from(hop).ok())
-        .unwrap_or(0)
-}
-
 /// Lean `DurableLineage.interruptAllowed`: in 0.20 an agent may interrupt
 /// another session only when the caller's session started it.
 pub fn agent_interrupt_allowed(

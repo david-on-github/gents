@@ -105,6 +105,7 @@ pub(crate) struct LeanContractSnapshot {
     pub(crate) session_hydration_apply_cases: Vec<LeanSessionHydrationApplyCase>,
     pub(crate) session_hydration_progress_cases: Vec<LeanSessionHydrationProgressCase>,
     pub(crate) session_hydration_durable_cases: Vec<LeanSessionHydrationDurableCase>,
+    pub(crate) session_hydration_start_cases: Vec<LeanSessionHydrationStartCase>,
     pub(crate) enrollment_cases: Vec<LeanEnrollmentCase>,
     pub(crate) enrollment_durable_projection_cases: Vec<LeanEnrollmentDurableProjectionCase>,
     pub(crate) enrollment_encoding_cases: Vec<LeanEnrollmentEncodingCase>,
@@ -819,6 +820,16 @@ pub(crate) struct LeanSessionHydrationDurableCase {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct LeanSessionHydrationStartCase {
+    pub(crate) name: String,
+    pub(crate) foreign_header: bool,
+    pub(crate) owned_session: bool,
+    pub(crate) has_documents: bool,
+    pub(crate) nonterminal_request: bool,
+    pub(crate) expected_start: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub(crate) struct LeanEnrollmentCase {
     pub(crate) name: String,
     pub(crate) steps: Vec<LeanEnrollmentTraceStep>,
@@ -969,7 +980,7 @@ pub(crate) struct LeanAgentRequestAdmissionCase {
     pub(crate) requester_matches_target: bool,
     pub(crate) signer_matches_target: bool,
     pub(crate) signer_matches_issuer: bool,
-    pub(crate) requester_matches_issuer: bool,
+    pub(crate) requester_matches_session_scope: bool,
     pub(crate) current_approval: bool,
     pub(crate) exact_generation: bool,
     pub(crate) authorization_fresh: bool,
@@ -1007,6 +1018,7 @@ pub(crate) struct LeanCausalHopContract {
     pub(crate) default_max_request_hop: u32,
     pub(crate) step_cases: Vec<LeanCausalHopStepCase>,
     pub(crate) chain_cases: Vec<LeanCausalHopChainCase>,
+    pub(crate) call_cases: Vec<LeanCausalHopCallCase>,
     pub(crate) interrupt_cases: Vec<LeanAgentInterruptCase>,
     pub(crate) write_cases: Vec<LeanSessionMessageWriteCase>,
 }
@@ -1036,8 +1048,8 @@ pub(crate) struct LeanAgentInterruptCase {
 }
 
 /// One materialization step: `cause` is `root`, `cross_session` (with its
-/// `cause_hop`) or `continuation`, from the hop of the request it continues in
-/// its own session.
+/// `cause_hop`), `return` or `continuation`, from the hop of the request it
+/// continues in its own session.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LeanCausalHopStepCase {
@@ -1066,6 +1078,18 @@ pub(crate) struct LeanCausalHopChainCase {
     pub(crate) name: String,
     pub(crate) max_request_hop: u32,
     pub(crate) steps: Vec<LeanCausalHopChainStep>,
+    pub(crate) expected_hops: Vec<u32>,
+    pub(crate) expected_admitted: Vec<bool>,
+}
+
+/// Calls and returns between a caller `a` and a callee `b` from hop zero
+/// (`CausalHop.run`); expectations are per materialized request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LeanCausalHopCallCase {
+    pub(crate) name: String,
+    pub(crate) max_request_hop: u32,
+    pub(crate) events: Vec<String>,
     pub(crate) expected_hops: Vec<u32>,
     pub(crate) expected_admitted: Vec<bool>,
 }
@@ -2048,6 +2072,10 @@ pub(crate) fn lean_session_hydration_progress_cases() -> &'static [LeanSessionHy
 
 pub(crate) fn lean_session_hydration_durable_cases() -> &'static [LeanSessionHydrationDurableCase] {
     &lean_contract_snapshot().session_hydration_durable_cases
+}
+
+pub(crate) fn lean_session_hydration_start_cases() -> &'static [LeanSessionHydrationStartCase] {
+    &lean_contract_snapshot().session_hydration_start_cases
 }
 
 pub(crate) fn lean_enrollment_cases() -> &'static [LeanEnrollmentCase] {

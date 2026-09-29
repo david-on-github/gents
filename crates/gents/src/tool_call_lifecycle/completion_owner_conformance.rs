@@ -560,8 +560,8 @@ pub(crate) async fn selected_background_wake() -> SelectedBackgroundWake {
     );
     let queue = wake.input.as_ref().unwrap().queue.as_ref().unwrap();
     assert_eq!(queue.policy, QueuePolicy::Coalesce);
-    // The caused request ran at hop 1, so its wake climbs to hop 2.
-    assert_eq!(wake.subagent_depth, Some(2));
+    // The caused request ran at hop 1; its result returns at the caller's hop.
+    assert_eq!(wake.subagent_depth, Some(0));
     assert_eq!(
         queue.key.as_deref(),
         Some(format!("background_completion:{session}").as_str())

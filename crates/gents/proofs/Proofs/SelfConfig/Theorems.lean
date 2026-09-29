@@ -123,16 +123,98 @@ theorem runStep_accept_target (validate guard : Doc → Bool) (t : Target)
       have hm := step_accepts_wholesale validate guard t (s t) p merged hstep
       simp [runStep, hstep, hm]
 
-theorem no_lockout_recoverable (decodeEnabled : Doc → Option Bool) (validate : Doc → Bool) (s : Store) (p : Patch)
-    (h : (runStep validate (gateOn decodeEnabled) .tools s p).2 = true) :
-    (gateOn decodeEnabled) ((runStep validate (gateOn decodeEnabled) .tools s p).1 .tools)
-      = true := by
-  cases hstep : step validate (gateOn decodeEnabled) .tools (s .tools) p with
+theorem no_lockout_recoverable (decode : Doc → Option Control) (validate : Doc → Bool)
+    (s : Store) (p : Patch)
+    (h : (runStep validate (keepsControl decode (s .tools)) .tools s p).2 = true) :
+    ∃ old new, decode (s .tools) = some old ∧
+      decode ((runStep validate (keepsControl decode (s .tools)) .tools s p).1 .tools)
+        = some new ∧
+      new.selfConfig = true ∧ (old.agents = true → new.agents = true) ∧
+      (old.noLockout = true → new.noLockout = true) ∧
+      (old.toolsAuthority = true → new.toolsAuthority = true) := by
+  cases hstep : step validate (keepsControl decode (s .tools)) .tools (s .tools) p with
   | none => simp [runStep, hstep] at h
   | some merged =>
-      have hval := step_accept_validates validate (gateOn decodeEnabled) .tools
-        (s .tools) p merged hstep
-      simp [runStep, hstep, hval.2]
+      have hg := (step_accept_validates validate (keepsControl decode (s .tools)) .tools
+        (s .tools) p merged hstep).2
+      have hpost :
+          (runStep validate (keepsControl decode (s .tools)) .tools s p).1 .tools = merged := by
+        simp [runStep, hstep]
+      rw [hpost]
+      unfold keepsControl at hg
+      cases ho : decode (s .tools) with
+      | none => simp [ho] at hg
+      | some old =>
+        cases hn : decode merged with
+        | none => simp [ho, hn] at hg
+        | some new =>
+          rw [ho, hn] at hg
+          simp only [retained, Bool.and_eq_true, Bool.or_eq_true, Bool.not_eq_true'] at hg
+          obtain ⟨⟨⟨hself, hagents⟩, hguard⟩, htools⟩ := hg
+          refine ⟨old, new, rfl, rfl, hself, ?_, ?_, ?_⟩
+          · intro ha; cases hagents <;> simp_all
+          · intro ha; cases hguard <;> simp_all
+          · intro ha; cases htools <;> simp_all
+
+/-- Turning the invoker's own self-config tool off is a lockout. -/
+theorem self_config_disable_refused (decode : Doc → Option Control)
+    (stored candidate : Doc) (old new : Control)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (hoff : new.selfConfig = false) :
+    keepsControl decode stored candidate = false := by
+  simp [keepsControl, ho, hn, hoff]
+
+/-- Removing an agents tool group the invoker already had is a lockout. -/
+theorem agents_removal_refused (decode : Doc → Option Control)
+    (stored candidate : Doc) (old new : Control)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (had : old.agents = true) (removed : new.agents = false) :
+    keepsControl decode stored candidate = false := by
+  simp [keepsControl, retained, ho, hn, had, removed]
+
+/-- Dropping the guard is the first step of a two-step lockout. -/
+theorem no_lockout_removal_refused (decode : Doc → Option Control)
+    (stored candidate : Doc) (old new : Control)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (had : old.noLockout = true) (removed : new.noLockout = false) :
+    keepsControl decode stored candidate = false := by
+  simp [keepsControl, retained, ho, hn, had, removed]
+
+/-- Dropping the `tools` category leaves self-config on but unable to restore. -/
+theorem tools_authority_removal_refused (decode : Doc → Option Control)
+    (stored candidate : Doc) (old new : Control)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (had : old.toolsAuthority = true) (removed : new.toolsAuthority = false) :
+    keepsControl decode stored candidate = false := by
+  simp [keepsControl, retained, ho, hn, had, removed]
+
+/-- Disabling the invoking behavior is a lockout. -/
+theorem self_disable_refused (decode : Doc → Option Reach)
+    (stored candidate : Doc) (old new : Reach)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (hoff : new.enabled = false) :
+    keepsReach decode stored candidate = false := by
+  simp [keepsReach, ho, hn, hoff]
+
+/-- Dropping the Setup tag is the first step of a two-step self-disable. -/
+theorem setup_tag_removal_refused (decode : Doc → Option Reach)
+    (stored candidate : Doc) (old new : Reach)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (had : old.setupTag = true) (removed : new.setupTag = false) :
+    keepsReach decode stored candidate = false := by
+  simp [keepsReach, retained, ho, hn, had, removed]
+
+/-- Everything else on the invoker's own Tools is allowed. -/
+theorem retained_control_allowed (decode : Doc → Option Control)
+    (stored candidate : Doc) (old new : Control)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (hon : new.selfConfig = true) (hagents : old.agents = true → new.agents = true)
+    (hguard : old.noLockout = true → new.noLockout = true)
+    (htools : old.toolsAuthority = true → new.toolsAuthority = true) :
+    keepsControl decode stored candidate = true := by
+  have r : ∀ a b : Bool, (a = true → b = true) → retained a b = true := by
+    intro a b hab; cases a <;> cases b <;> simp_all [retained]
+  simp [keepsControl, ho, hn, hon, r _ _ hagents, r _ _ hguard, r _ _ htools]
 
 theorem runStep_identity_immutable (validate guard : Doc → Bool) (t : Target)
     (s : Store) (p : Patch) (k : FieldKey) (hk : k ∈ protectedFields t) :

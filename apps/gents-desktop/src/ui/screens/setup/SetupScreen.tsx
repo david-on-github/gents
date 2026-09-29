@@ -88,6 +88,10 @@ import {
 
 type Step = "welcome" | "starting" | "inference";
 
+/* The runtime confirms a save only after it reconciles the new documents,
+   starts the rebound behavior and replicates its readiness back. */
+const SAVE_CONFIRMATION_TIMEOUT_MS = 15_000;
+
 export type ProviderId = InferenceProviderId;
 type ConnectionDraft = {
   authMethod: InferenceAuthMethod;
@@ -454,6 +458,8 @@ export function SetupScreen({
         onWait: setManagedWait,
       });
       setRuntimeGate("ready");
+      /* Account lookup goes through the runtime, so repeat it once it serves. */
+      if (setupAgentDidRef.current) void observeAccounts(setupAgentDidRef.current);
     } catch (cause) {
       setRuntimeGate("unavailable");
       setError(setupErrorMessage(cause));
@@ -466,9 +472,14 @@ export function SetupScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [step, requiresManagedRuntime, runtimeGate]);
   const [pendingSave, setPendingSave] = useState<Partial<Record<ProviderId, true>>>({});
+  /* Sign-in state is known, so a chosen provider may start its sign-in. */
+  const [accountsObserved, setAccountsObserved] = useState(false);
   const observeAccounts = (agentDid: string) => {
     const revision = ++accountRevision.current;
-    if (!api.listProviderAccounts) return Promise.resolve();
+    if (!api.listProviderAccounts) {
+      setAccountsObserved(true);
+      return Promise.resolve();
+    }
     return api
       .listProviderAccounts(agentDid)
       .then((accounts) => {
@@ -479,14 +490,17 @@ export function SetupScreen({
           return;
         setSignedIn(providerSignInState(accounts));
         setPendingSave(providerPendingSaveState(accounts));
+        setAccountsObserved(true);
       })
       .catch(() => {
-        /* Sign-in remains available if account lookup fails. */
+        /* Sign-in remains available if account lookup fails, but only a
+           click starts it: an unknown account may already be connected. */
       });
   };
   useEffect(() => {
     setSignedIn({});
     setPendingSave({});
+    setAccountsObserved(false);
     if (!setupAgentDid) {
       accountRevision.current += 1;
       return;
@@ -495,6 +509,9 @@ export function SetupScreen({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, setupAgentDid]);
   const [authUrl, setAuthUrl] = useState<string | null>(null);
+  /* The provider the user just chose, whose sign-in starts without a click. */
+  const autoSignIn = useRef<ProviderId | null>(fixedProvider ?? null);
+  const [autoSignInRequest, setAutoSignInRequest] = useState(0);
   const root = shell.snapshot?.bootstrap.defaultAgentHome ?? "~/.gents";
   const toolRoot = selectedDirectory === undefined ? homeRoot : selectedDirectory;
   const authority = authorityForSelection(toolCeiling, toolRoot);
@@ -666,6 +683,7 @@ export function SetupScreen({
     const oauthProvider = oauthProviderFor(connection.authMethod);
     if (!oauthProvider) return;
     if (requiresManagedRuntime && runtimeGate !== "ready") return;
+    autoSignIn.current = null;
     setBusy(true);
     setError(null);
     setAuthUrl(null);
@@ -859,6 +877,22 @@ export function SetupScreen({
     await shell.applyConfig((configApi) =>
       configApi.applyConfigComponents({ document: plan.document }),
     );
+    // Discovery ran before the backend existed. Running it again publishes the
+    // advertised catalog onto the persisted backend. It stays off the save path;
+    // the runtime prober publishes subscription catalogs if it fails.
+    const publishKey = `${currentDiscoveryKey.current}:publish`;
+    void Promise.resolve()
+      .then(() =>
+        api.discoverInferenceModels({
+          requestKey: publishKey,
+          agentDid: deployment.agentDid,
+          provider,
+          authMethod: connection.authMethod,
+          endpoint: connection.endpoint,
+          apiKey: connection.apiKey.trim() || null,
+        }),
+      )
+      .catch(() => {});
     return plan;
   };
 
@@ -866,7 +900,8 @@ export function SetupScreen({
     profileId: string,
     defaultBehaviorId: string | null,
   ) => {
-    for (let attempt = 0; attempt < 20; attempt += 1) {
+    const deadline = Date.now() + SAVE_CONFIRMATION_TIMEOUT_MS;
+    while (Date.now() < deadline) {
       const snapshot = await api.fetchDesktopSnapshot();
       const deployment = snapshot.client?.deployments.find(
         (candidate) => candidate.agentDid === setupAgentDid,
@@ -915,12 +950,47 @@ export function SetupScreen({
   };
 
   const pickProvider = (id: ProviderId) => {
-    if (busy || id === provider) return;
+    if (busy) return;
+    autoSignIn.current = id;
+    if (id === provider) {
+      /* Choosing the preselected provider is a choice too. */
+      setAutoSignInRequest((count) => count + 1);
+      return;
+    }
     setProvider(id);
     setAuthUrl(null);
     setError(null);
     invalidateDiscovery();
   };
+  useEffect(() => {
+    if (
+      autoSignIn.current !== provider ||
+      step !== "inference" ||
+      !catalog ||
+      !connection ||
+      !oauthProviderFor(connection.authMethod) ||
+      !accountsObserved ||
+      busy ||
+      (requiresManagedRuntime && runtimeGate !== "ready")
+    )
+      return;
+    autoSignIn.current = null;
+    if (signedIn[provider] || pendingSave[provider]) return;
+    void signIn();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    autoSignInRequest,
+    provider,
+    step,
+    catalog,
+    connection,
+    accountsObserved,
+    busy,
+    requiresManagedRuntime,
+    runtimeGate,
+    signedIn,
+    pendingSave,
+  ]);
   if (step === "welcome") {
     return (
       <Frame>
@@ -1189,6 +1259,7 @@ export function SetupScreen({
               onValueChange={(next) => {
                 if (!next) return;
                 const option = authOptions.find((item) => item.method === next);
+                autoSignIn.current = provider;
                 updateConnection({
                   authMethod: next as InferenceAuthMethod,
                   endpoint: option?.defaultEndpoint ?? connection.endpoint,

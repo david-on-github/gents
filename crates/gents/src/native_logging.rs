@@ -40,10 +40,13 @@ pub fn service_logging_enabled() -> bool {
 }
 
 /// Human-readable diagnostic instructions, not a pretend file path.
+///
+/// The macOS command is spelled by absolute path: zsh, the default shell,
+/// has a `log` builtin that shadows `/usr/bin/log` and prints nothing useful.
 pub fn diagnostics_hint() -> &'static str {
     #[cfg(target_vendor = "apple")]
     {
-        "Console.app: subsystem ai.gents; or log show --last 1h --predicate 'subsystem == \"ai.gents\"'"
+        "Console.app: subsystem ai.gents; or /usr/bin/log show --last 1h --predicate 'subsystem == \"ai.gents\"'"
     }
     #[cfg(target_os = "linux")]
     {

@@ -13,8 +13,9 @@ test.describe("first-run install", () => {
   }) => {
     await gotoHarness(page, "empty-fleet");
     await page.getByTestId("setup-next").click();
+    // Choosing a subscription provider starts its sign-in.
     await page.getByTestId("setup-provider-anthropic").click();
-    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page.getByText("Account connected", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Find models", exact: true }).click();
     await page.getByRole("option", { name: "claude-sonnet-5", exact: true }).click();
     // Effort is a recommended default, changeable later, not an up-front choice.
@@ -65,7 +66,7 @@ test.describe("first-run install", () => {
     expect(bounds).not.toBeNull();
     expect(bounds!.x).toBeGreaterThanOrEqual(0);
     expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
-    await page.getByRole("button", { name: "Sign in", exact: true }).click();
+    await expect(page.getByText("Account connected", { exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Find models", exact: true }).click();
     await page.getByRole("option", { name: "gpt-5.6-sol", exact: true }).click();
     await page.getByRole("button", { name: "Save backend", exact: true }).click();

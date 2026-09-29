@@ -148,7 +148,12 @@ async fn stage_claimed_continuation(
     let expected = GoalBackedRequestFingerprint::from_create(&create)?;
 
     if let Some(child) = children.first() {
-        verify_runtime_local_control_receipt(child, &goal.agent_did, parent_request_id)?;
+        verify_runtime_local_control_receipt(
+            child,
+            &goal.agent_did,
+            parent_request_id,
+            parent.requester_did.as_deref().unwrap_or(&goal.agent_did),
+        )?;
         let actual: GoalBackedRequestFingerprint =
             serde_json::from_value(serde_json::to_value(child)?)?;
         anyhow::ensure!(

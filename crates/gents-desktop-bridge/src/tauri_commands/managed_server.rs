@@ -993,7 +993,120 @@ async fn plan_state_reset(state: &DesktopAppState) -> Result<HomeResetPlan, Brid
         client_store,
         &state.policy.desktop_paths,
         &user_home,
+        client_binding(state).await,
     )
+}
+
+/// How the desktop client state relates to the managed home, as
+/// `managed-server.json`'s `reviewedFor` records it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClientBinding {
+    /// No reviewed home is remembered, or its home cannot be read.
+    Unbound,
+    /// The client was paired with this exact home and identity.
+    BoundToHome,
+    /// The reviewed home is gone or now carries another identity: the
+    /// pairing names a node that no longer exists here.
+    Orphaned,
+}
+
+/// A path is not identity: only the reviewed home itself being gone, or now
+/// carrying another DID, orphans the client. A configured home that moved or
+/// changed while the reviewed identity still exists keeps the client state.
+fn classify_binding(
+    reviewed: Option<&ReviewedHome>,
+    configured: Option<&HomeIdentity>,
+    reviewed_home: Option<&HomeIdentity>,
+    reviewed_init_present: bool,
+) -> ClientBinding {
+    let Some(reviewed) = reviewed else {
+        return ClientBinding::Unbound;
+    };
+    if configured.is_some_and(|home| home.reviewed == *reviewed) {
+        return ClientBinding::BoundToHome;
+    }
+    if configured.is_some_and(|home| home.reviewed.agent_did == reviewed.agent_did) {
+        return ClientBinding::Unbound;
+    }
+    match reviewed_home {
+        Some(home) if home.reviewed.agent_did == reviewed.agent_did => ClientBinding::Unbound,
+        Some(_) => ClientBinding::Orphaned,
+        // An init marker that exists but cannot be read is not evidence the
+        // node is gone.
+        None if reviewed_init_present => ClientBinding::Unbound,
+        None => ClientBinding::Orphaned,
+    }
+}
+
+async fn client_binding(state: &DesktopAppState) -> ClientBinding {
+    let Some(agent_home) = state.policy.agent_home.as_deref() else {
+        return ClientBinding::Unbound;
+    };
+    let reviewed = match load_preference(state).await {
+        Ok(stored) => stored.and_then(|stored| stored.reviewed_for),
+        Err(error) => {
+            tracing::warn!(
+                target: "gents_desktop::managed_server",
+                error = %error.message,
+                "managed-server.json is unreadable; treating the client state as unbound"
+            );
+            None
+        }
+    };
+    let Some(reviewed) = reviewed else {
+        return ClientBinding::Unbound;
+    };
+    let configured = read_home_identity(agent_home).await;
+    let reviewed_path = Path::new(&reviewed.home);
+    let reviewed_home = read_home_identity(reviewed_path).await;
+    let Ok(reviewed_init_present) = present(&gents::home::init_config_path(reviewed_path)) else {
+        return ClientBinding::Unbound;
+    };
+    classify_binding(
+        Some(&reviewed),
+        configured.as_ref(),
+        reviewed_home.as_ref(),
+        reviewed_init_present,
+    )
+}
+
+/// Before a client start opens its store: client state paired with a home
+/// that is gone or now carries another identity is archived through the
+/// reset plan, so first-run setup starts clean. The home is never touched.
+pub(super) async fn retire_orphaned_client_state(
+    state: &DesktopAppState,
+) -> Result<Option<ManagedServerResetResult>, BridgeError> {
+    if state.policy.managed_server != ManagedServerPolicy::Allowed {
+        return Ok(None);
+    }
+    // Provisioning writes the home's init marker under this lock; reading
+    // the binding outside it could see a home mid-write.
+    let _lifecycle = state.managed_server_lifecycle.lock().await;
+    if client_binding(state).await != ClientBinding::Orphaned {
+        return Ok(None);
+    }
+    drain_managed_runtime_pairing(state).await;
+    let _client = super::lifecycle::exclude_client(state).await?;
+    let user_home = resolve_user_home(dirs::home_dir())?;
+    let plan = plan_home_reset(
+        None,
+        None,
+        None,
+        &state.policy.desktop_paths,
+        &user_home,
+        ClientBinding::Orphaned,
+    )?;
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ").to_string();
+    let backup = plan.backup_path(&stamp)?;
+    plan.preflight(&backup)?;
+    let result = plan.retire(HomeResetDisposition::Archive, Some(&backup))?;
+    tracing::info!(
+        target: "gents_desktop::managed_server",
+        backup = ?result.backup_path,
+        retired = result.retired_paths.len(),
+        "archived desktop client state paired with a node that is no longer here"
+    );
+    Ok(Some(result))
 }
 
 async fn retire_incompatible_home<R: Runtime>(
@@ -1174,9 +1287,13 @@ fn canonical_root(path: &Path, label: &str) -> Result<PathBuf, BridgeError> {
 /// What a home reset would retire, derived from the refused stores.
 #[derive(Debug)]
 struct HomeResetPlan {
-    /// The canonical managed home and its refused store.
-    runtime: Option<(PathBuf, gents::storage_backend::IncompatibleStore)>,
+    /// The canonical managed home and its refused store. A home without a
+    /// refused store is in scope only because the retired client state was
+    /// paired with it.
+    runtime: Option<(PathBuf, Option<gents::storage_backend::IncompatibleStore>)>,
     client: Option<gents::storage_backend::IncompatibleStore>,
+    /// The client state is retired because its paired node is gone.
+    orphaned_client: bool,
     desktop_root: PathBuf,
     runtime_entries: gents::home::HomeEntries,
     /// The runtime entries a Delete removes: the owned entries, except that
@@ -1246,6 +1363,7 @@ fn plan_home_reset(
     client_store: Option<gents::storage_backend::IncompatibleStore>,
     desktop_paths: &gents_desktop_core::client::DesktopPaths,
     user_home: &Path,
+    binding: ClientBinding,
 ) -> Result<HomeResetPlan, BridgeError> {
     let inspect = |path: &Path| {
         gents::storage_backend::incompatible_store_kind(path).map_err(|error| {
@@ -1255,7 +1373,7 @@ fn plan_home_reset(
             )
         })
     };
-    let runtime = match runtime_home {
+    let runtime_home = match runtime_home {
         Some(configured_home) if present(configured_home)? => {
             reject_symlink(configured_home, "managed home")?;
             let home = canonical_root(configured_home, "managed home")?;
@@ -1277,7 +1395,9 @@ fn plan_home_reset(
                         ..store
                     },
                 }))
-                .map(|store| (home, store))
+                .map_or(Some((home.clone(), None)), |store| {
+                    Some((home, Some(store)))
+                })
         }
         _ => None,
     };
@@ -1289,7 +1409,17 @@ fn plan_home_reset(
             data_path: desktop_paths.node_data_dir().to_path_buf(),
         })
         .or(client_store);
-    if runtime.is_none() && client.is_none() {
+    let orphaned_client = binding == ClientBinding::Orphaned;
+    let runtime = runtime_home.filter(|(home, store)| {
+        // Starting fresh retires the client's pairing with this home; left in
+        // place, first-run setup would provision onto it and relaunch the
+        // runtime on a store that may not open.
+        store.is_some()
+            || (client.is_some()
+                && binding == ClientBinding::BoundToHome
+                && gents_server::server_host::initialized_home(home))
+    });
+    if runtime.is_none() && client.is_none() && !orphaned_client {
         return Err(BridgeError::new(
             BridgeErrorCode::InvalidArgument,
             "No local store is marked as legacy or incompatible; reset was refused.",
@@ -1303,7 +1433,7 @@ fn plan_home_reset(
     if let Some((home, _)) = runtime.as_ref() {
         ensure_retirable_root(home, "managed home", user_home)?;
     }
-    let retires_client_state = runtime.is_some() || client.is_some();
+    let retires_client_state = runtime.is_some() || client.is_some() || orphaned_client;
     if retires_client_state {
         ensure_retirable_root(&desktop_root, "desktop client state", user_home)?;
     }
@@ -1353,6 +1483,7 @@ fn plan_home_reset(
     Ok(HomeResetPlan {
         runtime,
         client,
+        orphaned_client,
         desktop_root,
         runtime_entries,
         delete_home_entries,
@@ -1365,7 +1496,14 @@ impl HomeResetPlan {
     /// The desktop client state is retired with its runtime: its pairing
     /// names the runtime identity being retired.
     fn retires_client_state(&self) -> bool {
-        self.client.is_some() || self.runtime.is_some()
+        self.client.is_some() || self.runtime.is_some() || self.orphaned_client
+    }
+
+    fn refused_stores(&self) -> impl Iterator<Item = &gents::storage_backend::IncompatibleStore> {
+        self.runtime
+            .iter()
+            .filter_map(|(_, store)| store.as_ref())
+            .chain(&self.client)
     }
 
     fn anchor(&self) -> &Path {
@@ -1390,12 +1528,15 @@ impl HomeResetPlan {
     /// Deletion is offered only for stores known to come from an older
     /// release; a store another, possibly newer, build wrote may still be
     /// wanted by that build.
+    ///
+    /// A paired runtime retired without a refusal was never opened, so its
+    /// store is unclassified and may belong to a newer build: archive only.
     fn deletable(&self) -> bool {
         self.runtime
-            .iter()
-            .map(|(_, store)| store)
-            .chain(&self.client)
-            .all(|store| store.kind.is_older())
+            .as_ref()
+            .is_none_or(|(_, store)| store.is_some())
+            && self.refused_stores().next().is_some()
+            && self.refused_stores().all(|store| store.kind.is_older())
     }
 
     /// A digest of everything the action would touch or leave, so a
@@ -1483,7 +1624,8 @@ impl HomeResetPlan {
             stores: self
                 .runtime
                 .iter()
-                .map(|(_, store)| view(IncompatibleStoreScope::Runtime, store))
+                .filter_map(|(_, store)| store.as_ref())
+                .map(|store| view(IncompatibleStoreScope::Runtime, store))
                 .chain(
                     self.client
                         .iter()
@@ -3954,6 +4096,7 @@ mod tests {
             None,
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap();
         let preview = plan.preview();
@@ -4056,6 +4199,7 @@ mod tests {
             None,
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap();
         let preview = plan.preview();
@@ -4107,6 +4251,7 @@ mod tests {
             None,
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap();
         let _ = plan.preview();
@@ -4116,6 +4261,260 @@ mod tests {
 
         assert_eq!(listing(&home), home_before);
         assert_eq!(listing(desktop.root()), desktop_before);
+    }
+
+    #[test]
+    fn starting_fresh_from_a_refused_client_store_retires_its_paired_home_before_relaunch() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp = std::fs::canonicalize(temp.path()).unwrap();
+        let (home, desktop) = dirty_home(&temp);
+
+        let plan = plan_home_reset(
+            Some(&home),
+            None,
+            Some(lineage_refusal(desktop.node_data_dir().to_path_buf())),
+            &desktop,
+            not_the_user_home(),
+            ClientBinding::BoundToHome,
+        )
+        .unwrap();
+        let preview = plan.preview();
+        assert_eq!(
+            preview.managed_home.as_deref(),
+            Some(home.to_str().unwrap())
+        );
+        assert!(preview
+            .planned_paths
+            .contains(&home.join("data").to_string_lossy().into_owned()));
+        assert!(
+            preview.delete_confirmation.is_none(),
+            "an unopened paired home may belong to a newer build: archive only"
+        );
+        plan.check_confirmation(&preview.confirmation, HomeResetDisposition::Archive)
+            .unwrap();
+        let backup = plan.backup_path("20260928T000000.000Z").unwrap();
+        plan.retire(HomeResetDisposition::Archive, Some(&backup))
+            .unwrap();
+
+        // What a relaunched runtime would find: no store, no init marker, and
+        // no desktop pairing; another agent's home is left alone.
+        let entries = gents::home::home_entries(&home, &[]).unwrap();
+        assert!(entries.owned.is_empty(), "{:?}", entries.owned);
+        assert!(!gents_server::server_host::initialized_home(&home));
+        assert!(home.join("grok-port-home/data/MANIFEST").is_file());
+        assert!(!desktop.node_data_dir().exists());
+        assert!(!desktop.root().join(MANAGED_SERVER_CONFIG).exists());
+    }
+
+    #[test]
+    fn orphaned_client_state_is_archived_without_touching_any_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp = std::fs::canonicalize(temp.path()).unwrap();
+        let (home, desktop) = dirty_home(&temp);
+        std::fs::write(desktop.node_data_dir().join("MANIFEST"), "REGOMAN").unwrap();
+
+        assert!(
+            plan_home_reset(
+                None,
+                None,
+                None,
+                &desktop,
+                not_the_user_home(),
+                ClientBinding::Unbound
+            )
+            .is_err(),
+            "healthy client state alone is not retired"
+        );
+        let plan = plan_home_reset(
+            None,
+            None,
+            None,
+            &desktop,
+            not_the_user_home(),
+            ClientBinding::Orphaned,
+        )
+        .unwrap();
+        let preview = plan.preview();
+        assert_eq!(preview.managed_home, None);
+        assert!(preview.stores.is_empty());
+        assert!(preview.delete_confirmation.is_none(), "archive only");
+        let reset = plan
+            .retire(
+                HomeResetDisposition::Archive,
+                Some(&plan.backup_path("20260928T000000.000Z").unwrap()),
+            )
+            .unwrap();
+        let backup = PathBuf::from(reset.backup_path.unwrap());
+        assert!(backup.join("desktop/node/MANIFEST").is_file());
+        assert!(backup.join("desktop").join(MANAGED_SERVER_CONFIG).is_file());
+        assert!(!desktop.node_data_dir().exists());
+        assert!(home.join("data/MANIFEST").is_file());
+        assert!(home.join("init.json").is_file());
+    }
+
+    #[test]
+    fn a_reviewed_home_that_is_gone_or_reidentified_orphans_the_client_state() {
+        let reviewed = ReviewedHome {
+            home: "/homes/a".into(),
+            agent_did: "did:key:a".into(),
+        };
+        let identity = |home: &str, did: &str| HomeIdentity {
+            reviewed: ReviewedHome {
+                home: home.into(),
+                agent_did: did.into(),
+            },
+            tool_ceiling: None,
+            tool_root: None,
+        };
+        let a = identity("/homes/a", "did:key:a");
+        let b = identity("/homes/b", "did:key:b");
+        assert_eq!(
+            classify_binding(None, None, None, false),
+            ClientBinding::Unbound
+        );
+        assert_eq!(
+            classify_binding(Some(&reviewed), Some(&a), Some(&a), true),
+            ClientBinding::BoundToHome
+        );
+        let reidentified = identity("/homes/a", "did:key:b");
+        assert_eq!(
+            classify_binding(
+                Some(&reviewed),
+                Some(&reidentified),
+                Some(&reidentified),
+                true
+            ),
+            ClientBinding::Orphaned
+        );
+        assert_eq!(
+            classify_binding(Some(&reviewed), None, None, false),
+            ClientBinding::Orphaned
+        );
+        assert_eq!(
+            classify_binding(Some(&reviewed), None, None, true),
+            ClientBinding::Unbound,
+            "an unreadable init marker is not evidence the node is gone"
+        );
+        assert_eq!(
+            classify_binding(Some(&reviewed), Some(&b), Some(&a), true),
+            ClientBinding::Unbound,
+            "switching to another home while the reviewed one still exists keeps the client"
+        );
+        assert_eq!(
+            classify_binding(
+                Some(&reviewed),
+                Some(&identity("/homes/moved", "did:key:a")),
+                None,
+                false
+            ),
+            ClientBinding::Unbound,
+            "the reviewed identity relocated to the configured home keeps the client"
+        );
+        assert_eq!(
+            classify_binding(Some(&reviewed), Some(&b), None, false),
+            ClientBinding::Orphaned,
+            "the reviewed home is gone and the configured home is another node"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_start_archives_state_paired_with_a_missing_home() {
+        let (temp, state) = orchestration_state();
+        let desktop = state.policy.desktop_paths.clone();
+        write(&desktop.node_data_dir().join("MANIFEST"), "REGOMAN");
+        write(desktop.peer_directory_path(), "{}");
+        let stored = serde_json::json!({
+            "agentName": "Mandrake",
+            "reviewedFor": {
+                "home": temp.path().join("agent").to_string_lossy(),
+                "agentDid": "did:key:gone"
+            }
+        });
+        write(
+            &desktop.root().join(MANAGED_SERVER_CONFIG),
+            &stored.to_string(),
+        );
+
+        let reset = retire_orphaned_client_state(&state)
+            .await
+            .unwrap()
+            .expect("orphaned state is archived");
+        assert!(reset.completed);
+        assert!(PathBuf::from(reset.backup_path.unwrap())
+            .join("desktop/node/MANIFEST")
+            .is_file());
+        assert!(!desktop.node_data_dir().exists());
+        assert!(!desktop.peer_directory_path().exists());
+        assert!(!desktop.root().join(MANAGED_SERVER_CONFIG).exists());
+        assert!(
+            retire_orphaned_client_state(&state)
+                .await
+                .unwrap()
+                .is_none(),
+            "nothing is left to retire"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn orphaned_state_that_cannot_be_archived_fails_without_moving_anything() {
+        use std::os::unix::fs::PermissionsExt;
+        let (temp, state) = orchestration_state();
+        let desktop = state.policy.desktop_paths.clone();
+        write(&desktop.node_data_dir().join("MANIFEST"), "REGOMAN");
+        let stored = serde_json::json!({
+            "agentName": "Mandrake",
+            "reviewedFor": {
+                "home": temp.path().join("agent").to_string_lossy(),
+                "agentDid": "did:key:gone"
+            }
+        });
+        write(
+            &desktop.root().join(MANAGED_SERVER_CONFIG),
+            &stored.to_string(),
+        );
+        let parent = desktop.root().parent().unwrap().to_path_buf();
+        let original = std::fs::metadata(&parent).unwrap().permissions();
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = retire_orphaned_client_state(&state).await;
+        std::fs::set_permissions(&parent, original).unwrap();
+
+        assert!(
+            result.is_err(),
+            "startup must not reopen state it failed to retire"
+        );
+        assert!(desktop.node_data_dir().join("MANIFEST").is_file());
+        assert!(desktop.root().join(MANAGED_SERVER_CONFIG).is_file());
+    }
+
+    #[tokio::test]
+    async fn client_start_keeps_state_paired_with_its_home() {
+        let (temp, state) = orchestration_state();
+        let desktop = state.policy.desktop_paths.clone();
+        let home = temp.path().join("agent");
+        write(
+            &home.join("init.json"),
+            r#"{"agent_did":"did:key:here","agent_name":"Mandrake"}"#,
+        );
+        write(&desktop.node_data_dir().join("MANIFEST"), "REGOMAN");
+        let stored = serde_json::json!({
+            "agentName": "Mandrake",
+            "reviewedFor": {
+                "home": std::fs::canonicalize(&home).unwrap().to_string_lossy(),
+                "agentDid": "did:key:here"
+            }
+        });
+        write(
+            &desktop.root().join(MANAGED_SERVER_CONFIG),
+            &stored.to_string(),
+        );
+
+        assert!(retire_orphaned_client_state(&state)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(desktop.node_data_dir().join("MANIFEST").is_file());
+        assert!(desktop.root().join(MANAGED_SERVER_CONFIG).is_file());
     }
 
     #[test]
@@ -4130,6 +4529,7 @@ mod tests {
             Some(lineage_refusal(desktop.node_data_dir().to_path_buf())),
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap();
         let preview = plan.preview();
@@ -4175,6 +4575,7 @@ mod tests {
             None,
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap();
         let preview = plan.preview();
@@ -4210,14 +4611,28 @@ mod tests {
         let temp = std::fs::canonicalize(temp.path()).unwrap();
         let (home, desktop) = dirty_home(&temp);
         let refused = || Some(lineage_refusal(home.join("data")));
-        let preview = plan_home_reset(Some(&home), refused(), None, &desktop, not_the_user_home())
-            .unwrap()
-            .preview();
+        let preview = plan_home_reset(
+            Some(&home),
+            refused(),
+            None,
+            &desktop,
+            not_the_user_home(),
+            ClientBinding::Unbound,
+        )
+        .unwrap()
+        .preview();
 
         // A runtime-owned entry appears after the review.
         write(&home.join("plugins/new/manifest.json"), "{}");
-        let changed =
-            plan_home_reset(Some(&home), refused(), None, &desktop, not_the_user_home()).unwrap();
+        let changed = plan_home_reset(
+            Some(&home),
+            refused(),
+            None,
+            &desktop,
+            not_the_user_home(),
+            ClientBinding::Unbound,
+        )
+        .unwrap();
         for (supplied, disposition) in [
             (preview.confirmation.as_str(), HomeResetDisposition::Archive),
             (
@@ -4264,6 +4679,7 @@ mod tests {
             None,
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap();
         let preview = plan.preview();
@@ -4305,6 +4721,7 @@ mod tests {
             None,
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap();
         let preview = plan.preview();
@@ -4341,6 +4758,7 @@ mod tests {
             None,
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap()
         .preview();
@@ -4380,13 +4798,27 @@ mod tests {
         let temp = std::fs::canonicalize(temp.path()).unwrap();
         let (home, desktop) = dirty_home(&temp);
         let refused = || Some(lineage_refusal(home.join("data")));
-        let preview = plan_home_reset(Some(&home), refused(), None, &desktop, not_the_user_home())
-            .unwrap()
-            .preview();
+        let preview = plan_home_reset(
+            Some(&home),
+            refused(),
+            None,
+            &desktop,
+            not_the_user_home(),
+            ClientBinding::Unbound,
+        )
+        .unwrap()
+        .preview();
 
         let lock = gents::home::lock_store(&home, &home.join("data")).unwrap();
-        let locked =
-            plan_home_reset(Some(&home), refused(), None, &desktop, not_the_user_home()).unwrap();
+        let locked = plan_home_reset(
+            Some(&home),
+            refused(),
+            None,
+            &desktop,
+            not_the_user_home(),
+            ClientBinding::Unbound,
+        )
+        .unwrap();
         locked
             .check_confirmation(&preview.confirmation, HomeResetDisposition::Archive)
             .unwrap();
@@ -4427,6 +4859,7 @@ mod tests {
             None,
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap();
         let preview = plan.preview();
@@ -4481,18 +4914,32 @@ mod tests {
         // The managed home is the user's home, or an ancestor of it.
         for user_home in [home.clone(), home.join("person")] {
             assert_eq!(
-                plan_home_reset(Some(&home), refused.clone(), None, &desktop, &user_home)
-                    .unwrap_err()
-                    .code,
+                plan_home_reset(
+                    Some(&home),
+                    refused.clone(),
+                    None,
+                    &desktop,
+                    &user_home,
+                    ClientBinding::Unbound
+                )
+                .unwrap_err()
+                .code,
                 BridgeErrorCode::InvalidArgument
             );
         }
         // The desktop state root is the user's home or one of its ancestors.
         let user_home = desktop.root().join("person");
         assert_eq!(
-            plan_home_reset(Some(&home), refused.clone(), None, &desktop, &user_home)
-                .unwrap_err()
-                .code,
+            plan_home_reset(
+                Some(&home),
+                refused.clone(),
+                None,
+                &desktop,
+                &user_home,
+                ClientBinding::Unbound
+            )
+            .unwrap_err()
+            .code,
             BridgeErrorCode::InvalidArgument
         );
         // A path alias of the user's home is the same root.
@@ -4502,9 +4949,16 @@ mod tests {
             std::os::unix::fs::symlink(&temp, &alias).unwrap();
             let aliased = std::fs::canonicalize(alias.join(".gents")).unwrap();
             assert_eq!(
-                plan_home_reset(Some(&home), refused.clone(), None, &desktop, &aliased)
-                    .unwrap_err()
-                    .code,
+                plan_home_reset(
+                    Some(&home),
+                    refused.clone(),
+                    None,
+                    &desktop,
+                    &aliased,
+                    ClientBinding::Unbound
+                )
+                .unwrap_err()
+                .code,
                 BridgeErrorCode::InvalidArgument
             );
         }
@@ -4529,6 +4983,7 @@ mod tests {
             None,
             &desktop,
             not_the_user_home(),
+            ClientBinding::Unbound,
         )
         .unwrap()
         .preview();
@@ -4546,14 +5001,29 @@ mod tests {
         let desktop =
             gents_desktop_core::client::DesktopPaths::from_root(temp.path().join("desktop"));
         assert_eq!(
-            plan_home_reset(Some(&home), None, None, &desktop, not_the_user_home())
-                .unwrap_err()
-                .code,
+            plan_home_reset(
+                Some(&home),
+                None,
+                None,
+                &desktop,
+                not_the_user_home(),
+                ClientBinding::Unbound
+            )
+            .unwrap_err()
+            .code,
             BridgeErrorCode::InvalidArgument
         );
         std::fs::remove_file(data.join("MANIFEST")).unwrap();
         std::fs::write(data.join("data.lark"), "legacy").unwrap();
-        let plan = plan_home_reset(Some(&home), None, None, &desktop, not_the_user_home()).unwrap();
+        let plan = plan_home_reset(
+            Some(&home),
+            None,
+            None,
+            &desktop,
+            not_the_user_home(),
+            ClientBinding::Unbound,
+        )
+        .unwrap();
         assert_eq!(
             plan.check_confirmation("RESET SOME OTHER HOME", HomeResetDisposition::Archive)
                 .unwrap_err()
@@ -4605,9 +5075,16 @@ mod tests {
         let desktop =
             gents_desktop_core::client::DesktopPaths::from_root(temp.path().join("desktop"));
         assert_eq!(
-            plan_home_reset(Some(&home), None, None, &desktop, not_the_user_home())
-                .unwrap_err()
-                .code,
+            plan_home_reset(
+                Some(&home),
+                None,
+                None,
+                &desktop,
+                not_the_user_home(),
+                ClientBinding::Unbound
+            )
+            .unwrap_err()
+            .code,
             BridgeErrorCode::PathEscapesRoot
         );
         let linked_home = temp.path().join("linked-home");
@@ -4618,7 +5095,8 @@ mod tests {
                 None,
                 None,
                 &desktop,
-                not_the_user_home()
+                not_the_user_home(),
+                ClientBinding::Unbound
             )
             .unwrap_err()
             .code,

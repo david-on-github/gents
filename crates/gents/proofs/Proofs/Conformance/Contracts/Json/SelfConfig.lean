@@ -56,7 +56,7 @@ def selfConfigCaseJson (w : CaseWitness) : String :=
     ++ "\"protected_preserved\":" ++ scBool w.protectedPreserved ++ ","
     ++ "\"containment_holds\":" ++ scBool w.containmentHolds ++ ","
     ++ "\"unchanged_on_reject\":" ++ scBool w.unchangedOnReject ++ ","
-    ++ "\"gate_on_after_accept\":" ++ scBool w.gateOnAfterAccept
+    ++ "\"control_kept_after_accept\":" ++ scBool w.controlKeptAfterAccept
   ++ "}"
 
 def selfConfigCasesJson : String :=

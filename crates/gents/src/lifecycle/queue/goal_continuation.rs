@@ -75,7 +75,7 @@ pub(crate) fn prepare_goal_continuation(
             &parent.request_id,
         );
     let identity = RequestIdentity {
-        requester_did: None,
+        requester_did: parent.requester_did.clone(),
         request_id: continuation.request_id,
         agent_did: parent.agent_did.clone(),
         behavior_id,

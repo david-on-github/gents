@@ -12,6 +12,11 @@ use super::super::document_view;
 use super::super::DocumentResolveContext;
 
 pub(super) const CONTROL_RECONCILE_DEBOUNCE: Duration = Duration::from_secs(5);
+/// A write committed on this node arrives as one transaction's changes, so it
+/// needs no replication-burst coalescing. An operator waiting on the resulting
+/// readiness (desktop setup confirms within seconds) must not pay the replicated
+/// debounce.
+pub(super) const CONTROL_RECONCILE_LOCAL_DEBOUNCE: Duration = Duration::from_millis(250);
 pub(super) const CONTROL_RECONCILE_SETTLE_RETRY: Duration = Duration::from_secs(1);
 const CONTROL_RECONCILE_SETTLE_WINDOW: Duration = Duration::from_secs(60);
 const CONTROL_WATCHER_IDLE_SLEEP: Duration = Duration::from_secs(60 * 60 * 24 * 365);
@@ -19,6 +24,7 @@ const CONTROL_WATCHER_IDLE_SLEEP: Duration = Duration::from_secs(60 * 60 * 24 * 
 #[derive(Clone, Copy)]
 pub(super) struct ControlWatcherTiming {
     pub(super) debounce: Duration,
+    pub(super) local_debounce: Duration,
     pub(super) settle_retry: Duration,
     pub(super) settle_window: Duration,
     pub(super) idle_sleep: Duration,
@@ -26,6 +32,7 @@ pub(super) struct ControlWatcherTiming {
 
 const CONTROL_WATCHER_TIMING: ControlWatcherTiming = ControlWatcherTiming {
     debounce: CONTROL_RECONCILE_DEBOUNCE,
+    local_debounce: CONTROL_RECONCILE_LOCAL_DEBOUNCE,
     settle_retry: CONTROL_RECONCILE_SETTLE_RETRY,
     settle_window: CONTROL_RECONCILE_SETTLE_WINDOW,
     idle_sleep: CONTROL_WATCHER_IDLE_SLEEP,
@@ -77,6 +84,7 @@ pub(super) async fn run_control_watcher_with_timing(
     let mut last_proposed_fingerprint = None::<String>;
     let mut phase_transition_pending = false;
     let mut resync_required = false;
+    let mut replicated_pending = false;
     let mut collection_id_to_name = HashMap::<String, String>::new();
     let mut measured_mcp_availability =
         crate::tool_surface::measured_available_mcp_service_ids(node.as_ref(), &agent_did)
@@ -88,6 +96,7 @@ pub(super) async fn run_control_watcher_with_timing(
         tokio::select! {
             _ = shutdown.changed() => return Ok(()),
             _ = &mut sleep, if dirty => {
+                replicated_pending = false;
                 if resync_required || pending_visibility || settle_deadline.is_some() {
                     match document_view::load_document_runtime_view(node.as_ref(), &agent_did).await {
                         Ok(reloaded) => {
@@ -353,7 +362,13 @@ pub(super) async fn run_control_watcher_with_timing(
                     runtime_status
                         .set_reconcile_phase(ReconcilePhase::Debouncing)
                         .await;
-                    sleep.as_mut().reset(tokio::time::Instant::now() + timing.debounce);
+                    replicated_pending |= !update.has_local_write;
+                    let debounce = if replicated_pending {
+                        timing.debounce
+                    } else {
+                        timing.local_debounce
+                    };
+                    sleep.as_mut().reset(tokio::time::Instant::now() + debounce);
                 }
             }
         }

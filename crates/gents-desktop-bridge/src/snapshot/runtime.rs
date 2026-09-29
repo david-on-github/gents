@@ -345,13 +345,31 @@ pub async fn build_runtime_snapshot(core: &ClientCore) -> DesktopRuntimeSnapshot
                 .collect::<Vec<_>>();
             tasks.sort_by(|left, right| left.task_id.cmp(&right.task_id));
 
-            let sessions = session_summaries(
+            let mut sessions = session_summaries(
                 &store.sessions,
                 &store.requests,
                 &peer.agent_did,
                 &tasks,
                 &triggers,
             );
+            let principal_scope = core.transcript_principal_scope(&peer.agent_did);
+            let operator = core.operator_graphql(&peer.agent_did).is_some();
+            for summary in &mut sessions {
+                summary.unreadable_reason = store
+                    .sessions
+                    .iter()
+                    .find(|row| {
+                        row.session_id == summary.session_id && row.agent_did == summary.agent_did
+                    })
+                    .and_then(|row| {
+                        gents_desktop_core::client::session_unreadable_reason(
+                            row,
+                            principal_scope.as_deref(),
+                            operator,
+                        )
+                    })
+                    .map(str::to_owned);
+            }
 
             let behavior_environments = resolve_behavior_environments(
                 &behaviors,
@@ -941,6 +959,7 @@ mod behavior_environment_tests {
             turn_state: turn_state.map(str::to_string),
             message_count: None,
             tool_call_count: None,
+            unreadable_reason: None,
         }
     }
 

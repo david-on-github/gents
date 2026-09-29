@@ -3,16 +3,17 @@
 use std::collections::BTreeSet;
 
 use gents::agent::p2p_reconcile::session_hydration::{
-    apply_hydration_delivery, begin_hydration_request, can_retry_hydration, decide_hydration,
-    observe_hydration_progress, AppliedPairingRoute, ClientHydrationPhase, ClientHydrationProgress,
-    HydrationApplyOutcome, HydrationCatalog, HydrationDeliveryResult, HydrationDocument,
-    HydrationRequest, HydrationTerminalWriteResult, HydrationVerdict, SessionHydrationCollection,
-    SessionHydrationDocumentKey, SessionOwner, VerifiedActiveMembership,
+    apply_hydration_delivery, begin_hydration_request, can_retry_hydration, can_start_hydration,
+    decide_hydration, observe_hydration_progress, AppliedPairingRoute, ClientHydrationPhase,
+    ClientHydrationProgress, HydrationApplyOutcome, HydrationCatalog, HydrationDeliveryResult,
+    HydrationDocument, HydrationRequest, HydrationTerminalWriteResult, HydrationVerdict,
+    SessionHydrationCollection, SessionHydrationDocumentKey, SessionOwner,
+    VerifiedActiveMembership,
 };
 
 use crate::lean_vocab_test::{
     lean_session_hydration_apply_cases, lean_session_hydration_durable_cases,
-    lean_session_hydration_progress_cases,
+    lean_session_hydration_progress_cases, lean_session_hydration_start_cases,
 };
 
 fn request() -> HydrationRequest {
@@ -415,6 +416,28 @@ fn retired_collection_names_are_rejected_by_serde() {
         assert!(
             error.to_string().contains("unknown variant"),
             "{retired} must be rejected as an unknown collection variant: {error}"
+        );
+    }
+}
+
+#[test]
+fn generated_session_hydration_start_cases_match_receiver_start() {
+    let cases = lean_session_hydration_start_cases();
+    assert_eq!(cases.len(), 16, "every start input combination is modeled");
+    assert!(cases
+        .iter()
+        .any(|case| case.foreign_header && case.owned_session && !case.expected_start));
+    for case in cases {
+        assert_eq!(
+            can_start_hydration(
+                case.foreign_header,
+                case.owned_session,
+                case.has_documents,
+                case.nonterminal_request,
+            ),
+            case.expected_start,
+            "{}",
+            case.name
         );
     }
 }

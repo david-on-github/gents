@@ -4,6 +4,7 @@ import { useState } from "react";
 import {
   ChevronDown,
   CornerDownRight,
+  Lock,
   MessageSquare,
   Play,
   Plus,
@@ -287,8 +288,21 @@ export function SessionsScreen({ shell }: { shell: Shell }) {
                         </title>
                       </CornerDownRight>
                     )}
+                    {row.session.unreadableReason && (
+                      <Lock
+                        className="size-3.5 shrink-0 text-muted-foreground"
+                        role="img"
+                        aria-label={row.session.unreadableReason}
+                      >
+                        <title>{row.session.unreadableReason}</title>
+                      </Lock>
+                    )}
                     <span
-                      className={cn("truncate", row.child && "text-muted-foreground")}
+                      className={cn(
+                        "truncate",
+                        (row.child || row.session.unreadableReason) &&
+                          "text-muted-foreground",
+                      )}
                     >
                       {row.session.title ?? "Untitled"}
                     </span>

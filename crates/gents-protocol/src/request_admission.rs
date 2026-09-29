@@ -130,7 +130,10 @@ pub struct AgentRequestAdmissionObservation {
     pub requester_matches_target: bool,
     pub signer_matches_target: bool,
     pub signer_matches_issuer: bool,
-    pub requester_matches_issuer: bool,
+    /// The requester is the owner of the existing target session, or the
+    /// target for a new session or a title audit (Lean
+    /// `Enrollment.runtimeRequesterScope`).
+    pub requester_matches_session_scope: bool,
     pub current_approval: bool,
     pub exact_generation: bool,
     pub authorization_fresh: bool,
@@ -198,13 +201,11 @@ pub fn project_agent_request_admission(observation: AgentRequestAdmissionObserva
             common
                 && match observation.runtime_source_kind {
                     RuntimeInternalSourceKind::LocalControl => {
-                        observation.requester_matches_issuer
-                            && observation.requester_matches_target
+                        observation.requester_matches_session_scope
                             && observation.source_document_binding_current
                     }
                     RuntimeInternalSourceKind::AutomatedTrigger => {
-                        observation.requester_matches_issuer
-                            && observation.requester_matches_target
+                        observation.requester_matches_session_scope
                             && observation.trigger_config_document_binding_current
                             && observation.target_policy_allows
                     }

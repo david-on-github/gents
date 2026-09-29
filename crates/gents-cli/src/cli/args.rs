@@ -2893,7 +2893,10 @@ pub(crate) struct BackendSetArgs {
 pub(crate) struct BackendDiscoverModelsArgs {
     #[arg(long)]
     pub(crate) graphql: Option<String>,
-    #[arg(long)]
+    #[arg(
+        long,
+        help = "Discover this stored backend and publish its credential-free model catalog observation"
+    )]
     pub(crate) backend_id: Option<String>,
     #[arg(
         long,
@@ -2925,11 +2928,6 @@ pub(crate) struct BackendDiscoverModelsArgs {
         help = "Agent home directory used to resolve the local agent DID for OAuth-credential backend discovery (defaults to ~/.gents). Pass --agent-did instead to target a specific agent"
     )]
     pub(crate) home: Option<PathBuf>,
-    #[arg(
-        long,
-        help = "Publish the discovered model catalog observation for the selected backend (requires --backend-id; nothing is written without this flag)"
-    )]
-    pub(crate) write: bool,
 }
 
 #[derive(clap::Args)]

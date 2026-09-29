@@ -93,6 +93,7 @@ where
 
 const TEST_CONTROL_WATCHER_TIMING: ControlWatcherTiming = ControlWatcherTiming {
     debounce: Duration::from_millis(20),
+    local_debounce: Duration::from_millis(20),
     settle_retry: Duration::from_millis(10),
     settle_window: Duration::from_millis(200),
     idle_sleep: Duration::from_secs(60),
@@ -326,6 +327,89 @@ async fn control_watcher_publishes_reconciled_snapshot_after_relevant_update() {
         announced_phases.announced(),
         ["debouncing", "resolving", "debouncing", "resolving"],
         "a metadata-only observation debounces before it resolves"
+    );
+
+    let _ = shutdown_tx.send(true);
+    watcher_task.await.unwrap().unwrap();
+}
+
+/// #2068: an operator's own committed write reconciles without waiting out the
+/// replicated-arrival debounce, which Setup's save confirmation cannot outlast.
+#[tokio::test]
+async fn control_watcher_reconciles_a_local_write_without_the_replication_debounce() {
+    let node = test_node().await;
+    ensure_runtime_schemas(node.as_ref()).await.unwrap();
+    let identity = Arc::new(test_identity("control-watcher-local"));
+    bind_default_behavior_backend(
+        node.as_ref(),
+        identity.did(),
+        "backend-control",
+        "http://127.0.0.1:8111/v1",
+    )
+    .await;
+    let agent = crate::Gents::from_default_behavior_documents(
+        node.clone(),
+        identity,
+        crate::agent::DocumentRuntimeOptions {
+            tool_ceiling: ToolCeiling::meta_only(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    let resolve_context = agent
+        .document_runtime_context()
+        .cloned()
+        .expect("document-backed agent");
+    let runtime_status = RuntimeStatusHandle::new(node.clone(), agent.agent_did().to_string());
+    runtime_status
+        .initialize_startup(agent.default_behavior_id())
+        .await
+        .unwrap();
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let (proposal_tx, mut proposal_rx) = mpsc::channel(4);
+    let subscription = node.subscribe_document_changes();
+    let watcher_task = tokio::spawn(run_control_watcher_with_timing(
+        node.clone(),
+        subscription,
+        agent.agent_did().to_string(),
+        resolve_context,
+        proposal_tx,
+        runtime_status,
+        mpsc::channel::<()>(1).1,
+        shutdown_rx,
+        ControlWatcherTiming {
+            debounce: Duration::from_secs(3600),
+            ..TEST_CONTROL_WATCHER_TIMING
+        },
+    ));
+
+    write_documents(
+        node.as_ref(),
+        "test.context.local",
+        vec![(
+            crate::Collection::AgentContext,
+            serde_json::json!({
+                "agent_did": agent.agent_did(),
+                "context_id": format!("{}:context", agent.default_behavior_id()),
+                "tools_id": format!("{}:tools", agent.default_behavior_id()),
+                "system_prompt": "operator prompt"
+            }),
+        )],
+    )
+    .await;
+
+    let snapshot = tokio::time::timeout(PROPOSAL_TIMEOUT, proposal_rx.recv())
+        .await
+        .expect("a local write must reconcile after the local debounce")
+        .expect("reconciled snapshot");
+    assert_eq!(
+        snapshot
+            .behaviors
+            .get(agent.default_behavior_id())
+            .expect("default behavior in snapshot")
+            .system_prompt,
+        "operator prompt"
     );
 
     let _ = shutdown_tx.send(true);

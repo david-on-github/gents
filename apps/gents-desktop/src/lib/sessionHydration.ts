@@ -1,6 +1,7 @@
 import type { SessionHydrationView } from "@source-inc/gents-desktop-client";
 
-export type VisibleHydrationPhase = "requested" | "serving" | "complete" | "failed";
+export type VisibleHydrationPhase =
+  "requested" | "serving" | "complete" | "failed" | "unreadable";
 
 export type VisibleSessionHydration = SessionHydrationView & {
   phase: VisibleHydrationPhase;
@@ -21,7 +22,8 @@ export function visibleSessionHydration(
     hydration.phase !== "requested" &&
     hydration.phase !== "serving" &&
     hydration.phase !== "complete" &&
-    hydration.phase !== "failed"
+    hydration.phase !== "failed" &&
+    hydration.phase !== "unreadable"
   ) {
     return null;
   }
@@ -52,6 +54,8 @@ export function sessionHydrationLabel(hydration: VisibleSessionHydration): strin
         : `Session history loaded · ${covered} of ${served}`;
     case "failed":
       return "Couldn't fetch the rest of this session";
+    case "unreadable":
+      return "Not readable from this client";
   }
 }
 

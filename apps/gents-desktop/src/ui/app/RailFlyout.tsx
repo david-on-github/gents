@@ -8,7 +8,7 @@
    after a short rest, closes when the pointer leaves; keyboard focus
    inside keeps it open. */
 import { useRef, useState, type ReactNode } from "react";
-import { ChevronRight, Inbox, Plus, ScrollText, Users } from "lucide-react";
+import { ChevronRight, Inbox, Lock, Plus, ScrollText, Users } from "lucide-react";
 import type { DeploymentView } from "@source-inc/gents-desktop-client";
 import { ScrollArea } from "@gents/ui/components/scroll-area";
 import { cn } from "@gents/ui/lib/utils";
@@ -166,6 +166,15 @@ export function NavPanel({
                     <span className="min-w-0 flex-1 truncate">
                       {c.title ?? "Untitled session"}
                     </span>
+                    {c.unreadableReason && (
+                      <Lock
+                        className="size-3 shrink-0"
+                        role="img"
+                        aria-label={c.unreadableReason}
+                      >
+                        <title>{c.unreadableReason}</title>
+                      </Lock>
+                    )}
                   </a>
                 </li>
               ))}

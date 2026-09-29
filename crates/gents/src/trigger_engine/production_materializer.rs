@@ -251,14 +251,7 @@ impl MaterializerHandle for ProductionMaterializer {
         Box::pin(async move {
             let (behavior_name, behavior_did, _deadline_secs, _backend_id) = resolved?;
             let runtime_actor = runtime_actor?;
-            let parsed_trigger_context =
-                crate::lifecycle::TriggerExecutionContext::parse(trigger_context.as_deref())?;
-            let requester_did = parsed_trigger_context
-                .source_fields
-                .get("requester_did")
-                .map(String::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty());
+            crate::lifecycle::TriggerExecutionContext::parse(trigger_context.as_deref())?;
             let explicit = WorkspaceLineage::from_trigger_context(trigger_context.as_deref())?;
             let graph = match trigger_id.as_deref() {
                 Some(trigger) => {
@@ -290,6 +283,20 @@ impl MaterializerHandle for ProductionMaterializer {
             let (enqueued, conversation_title) = if let Some(prepared) = &delivery {
                 let fire = &prepared.receipt;
                 let title = task_session_title(&task_label);
+                // A fire into an existing session is written under the
+                // requester that owns it (Lean `Enrollment.runtimeRequesterScope`).
+                let session_scope = if prepared.target_existing
+                    && matches!(trigger_kind, TriggerKind::Event | TriggerKind::Schedule)
+                {
+                    crate::session::load_session_requester_scope(
+                        node.as_ref(),
+                        &behavior_did,
+                        &fire.session_id,
+                    )
+                    .await?
+                } else {
+                    None
+                };
                 let retry_key = if super::event_delivery::is_group_fire_key(&durable_fire_key) {
                     &durable_fire_key
                 } else {
@@ -298,7 +305,7 @@ impl MaterializerHandle for ProductionMaterializer {
                 let create = build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title(
                     &behavior_did, &behavior_name, &rendered_prompt, execution_origin, lineage,
                     Some(&title), workspace_ref, &fire.request_id, &fire.session_id,
-                    Some(retry_key), requester_did, trigger_doc_id.as_deref(),
+                    Some(retry_key), session_scope.as_deref(), trigger_doc_id.as_deref(),
                 ).await?;
                 let admission = crate::lifecycle::write_trigger_delivery(
                     node.as_ref(),
@@ -327,7 +334,7 @@ impl MaterializerHandle for ProductionMaterializer {
                     &identity.request_id,
                     &identity.session_id,
                     Some(&identity.retry_key),
-                    requester_did,
+                    None,
                     trigger_doc_id.as_deref(),
                 )
                 .await?;
@@ -370,7 +377,7 @@ impl MaterializerHandle for ProductionMaterializer {
                         Some(&conversation_title),
                         workspace_ref,
                         Some(&request_id),
-                        requester_did,
+                        None,
                         trigger_doc_id.as_deref(),
                         prepared_ids.as_ref().map(|(_, session)| session.as_str()),
                     )

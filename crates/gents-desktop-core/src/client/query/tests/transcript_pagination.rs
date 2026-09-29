@@ -332,3 +332,28 @@ async fn operator_reads_a_local_subagent_session_under_its_own_scope() {
         Some(desktop)
     );
 }
+
+#[test]
+fn unreadable_reason_follows_the_exact_read_scope() {
+    let agent = "did:test:agent";
+    let desktop = "did:test:desktop";
+    let own = session_row("own", agent, Some(desktop));
+    assert_eq!(session_unreadable_reason(&own, Some(desktop), false), None);
+
+    let node_owned = session_row("child", agent, Some(agent));
+    assert_eq!(
+        session_unreadable_reason(&node_owned, Some(desktop), true),
+        None,
+        "the operator reads the agent's own session under its own scope"
+    );
+    assert!(session_unreadable_reason(&node_owned, Some(desktop), false)
+        .is_some_and(|reason| reason.contains("owned by its node")));
+
+    let other = session_row("other", agent, Some("did:test:other"));
+    assert!(session_unreadable_reason(&other, Some(desktop), true)
+        .is_some_and(|reason| reason.contains("another requester")));
+
+    let unscoped = session_row("unscoped", agent, None);
+    assert!(session_unreadable_reason(&unscoped, Some(desktop), true).is_some());
+    assert_eq!(session_unreadable_reason(&unscoped, None, false), None);
+}

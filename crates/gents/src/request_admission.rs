@@ -85,7 +85,7 @@ fn base_admission_observation(
         requester_matches_target: false,
         signer_matches_target: false,
         signer_matches_issuer: false,
-        requester_matches_issuer: false,
+        requester_matches_session_scope: false,
         current_approval: false,
         exact_generation: false,
         authorization_fresh: false,
@@ -477,18 +477,29 @@ impl AgentRequestAdmissionVerifier {
                 observation.runtime_evidence_present =
                     issuer.is_some() && source.is_some() && admission.runtime_source_kind.is_some();
                 observation.signer_matches_issuer = issuer == Some(&admission.signer_did);
-                observation.requester_matches_issuer = row.requester_did.as_deref() == issuer;
                 observation.signer_matches_target =
                     row.agent_did.as_deref() == Some(admission.signer_did.as_str());
                 observation.requester_matches_target =
                     row.requester_did.as_deref() == row.agent_did.as_deref();
                 observation.target_runtime_attestation_valid = issuer == row.agent_did.as_deref();
-                let requester_matches_source =
-                    observation.requester_matches_issuer && observation.requester_matches_target;
+                let target = required_row_string(row.agent_did.as_deref(), "agent_did")?;
+                let session_scope = if row.purpose == Some(RequestPurpose::TitleAudit) {
+                    None
+                } else {
+                    crate::session::load_session_requester_scope(
+                        self.node.as_ref(),
+                        target,
+                        required_row_string(row.session_id.as_deref(), "session_id")?,
+                    )
+                    .await
+                    .map_err(AgentRequestAdmissionError::unavailable)?
+                };
+                observation.requester_matches_session_scope = row.requester_did.as_deref()
+                    == Some(session_scope.as_deref().unwrap_or(target));
                 if !observation.runtime_evidence_present
                     || !observation.signer_matches_issuer
                     || !observation.signer_matches_target
-                    || !requester_matches_source
+                    || !observation.requester_matches_session_scope
                     || !observation.target_runtime_attestation_valid
                 {
                     require_admitted_observation(observation, None)?;
@@ -740,6 +751,15 @@ async fn verify_runtime_source_binding(
                     "title-audit parent does not match its session and behavior",
                 );
             }
+            deny_if(
+                parent.session_id == row.session_id
+                    && parent
+                        .requester_did
+                        .as_deref()
+                        .or(parent.agent_did.as_deref())
+                        == row.requester_did.as_deref(),
+                "local-control parent is outside its session or requester scope",
+            )?;
             request_workspace(row)
                 .validate_source(&request_workspace(&parent), true)
                 .map_err(AgentRequestAdmissionError::denied)
@@ -968,10 +988,13 @@ pub(crate) fn verify_historical_title_receipt(
 /// not fresh execution admission: terminal/expired children remain receipts.
 /// The caller separately binds the exact goal, parent docID and sequence and
 /// authorizes its own operation; no execution capability is returned here.
+/// `expected_requester_did` is the requester of the parent it continues in the
+/// same session (Lean `Enrollment.runtimeRequesterScope`).
 pub(crate) fn verify_runtime_local_control_receipt(
     row: &AgentRequestRow,
     expected_target_did: &str,
     expected_source_request_id: &str,
+    expected_requester_did: &str,
 ) -> Result<()> {
     let admission = row_admission(row)?;
     verify_request_receipt_signature(row)?;
@@ -982,7 +1005,7 @@ pub(crate) fn verify_runtime_local_control_receipt(
             && admission.signer_did == expected_target_did
             && admission.runtime_issuer_did.as_deref() == Some(expected_target_did)
             && row.agent_did.as_deref() == Some(expected_target_did)
-            && row.requester_did.as_deref() == Some(expected_target_did)
+            && row.requester_did.as_deref() == Some(expected_requester_did)
             && admission.runtime_source_request_id.as_deref() == Some(expected_source_request_id)
             && row.caused_by_parent_request_id.as_deref() == Some(expected_source_request_id)
             && row
@@ -1331,24 +1354,41 @@ mod tests {
         row.lifecycle_state =
             Some(gents_protocol::request_lifecycle::RequestLifecycleState::Completed);
         row.deadline = Some("2020-01-01T00:00:01Z".into());
-        super::verify_runtime_local_control_receipt(&row, identity.did(), "receipt-parent")
-            .expect("terminal and expired original receipt remains authenticated");
+        super::verify_runtime_local_control_receipt(
+            &row,
+            identity.did(),
+            "receipt-parent",
+            identity.did(),
+        )
+        .expect("terminal and expired original receipt remains authenticated");
         assert!(super::verify_runtime_local_control_receipt(
             &row,
             identity.did(),
-            "different-parent"
+            "different-parent",
+            identity.did(),
         )
         .is_err());
         let foreign = KeyIdentity::load_or_create(temp.path().join("foreign.key"), None).unwrap();
-        assert!(
-            super::verify_runtime_local_control_receipt(&row, foreign.did(), "receipt-parent")
-                .is_err()
-        );
+        assert!(super::verify_runtime_local_control_receipt(
+            &row,
+            foreign.did(),
+            "receipt-parent",
+            foreign.did(),
+        )
+        .is_err());
+        assert!(super::verify_runtime_local_control_receipt(
+            &row,
+            identity.did(),
+            "receipt-parent",
+            foreign.did(),
+        )
+        .is_err());
         row.content = Some("forged continuation".into());
         assert!(super::verify_runtime_local_control_receipt(
             &row,
             identity.did(),
-            "receipt-parent"
+            "receipt-parent",
+            identity.did(),
         )
         .is_err());
         row.content = Some("original continuation".into());
@@ -1356,7 +1396,8 @@ mod tests {
         assert!(super::verify_runtime_local_control_receipt(
             &row,
             identity.did(),
-            "receipt-parent"
+            "receipt-parent",
+            identity.did(),
         )
         .is_err());
         node.shutdown().await;

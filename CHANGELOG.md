@@ -8,6 +8,39 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- `Tools.self_config.self_config_dry_run` is renamed `self_config_preview`
+  (#2062). It grants the `config` preview verb; it never blocked writes. There
+  is no alias: rewrite stored Tools documents and manifests that set the old
+  key. The effective self-config read reports `preview` instead of `dry_run`.
+
+- The Engineer is a full self-writing agent (#1796). Self-config no longer
+  refuses edits that reference the Setup behavior: it may edit its own Tools,
+  Context, profile and datastore surfaces and create Tasks, Triggers and
+  EventSources that target itself. With `self_config_no_lockout` it is refused
+  only a lockout: disabling its behavior or backend, turning off its
+  self-config tool, or turning off an agents tool group it had. `config` gains
+  `subagent-target` and `execution` resources (list, get, preview, create,
+  edit; delete through `cleanup`), and `plan preview` accepts `SubagentTarget`
+  and `InferenceExecution` (#2058, #2059). `gents init --setup-steward` (the
+  desktop first run) ships the Engineer with the agents tools, the sessions
+  tool, read-only query and an `engineer-mailbox` escalation surface (#2060).
+  `agent_message`, `agent_interrupt` and `agent_list` now follow
+  `Tools.subagents.enabled` alone; `agent_new` still appears only when
+  `target_ids` selects a target.
+
+- DefraDB moves to defradb.rs `main` at `6d9aa9d9`, which includes the
+  durable document-arrival journal behind #2041 (defradb.rs#1853). Collection
+  identities now commit to `@immutable`, `@branchable` and any governance root,
+  so collection versions differ from earlier builds: update the desktop and
+  every paired runtime together, and start from a fresh home. DefraDB no longer
+  serves the browser `/sync` endpoint; browsers sync as Iroh peers. BLS
+  identities (now `bls_aug_v1`) are still refused as runtime identities.
+  The pin is `02d252f8`, defradb.rs main with #1856: an indexed String field
+  holding RFC3339 text is found by `_eq` and range filters again, so failed
+  plugin callbacks are retried (#1963). It also brings strict ACP checks on
+  replicated protected updates (#1827) and a fix for a lost document-change
+  wake during concurrent draining.
+
 - Durable trigger delivery (#2041) adds non-branchable `TriggerFire`,
   `EventSourceCursor`, and `FireOutcome` collections and updates the canonical
   schema baseline. v0.20 still requires a fresh home; this does not provide an
@@ -172,6 +205,19 @@ source consistency checks, not a separate runtime compatibility version.
   but rejects every all-digit value (#1735).
 
 ### Fixed
+
+- `max_request_hop` bounds call depth again, not the number of calls (#2065).
+  An `agent_new`/`agent_message` result returned to the calling session keeps
+  that session's hop; only the outward call climbs. A caller can make any
+  number of sequential calls to a callee at depth one, while an A↔B message
+  loop is still refused at the bound.
+
+- Agent results and trigger fires reach sessions a paired client started
+  (#2064). A completion wake, control continuation or automated trigger fire
+  delivered into an existing session is written under the requester that owns the
+  session, and admission refuses any other requester, so an `agent_new` result
+  or a `session_id_template` fire lands in a desktop-created session instead of
+  failing with "no AgentSession".
 
 - Desktop observation retains other agents when a document is deleted and prevents
   an older reload from replacing a freshly observed request (#1960, #2054).
