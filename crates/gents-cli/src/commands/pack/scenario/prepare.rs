@@ -193,7 +193,18 @@ fn run_prepare_steps_blocking(
             .find(|declared| declared.name == step.plugin)
             .with_context(|| format!("prepare step names undeclared plugin {}", step.plugin))?;
         let artifact_path = pack.join(&plugin.artifact);
-        if plugin.source.is_some() {
+        // A pack directory holding only its declared assets (a built
+        // `.pack`, the home's store, or a registry fetch) keeps
+        // `plugin.source` in the manifest but never ships the source tree
+        // itself, so a source is only actually available here when its
+        // entry file is really on disk. Rebuild from it when it is; fall
+        // back to the shipped artifact otherwise, exactly like a plugin
+        // with no declared source at all.
+        let source_entry = plugin.source.as_deref().and_then(|source| {
+            crate::commands::pack::build::plugin_entry(&plugin.language)
+                .map(|entry| pack.join(source).join(entry))
+        });
+        if source_entry.is_some_and(|entry| entry.is_file()) {
             // Always rebuilt, not just when missing: `build_plugin` stamps
             // the source digest, so an unchanged source costs one digest
             // check, while a source an author edited since the last build
@@ -557,6 +568,59 @@ mod tests {
             artifact_path.is_file(),
             "the missing artifact must have been rebuilt"
         );
+        assert_eq!(fields.get("files").map(String::as_str), Some("a.txt"));
+    }
+
+    /// A pack directory holding only its declared assets, the shape a built
+    /// `.pack`, the home's store, or a registry fetch actually ships, keeps
+    /// `plugin.source` in the manifest without shipping the source tree
+    /// itself (`bind_plugin_fixture`'s `plugins/list_files/source` is not
+    /// in `assets`). The prepare step must run the shipped artifact rather
+    /// than attempt a build that has nothing to build from.
+    #[test]
+    fn a_prepare_step_runs_from_an_asset_only_pack_copy() {
+        let fixture = crate::commands::plugin::testing::build_bind_plugin_fixture();
+        let distribution: gents::pack::PackManifest =
+            serde_json::from_slice(&std::fs::read(fixture.path().join("manifest.json")).unwrap())
+                .unwrap();
+
+        let asset_only = tempfile::tempdir().unwrap();
+        std::fs::copy(
+            fixture.path().join("manifest.json"),
+            asset_only.path().join("manifest.json"),
+        )
+        .unwrap();
+        for asset in &distribution.metadata.assets {
+            let from = fixture.path().join(asset);
+            let to = asset_only.path().join(asset);
+            std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+            std::fs::copy(&from, &to).unwrap();
+        }
+        assert!(
+            !asset_only.path().join("plugins/list_files").is_dir(),
+            "the asset-only copy must not ship the plugin's source tree"
+        );
+
+        let within = tempfile::tempdir().unwrap();
+        let allowed = within.path().join("allowed");
+        std::fs::create_dir(&allowed).unwrap();
+        std::fs::write(allowed.join("a.txt"), b"a").unwrap();
+
+        let step = ScenarioPrepareStep {
+            plugin: "list_files".to_string(),
+            input: json!({"root": "unused"}),
+            bind_dir: Some(allowed.to_string_lossy().into_owned()),
+            seed_fields: BTreeMap::from([("files".to_string(), "/files/0".to_string())]),
+        };
+
+        let fields = run_prepare_steps_blocking(
+            asset_only.path(),
+            &distribution,
+            &[step],
+            Some(within.path()),
+            false,
+        )
+        .expect("an asset-only copy must run its shipped artifact, not attempt a build");
         assert_eq!(fields.get("files").map(String::as_str), Some("a.txt"));
     }
 
