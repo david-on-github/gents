@@ -458,6 +458,8 @@ export function SetupScreen({
         onWait: setManagedWait,
       });
       setRuntimeGate("ready");
+      /* Account lookup goes through the runtime, so repeat it once it serves. */
+      if (setupAgentDidRef.current) void observeAccounts(setupAgentDidRef.current);
     } catch (cause) {
       setRuntimeGate("unavailable");
       setError(setupErrorMessage(cause));
@@ -491,8 +493,8 @@ export function SetupScreen({
         setAccountsObserved(true);
       })
       .catch(() => {
-        /* Sign-in remains available if account lookup fails. */
-        if (accountRevision.current === revision) setAccountsObserved(true);
+        /* Sign-in remains available if account lookup fails, but only a
+           click starts it: an unknown account may already be connected. */
       });
   };
   useEffect(() => {
@@ -946,7 +948,19 @@ export function SetupScreen({
   };
 
   const pickProvider = (id: ProviderId) => {
-    if (busy || id === provider) return;
+    if (busy) return;
+    if (id === provider) {
+      /* Choosing the preselected provider is a choice too. */
+      if (
+        connection &&
+        oauthProviderFor(connection.authMethod) &&
+        accountsObserved &&
+        !signedIn[provider] &&
+        !pendingSave[provider]
+      )
+        void signIn();
+      return;
+    }
     autoSignIn.current = id;
     setProvider(id);
     setAuthUrl(null);

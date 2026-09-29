@@ -95,6 +95,41 @@ describe("setup provider sign-in", () => {
     expect(api.codexLogin).not.toHaveBeenCalled();
   });
 
+  it("starts sign-in when the preselected provider is chosen", async () => {
+    const { api, shell } = setup();
+    render(
+      <SetupScreen
+        shell={shell}
+        initialStep="inference"
+        agentDid={AGENT}
+        onDone={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByTestId("setup-provider-openai"));
+    expect(await screen.findByText("Account connected")).toBeVisible();
+    expect(api.codexLogin).toHaveBeenCalledTimes(1);
+  });
+
+  it("leaves sign-in to a click when the account lookup fails", async () => {
+    const { api, shell } = setup({
+      listProviderAccounts: vi.fn().mockRejectedValue(new Error("runtime not serving")),
+    });
+    render(
+      <SetupScreen
+        shell={shell}
+        initialStep="inference"
+        purpose="add-backend"
+        provider="anthropic"
+        agentDid={AGENT}
+        onCancel={vi.fn()}
+        onDone={vi.fn()}
+      />,
+    );
+    await userEvent.click(await screen.findByRole("button", { name: "Sign in" }));
+    expect(await screen.findByText("Account connected")).toBeVisible();
+    expect(api.claudeLogin).toHaveBeenCalledTimes(1);
+  });
+
   it("does not sign in again to a provider that is already connected", async () => {
     const { api, shell } = setup({
       listProviderAccounts: vi.fn().mockResolvedValue([
