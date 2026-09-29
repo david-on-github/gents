@@ -435,7 +435,7 @@ async fn a_dependency_is_released_with_its_last_non_explicit_dependent() {
     let receipt = crate::test_support::install_test_graph_package_explicit(
         &access,
         OWNER,
-        "code_review",
+        "review_graph",
         &options,
         false,
     )
@@ -446,7 +446,7 @@ async fn a_dependency_is_released_with_its_last_non_explicit_dependent() {
     super::super::install_pack_documents(
         &access,
         OWNER,
-        &demo_identity(vec!["gents/code_review".into()]),
+        &demo_identity(vec!["fixture/review_graph".into()]),
         &config(&[("alpha", "Alpha")]),
         DriftPolicy::Refuse,
     )
@@ -454,7 +454,7 @@ async fn a_dependency_is_released_with_its_last_non_explicit_dependent() {
     .unwrap();
 
     // Removing the dependency directly is refused, naming the dependent.
-    let error = remove_pack(&access, OWNER, "gents/code_review", DriftPolicy::Refuse)
+    let error = remove_pack(&access, OWNER, "fixture/review_graph", DriftPolicy::Refuse)
         .await
         .unwrap_err();
     assert!(format!("{error:#}").contains("acme/demo"), "{error:#}");
@@ -464,7 +464,7 @@ async fn a_dependency_is_released_with_its_last_non_explicit_dependent() {
         .await
         .unwrap();
     assert_eq!(report.dependencies.len(), 1);
-    assert_eq!(report.dependencies[0].pack, "gents/code_review");
+    assert_eq!(report.dependencies[0].pack, "fixture/review_graph");
     assert!(report.dependencies[0]
         .documents
         .removed
@@ -482,7 +482,7 @@ async fn a_dependency_is_released_with_its_last_non_explicit_dependent() {
 async fn an_explicit_dependency_survives_its_dependent() {
     let (_node, access, options) = dependency_fixture().await;
     let receipt =
-        crate::test_support::install_test_graph_package(&access, OWNER, "code_review", &options)
+        crate::test_support::install_test_graph_package(&access, OWNER, "review_graph", &options)
             .await
             .unwrap();
     activate(&access, &receipt.graph_id, &receipt.revision_digest).await;
@@ -490,7 +490,7 @@ async fn an_explicit_dependency_survives_its_dependent() {
     super::super::install_pack_documents(
         &access,
         OWNER,
-        &demo_identity(vec!["gents/code_review".into()]),
+        &demo_identity(vec!["fixture/review_graph".into()]),
         &config(&[("alpha", "Alpha")]),
         DriftPolicy::Refuse,
     )
@@ -511,11 +511,11 @@ async fn an_explicit_dependency_survives_its_dependent() {
         .unwrap();
     let rows = remaining["data"]["PackInstallation"].as_array().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["coordinate"], "gents/code_review");
+    assert_eq!(rows[0]["coordinate"], "fixture/review_graph");
     assert_eq!(rows[0]["required_by"], Value::Null);
 
     // Still removable directly now that nothing requires it.
-    remove_pack(&access, OWNER, "gents/code_review", DriftPolicy::Refuse)
+    remove_pack(&access, OWNER, "fixture/review_graph", DriftPolicy::Refuse)
         .await
         .unwrap();
 }
@@ -526,7 +526,7 @@ async fn an_upgrade_that_drops_a_dependency_releases_its_claim() {
     let receipt = crate::test_support::install_test_graph_package_explicit(
         &access,
         OWNER,
-        "code_review",
+        "review_graph",
         &options,
         false,
     )
@@ -537,7 +537,7 @@ async fn an_upgrade_that_drops_a_dependency_releases_its_claim() {
     super::super::install_pack_documents(
         &access,
         OWNER,
-        &demo_identity(vec!["gents/code_review".into()]),
+        &demo_identity(vec!["fixture/review_graph".into()]),
         &config(&[("alpha", "Alpha")]),
         DriftPolicy::Refuse,
     )
@@ -548,13 +548,13 @@ async fn an_upgrade_that_drops_a_dependency_releases_its_claim() {
         .await
         .unwrap();
     let rows = after_first["data"]["PackInstallation"].as_array().unwrap();
-    let code_review = rows
+    let review_graph = rows
         .iter()
-        .find(|row| row["coordinate"] == "gents/code_review")
+        .find(|row| row["coordinate"] == "fixture/review_graph")
         .unwrap();
-    assert_eq!(code_review["required_by"], json!(["acme/demo"]));
+    assert_eq!(review_graph["required_by"], json!(["acme/demo"]));
 
-    // An upgrade of acme/demo that no longer depends on code_review.
+    // An upgrade of acme/demo that no longer depends on review_graph.
     super::super::install_pack_documents(
         &access,
         OWNER,
@@ -575,7 +575,7 @@ async fn an_upgrade_that_drops_a_dependency_releases_its_claim() {
     assert!(
         !rows
             .iter()
-            .any(|row| row["coordinate"] == "gents/code_review"),
+            .any(|row| row["coordinate"] == "fixture/review_graph"),
         "the dropped, non-explicit dependency is released outright (its own graph \
          documents removed), the same as `gents pack remove` releases a dependency \
          whose last dependent is removed; a dangling required_by is not enough: {rows:?}"
@@ -588,7 +588,7 @@ async fn a_legacy_record_without_dependency_fields_reads_as_explicit() {
     let receipt = crate::test_support::install_test_graph_package_explicit(
         &access,
         OWNER,
-        "code_review",
+        "review_graph",
         &options,
         false,
     )
@@ -603,7 +603,7 @@ async fn a_legacy_record_without_dependency_fields_reads_as_explicit() {
     super::super::install_pack_documents(
         &access,
         OWNER,
-        &demo_identity(vec!["gents/code_review".into()]),
+        &demo_identity(vec!["fixture/review_graph".into()]),
         &config(&[("alpha", "Alpha")]),
         DriftPolicy::Refuse,
     )
@@ -622,7 +622,7 @@ async fn a_legacy_record_without_dependency_fields_reads_as_explicit() {
     let rows = remaining["data"]["PackInstallation"].as_array().unwrap();
     assert!(
         rows.iter()
-            .any(|row| row["coordinate"] == "gents/code_review"),
+            .any(|row| row["coordinate"] == "fixture/review_graph"),
         "a legacy record with no explicit field must never be auto-released: {rows:?}"
     );
 }

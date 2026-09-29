@@ -246,6 +246,10 @@ pub(crate) mod test_support {
             .unwrap();
     }
 
+    /// Reads a graph pack fixture from `tests/fixtures/packs/<name>` (never a
+    /// bundled pack, which no longer exists once G7 lands) through the same
+    /// archive path an install takes: `pack_dir` packs the directory,
+    /// `PackArchive::from_bytes` reads it back, and the graph loader loads it.
     pub(crate) fn load_test_graph_package(
         name: &str,
         options: &crate::graph_package::GraphPackageInstallBindings,
@@ -253,8 +257,14 @@ pub(crate) mod test_support {
         let scope = crate::pack::PackInstallOptions {
             agent_did: options.agent_did.clone(),
         };
-        crate::graph_package::load_package(
-            &crate::pack::resolve_pack(name).unwrap(),
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/packs")
+            .join(name);
+        let (bytes, _) = crate::pack_archive::pack_dir(&dir)
+            .unwrap_or_else(|error| panic!("packing fixture {name:?}: {error:#}"));
+        let archive = crate::pack_archive::PackArchive::from_bytes(&bytes).unwrap();
+        crate::graph_package::load_archive_graph_package_with_environment(
+            &archive,
             &scope,
             &|name| (name == "GENTS_REVIEW_MODEL").then(|| "test-model".to_owned()),
         )

@@ -110,7 +110,7 @@ fn compiler_preserves_entry_and_group_selection_and_rejects_fanout() {
         compile_graph, CompilerPolicy, GraphIntent, GraphSessionSelection, StageCapability,
     };
     let mut authored: Value = serde_json::from_str(include_str!(
-        "../../../../packs/code_review/pack_config.json"
+        "../../tests/fixtures/packs/review_graph/pack_config.json"
     ))
     .unwrap();
     authored["graph_intents"][0]["agent_did"] = json!("did:test:session-compiler");
