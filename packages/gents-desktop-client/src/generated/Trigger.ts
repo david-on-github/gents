@@ -9,7 +9,12 @@ import type { TriggerSource } from "./TriggerSource.js";
  * and enqueues an AgentRequest. Execution and terminal state belong to that
  * request, not to a new task-run lifecycle.
  */
-export type Trigger = { agent_did: string, trigger_id: string, display_name?: string | null, description?: string | null, task_id: string, source: TriggerSource, enabled?: boolean | null,
+export type Trigger = { agent_did: string, trigger_id: string, display_name?: string | null, description?: string | null, task_id: string, source: TriggerSource,
+/**
+ * Render an existing session ID from the fire scope. Missing/null creates
+ * a session; a configured template must render a nonempty owned session.
+ */
+session_id_template?: string | null, enabled?: boolean | null,
 /**
  * Reuse parallel / serial / latest_only semantics. Absent/null is Parallel
  * for both schedule and event sources, matching the graph-edge default.

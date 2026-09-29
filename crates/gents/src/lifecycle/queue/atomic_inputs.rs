@@ -534,14 +534,30 @@ async fn background_completion_transaction_attempt(
                     .doc_id
                     .as_deref()
                     .context("pending wake is missing _docID")?;
-                txn.execute(&super::coalescing::supersede_pending_mutation(
-                    lower_doc_id,
-                    &parent.agent_did,
-                    &request_id,
-                    &doc_id,
-                    "raised to the hop of a later completion",
-                ))
-                .await?;
+                let superseded = txn
+                    .execute(&super::coalescing::supersede_pending_mutation(
+                        lower_doc_id,
+                        &parent.agent_did,
+                        &request_id,
+                        &doc_id,
+                        "raised to the hop of a later completion",
+                    ))
+                    .await?;
+                if superseded
+                    .get("data")
+                    .and_then(|data| data.get("update_AgentRequest"))
+                    .is_some_and(crate::graphql::response_has_documents)
+                {
+                    crate::trigger_engine::durable::publish_request_outcome(
+                        txn,
+                        &parent.agent_did,
+                        &lower.request_id,
+                        "superseded",
+                        "raised to the hop of a later completion",
+                        &now,
+                    )
+                    .await?;
+                }
             }
             (
                 EnqueuedAgentRequest {

@@ -24,7 +24,7 @@ def dispatchStep
       , isTerminal := false
       , executionOrigin := origin }
     match intent.concurrency with
-    | .parallel =>
+    | .parallel | .queuedSerial =>
       { state with requests := state.requests ++ [newRequest] }
     | .serial =>
       match key with
@@ -106,6 +106,10 @@ private theorem dispatchStep_preserves_causedBy_and_concurrency
     simp only
     cases h_conc : intent.concurrency with
     | parallel =>
+      simp only
+      refine ⟨r, ?_, rfl, rfl⟩
+      exact List.mem_append_left _ h_mem
+    | queuedSerial =>
       simp only
       refine ⟨r, ?_, rfl, rfl⟩
       exact List.mem_append_left _ h_mem

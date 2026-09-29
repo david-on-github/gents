@@ -2,6 +2,7 @@ use super::*;
 
 fn resolved_task_for_test(task_id: &str, behavior_id: &str, prompt_template: &str) -> ResolvedTask {
     ResolvedTask {
+        emit_outcome: false,
         task_id: task_id.to_string(),
         name: None,
         behavior_id: behavior_id.to_string(),
@@ -156,6 +157,8 @@ async fn production_materializer_persists_event_source_document_lineage() {
             "event body",
             None,
             "event-test-fire",
+            None,
+            None,
         )
         .await
         .expect("Event materialize should succeed");
@@ -264,6 +267,8 @@ async fn production_schedule_materialization_passes_final_exact_config_admission
             "schedule body",
             None,
             "schedule-test-fire",
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -317,6 +322,8 @@ async fn production_materializer_rejects_incoherent_source_document_lineage() {
             "body",
             None,
             "invalid-event-test-fire",
+            None,
+            None,
         )
         .await
         .expect_err("Event materialization without a source document must fail closed");
@@ -334,6 +341,8 @@ async fn production_materializer_rejects_incoherent_source_document_lineage() {
             "body",
             None,
             "invalid-schedule-test-fire",
+            None,
+            None,
         )
         .await
         .expect_err("non-Event materialization must reject source document lineage");
@@ -360,6 +369,8 @@ async fn production_materializer_rejects_manual_lineage_with_trigger_id() {
             "manual body",
             None,
             "invalid-manual-test-fire",
+            None,
+            None,
         )
         .await
         .expect_err("Manual materialize with trigger_id must fail before persistence");

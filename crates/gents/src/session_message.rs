@@ -140,6 +140,7 @@ pub(crate) async fn render_body(
     node: &EmbeddedNode,
     caller_agent_did: &str,
     target_behavior_id: &str,
+    target_session_id: &str,
     body: MessageBody<'_>,
 ) -> Result<Result<RenderedBody, String>> {
     let task = match body {
@@ -180,10 +181,15 @@ pub(crate) async fn render_body(
     };
     let task_document: crate::document_config::Task =
         serde_json::from_value(loaded).context("decode configured Task")?;
+    if task_document.emit_outcome {
+        return Ok(Err("emit_outcome Tasks require document-triggered delivery or explicit CLI/desktop Task admission; agent_new/agent_message Task bodies do not emit outcomes".into()));
+    }
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let (node_scope, ctx_scope) =
         crate::template::task_node_ctx(caller_agent_did, target_behavior_id, &now);
     let scope = crate::template::TemplateScope {
+        session: Some(serde_json::json!({"session_id": target_session_id})),
+        request: None,
         event: serde_json::Value::Null,
         doc: None,
         args: Some(task.input.clone().unwrap_or(serde_json::json!({}))),

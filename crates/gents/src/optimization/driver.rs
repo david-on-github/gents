@@ -45,7 +45,7 @@ use crate::optimization::subject::{
 };
 use crate::optimization::target::{
     baseline_equivalence, capture_closure, closure_digests, current_text, BaselineMismatch,
-    Closure, Target, TargetField,
+    Closure, JobTarget, Target,
 };
 
 /// Everything an operator chose about a job. Read in full only when the job
@@ -60,9 +60,7 @@ pub struct JobRequest {
     /// The DID of the home that launched the job, recorded on every run.
     pub evaluator_did: String,
     pub behavior_id: String,
-    pub target_field: TargetField,
-    /// The task a `TaskPromptTemplate` target names; ignored otherwise.
-    pub task_id: Option<String>,
+    pub target: JobTarget,
     pub definition_id: String,
     pub inference_profile_id: String,
     /// The operator-supplied baseline subject pack (ruling R5). Copied into the
@@ -588,9 +586,7 @@ pub(crate) fn check_policy(
     policy: &PolicyV2,
     definition: &EvalDefinition,
 ) -> Result<()> {
-    if policy.min_pairs == 0 {
-        return Err(refused("policy min_pairs must be at least 1"));
-    }
+    check_policy_shape(request, policy)?;
     // Above the exact limit the p-value is sampled at a resolution of
     // 1e6 / (samples + 1) ppm; the model's own bound (`1000000 <= alphaEff *
     // 2^n`) applied to that resolution says whether alpha is reachable at all.
@@ -604,6 +600,15 @@ pub(crate) fn check_policy(
             alpha_effective_ppm(policy)
         )));
     }
+    Ok(())
+}
+
+/// The policy checks that need no definition, so a caller can refuse a job
+/// before it loads or writes anything.
+pub(crate) fn check_policy_shape(request: &JobRequest, policy: &PolicyV2) -> Result<()> {
+    if policy.min_pairs == 0 {
+        return Err(refused("policy min_pairs must be at least 1"));
+    }
     if policy.max_rounds == request.budgets.max_rounds {
         return Ok(());
     }
@@ -611,6 +616,14 @@ pub(crate) fn check_policy(
         "policy max_rounds {} does not match the budget's max_rounds {}; the Bonferroni divisor must be the number of candidates the job may try",
         policy.max_rounds, request.budgets.max_rounds
     )))
+}
+
+/// The checks of a request and policy alone that a new job is frozen after,
+/// so a caller can refuse the job before it writes anything of its own.
+pub fn check_request(request: &JobRequest, policy: &PolicyV2) -> Result<()> {
+    validate_job_id(&request.job_id)?;
+    check_policy_shape(request, policy)?;
+    check_seed_spacing(request, policy)
 }
 
 /// Finding F2: a resume must repeat the request the job was frozen from. The
@@ -636,11 +649,7 @@ pub(crate) fn check_resume(
     if origin.subject.behavior_id != request.behavior_id {
         differs.push("behavior_id");
     }
-    let task_id = request
-        .task_id
-        .as_deref()
-        .filter(|_| request.target_field == TargetField::TaskPromptTemplate);
-    if origin.target.field != request.target_field || origin.target.task_id() != task_id {
+    if origin.target.job_target() != request.target {
         differs.push("target");
     }
     if origin.definition.definition_id != request.definition_id {
@@ -910,8 +919,7 @@ fn proposed_candidate(
         &final_dir,
         &origin.owner,
         &origin.subject.behavior_id,
-        origin.target.field,
-        origin.target.task_id(),
+        &origin.target.job_target(),
     )?;
     anyhow::ensure!(
         candidate.digest == digest,
@@ -965,8 +973,7 @@ async fn freeze_job(
     request: &JobRequest,
     policy: &PolicyV2,
 ) -> Result<JobRecord> {
-    validate_job_id(&request.job_id)?;
-    check_seed_spacing(request, policy)?;
+    check_request(request, policy)?;
     let owner = request.owner.as_str();
     let definition = load_definition(access, owner, &request.definition_id)
         .await
@@ -977,14 +984,13 @@ async fn freeze_job(
         &request.baseline_pack,
         owner,
         &request.behavior_id,
-        request.target_field,
-        request.task_id.as_deref(),
+        &request.target,
     )?;
     let pack_text = baseline_text(&source)?;
     // Ruling R5, before anything is written: the pack must be the live one.
     let closure = read_closure(access, owner).await?;
     let target = Target {
-        field: request.target_field,
+        field: request.target.field(),
         owner: request.owner.clone(),
         id: source.target_id.clone(),
     };
@@ -1187,8 +1193,7 @@ pub async fn run_job(
         &baseline_path,
         owner,
         &origin.subject.behavior_id,
-        origin.target.field,
-        origin.target.task_id(),
+        &origin.target.job_target(),
     )?;
     if baseline.digest != origin.subject.pack_digest {
         return Err(refused(format!(
@@ -1518,8 +1523,7 @@ pub(crate) fn verified_checkpoint(
         &path,
         &origin.owner,
         &origin.subject.behavior_id,
-        origin.target.field,
-        origin.target.task_id(),
+        &origin.target.job_target(),
     )?;
     anyhow::ensure!(
         pack.digest == held.pack_digest,
@@ -1624,8 +1628,7 @@ mod tests {
             owner: "did:key:o".into(),
             evaluator_did: "did:key:home".into(),
             behavior_id: "monitor".into(),
-            target_field: TargetField::AgentContextSystemPrompt,
-            task_id: None,
+            target: JobTarget::Context,
             definition_id: "monitor-findings".into(),
             inference_profile_id: "local".into(),
             baseline_pack: PathBuf::from("/tmp/baseline"),
@@ -2156,20 +2159,21 @@ mod tests {
         let error = check_resume(&request(), &other_policy, &origin()).unwrap_err();
         assert!(job_refused(&error).unwrap().0.contains("policy"));
 
-        // A task_id is only part of the target when the target is a task.
-        let mut stray = request();
-        stray.task_id = Some("plan".into());
-        check_resume(&stray, &policy, &origin()).unwrap();
-
         let mut retargeted = request();
-        retargeted.target_field = TargetField::TaskPromptTemplate;
-        retargeted.task_id = Some("plan".into());
+        retargeted.target = JobTarget::Task("plan".into());
         let error = check_resume(&retargeted, &policy, &origin()).unwrap_err();
         assert!(job_refused(&error).unwrap().0.contains("target"));
         let mut task_origin = origin();
         task_origin.target.field = TargetField::TaskPromptTemplate;
         task_origin.target.id = "plan".into();
         check_resume(&retargeted, &policy, &task_origin).unwrap();
+
+        let mut other_task = request();
+        other_task.target = JobTarget::Task("other".into());
+        let error = check_resume(&other_task, &policy, &task_origin).unwrap_err();
+        assert!(job_refused(&error).unwrap().0.contains("target"));
+        let error = check_resume(&request(), &policy, &task_origin).unwrap_err();
+        assert!(job_refused(&error).unwrap().0.contains("target"));
     }
 
     /// C1 (constraint 15): the capture list is frozen with the job, so a

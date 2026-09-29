@@ -220,7 +220,7 @@ async fn code_review_install_is_idempotent_shared_home_safe_and_runnable() {
         assert!(task["goal_objective_template"]
             .as_str()
             .is_some_and(|s| !s.is_empty()));
-        assert!(task["goal_token_budget"].as_i64().is_some_and(|n| n > 0));
+        assert!(task["goal_token_budget"].is_null());
     }
     let expected_bindings = BTreeMap::from([
         ("review-recon", "claude:inference"),

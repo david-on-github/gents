@@ -41,7 +41,6 @@ pub(crate) use recovery::{
     recover_expired_generation_with_facts, RecoveryResult, RecoverySelectionChoice,
     RecoverySelectionRejected,
 };
-mod rows;
 mod task_title;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -51,13 +50,14 @@ pub use manual::{write_manual_agent_request, write_manual_agent_request_with_con
 pub use materialize::{
     activate_workspace_bound_request,
     build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title,
-    build_signed_request, next_request_hop, request_hop_within_bound, EnqueuedAgentRequest,
-    ParentLink, RequestHopCause, RequestIdentity, RequestSigner, RequestSpec, RetryLink,
+    build_signed_request, next_request_hop, request_hop_within_bound, task_fire_key,
+    write_task_delivery, write_task_delivery_local, EnqueuedAgentRequest, ParentLink,
+    RequestHopCause, RequestIdentity, RequestSigner, RequestSpec, RetryLink, TaskDeliveryAdmission,
 };
 pub(crate) use materialize::{
-    build_session_message_request, write_pending_agent_request_with_lineage_and_conversation_title,
-    write_pending_agent_request_with_lineage_workspace_and_conversation_title, SessionMessageCause,
-    SessionMessageTarget,
+    build_session_message_request,
+    write_pending_agent_request_with_lineage_workspace_and_conversation_title,
+    write_trigger_delivery, SessionMessageCause, SessionMessageTarget,
 };
 pub use queue::enqueue_local_steering_request;
 pub(crate) use task_title::task_goal_session_title;

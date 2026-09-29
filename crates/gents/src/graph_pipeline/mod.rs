@@ -20,6 +20,7 @@ pub(crate) use live::{is_live_for, live_run_correlations};
 pub(crate) use routes::revision_artifact_ids;
 #[cfg(test)]
 pub(crate) use run::derive_graph_workspace;
+pub(crate) use run::resolve_graph_session;
 pub(crate) use run::{
     graph_binding_for_request_in_txn, resolve_graph_workspace, run_graph_run_reconciler,
     GRAPH_RUN_TERMINAL_STATUSES,
@@ -52,9 +53,10 @@ pub use tools::{
 pub use types::{
     BundledProvenance, CapabilityManifestEntry, DeliveryConcurrency, DeliveryMode, Diagnostic,
     DiagnosticCode, EntryBinding, GraphEdge, GraphIntent, GraphLimits, GraphNode, GraphPlan,
-    GroupCount, PackagePlan, PlannedEdge, PlannedEntry, PlannedNode, PlannedPackageArtifact,
-    PlannedResult, PortCardinality, PortRef, PortSpec, RequiredSchemaDigest, ResultCardinality,
-    ResultContract, StageCapability, StageTarget, WorkspaceAuthority, COMPILER_VERSION,
+    GraphSessionSelection, GroupCount, PackagePlan, PlannedEdge, PlannedEntry, PlannedNode,
+    PlannedPackageArtifact, PlannedResult, PortCardinality, PortRef, PortSpec,
+    RequiredSchemaDigest, ResultCardinality, ResultContract, StageCapability, StageTarget,
+    WorkspaceAuthority, COMPILER_VERSION,
 };
 
 #[cfg(test)]

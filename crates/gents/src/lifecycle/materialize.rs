@@ -80,34 +80,6 @@ async fn resolve_created_agent_request_doc_id(
         .map(str::to_string)
 }
 
-pub(crate) async fn write_pending_agent_request_with_lineage_and_conversation_title(
-    node: &EmbeddedNode,
-    actor: ::identity::Did,
-    agent_did: &str,
-    behavior_id: &str,
-    content: &str,
-    execution_origin: ExecutionOrigin,
-    trigger_lineage: TriggerLineage,
-    conversation_title: Option<&str>,
-) -> Result<EnqueuedAgentRequest> {
-    write_pending_agent_request_with_lineage_workspace_and_conversation_title(
-        node,
-        actor,
-        agent_did,
-        behavior_id,
-        content,
-        execution_origin,
-        trigger_lineage,
-        conversation_title,
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .await
-}
-
 /// Write one signed pending request. `session_id` names an existing session
 /// the request continues; absent mints a new session.
 #[allow(clippy::too_many_arguments)]
@@ -1200,5 +1172,302 @@ mod pin_tests {
             normalized,
             "request_id: \"req-materialize-pending-event\", purpose: \"normal\", agent_did: \"did:key:z6Mkmuzzq2Ea9TgVB5EnaeY655fERuo15hrBtsL2oT3arco7\", requester_did: \"did:key:z6Mkmuzzq2Ea9TgVB5EnaeY655fERuo15hrBtsL2oT3arco7\", behavior_id: \"behavior-1\", session_id: \"sess-materialize-pending-event\", retry_root_request: \"req-materialize-pending-event\", retry_key: \"retry-key-1\", content: \"hello agent\", input: { initial_title: { source: \"task\", text: \"My Conversation\" } }, execution_origin: \"scheduled\", caused_by_trigger_id: \"trigger-1\", caused_by_trigger_doc_id: \"trigger-doc-1\", caused_by_trigger_kind: \"event\", caused_by_correlation: \"corr-1\", caused_by_trigger_context: \"{\\\"k\\\":\\\"v\\\"}\", caused_by_source_doc_id: \"source-doc-1\", created_at: \"<CREATED_AT>\", retry_count: 0, max_retries: 3, subagent_depth: 0, workspace_id: \"ws-1\", workspace_owner_agent_did: \"did:key:workspace-owner\", workspace_authority: \"readWrite\", workspace_seal_hash: \"seal-1\", admission_kind: \"runtime-internal\", admission_signer_did: \"did:key:z6Mkmuzzq2Ea9TgVB5EnaeY655fERuo15hrBtsL2oT3arco7\", admission_signature: \"<SIGNATURE>\", runtime_issuer_did: \"did:key:z6Mkmuzzq2Ea9TgVB5EnaeY655fERuo15hrBtsL2oT3arco7\", runtime_source_request_id: \"trigger-1\", runtime_source_kind: \"automated-trigger\", lifecycle_state: \"workspaceBindingPending\", failure_reason: \"\""
         );
+    }
+}
+
+/// Canonical identity shared by automated and manually invoked Task fires.
+pub fn task_fire_key(identity: &gents_protocol::trigger_delivery::FireIdentity) -> String {
+    crate::trigger_engine::durable::fire_key(identity)
+}
+
+pub struct TaskDeliveryAdmission {
+    pub request: EnqueuedAgentRequest,
+    pub duplicate: bool,
+}
+
+/// Admits a Task fire and its signed request atomically. An existing target may
+/// be busy; its request stays pending until the session claim owner admits it.
+pub async fn write_task_delivery(
+    access: &crate::config_client::ConfigAccess,
+    fire: &gents_protocol::trigger_delivery::TriggerFire,
+    continue_existing: bool,
+    create: &gents_protocol::request_admission::AgentRequestCreate,
+) -> Result<TaskDeliveryAdmission> {
+    access
+        .transact("lifecycle.admit_task_delivery", |txn| {
+            Box::pin(async move { stage_task_delivery(txn, fire, continue_existing, create).await })
+        })
+        .await
+}
+
+pub async fn write_task_delivery_local(
+    node: &EmbeddedNode,
+    actor: ::identity::Did,
+    fire: &gents_protocol::trigger_delivery::TriggerFire,
+    continue_existing: bool,
+    create: &gents_protocol::request_admission::AgentRequestCreate,
+) -> Result<TaskDeliveryAdmission> {
+    crate::config_client::ConfigAccess::transact_local(
+        node,
+        Some(actor),
+        "lifecycle.admit_task_delivery",
+        |txn| {
+            Box::pin(async move { stage_task_delivery(txn, fire, continue_existing, create).await })
+        },
+    )
+    .await
+}
+
+pub(crate) async fn write_trigger_delivery(
+    node: &EmbeddedNode,
+    actor: ::identity::Did,
+    prepared: &crate::trigger_engine::durable::PreparedFire,
+    create: &gents_protocol::request_admission::AgentRequestCreate,
+) -> Result<TaskDeliveryAdmission> {
+    write_task_delivery_local(
+        node,
+        actor,
+        &prepared.receipt,
+        prepared.target_existing,
+        create,
+    )
+    .await
+}
+
+async fn stage_task_delivery(
+    txn: &crate::config_client::ConfigApplyTxn<'_>,
+    fire: &gents_protocol::trigger_delivery::TriggerFire,
+    continue_existing: bool,
+    create: &gents_protocol::request_admission::AgentRequestCreate,
+) -> Result<TaskDeliveryAdmission> {
+    let fresh = crate::trigger_engine::durable::stage_fire_receipt(txn, fire).await?;
+    if fresh {
+        if create.caused_by_trigger_kind.as_deref() == Some("event") {
+            anyhow::ensure!(
+                create.caused_by_trigger_id.as_deref() == Some(fire.identity.trigger_id.as_str()),
+                "event request and receipt trigger identity disagree"
+            );
+            crate::config_client::event_source_cursor::validate_event_admission(txn, fire).await?;
+        }
+        anyhow::ensure!(
+            create.agent_did == fire.identity.owner_did
+                && create.request_id == fire.request_id
+                && create.session_id == fire.session_id,
+            "Task receipt and signed request identity disagree"
+        );
+        anyhow::ensure!(
+            !fire.goal_assignment_applied,
+            "a Task admission cannot apply its Goal assignment"
+        );
+        anyhow::ensure!(
+            !fire.emit_outcome
+                || fire
+                    .source_handoff_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()),
+            "outcome-enabled Task requires its source handoff identity"
+        );
+        match &fire.goal_id {
+            Some(goal_id) => {
+                anyhow::ensure!(
+                    goal_id
+                        == &crate::goal::deterministic_goal_id(
+                            &create.agent_did,
+                            &create.session_id
+                        ),
+                    "Task receipt has a noncanonical Goal identity"
+                );
+                anyhow::ensure!(
+                    fire.goal_objective
+                        .as_deref()
+                        .is_some_and(|objective| !objective.trim().is_empty()),
+                    "Goal-backed Task requires an objective"
+                );
+                anyhow::ensure!(
+                    fire.goal_token_budget.is_none_or(|budget| budget > 0),
+                    "Task Goal budget must be positive"
+                );
+            }
+            None => anyhow::ensure!(
+                fire.goal_objective.is_none() && fire.goal_token_budget.is_none(),
+                "ordinary Task receipt cannot declare a Goal assignment"
+            ),
+        }
+        let manual_label = create.caused_by_trigger_kind.as_deref() == Some("manual")
+            && create.caused_by_trigger_id.is_none()
+            && fire.identity.source_collection == "Task"
+            && fire
+                .identity
+                .trigger_id
+                .starts_with(&format!("manual:{}:", fire.task_id));
+        let session = crate::session::load_agent_session_row_in_txn(
+            txn,
+            &create.agent_did,
+            &create.session_id,
+            Some(create.requester_did.as_str()),
+        )
+        .await?;
+        if continue_existing {
+            anyhow::ensure!(
+                crate::trigger_engine::durable::resolve_session_id(
+                    &fire.identity,
+                    Some(&create.session_id),
+                    session.is_some()
+                )
+                .is_some(),
+                "Task target session is missing or belongs to another owner"
+            );
+        } else {
+            anyhow::ensure!(
+                manual_label
+                    || crate::trigger_engine::durable::resolve_session_id(
+                        &fire.identity,
+                        None,
+                        false
+                    )
+                    .as_deref()
+                        == Some(fire.session_id.as_str()),
+                "new Task session must derive from its fire identity"
+            );
+        }
+        if let Some(session) = session {
+            anyhow::ensure!(
+                session.session.behavior_id == create.behavior_id,
+                "Task target session has a different behavior"
+            );
+            anyhow::ensure!(
+                session.session.closed_at.is_none(),
+                "Task target session is closed"
+            );
+        }
+        crate::graph_pipeline::fence_graph_root_request_in_txn(txn, create).await?;
+        txn.execute(&create.graphql_mutation().map_err(anyhow::Error::msg)?)
+            .await?;
+    }
+    let query = format!("{{ AgentRequest(filter: {{agent_did: {{_eq: \"{}\"}}, request_id: {{_eq: \"{}\"}}}}) {{ _docID session_id }} }}",
+        escape_graphql_string(&fire.identity.owner_did), escape_graphql_string(&fire.request_id));
+    let response = txn.execute(&query).await?;
+    let rows = response
+        .pointer("/data/AgentRequest")
+        .and_then(serde_json::Value::as_array)
+        .context("admitted request query omitted rows")?;
+    anyhow::ensure!(
+        rows.len() == 1,
+        "fire receipt requires exactly one admitted request"
+    );
+    let session_id = rows[0]["session_id"]
+        .as_str()
+        .context("admitted request lacks session ID")?;
+    anyhow::ensure!(
+        !fresh || session_id == fire.session_id,
+        "admitted request changed its fire's session"
+    );
+    Ok(TaskDeliveryAdmission {
+        duplicate: !fresh,
+        request: EnqueuedAgentRequest {
+            doc_id: rows[0]["_docID"]
+                .as_str()
+                .context("admitted request lacks document ID")?
+                .into(),
+            request_id: fire.request_id.clone(),
+            session_id: session_id.into(),
+        },
+    })
+}
+
+#[cfg(test)]
+mod task_delivery_tests {
+    use super::*;
+    use crate::lifecycle::test_support::{pin_fixed_signing_identity, PIN_FIXED_DID};
+
+    #[tokio::test]
+    async fn task_admission_is_atomic_idempotent_and_defers_goal_assignment() {
+        let identity_dir = tempfile::tempdir().unwrap();
+        let _identity = pin_fixed_signing_identity(identity_dir.path());
+        let node = Arc::new(EmbeddedNode::builder().build().await.unwrap());
+        crate::ensure_runtime_schemas(&node).await.unwrap();
+        let access = crate::config_client::ConfigAccess::Local(node.clone());
+        let identity = gents_protocol::trigger_delivery::FireIdentity {
+            owner_did: PIN_FIXED_DID.into(),
+            trigger_id: "manual:task".into(),
+            source_collection: "Task".into(),
+            source_doc_id: "invocation-key".into(),
+        };
+        let key = task_fire_key(&identity);
+        let session_id = format!("trigger-session:{key}");
+        let fire = gents_protocol::trigger_delivery::TriggerFire {
+            fire_key: key.clone(),
+            identity,
+            task_id: "task".into(),
+            request_id: format!("trigger-request:{key}"),
+            session_id: session_id.clone(),
+            goal_id: Some(crate::goal::deterministic_goal_id(
+                PIN_FIXED_DID,
+                &session_id,
+            )),
+            goal_objective: Some("complete assignment".into()),
+            goal_token_budget: Some(100),
+            goal_assignment_applied: false,
+            emit_outcome: true,
+            queued_serial: false,
+            source_handoff_id: Some("invocation-key".into()),
+            reply_session_id: None,
+            shard_id: None,
+            attempt: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+        };
+        let create =
+            build_signed_pending_agent_request_with_lineage_workspace_and_conversation_title(
+                PIN_FIXED_DID,
+                "behavior",
+                "complete assignment",
+                ExecutionOrigin::Interactive,
+                TriggerLineage {
+                    trigger_id: None,
+                    trigger_kind: Some("manual".into()),
+                    source_doc_id: None,
+                    correlation: None,
+                    trigger_context: None,
+                },
+                None,
+                None,
+                &fire.request_id,
+                &fire.session_id,
+                Some(&fire.fire_key),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(write_task_delivery(&access, &fire, true, &create)
+            .await
+            .is_err());
+        let before = access
+            .execute("{ TriggerFire { fire_key } AgentRequest { request_id } }")
+            .await
+            .unwrap();
+        assert_eq!(before["data"]["TriggerFire"].as_array().unwrap().len(), 0);
+        assert_eq!(before["data"]["AgentRequest"].as_array().unwrap().len(), 0);
+        let first = write_task_delivery(&access, &fire, false, &create)
+            .await
+            .unwrap();
+        let retry = write_task_delivery(&access, &fire, false, &create)
+            .await
+            .unwrap();
+        assert_eq!(first.request.doc_id, retry.request.doc_id);
+        assert!(!first.duplicate);
+        assert!(retry.duplicate);
+        let after = access.execute("{ TriggerFire { fire_key goal_assignment_applied } AgentRequest { request_id lifecycle_state } Goal { goal_id } }").await.unwrap();
+        assert_eq!(after["data"]["TriggerFire"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            after["data"]["TriggerFire"][0]["goal_assignment_applied"],
+            false
+        );
+        assert_eq!(after["data"]["AgentRequest"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            after["data"]["AgentRequest"][0]["lifecycle_state"],
+            "pending"
+        );
+        assert_eq!(after["data"]["Goal"].as_array().unwrap().len(), 0);
     }
 }

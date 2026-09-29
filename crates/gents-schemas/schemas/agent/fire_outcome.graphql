@@ -1,0 +1,18 @@
+type FireOutcome @index(fields: ["handoff_id"], unique: true) {
+    handoff_id: String @immutable
+    fire_key: String @index @immutable
+    owner_did: String @index @immutable
+    trigger_id: String @index @immutable
+    source_collection: String @immutable
+    source_doc_id: String @immutable
+    request_id: String @index @immutable
+    session_id: String @index @immutable
+    goal_id: String @index @immutable
+    terminal_state: String @immutable
+    reason: String @immutable
+    source_handoff_id: String @immutable
+    reply_session_id: String @index @immutable
+    shard_id: String @immutable
+    attempt: Int @immutable
+    created_at: DateTime @index @immutable
+}

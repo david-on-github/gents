@@ -54,7 +54,7 @@ async fn claim_request_with_projection<F>(
     request: &AgentRequest,
     claimed_at: &str,
     build_mutation: F,
-) -> Result<(defra_node::QueryResponse, BackgroundCompletionClaimSnapshot)>
+) -> Result<Option<(defra_node::QueryResponse, BackgroundCompletionClaimSnapshot)>>
 where
     F: Fn(&str) -> String + Sync,
 {
@@ -83,6 +83,16 @@ where
         "lifecycle.claim_request",
         move |txn| {
             Box::pin(async move {
+                if !crate::goal::fence_goal_continuation_claim_in_txn(&txn, request, claimed_at)
+                    .await?
+                {
+                    return Ok(None);
+                }
+                if request.purpose == gents_protocol::request_admission::RequestPurpose::Normal
+                    && !super::query::claim_queue_allows(&txn, request).await?
+                {
+                    return Ok(None);
+                }
                 let snapshot = if capture_background_snapshot {
                     let response = txn.execute_local_response(&snapshot_query).await?;
                     let through_sequence = response
@@ -131,11 +141,12 @@ where
                         .and_then(|data| data.get("update_AgentRequest"))
                         .is_some_and(response_has_documents)
                 {
+                    crate::goal::apply_claimed_task_goal_in_txn(&txn, request, claimed_at).await?;
                     crate::mailbox::claim_reply_in_txn(&txn, request, claimed_at).await?;
                     super::materialize::apply_request_session_projection(&txn, request, claimed_at)
                         .await?;
                 }
-                Ok::<_, anyhow::Error>((claimed, snapshot))
+                Ok::<_, anyhow::Error>(Some((claimed, snapshot)))
             })
         },
     )
@@ -231,22 +242,11 @@ impl RequestLifecycle {
                 super::TtlOutcome::NotSet => None,
                 super::TtlOutcome::Live(parsed) => Some(parsed),
             };
-        if self.request.purpose == gents_protocol::request_admission::RequestPurpose::Normal {
-            let dedup = self.check_deduplication().await?;
-            if !dedup.is_earliest {
-                tracing::info!(
-                    request_id = %self.request.request_id,
-                    session_id = %self.request.session_id,
-                    blocking_request_id = dedup.blocking_request_id.as_deref().unwrap_or(""),
-                    "request remains queued behind earlier same-session request"
-                );
-                return Ok(DurableClaimOutcome::NotClaimed(ClaimOutcome::Queued));
-            }
-        }
         let (now, generation) = claim_inputs();
-        Ok(DurableClaimOutcome::Claimed(
-            self.persist_pending_claim_at(now, generation).await?,
-        ))
+        match self.persist_pending_claim_at(now, generation).await? {
+            Some(receipt) => Ok(DurableClaimOutcome::Claimed(receipt)),
+            None => Ok(DurableClaimOutcome::NotClaimed(ClaimOutcome::Queued)),
+        }
     }
 
     /// Commit the modeled claimed → processing boundary before allocating a
@@ -364,10 +364,36 @@ impl RequestLifecycle {
                 ) {{ _docID }}
             }}"#
         );
-        let resp = crate::config_client::ConfigAccess::write_local_idempotent_update_response(
+        let request = &self.request;
+        let resp = crate::config_client::ConfigAccess::transact_local_idempotent(
             &self.node,
+            None,
+            crate::config_client::IdempotentTransactionRetry::Standard,
             "interrupt_before_claim",
-            &mutation,
+            |txn| {
+                let mutation = &mutation;
+                let terminalized_at = &terminalized_at;
+                Box::pin(async move {
+                    let response = txn.execute_local_response(mutation).await?;
+                    if response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("update_AgentRequest"))
+                        .is_some_and(response_has_documents)
+                    {
+                        crate::trigger_engine::durable::publish_request_outcome(
+                            txn,
+                            &request.agent_did,
+                            &request.request_id,
+                            "interrupted",
+                            "interrupted before claim",
+                            terminalized_at,
+                        )
+                        .await?;
+                    }
+                    Ok(response)
+                })
+            },
         )
         .await?;
         if !resp
@@ -417,10 +443,36 @@ impl RequestLifecycle {
                 ) {{ _docID }}
             }}"#
         );
-        let resp = crate::config_client::ConfigAccess::write_local_idempotent_update_response(
+        let request = &self.request;
+        let resp = crate::config_client::ConfigAccess::transact_local_idempotent(
             &self.node,
+            None,
+            crate::config_client::IdempotentTransactionRetry::Standard,
             "expire_stale",
-            &mutation,
+            |txn| {
+                let mutation = &mutation;
+                let terminalized_at = &terminalized_at;
+                Box::pin(async move {
+                    let response = txn.execute_local_response(mutation).await?;
+                    if response
+                        .data
+                        .as_ref()
+                        .and_then(|data| data.get("update_AgentRequest"))
+                        .is_some_and(response_has_documents)
+                    {
+                        crate::trigger_engine::durable::publish_request_outcome(
+                            txn,
+                            &request.agent_did,
+                            &request.request_id,
+                            "dead",
+                            "Stale",
+                            terminalized_at,
+                        )
+                        .await?;
+                    }
+                    Ok(response)
+                })
+            },
         )
         .await?;
         if !resp
@@ -477,6 +529,9 @@ impl RequestLifecycle {
             }}"#
         );
         let request_mutation = &request_mutation;
+        let request = &self.request;
+        let outcome_reason = reason_text.as_str();
+        let outcome_time = terminalized_at_value.as_str();
         let updated =
             crate::config_client::ConfigAccess::transact_local_idempotent(
                 &self.node,
@@ -495,6 +550,17 @@ impl RequestLifecycle {
                             .get("data")
                             .and_then(|data| data.get("update_AgentRequest"))
                             .is_some_and(response_has_documents);
+                        if updated {
+                            crate::trigger_engine::durable::publish_request_outcome(
+                                txn,
+                                &request.agent_did,
+                                &request.request_id,
+                                "failed",
+                                outcome_reason,
+                                outcome_time,
+                            )
+                            .await?;
+                        }
                         Ok::<_, anyhow::Error>(updated)
                     })
                 },
@@ -561,7 +627,7 @@ impl RequestLifecycle {
         &self,
         now: chrono::DateTime<chrono::Utc>,
         execution_generation: String,
-    ) -> Result<DurableClaimReceipt> {
+    ) -> Result<Option<DurableClaimReceipt>> {
         self.ensure_state(&[LocalLifecycleState::Pending], "claim")?;
         let claimed_at = now.to_rfc3339();
         let lease_secs = i64::try_from(self.execution_lease_duration_secs)
@@ -654,7 +720,7 @@ impl RequestLifecycle {
         let is_background_completion = self.request.purpose
             == gents_protocol::request_admission::RequestPurpose::Normal
             && crate::lifecycle::is_background_completion_request(&self.request.input);
-        let (resp, snapshot) = claim_request_with_projection(
+        let Some((resp, snapshot)) = claim_request_with_projection(
             self.node.as_ref(),
             &self.request.session_id,
             is_background_completion,
@@ -662,7 +728,10 @@ impl RequestLifecycle {
             &claimed_at,
             &build_mutation,
         )
-        .await?;
+        .await?
+        else {
+            return Ok(None);
+        };
         let background_completion_input_through_sequence = snapshot.through_sequence;
 
         // The mutation response is the only response that can carry the exact
@@ -698,7 +767,7 @@ impl RequestLifecycle {
             "claimed agent request with exact DefraDB version"
         );
 
-        Ok(DurableClaimReceipt {
+        Ok(Some(DurableClaimReceipt {
             request: claimed_request,
             request_commit_cid,
             deadline_at,
@@ -706,7 +775,7 @@ impl RequestLifecycle {
             valid_until_at_claim: self.valid_until_at_claim,
             execution_generation,
             lease_ms: lease_ms as u64,
-        })
+        }))
     }
 }
 
@@ -734,6 +803,28 @@ mod tests {
         input: Option<&gents_protocol::request_input::RequestInput>,
         execution_origin: &str,
     ) -> AgentRequest {
+        insert_pending_request_for_owner(
+            node,
+            TEST_AGENT_DID,
+            request_id,
+            session_id,
+            created_at,
+            input,
+            execution_origin,
+        )
+        .await
+    }
+
+    async fn insert_pending_request_for_owner(
+        node: &EmbeddedNode,
+        owner: &str,
+        request_id: &str,
+        session_id: &str,
+        created_at: &str,
+        input: Option<&gents_protocol::request_input::RequestInput>,
+        execution_origin: &str,
+    ) -> AgentRequest {
+        let escaped_owner = escape_graphql_string(owner);
         let escaped_request_id = escape_graphql_string(request_id);
         let escaped_session_id = escape_graphql_string(session_id);
         let escaped_created_at = escape_graphql_string(created_at);
@@ -746,7 +837,7 @@ mod tests {
                 create_AgentRequest(input: {{
                     request_id: "{escaped_request_id}",
                     purpose: "normal",
-                    agent_did: "{TEST_AGENT_DID}",
+                    agent_did: "{escaped_owner}",
                     behavior_id: "{TEST_BEHAVIOR_ID}",
                     session_id: "{escaped_session_id}",
                     retry_parent_request: "",
@@ -878,6 +969,325 @@ mod tests {
             .is_err(),
             "expired replay must not acknowledge ownership"
         );
+    }
+
+    #[tokio::test]
+    async fn claim_queue_uses_arrival_order_and_scopes_sessions_to_owner() {
+        let node = test_node().await;
+        let _foreign = insert_pending_request_for_owner(
+            &node,
+            "did:test:foreign-owner",
+            "foreign-first",
+            "shared-session-id",
+            "2025-01-01T00:00:00Z",
+            None,
+            "interactive",
+        )
+        .await;
+        let first = insert_pending_request(
+            &node,
+            "z-first",
+            "shared-session-id",
+            "2026-01-02T00:00:00Z",
+            None,
+            "interactive",
+        )
+        .await;
+        let second = insert_pending_request(
+            &node,
+            "a-second",
+            "shared-session-id",
+            "2026-01-01T00:00:00Z",
+            None,
+            "interactive",
+        )
+        .await;
+        for (request, expected) in [(&first, true), (&second, false)] {
+            let allowed = crate::config_client::ConfigAccess::transact_local(
+                &node,
+                None,
+                "test.claim_queue_arrival_order",
+                |txn| {
+                    Box::pin(
+                        async move { super::super::query::claim_queue_allows(txn, request).await },
+                    )
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(allowed, expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_task_goal_changes_only_when_its_request_claims() {
+        for stopped in [false, true] {
+            for task_budget in [None, Some(50)] {
+                let node = test_node().await;
+                let session = "task-goal-session";
+                let original = crate::goal::set_goal(
+                    &node,
+                    TEST_AGENT_DID,
+                    session,
+                    Some("finish original work"),
+                    Some(crate::goal::GoalStatus::Active),
+                    Some(Some(100)),
+                )
+                .await
+                .unwrap();
+                let first = insert_pending_request(
+                    &node,
+                    "prior-request",
+                    session,
+                    "2026-01-01T00:00:00Z",
+                    None,
+                    "interactive",
+                )
+                .await;
+                let first_doc_id = first.doc_id.clone();
+                let second = insert_pending_request(
+                    &node,
+                    "task-request",
+                    session,
+                    "2026-01-01T00:00:01Z",
+                    None,
+                    "interactive",
+                )
+                .await;
+                let assigned_doc_id = second.doc_id.clone();
+                let receipt = serde_json::json!({
+                    "fire_key": "task-goal-fire", "owner_did": TEST_AGENT_DID,
+                    "task_id": "goal-task", "created_at": "2026-01-01T00:00:01Z",
+                    "trigger_id": "task-goal-trigger", "source_collection": "Work",
+                    "source_doc_id": "assignment", "request_id": second.request_id,
+                    "session_id": session, "queued_serial": true, "emit_outcome": false,
+                    "goal_id": original.goal_id, "goal_objective": "perform next assignment",
+                    "goal_token_budget": task_budget, "goal_assignment_applied": false,
+                });
+                crate::config_client::ConfigAccess::transact_local(&node, None, "test.task_assignment", |txn| {
+            let receipt = receipt.clone();
+            Box::pin(async move {
+                txn.execute_with_variables("mutation($input: TriggerFireMutationInputArg!) { create_TriggerFire(input: $input) { _docID } }",
+                    &serde_json::json!({"input": receipt})).await?;
+                Ok(())
+            })
+        }).await.unwrap();
+                let mut first_lifecycle = RequestLifecycle::new_with_execution_binding(
+                    node.clone(),
+                    TEST_BEHAVIOR_ID,
+                    TEST_AGENT_DID,
+                    first,
+                    60,
+                    ExecutionOrigin::Interactive,
+                    TEST_BACKEND_ID,
+                );
+                let mut second_lifecycle = RequestLifecycle::new_with_execution_binding(
+                    node.clone(),
+                    TEST_BEHAVIOR_ID,
+                    TEST_AGENT_DID,
+                    second,
+                    60,
+                    ExecutionOrigin::Interactive,
+                    TEST_BACKEND_ID,
+                );
+                let now = chrono::Utc::now();
+                assert!(first_lifecycle
+                    .claim_pending_durable_with_inputs(|| now, || (now, "first".into()))
+                    .await
+                    .unwrap()
+                    .was_claimed());
+                assert!(matches!(
+                    second_lifecycle
+                        .claim_pending_durable_with_inputs(|| now, || (now, "second".into()))
+                        .await
+                        .unwrap(),
+                    DurableClaimOutcome::NotClaimed(ClaimOutcome::Queued)
+                ));
+                let unchanged = crate::goal::load_canonical_goal(&node, TEST_AGENT_DID, session)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(unchanged.objective, original.objective);
+                assert_eq!(
+                    unchanged.continuation_sequence(),
+                    original.continuation_sequence()
+                );
+                let finish = format!(
+                    r#"mutation {{
+            update_AgentRequest(filter: {{_docID: {{_eq: "{}"}}}}, input: {{lifecycle_state: "completed"}}) {{_docID}}
+            create_InferenceCall(input: {{call_id: "prior-usage", request_id: "prior-request", agent_did: "{TEST_AGENT_DID}", prompt_tokens: 100, completion_tokens: 0}}) {{_docID}}
+        }}"#,
+                    escape_graphql_string(&first_doc_id)
+                );
+                crate::config_client::ConfigAccess::transact_local(
+                    &node,
+                    None,
+                    "test.finish_prior_assignment",
+                    |txn| {
+                        let finish = &finish;
+                        Box::pin(async move {
+                            txn.execute(finish).await?;
+                            Ok(())
+                        })
+                    },
+                )
+                .await
+                .unwrap();
+                if stopped {
+                    crate::goal::set_goal(
+                        &node,
+                        TEST_AGENT_DID,
+                        session,
+                        None,
+                        Some(crate::goal::GoalStatus::Complete),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                }
+                assert!(second_lifecycle
+                    .claim_pending_durable_with_inputs(|| now, || (now, "second".into()))
+                    .await
+                    .unwrap()
+                    .was_claimed());
+                let assigned = crate::goal::load_canonical_goal(&node, TEST_AGENT_DID, session)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(assigned.objective, "perform next assignment");
+                assert_eq!(
+                    assigned.assignment_root_request_doc_id.as_deref(),
+                    Some(assigned_doc_id.as_str())
+                );
+                assert_eq!(assigned.token_budget, task_budget);
+                assert_eq!(
+                    assigned.parsed_status(),
+                    Some(crate::goal::GoalStatus::Active)
+                );
+                assert_eq!(
+                    assigned.continuation_sequence(),
+                    original.continuation_sequence() + 1
+                );
+                assert_eq!(
+                    assigned.token_usage_baseline.unwrap_or_default(),
+                    if stopped { 100 } else { 0 }
+                );
+                assert_eq!(
+                    crate::goal::refresh_goal_usage(&node, &assigned)
+                        .await
+                        .unwrap(),
+                    if stopped { 0 } else { 100 }
+                );
+                assert!(!crate::goal::update_goal_fields_if_status(
+                    &node,
+                    &original,
+                    crate::goal::GoalStatus::Active,
+                    "objective: \"stale controller\""
+                )
+                .await
+                .unwrap());
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_serial_claims_follow_durable_arrival_order() {
+        let node = test_node().await;
+        // The later request sorts first by both logical ID and wall time.
+        let first = insert_pending_request(
+            &node,
+            "z-first",
+            "first-session",
+            "2026-01-02T00:00:00Z",
+            None,
+            "interactive",
+        )
+        .await;
+        let second = insert_pending_request(
+            &node,
+            "a-second",
+            "second-session",
+            "2026-01-01T00:00:00Z",
+            None,
+            "interactive",
+        )
+        .await;
+        for request in [&first, &second] {
+            let input = serde_json::json!({
+                "fire_key": format!("test-fire:{}", request.request_id),
+                "owner_did": TEST_AGENT_DID,
+                "trigger_id": "queued-serial-trigger",
+                "source_collection": "Work",
+                "source_doc_id": request.request_id,
+                "request_id": request.request_id,
+                "session_id": request.session_id,
+                "queued_serial": true,
+                "goal_assignment_applied": false,
+            });
+            crate::config_client::ConfigAccess::transact_local(
+                &node, None, "test.serial_claim_receipt", |txn| {
+                    let input = input.clone();
+                    Box::pin(async move {
+                        txn.execute_with_variables(
+                            "mutation($input: TriggerFireMutationInputArg!) { create_TriggerFire(input: $input) { _docID } }",
+                            &serde_json::json!({"input": input}),
+                        ).await?;
+                        Ok(())
+                    })
+                },
+            ).await.unwrap();
+        }
+        let first_doc_id = first.doc_id.clone();
+        let second_doc_id = second.doc_id.clone();
+        let mut first_lifecycle = RequestLifecycle::new_with_execution_binding(
+            node.clone(),
+            TEST_BEHAVIOR_ID,
+            TEST_AGENT_DID,
+            first,
+            60,
+            ExecutionOrigin::Interactive,
+            TEST_BACKEND_ID,
+        );
+        let mut second_lifecycle = RequestLifecycle::new_with_execution_binding(
+            node.clone(),
+            TEST_BEHAVIOR_ID,
+            TEST_AGENT_DID,
+            second,
+            60,
+            ExecutionOrigin::Interactive,
+            TEST_BACKEND_ID,
+        );
+        let now = chrono::Utc::now();
+        let (second_result, first_result) = tokio::join!(
+            second_lifecycle
+                .claim_pending_durable_with_inputs(|| now, || (now, "second-generation".into())),
+            first_lifecycle
+                .claim_pending_durable_with_inputs(|| now, || (now, "first-generation".into())),
+        );
+        assert!(matches!(
+            second_result.unwrap(),
+            DurableClaimOutcome::NotClaimed(ClaimOutcome::Queued)
+        ));
+        assert!(first_result.unwrap().was_claimed());
+        assert_eq!(
+            durable_request_row(&node, &first_doc_id)
+                .await
+                .lifecycle_state,
+            Some(RequestLifecycleState::Claimed)
+        );
+        assert_eq!(
+            durable_request_row(&node, &second_doc_id)
+                .await
+                .lifecycle_state,
+            Some(RequestLifecycleState::Pending)
+        );
+        assert!(matches!(
+            second_lifecycle
+                .claim_pending_durable_with_inputs(|| now, || (now, "second-generation".into()))
+                .await
+                .unwrap(),
+            DurableClaimOutcome::NotClaimed(ClaimOutcome::Queued)
+        ));
     }
 
     #[tokio::test]

@@ -258,6 +258,7 @@ export function NewAutomationDialog({
           description: null,
           behavior_id: behaviorId,
           prompt_template: prompt.trim(),
+          emit_outcome: false,
           goal_objective_template: null,
           goal_token_budget: null,
           enabled: true,

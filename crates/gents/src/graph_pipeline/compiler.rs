@@ -769,6 +769,86 @@ pub fn compile_graph(
         }
     }
 
+    for (index, node) in intent.nodes.iter().enumerate() {
+        let Some(selection) = &node.session else {
+            continue;
+        };
+        let path = format!("/nodes/{index}/session/continue");
+        let target = selection.continue_node_id.as_str();
+        if target.trim().is_empty() || target == node.node_id {
+            diagnostic(
+                &mut diagnostics,
+                DiagnosticCode::InvalidSessionSelection,
+                path,
+                "session continuation must name another Task node",
+            );
+            continue;
+        }
+        let source_task = resolved
+            .get(node.node_id.as_str())
+            .is_some_and(|cap| matches!(cap.target, StageTarget::Task { .. }));
+        let target_exists = nodes.contains(target);
+        let target_task = resolved
+            .get(target)
+            .is_some_and(|cap| matches!(cap.target, StageTarget::Task { .. }));
+        let entries = intent
+            .entries
+            .iter()
+            .filter(|entry| entry.to.node_id == target)
+            .count();
+        let edges = intent
+            .edges
+            .iter()
+            .filter(|edge| edge.to.node_id == target)
+            .collect::<Vec<_>>();
+        use super::run::workspace_lineage::{
+            session_target_eligible, SessionTargetEligibility, SessionTargetRoute,
+        };
+        let (route_count, route_kind) = if entries > 0 && edges.is_empty() {
+            (1, SessionTargetRoute::SelectedEntry)
+        } else {
+            (
+                entries + edges.len(),
+                if edges.len() == 1 && edges[0].delivery.is_some() {
+                    SessionTargetRoute::Grouped
+                } else {
+                    SessionTargetRoute::PerDocument
+                },
+            )
+        };
+        let eligibility = SessionTargetEligibility {
+            source_is_task: source_task,
+            target_exists,
+            target_is_task: target_task,
+            route_count,
+            route_kind,
+        };
+        if !session_target_eligible(&eligibility) {
+            let (code, message) = if !source_task {
+                (
+                    DiagnosticCode::InvalidSessionSelection,
+                    "only Task nodes can continue sessions",
+                )
+            } else if !target_exists {
+                (
+                    DiagnosticCode::UnknownSessionTarget,
+                    "session continuation target does not exist",
+                )
+            } else if !target_task {
+                (
+                    DiagnosticCode::NonTaskSessionTarget,
+                    "session continuation target must be a Task",
+                )
+            } else {
+                (
+                    DiagnosticCode::NonSingletonSessionTarget,
+                    "session target must be a selected entry or one grouped route per correlation",
+                )
+            };
+            diagnostic(&mut diagnostics, code, path, message);
+        }
+    }
+
     if !diagnostics.is_empty() {
         sorted_diagnostics(&mut diagnostics);
         return Err(GraphCompileError { diagnostics });
@@ -784,6 +864,7 @@ pub fn compile_graph(
                 capability_id: capability.capability_id.clone(),
                 capability_revision: capability.revision.clone(),
                 target: capability.target.clone(),
+                session: node.session.clone(),
                 output_ports: match capability.target {
                     StageTarget::Plugin { .. } => capability.output_ports.clone(),
                     StageTarget::Task { .. } => Vec::new(),

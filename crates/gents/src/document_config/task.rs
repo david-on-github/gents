@@ -19,6 +19,14 @@ pub struct Task {
     pub description: Option<String>,
     pub behavior_id: String,
     pub prompt_template: String,
+    /// Emit one durable FireOutcome at the request or Goal terminal boundary.
+    /// Outcome consumers must leave this disabled.
+    #[serde(
+        default,
+        deserialize_with = "super::serde_helpers::deserialize_default_on_null",
+        skip_serializing_if = "super::serde_helpers::is_disabled"
+    )]
+    pub emit_outcome: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
     pub goal_objective_template: Option<String>,

@@ -628,6 +628,12 @@ Provider-input assembly for Claude: the body's `system[]` order and tools omissi
 | `Proofs/Optimization.lean` | Configuration optimization (#1455) on the eval contract: worst-case unknown imputation, integer sufficiency and non-regression gates over per-case paired sums, the cost sub-gate, the ordered decision, the rule that too few cases can never be accepted, and the length-guarded job journal with bounded rounds. The permutation test, eval runs and the proposer are refinement boundaries |
 | `Proofs/SelfConfig.lean` | Barrel for agent self-configuration patch semantics: field partitions, merge, write step, and guardrails (#654) |
 | `Proofs/Triggers.lean` | Barrel for trigger types, dispatch, reachability, serial, latest-only, and lineage proofs |
+| `Proofs/Triggers/Identity.lean` | Canonical fire identity framing and injectivity; owner, trigger, collection and physical document identity feed request, session and outcome IDs. |
+| `Proofs/Triggers/Queue.lean` | Single claim predicate for native arrival observations and the closed fire model; queued-serial FIFO, running-session exclusion, and the pre-journal ordinary cohort. |
+| `Proofs/Triggers/Refinement.lean` | Fresh queued document admission refines the legacy dispatch model after erasing durable identity and claim details; execution exclusion belongs to the shared claim predicate. |
+| `Proofs/Triggers/Durable.lean` | Atomic admission, configured outcome-chain rejection, shared session Goal assignments, separate terminal/publication transitions and idempotent outcome recovery. |
+| `Proofs/EventDelivery/Durable.lean` | Receiving-node arrival journal checkpoints and complete-prefix admission/disposition invariant, including disabled delivery, initial seeding and crash replay. |
+| `Proofs/GraphPipeline/WorkspaceLineage.lean` | Pinned graph session selection for #1445, sharing authenticated existing session and ancestry owners. |
 | `Proofs/Workspace.lean` | Isolated workspace lifecycle, append-only bindings, seal/owner routing, and authority meet |
 | `Proofs/Callback.lean` | Callback invocation lifecycle, action-journal prefix, and claim uniqueness |
 | `Proofs/Client.lean` | Barrel for client turn-state derivation and client theorems |
@@ -675,7 +681,7 @@ Semantic submodules:
 | `Proofs.InferenceCall` | `State`, `Transition`, `Executable`, `Properties`, `SlotAccounting`, `ControllerBookkeeping`, `Registry`, `Persistence` |
 | `Proofs.RuntimeReconcile` | `State`, `Transition`, `Executable` |
 | `Proofs.ApplyReconcile` | `Collections`, `Manifest`, `Publication` (includes digest-guarded `publishIf`), `Convergence`, `ContractCases`, `RuntimeBridge` |
-| `Proofs.Triggers` | `Types`, `Dispatch`, `Reachability`, `SerialSupport`, `Serial`, `LatestOnly`, `Lineage` |
+| `Proofs.Triggers` | `Types`, `Dispatch`, `Reachability`, `SerialSupport`, `Serial`, `LatestOnly`, `Lineage`, `Groups`, `Identity`, `Queue`, `Durable`, `Refinement` |
 | `Proofs.Triggers.SerialSupport` | `Counting`, `Preservation` |
 | `Proofs.Client` | `Types`, `Lifecycle`, `Terminal`, `Replacement`, `Output` |
 | `Proofs.ClientShell` | `Types`, `Submission`, `Transition`, `Projection`, `Timeline`, `PresentationAgreement`, `ObservationOrdering`, `Theorems` |

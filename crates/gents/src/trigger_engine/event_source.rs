@@ -34,6 +34,8 @@ use crate::UpdateSubscriptionSource;
 
 use super::{FireIntent, TriggerKind, TriggerSource};
 
+mod durable;
+
 /// Cap for the one-shot existing-docs seed query run when a collection is
 /// newly admitted to `desired_collections`. The goal of the seed is to
 /// enforce spec's forward-only semantic: pre-existing docs in the source
@@ -157,6 +159,9 @@ struct DeliveryBuild {
 }
 
 pub struct EventSource {
+    durable_checkpoint: Option<durable::PendingCheckpoint>,
+    durable_ready: bool,
+    durable_after_trigger: Option<String>,
     runtime_observer: Option<Arc<dyn crate::agent::RuntimeSnapshotObserver>>,
     snapshot_rx: watch::Receiver<Arc<ActiveRuntimeSnapshot>>,
     node: Arc<EmbeddedNode>,
@@ -177,6 +182,9 @@ pub struct EventSource {
     // correlation-incomplete sibling. This prevents a ready sibling from
     // firing again when a follow-up update supplies the missing correlation.
     partially_seen_triggers: HashMap<SourceDocumentKey, HashSet<String>>,
+    /// Startup reconstructs incomplete correlations/live graph rows that predate
+    /// the registration cursor; these retain the existing deferred-delivery owner.
+    startup_deferred_documents: HashSet<SourceDocumentKey>,
     pub(super) deferrals: super::deferred_delivery::DeferralWatch,
     pending_intents: Mutex<VecDeque<FireIntent>>,
     group_timers: Arc<Mutex<HashMap<GroupTrackingKey, GroupTimer>>>,
@@ -323,8 +331,12 @@ impl EventSource {
             cancel,
             source_schema_cache: SourceSchemaCache::default(),
             collection_id_to_name: HashMap::new(),
+            durable_checkpoint: None,
+            durable_ready: true,
+            durable_after_trigger: None,
             seen_docs: HashMap::new(),
             partially_seen_triggers: HashMap::new(),
+            startup_deferred_documents: HashSet::new(),
             deferrals: Default::default(),
             pending_intents: Mutex::new(VecDeque::new()),
             group_timers: Arc::new(Mutex::new(HashMap::new())),
@@ -428,7 +440,40 @@ impl EventSource {
             );
         }
 
+        for trigger in snapshot.active_event_triggers().values() {
+            if trigger.event_kind != "created"
+                || trigger.fire_mode != crate::runtime_snapshot::EventTriggerFireMode::PerDocument
+            {
+                continue;
+            }
+            let Ok(delivery) = Self::delivery(snapshot, trigger) else {
+                continue;
+            };
+            let owner = delivery.owner();
+            if let Err(error) = crate::config_client::ConfigAccess::transact_local(
+                &self.node,
+                None,
+                "trigger.seed_arrival_cursor",
+                |txn| {
+                    Box::pin(async move {
+                        crate::config_client::event_source_cursor::load_or_seed_for_source(
+                            txn,
+                            owner,
+                            &trigger.trigger_id,
+                            &trigger.source_collection,
+                        )
+                        .await
+                        .map(|_| ())
+                    })
+                },
+            )
+            .await
+            {
+                tracing::warn!(%error, trigger_id = %trigger.trigger_id, "arrival registration remains pending");
+            }
+        }
         self.desired_collections = desired;
+        self.durable_ready = true;
         self.subscription_seed_failures
             .retain(|collection, _| self.desired_collections.contains(collection));
 
@@ -684,6 +729,10 @@ impl EventSource {
             }
         }
         for (doc_id, pending_trigger_ids) in &deferred_by_doc {
+            self.startup_deferred_documents.insert(SourceDocumentKey {
+                source_collection: collection.to_owned(),
+                source_doc_id: doc_id.clone(),
+            });
             doc_ids.remove(doc_id);
             self.mark_triggers_seen(
                 collection,
@@ -740,44 +789,6 @@ impl EventSource {
         Err(last_error.expect("seed retry loop always attempts at least once"))
     }
 
-    async fn load_doc_ids_for_collection(&self, collection: &str) -> anyhow::Result<Vec<String>> {
-        crate::graphql::validate_collection_identifier(collection)?;
-        let query = format!(
-            r#"query {{ {collection}(limit: {limit}) {{ _docID }} }}"#,
-            collection = collection,
-            limit = SEEN_DOCS_SEED_LIMIT,
-        );
-        let response = crate::graphql::graphql_with_transaction_retry(
-            &self.node,
-            &query,
-            "event source rescan query",
-        )
-        .await
-        .with_context(|| format!("event source rescan query for {collection}"))?;
-        let rows = response
-            .data
-            .as_ref()
-            .and_then(|data| data.get(collection))
-            .and_then(serde_json::Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        if rows.len() >= SEEN_DOCS_SEED_LIMIT {
-            tracing::warn!(
-                source_collection = %collection,
-                limit = %SEEN_DOCS_SEED_LIMIT,
-                "event source rescan hit limit; older unseen docs may wait for a later event"
-            );
-        }
-        Ok(rows
-            .into_iter()
-            .filter_map(|row| {
-                row.get("_docID")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            })
-            .collect())
-    }
-
     pub(super) fn has_seen(&self, collection: &str, doc_id: &str) -> bool {
         self.seen_docs
             .get(collection)
@@ -785,6 +796,10 @@ impl EventSource {
     }
 
     fn mark_seen(&mut self, collection: &str, doc_id: &str) {
+        self.startup_deferred_documents.remove(&SourceDocumentKey {
+            source_collection: collection.to_owned(),
+            source_doc_id: doc_id.to_owned(),
+        });
         self.seen_docs
             .entry(collection.to_string())
             .or_default()
@@ -1126,7 +1141,7 @@ impl EventSource {
         #[cfg(test)]
         self.group_membership_queries
             .fetch_add(1, Ordering::Relaxed);
-        let (docs, complete) = match event_delivery::evaluate_group(
+        let (docs, complete, state_doc_id) = match event_delivery::evaluate_group(
             &self.node,
             &self.source_schema_cache,
             delivery,
@@ -1135,12 +1150,13 @@ impl EventSource {
         .await
         {
             Ok(GroupOutcome::Ready {
+                state_doc_id,
                 first_seen,
                 docs,
                 complete,
             }) => {
                 self.cache_group_clock(&key, first_seen, reactivate);
-                (docs, complete)
+                (docs, complete, state_doc_id)
             }
             Ok(GroupOutcome::Pending {
                 first_seen,
@@ -1191,6 +1207,7 @@ impl EventSource {
             "correlation": correlation,
         });
         let group_vars = serde_json::json!({
+            "state_doc_id": state_doc_id,
             "correlation_value": correlation,
             "count": docs.len(),
             "docs": docs,
@@ -1222,7 +1239,9 @@ impl EventSource {
             on_result: Box::new(move |result| {
                 if matches!(
                     result,
-                    super::FireResult::Fired { .. } | super::FireResult::Skipped { .. }
+                    super::FireResult::Fired { .. }
+                        | super::FireResult::Duplicate { .. }
+                        | super::FireResult::Skipped { .. }
                 ) {
                     timers
                         .lock()
@@ -1281,7 +1300,7 @@ impl EventSource {
                         caused_by_correlation: {{ _in: [{correlations}] }}
                     }},
                     limit: {limit}
-                ) {{ caused_by_correlation request_id }}
+                ) {{ caused_by_correlation request_id retry_key }}
             }}"#,
             agent_did = crate::graphql::escape_graphql_string(agent_did),
             trigger_id = crate::graphql::escape_graphql_string(&trigger.trigger_id),
@@ -1315,8 +1334,9 @@ impl EventSource {
                 let correlation = row.get("caused_by_correlation")?.as_str()?;
                 let key = keys.get(correlation)?;
                 let request_id = row.get("request_id")?.as_str()?;
-                event_delivery::request_matches_fire_key(agent_did, request_id, key)
-                    .then(|| correlation.to_owned())
+                (event_delivery::request_matches_fire_key(agent_did, request_id, key)
+                    || row["retry_key"].as_str() == Some(key.as_str()))
+                .then(|| correlation.to_owned())
             })
             .collect()
     }
@@ -1561,6 +1581,10 @@ impl EventSource {
                     );
                     ("fired", None, Some(1))
                 }
+                crate::trigger_engine::FireResult::Duplicate { request_id } => {
+                    tracing::debug!(%trigger_id, %request_id, "duplicate event fire refused");
+                    ("duplicate", None, None)
+                }
                 crate::trigger_engine::FireResult::Skipped { reason } => {
                     ("skipped", Some(reason.clone()), None)
                 }
@@ -1624,6 +1648,24 @@ impl EventSource {
             .collect();
         candidates.sort_by(|a, b| a.trigger_id.cmp(&b.trigger_id));
 
+        self.build_intents_for_candidates(
+            snapshot,
+            collection_name,
+            source_doc_id,
+            candidates,
+            true,
+        )
+        .await
+    }
+
+    async fn build_intents_for_candidates(
+        &self,
+        snapshot: &ActiveRuntimeSnapshot,
+        collection_name: &str,
+        source_doc_id: &str,
+        candidates: Vec<crate::runtime_snapshot::ResolvedEventTrigger>,
+        use_seen: bool,
+    ) -> DeliveryBuild {
         let mut build = DeliveryBuild {
             intents: Vec::with_capacity(candidates.len()),
             correlation_pending: false,
@@ -1631,7 +1673,9 @@ impl EventSource {
             deferred: Vec::new(),
         };
         for trigger in candidates {
-            if self.has_seen_trigger(collection_name, source_doc_id, &trigger.trigger_id) {
+            if use_seen
+                && self.has_seen_trigger(collection_name, source_doc_id, &trigger.trigger_id)
+            {
                 continue;
             }
             match self.probe_filter(source_doc_id, &trigger).await {
@@ -1809,47 +1853,31 @@ impl EventSource {
         if let Some(intent) = self.reconcile_due_and_rotating_groups().await {
             return Some(intent);
         }
-        let mut collections: Vec<String> = self.desired_collections.iter().cloned().collect();
-        collections.sort();
         let snapshot = self.snapshot_rx.borrow().clone();
-
-        for collection in collections {
-            let doc_ids = match self.load_doc_ids_for_collection(&collection).await {
-                Ok(doc_ids) => doc_ids,
-                Err(err) => {
-                    tracing::warn!(
-                        source_collection = %collection,
-                        %err,
-                        "event source periodic rescan failed for collection",
-                    );
-                    continue;
-                }
-            };
-
-            for doc_id in doc_ids {
-                if self.has_seen(&collection, &doc_id) {
-                    continue;
-                }
-                let build = self
-                    .build_intents_for_all_matching(
-                        snapshot.as_ref(),
-                        &collection,
-                        &doc_id,
-                        "created",
-                    )
-                    .await;
-                self.commit_delivery_seen_state(&collection, &doc_id, &build);
-                if let Some(first) = self.take_first_and_queue_rest(build.intents) {
-                    tracing::info!(
-                        source_collection = %collection,
-                        source_doc_id = %doc_id,
-                        "event source periodic rescan emitted fire intent",
-                    );
-                    return Some(first);
-                }
+        let mut deferred = self
+            .startup_deferred_documents
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        deferred.sort_by(|a, b| {
+            (&a.source_collection, &a.source_doc_id).cmp(&(&b.source_collection, &b.source_doc_id))
+        });
+        for doc in deferred {
+            let build = self
+                .build_intents_for_all_matching(
+                    snapshot.as_ref(),
+                    &doc.source_collection,
+                    &doc.source_doc_id,
+                    "created",
+                )
+                .await;
+            self.commit_delivery_seen_state(&doc.source_collection, &doc.source_doc_id, &build);
+            if let Some(intent) = self.take_first_and_queue_rest(build.intents) {
+                return Some(intent);
             }
         }
-        None
+        self.durable_ready = true;
+        self.next_durable_fire().await
     }
 }
 
@@ -1867,13 +1895,8 @@ impl TriggerSource for EventSource {
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<FireIntent>> + Send + '_>> {
         Box::pin(async move {
-            // Outer loop: reconcile-on-generation-bump, then race subscription
-            // vs. snapshot-change vs. cancel. `None` here means "source is
-            // permanently done, drop it" — an idle tick or an unmatched event
-            // must not exit. Return `None` only on cancel or subscription
-            // channel closure; keep looping otherwise so the engine's outer
-            // driver doesn't teardown the source on the first miss.
             loop {
+                self.finish_durable_checkpoint().await;
                 if let Some(intent) = self
                     .pending_intents
                     .lock()
@@ -1888,10 +1911,21 @@ impl TriggerSource for EventSource {
                     self.reconcile_subscriptions(snapshot.as_ref()).await;
                 }
 
+                if self.durable_ready {
+                    if let Some(intent) = self.next_durable_fire().await {
+                        return Some(intent);
+                    }
+                }
+
                 if self.subscription.is_none() || self.desired_collections.is_empty() {
                     tokio::select! {
                         biased;
                         _ = self.cancel.cancelled() => return None,
+                        _ = self.rescan_tick.tick(), if !self.desired_collections.is_empty() => {
+                            self.durable_ready = true;
+                            self.subscription = Some(self.subscription_source.subscribe_updates());
+                            continue;
+                        }
                         res = self.snapshot_rx.changed() => {
                             if res.is_err() {
                                 return None;
@@ -1906,6 +1940,7 @@ impl TriggerSource for EventSource {
                 // above, so we can take a &mut borrow for the recv poll.
                 let mut message = None;
                 let mut dropped = 0;
+                let mut subscription_closed = false;
                 let rescan_due = {
                     let subscription = self
                         .subscription
@@ -1928,11 +1963,9 @@ impl TriggerSource for EventSource {
                                     false
                                 }
                                 None => {
-                                    tracing::warn!(
-                                        "event source subscription channel closed; \
-                                         source exiting",
-                                    );
-                                    return None;
+                                    tracing::warn!("event source subscription closed; durable delivery continues on source ticks");
+                                    subscription_closed = true;
+                                    true
                                 }
                             }
                         }
@@ -1942,12 +1975,16 @@ impl TriggerSource for EventSource {
                     }
                     rescan_due
                 };
+                if subscription_closed {
+                    self.subscription = None;
+                }
                 if rescan_due {
                     if let Some(intent) = self.rescan_created_docs().await {
                         return Some(intent);
                     }
                     continue;
                 }
+                self.durable_ready = true;
                 let message = message.expect("subscription recv branch sets message");
 
                 if dropped > 0 {
@@ -2008,7 +2045,7 @@ impl TriggerSource for EventSource {
 
                 let snapshot = self.snapshot_rx.borrow().clone();
                 let event_kind = "created";
-                let build = self
+                let mut build = self
                     .build_intents_for_all_matching(
                         snapshot.as_ref(),
                         &collection_name,
@@ -2016,6 +2053,15 @@ impl TriggerSource for EventSource {
                         event_kind,
                     )
                     .await;
+                let startup_deferred =
+                    self.startup_deferred_documents
+                        .contains(&SourceDocumentKey {
+                            source_collection: collection_name.clone(),
+                            source_doc_id: doc_id.clone(),
+                        });
+                build
+                    .intents
+                    .retain(|intent| startup_deferred || intent.group_vars.is_some());
                 self.commit_delivery_seen_state(&collection_name, &doc_id, &build);
                 if build.intents.is_empty() {
                     continue;

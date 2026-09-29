@@ -229,8 +229,7 @@ pub async fn promote(
             &path,
             &origin.owner,
             &origin.subject.behavior_id,
-            origin.target.field,
-            origin.target.task_id(),
+            &origin.target.job_target(),
         )?;
         let text = baseline_text(&pack)?;
         anyhow::ensure!(

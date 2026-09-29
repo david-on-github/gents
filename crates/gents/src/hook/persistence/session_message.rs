@@ -205,6 +205,7 @@ impl DefraSessionHook {
             &self.node,
             &caller.agent_did,
             &target.behavior_id,
+            &target.session_id,
             body,
         )
         .await?

@@ -447,6 +447,7 @@ async fn terminalize_execution_with_time(
             let expiry = escape_graphql_string(expiry);
             let timestamp = now.to_rfc3339();
             let timestamp_gql = escape_graphql_string(&timestamp);
+            let outcome_reason = reason;
             let reason = escape_graphql_string(reason);
             let target = escape_graphql_string(effective_outcome.request_state().as_str());
             let state = escape_graphql_string(state.as_str());
@@ -477,6 +478,10 @@ async fn terminalize_execution_with_time(
                 request_doc_id, &row.request_id, &timestamp,
             ).await?;
             }
+            crate::trigger_engine::durable::publish_request_outcome(
+                txn, agent, &row.request_id, effective_outcome.request_state().as_str(),
+                outcome_reason, &timestamp,
+            ).await?;
             Ok(TerminalizeResult::Won)
         }),
     ).await

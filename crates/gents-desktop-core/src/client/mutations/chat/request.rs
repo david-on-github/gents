@@ -79,6 +79,7 @@ pub async fn submit_request(
         content,
         behavior_id,
         options,
+        None,
     )
     .await?;
     let mutation = create.graphql_mutation().map_err(anyhow::Error::msg)?;
@@ -119,6 +120,7 @@ pub async fn submit_goal_backed_request(
         content,
         behavior_id,
         options,
+        None,
     )
     .await?;
     gents::goal::submit_goal_backed_request(
@@ -134,6 +136,42 @@ pub async fn submit_goal_backed_request(
 }
 
 #[allow(clippy::too_many_arguments)]
+pub async fn submit_task_request(
+    node: &EmbeddedNode,
+    store: &ClientStore,
+    access: &ConfigAccess,
+    fire: &gents_protocol::trigger_delivery::TriggerFire,
+    requester_did: &str,
+    signer: &dyn gents::identity::AgentIdentity,
+    admission: AgentRequestAdmissionRecord,
+    content: &str,
+    behavior_id: Option<&str>,
+    mut options: SubmitRequestOptions,
+) -> Result<SubmittedRequest> {
+    options.retry_key = Some(fire.fire_key.clone());
+    let (result, create) = build_request_submission(
+        node,
+        store,
+        &fire.session_id,
+        &fire.identity.owner_did,
+        requester_did,
+        signer,
+        admission,
+        content,
+        behavior_id,
+        options,
+        Some(&fire.request_id),
+    )
+    .await?;
+    let admitted = gents::lifecycle::write_task_delivery(access, fire, false, &create).await?;
+    Ok(SubmittedRequest {
+        request_id: admitted.request.request_id,
+        session_id: admitted.request.session_id,
+        ..result
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn build_request_submission(
     node: &EmbeddedNode,
     store: &ClientStore,
@@ -145,6 +183,7 @@ async fn build_request_submission(
     content: &str,
     behavior_id: Option<&str>,
     options: SubmitRequestOptions,
+    request_id: Option<&str>,
 ) -> Result<(
     SubmittedRequest,
     gents_protocol::request_admission::AgentRequestCreate,
@@ -154,7 +193,9 @@ async fn build_request_submission(
     let requester_did = normalize_required("requester_did", requester_did)?;
     let content = normalize_required("content", content)?;
     let (content, options) = prepare_prompt_submission(content, options)?;
-    let request_id = Uuid::new_v4().to_string();
+    let request_id = request_id
+        .map(str::to_owned)
+        .unwrap_or_else(|| Uuid::new_v4().to_string());
     let binding = resolve_agent_binding(store, agent_did, behavior_id, Some(session_id))?;
     if let Some(mailbox_item_id) = options
         .caused_by_source_doc_id

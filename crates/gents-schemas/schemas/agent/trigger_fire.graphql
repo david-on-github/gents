@@ -1,0 +1,21 @@
+type TriggerFire @index(fields: ["fire_key"], unique: true) {
+    fire_key: String @immutable
+    owner_did: String @index @immutable
+    trigger_id: String @index @immutable
+    source_collection: String @immutable
+    source_doc_id: String @index @immutable
+    task_id: String @immutable
+    request_id: String @index @immutable
+    session_id: String @index @immutable
+    goal_id: String @index @immutable
+    goal_objective: String @immutable
+    goal_token_budget: Int @immutable
+    goal_assignment_applied: Boolean
+    emit_outcome: Boolean @index @immutable
+    queued_serial: Boolean @immutable
+    source_handoff_id: String @immutable
+    reply_session_id: String @immutable
+    shard_id: String @immutable
+    attempt: Int @immutable
+    created_at: DateTime @index @immutable
+}

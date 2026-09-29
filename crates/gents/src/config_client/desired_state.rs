@@ -1060,6 +1060,25 @@ pub async fn apply_desired_state_plan(
             .await?;
         }
     }
+    for document in plan.documents() {
+        let (owner, id) = document_identity(document.collection, &document.add)?;
+        match document.collection {
+            Collection::EventSource => {
+                super::event_source_cursor::seed_referencing_triggers(txn, owner, id).await?;
+            }
+            Collection::Trigger => {
+                let trigger: crate::document_config::Trigger =
+                    serde_json::from_value(document.update.clone())?;
+                if matches!(
+                    trigger.source,
+                    crate::document_config::TriggerSource::Event { .. }
+                ) {
+                    super::event_source_cursor::load_or_seed(txn, owner, id).await?;
+                }
+            }
+            _ => {}
+        }
+    }
     let mut owners: BTreeSet<_> = plan
         .documents()
         .iter()

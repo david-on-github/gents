@@ -14,6 +14,7 @@ structure TriggerScenario where
 def concurrencyName : ConcurrencyMode → String
   | .parallel => "parallel"
   | .serial => "serial"
+  | .queuedSerial => "queued_serial"
   | .latestOnly => "latest_only"
 
 def jsonOptionString : Option String → String := jsonOptionalString
@@ -98,7 +99,7 @@ def expectedSkipReason (scenario : TriggerScenario) : Option String :=
     | some _ =>
       match scenario.intent.concurrency with
       | .serial => some "serial: prior fire still in-flight"
-      | .parallel | .latestOnly => none
+      | .parallel | .queuedSerial | .latestOnly => none
 
 def expectedSupersedeCallKeys (scenario : TriggerScenario) : List TriggerKey :=
   match dispatch scenario.snap scenario.intent, scenario.intent.concurrency, scenario.intent.triggerId with

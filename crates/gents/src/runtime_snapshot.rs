@@ -82,6 +82,7 @@ pub(crate) fn effective_behavior_admission<'a>(
 
 #[derive(Debug, Clone)]
 pub struct ResolvedTask {
+    pub emit_outcome: bool,
     pub task_id: String,
     pub name: Option<String>,
     pub behavior_id: String,
@@ -107,6 +108,7 @@ impl ResolvedTask {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedSchedule {
+    pub session_id_template: Option<String>,
     /// Physical id of the Trigger document whose Schedule source points at
     /// this schedule; empty when no enabled trigger references it.
     pub trigger_doc_id: String,
@@ -132,6 +134,7 @@ pub enum EventTriggerFireMode {
 
 #[derive(Debug, Clone)]
 pub struct ResolvedEventTrigger {
+    pub session_id_template: Option<String>,
     /// Physical id of the Trigger document carrying this event source.
     pub trigger_doc_id: String,
     pub trigger_id: String,

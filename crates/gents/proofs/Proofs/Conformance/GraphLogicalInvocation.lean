@@ -137,4 +137,32 @@ private def publicationCaseJson (c : PublicationCase) :=
   ",\"events\":" ++ jsonArray (c.events.map eventJson) ++
   ",\"expected\":" ++ jsonArray (c.expected.map publicationStateJson) ++ "}"
 def publicationCasesJson := jsonArray (publicationCases.map publicationCaseJson)
+namespace AssignmentCases
+structure HeadCase where
+  name : String
+  applied : Bool := true
+  heads : List AssignmentHead := [⟨10,true,true,true,false⟩]
+  deriving DecidableEq, Repr
+
+def cases : List HeadCase :=
+  [ {name := "own_applied_root"}
+  , {name := "old_root_retains_goal_while_next_queued", heads := [⟨10,true,true,true,false⟩,⟨20,false,true,false,false⟩]}
+  , {name := "old_root_relinquishes_goal_after_next_applied", heads := [⟨10,true,true,true,false⟩,⟨20,false,true,true,false⟩]}
+  , {name := "new_queued_root_has_no_goal", applied := false, heads := [⟨10,false,true,true,false⟩,⟨20,true,true,false,false⟩]}
+  , {name := "new_applied_root_owns_goal", heads := [⟨10,false,true,true,false⟩,⟨20,true,true,true,false⟩]}
+  , {name := "unrelated_chat_cannot_erase_goal", heads := [⟨10,true,true,true,false⟩,⟨20,false,false,false,false⟩]}
+  , {name := "unsigned_root_cannot_erase_goal", heads := [⟨10,true,true,true,false⟩,⟨20,false,false,true,false⟩]}
+  , {name := "own_continuation_retains_goal", heads := [⟨10,true,true,true,false⟩,⟨20,true,false,false,true⟩]}
+  ]
+private def headJson (h : AssignmentHead) : String :=
+  "{\"doc\":" ++ toString h.doc ++ ",\"member\":" ++ b h.member ++
+  ",\"authentic_root\":" ++ b h.authenticRoot ++ ",\"assignment_applied\":" ++ b h.assignmentApplied ++
+  ",\"authenticated_continuation\":" ++ b h.authenticatedContinuation ++ "}"
+private def caseJson (c : HeadCase) : String :=
+  "{\"name\":" ++ jsonString c.name ++ ",\"root_assignment_applied\":" ++ b c.applied ++
+  ",\"heads\":" ++ jsonArray (c.heads.map headJson) ++
+  ",\"expected\":" ++ b (assignmentOwnsGoal c.applied c.heads) ++ "}"
+def casesJson : String := jsonArray (cases.map caseJson)
+end AssignmentCases
+
 end Conformance.GraphLogicalInvocationContracts

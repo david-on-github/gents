@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::runtime_snapshot::ActiveRuntimeSnapshot;
 
 pub(crate) mod deferred_delivery;
+pub(crate) mod durable;
 pub(crate) mod event_delivery;
 pub(crate) mod event_source;
 pub(crate) mod goal_source;
@@ -101,6 +102,12 @@ impl std::fmt::Display for MaterializeSkip {
 
 impl std::error::Error for MaterializeSkip {}
 
+#[derive(Debug, thiserror::Error)]
+#[error("fire already admitted as {request_id}")]
+pub(crate) struct MaterializeDuplicate {
+    pub request_id: String,
+}
+
 pub(crate) fn fire_result_from_materialize(result: anyhow::Result<String>) -> FireResult {
     match result {
         Ok(request_id) => FireResult::Fired { request_id },
@@ -108,6 +115,10 @@ pub(crate) fn fire_result_from_materialize(result: anyhow::Result<String>) -> Fi
             if let Some(skip) = error.downcast_ref::<MaterializeSkip>() {
                 FireResult::Skipped {
                     reason: skip.reason.clone(),
+                }
+            } else if let Some(duplicate) = error.downcast_ref::<MaterializeDuplicate>() {
+                FireResult::Duplicate {
+                    request_id: duplicate.request_id.clone(),
                 }
             } else {
                 FireResult::Errored {
@@ -118,8 +129,13 @@ pub(crate) fn fire_result_from_materialize(result: anyhow::Result<String>) -> Fi
     }
 }
 
+pub(crate) const SERIAL_BUSY: &str = "serial: prior fire still in-flight";
+
 #[derive(Debug, Clone)]
 pub enum FireResult {
+    Duplicate {
+        request_id: String,
+    },
     #[allow(dead_code)]
     Fired {
         request_id: String,
@@ -152,7 +168,29 @@ pub(crate) trait MaterializerHandle: Send + Sync {
         rendered_prompt: &str,
         rendered_goal_objective: Option<&str>,
         durable_fire_key: &str,
+        delivery: Option<&crate::trigger_engine::durable::PreparedFire>,
+        prepared_ids: Option<(&str, &str)>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<String>> + Send + '_>>;
+
+    fn recover_event_fire(
+        &self,
+        _identity: &gents_protocol::trigger_delivery::FireIdentity,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Option<String>>> + Send + '_>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
+
+    fn resolve_graph_session(
+        &self,
+        _task: &crate::runtime_snapshot::ResolvedTask,
+        _trigger_id: &str,
+        _correlation: Option<&str>,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = anyhow::Result<Option<String>>> + Send + '_>,
+    > {
+        Box::pin(async { Ok(None) })
+    }
 
     /// Check whether any active runtime `AgentRequest` of `agent_did` is
     /// currently bound to this trigger. Used by the concurrency gate to
@@ -271,6 +309,65 @@ impl TriggerEngine {
             return result;
         }
 
+        let event_identity = if intent.trigger_kind == TriggerKind::Event {
+            let snapshot = self.snapshot_rx.borrow().clone();
+            let collection = intent
+                .event_vars
+                .get("source_collection")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| {
+                    snapshot
+                        .active_event_triggers()
+                        .get(intent.trigger_id.as_deref().unwrap_or_default())
+                        .map(|trigger| trigger.source_collection.as_str())
+                });
+            let (collection, document) = match &intent.group_vars {
+                Some(group) => (
+                    Some("EventGroupState"),
+                    group
+                        .get("state_doc_id")
+                        .and_then(serde_json::Value::as_str),
+                ),
+                None => (
+                    collection,
+                    intent
+                        .event_vars
+                        .get("source_doc_id")
+                        .and_then(serde_json::Value::as_str),
+                ),
+            };
+            match (intent.trigger_id.as_ref(), collection, document) {
+                (Some(trigger), Some(collection), Some(document)) => {
+                    Some(gents_protocol::trigger_delivery::FireIdentity {
+                        owner_did: snapshot.local_did.clone(),
+                        trigger_id: trigger.clone(),
+                        source_collection: collection.to_owned(),
+                        source_doc_id: document.to_owned(),
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some(identity) = &event_identity {
+            match self.materializer.recover_event_fire(identity).await {
+                Ok(Some(request_id)) => {
+                    let result = FireResult::Duplicate { request_id };
+                    (intent.on_result)(result.clone());
+                    return result;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    let result = FireResult::Errored {
+                        error: format!("recover event fire: {error}"),
+                    };
+                    (intent.on_result)(result.clone());
+                    return result;
+                }
+            }
+        }
+
         // Recovery is keyed by the durable Task/fire identity, not by the
         // Task's current declaration. The goal, request, and claim may have
         // committed before the source checkpoint did; if an operator removes
@@ -336,16 +433,215 @@ impl TriggerEngine {
             TriggerKind::Manual => None,
         };
 
+        let graph_session_id = if let Some(trigger_id) = intent.trigger_id.as_deref() {
+            match self
+                .materializer
+                .resolve_graph_session(&intent.task, trigger_id, intent.correlation.as_deref())
+                .await
+            {
+                Ok(session) => session,
+                Err(error) => {
+                    let result = FireResult::Errored {
+                        error: format!("resolve graph session: {error}"),
+                    };
+                    (intent.on_result)(result.clone());
+                    return result;
+                }
+            }
+        } else {
+            None
+        };
+
         let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let (node_scope, ctx_scope) =
             crate::template::task_node_ctx(&snapshot.local_did, &intent.task.behavior_id, &now);
-        let scope = crate::template::TemplateScope {
+        if intent.trigger_kind != TriggerKind::Event {
+            let unsupported_session = intent
+                .trigger_id
+                .as_deref()
+                .and_then(|id| snapshot.active_schedules().get(id))
+                .is_some_and(|schedule| schedule.session_id_template.is_some());
+            if let Err(error) = validate_non_document_task_options(
+                intent.task.emit_outcome,
+                intent.concurrency,
+                unsupported_session,
+            ) {
+                let result = FireResult::Errored {
+                    error: error.to_string(),
+                };
+                (intent.on_result)(result.clone());
+                return result;
+            }
+        }
+        let prepared_ids = if matches!(
+            intent.trigger_kind,
+            TriggerKind::Manual | TriggerKind::Schedule
+        ) {
+            Some(if intent.task.goal_objective_template.is_some() {
+                let Some(behavior) = snapshot.behavior(&intent.task.behavior_id) else {
+                    let result = FireResult::Errored {
+                        error: "Task behavior unavailable".into(),
+                    };
+                    (intent.on_result)(result.clone());
+                    return result;
+                };
+                let identity = crate::goal::task_goal_fire_identity(
+                    behavior.agent_did(),
+                    &intent.task.task_id,
+                    &intent.durable_fire_key,
+                );
+                (identity.request_id, identity.session_id)
+            } else {
+                (
+                    uuid::Uuid::new_v4().to_string(),
+                    uuid::Uuid::new_v4().to_string(),
+                )
+            })
+        } else {
+            None
+        };
+        let mut scope = crate::template::TemplateScope {
+            session: prepared_ids
+                .as_ref()
+                .map(|(_, session)| serde_json::json!({"session_id": session})),
+            request: prepared_ids
+                .as_ref()
+                .map(|(request, _)| serde_json::json!({"request_id": request})),
             event: intent.event_vars.clone(),
             doc: intent.doc_vars.clone(),
             args: intent.args_vars.clone(),
             group: intent.group_vars.clone(),
             node: node_scope,
             ctx: ctx_scope,
+        };
+        let mut delivery = if intent.trigger_kind == TriggerKind::Event {
+            let prepared = (|| -> anyhow::Result<gents_protocol::trigger_delivery::TriggerFire> {
+                let trigger = snapshot
+                    .active_event_triggers()
+                    .get(intent.trigger_id.as_deref().unwrap_or_default())
+                    .ok_or_else(|| anyhow::anyhow!("event trigger disappeared"))?;
+                let owner = snapshot
+                    .behavior(&intent.task.behavior_id)
+                    .ok_or_else(|| anyhow::anyhow!("trigger behavior unavailable"))?
+                    .agent_did()
+                    .to_string();
+                let (source_collection, source_doc_id) = if let Some(group) = &intent.group_vars {
+                    (
+                        "EventGroupState",
+                        group
+                            .get("state_doc_id")
+                            .and_then(serde_json::Value::as_str),
+                    )
+                } else {
+                    (
+                        trigger.source_collection.as_str(),
+                        intent
+                            .event_vars
+                            .get("source_doc_id")
+                            .and_then(serde_json::Value::as_str),
+                    )
+                };
+                let source_doc_id = source_doc_id
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| anyhow::anyhow!("fire lacks source document ID"))?;
+                let identity = gents_protocol::trigger_delivery::FireIdentity {
+                    owner_did: owner,
+                    trigger_id: trigger.trigger_id.clone(),
+                    source_collection: source_collection.into(),
+                    source_doc_id: source_doc_id.into(),
+                };
+                let key = durable::fire_key(&identity);
+                let session_id = match trigger.session_id_template.as_deref() {
+                    Some(template) => {
+                        let value = crate::template::render_template(template, &scope)?;
+                        anyhow::ensure!(
+                            !value.trim().is_empty(),
+                            "session template rendered an empty ID"
+                        );
+                        anyhow::ensure!(
+                            graph_session_id
+                                .as_ref()
+                                .is_none_or(|session| session == &value),
+                            "trigger session template disagrees with pinned graph session"
+                        );
+                        value
+                    }
+                    None => graph_session_id
+                        .clone()
+                        .unwrap_or_else(|| identity.session_id()),
+                };
+                let source_string = |field: &str| {
+                    intent
+                        .doc_vars
+                        .as_ref()
+                        .and_then(|d| d.get(field))
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                };
+                let fire = gents_protocol::trigger_delivery::TriggerFire {
+                    request_id: identity.request_id(),
+                    fire_key: key,
+                    identity,
+                    goal_id: intent.task.goal_objective_template.as_ref().map(|_| {
+                        crate::goal::deterministic_goal_id(
+                            snapshot
+                                .behavior(&intent.task.behavior_id)
+                                .unwrap()
+                                .agent_did(),
+                            &session_id,
+                        )
+                    }),
+                    session_id,
+                    task_id: intent.task.task_id.clone(),
+                    emit_outcome: intent.task.emit_outcome,
+                    goal_objective: None,
+                    goal_token_budget: intent.task.goal_token_budget,
+                    goal_assignment_applied: false,
+                    queued_serial: intent.concurrency
+                        == crate::runtime_snapshot::ConcurrencyMode::QueuedSerial,
+                    source_handoff_id: source_string("handoff_id"),
+                    reply_session_id: source_string("reply_session_id"),
+                    shard_id: source_string("shard_id"),
+                    attempt: intent
+                        .doc_vars
+                        .as_ref()
+                        .and_then(|d| d.get("attempt"))
+                        .and_then(serde_json::Value::as_i64),
+                    created_at: now.clone(),
+                };
+                anyhow::ensure!(
+                    !fire.emit_outcome
+                        || fire
+                            .source_handoff_id
+                            .as_ref()
+                            .is_some_and(|s| !s.is_empty()),
+                    "emit_outcome requires a source handoff_id"
+                );
+                Ok(fire)
+            })();
+            match prepared {
+                Ok(fire) => {
+                    scope.session = Some(serde_json::json!({"session_id": fire.session_id}));
+                    scope.request = Some(serde_json::json!({"request_id": fire.request_id}));
+                    Some(durable::PreparedFire {
+                        target_existing: graph_session_id.is_some()
+                            || snapshot
+                                .active_event_triggers()
+                                .get(intent.trigger_id.as_deref().unwrap())
+                                .is_some_and(|t| t.session_id_template.is_some()),
+                        receipt: fire,
+                    })
+                }
+                Err(error) => {
+                    let result = FireResult::Errored {
+                        error: format!("prepare fire: {error}"),
+                    };
+                    (intent.on_result)(result.clone());
+                    return result;
+                }
+            }
+        } else {
+            None
         };
         let (rendered, rendered_goal_objective) = match crate::template::render_task(
             &intent.task.prompt_template,
@@ -360,6 +656,9 @@ impl TriggerEngine {
                 return result;
             }
         };
+        if let Some(delivery) = &mut delivery {
+            delivery.receipt.goal_objective = rendered_goal_objective.clone();
+        }
         let concurrency_agent_did = || {
             snapshot
                 .behavior(&intent.task.behavior_id)
@@ -395,14 +694,28 @@ impl TriggerEngine {
         };
         let Some(trigger_id) = intent.trigger_id.clone() else {
             return self
-                .materialize_after_lock(intent, trigger_doc_id, rendered, rendered_goal_objective)
+                .materialize_after_lock(
+                    intent,
+                    trigger_doc_id,
+                    rendered,
+                    rendered_goal_objective,
+                    delivery,
+                    prepared_ids,
+                )
                 .await;
         };
         if intent.concurrency == crate::runtime_snapshot::ConcurrencyMode::Parallel
             && intent.group_vars.is_none()
         {
             return self
-                .materialize_after_lock(intent, trigger_doc_id, rendered, rendered_goal_objective)
+                .materialize_after_lock(
+                    intent,
+                    trigger_doc_id,
+                    rendered,
+                    rendered_goal_objective,
+                    delivery,
+                    prepared_ids,
+                )
                 .await;
         }
         let agent_did = match concurrency_agent_did() {
@@ -430,6 +743,23 @@ impl TriggerEngine {
                 .clone()
         };
         let guard = lock.lock().await;
+
+        if let Some(identity) = &event_identity {
+            let recovered = self.materializer.recover_event_fire(identity).await;
+            let result = match recovered {
+                Ok(Some(request_id)) => Some(FireResult::Duplicate { request_id }),
+                Ok(None) => None,
+                Err(error) => Some(FireResult::Errored {
+                    error: format!("recover locked event fire: {error}"),
+                }),
+            };
+            if let Some(result) = result {
+                drop(guard);
+                self.prune_trigger_lock(&lock_key, &lock).await;
+                (intent.on_result)(result.clone());
+                return result;
+            }
+        }
 
         if intent.group_vars.is_some() {
             let Some(_correlation) = intent
@@ -478,7 +808,7 @@ impl TriggerEngine {
         // full group lock, an absent marker leaves no grouped request to gate
         // or supersede. Per-document concurrency remains trigger-wide.
         match (intent.group_vars.is_some(), intent.concurrency) {
-            (true, _) | (false, ConcurrencyMode::Parallel) => {}
+            (true, _) | (false, ConcurrencyMode::Parallel | ConcurrencyMode::QueuedSerial) => {}
             (false, ConcurrencyMode::Serial) => match self
                 .materializer
                 .has_active_runtime_request_for_trigger(
@@ -490,7 +820,7 @@ impl TriggerEngine {
             {
                 Ok(true) => {
                     let result = FireResult::Skipped {
-                        reason: "serial: prior fire still in-flight".to_string(),
+                        reason: SERIAL_BUSY.to_string(),
                     };
                     drop(guard);
                     self.prune_trigger_lock(&lock_key, &lock).await;
@@ -530,7 +860,14 @@ impl TriggerEngine {
         }
 
         let result = self
-            .materialize_after_lock(intent, trigger_doc_id, rendered, rendered_goal_objective)
+            .materialize_after_lock(
+                intent,
+                trigger_doc_id,
+                rendered,
+                rendered_goal_objective,
+                delivery,
+                prepared_ids,
+            )
             .await;
         drop(guard);
         self.prune_trigger_lock(&lock_key, &lock).await;
@@ -554,6 +891,8 @@ impl TriggerEngine {
         trigger_doc_id: Option<String>,
         rendered: String,
         rendered_goal_objective: Option<String>,
+        delivery: Option<durable::PreparedFire>,
+        prepared_ids: Option<(String, String)>,
     ) -> FireResult {
         let source_doc_id = if matches!(intent.trigger_kind, TriggerKind::Event) {
             intent
@@ -579,6 +918,10 @@ impl TriggerEngine {
                 &rendered,
                 rendered_goal_objective.as_deref(),
                 &intent.durable_fire_key,
+                delivery.as_ref(),
+                prepared_ids
+                    .as_ref()
+                    .map(|(request, session)| (request.as_str(), session.as_str())),
             )
             .await;
         if materialized.is_err() && rendered_goal_objective.is_some() {
@@ -594,4 +937,24 @@ impl TriggerEngine {
         (intent.on_result)(result.clone());
         result
     }
+}
+
+fn validate_non_document_task_options(
+    emit_outcome: bool,
+    concurrency: crate::runtime_snapshot::ConcurrencyMode,
+    session_template: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !emit_outcome,
+        "emit_outcome requires document-triggered delivery or explicit CLI/desktop Task admission"
+    );
+    anyhow::ensure!(
+        concurrency != crate::runtime_snapshot::ConcurrencyMode::QueuedSerial,
+        "queued_serial requires a document event source"
+    );
+    anyhow::ensure!(
+        !session_template,
+        "session_id_template requires a document event source"
+    );
+    Ok(())
 }

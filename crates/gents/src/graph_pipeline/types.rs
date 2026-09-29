@@ -144,6 +144,17 @@ pub type GroupCount = crate::document_config::EventGroupCount;
 pub type DeliveryMode = Option<crate::document_config::EventGroup>;
 pub type DeliveryConcurrency = crate::document_config::ConcurrencyMode;
 
+/// Selects a singleton Task invocation in the same pinned graph correlation.
+/// Runtime resolution requires exactly one authenticated root; node names alone
+/// never authorize a session or transfer the firing node's attribution.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+pub struct GraphSessionSelection {
+    #[serde(rename = "continue")]
+    pub continue_node_id: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -151,6 +162,9 @@ pub struct GraphNode {
     pub node_id: String,
     pub capability_id: String,
     pub capability_revision: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
+    pub session: Option<GraphSessionSelection>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -268,6 +282,10 @@ pub enum DiagnosticCode {
     CapabilityRevisionMismatch,
     UnauthorizedCapability,
     UnknownNode,
+    InvalidSessionSelection,
+    UnknownSessionTarget,
+    NonTaskSessionTarget,
+    NonSingletonSessionTarget,
     UnknownPort,
     InvalidCollection,
     InvalidCorrelationField,
@@ -309,6 +327,8 @@ pub struct PlannedNode {
     pub capability_id: String,
     pub capability_revision: String,
     pub target: StageTarget,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<GraphSessionSelection>,
     /// Where a plugin node writes its result. Empty for an agent node, whose
     /// model writes its outputs through its own tools.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

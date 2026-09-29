@@ -96,12 +96,12 @@ pub(super) const AGENT_SESSION_FIELDS: &str = "session_id agent_did requester_di
 pub(super) const GOAL_FIELDS: &str = "goal_id session_id agent_did creation_key objective status token_budget tokens_used active_time_seconds active_started_at consecutive_blocked_audits last_blocked_request_id last_blocked_reason last_continued_from_request_id continuation_sequence wrapup_requested wrapup_completed infrastructure_retry_count last_failure completion_evidence created_at updated_at";
 pub(super) const AGENT_TOOL_CALL_FIELDS: &str = "_docID tool_call_key agent_did session_id request_id request_doc_id requester_did message_sequence tool_name tool_call_id status lifecycle_state await_mode deadline_at cancel_cause started_at completed_at selected_service_id selected_tool_name tool_failure_class denial_reason denied_argv denied_command denied_argument denied_subcommand denied_prefix policy_mode policy_network latency_ms";
 pub(super) const COMPACTION_ENTRY_FIELDS: &str = "compaction_key session_id requester_did sequence summary files_read files_modified messages_compacted compacted_through_sequence original_tokens compacted_tokens created_at";
-pub(super) const TASK_FIELDS: &str = "task_id agent_did display_name description behavior_id prompt_template goal_objective_template goal_token_budget hooks enabled output_schema_ref created_at updated_at tags";
+pub(super) const TASK_FIELDS: &str = "task_id agent_did display_name description behavior_id prompt_template emit_outcome goal_objective_template goal_token_budget hooks enabled output_schema_ref created_at updated_at tags";
 pub(super) const SKILL_FIELDS: &str = "skill_id agent_did name description instructions source_directory tool_refs display_name interface_json enabled created_at tags";
 pub(super) const SCHEDULE_FIELDS: &str =
     "schedule_id agent_did display_name cadence created_at updated_at tags";
 pub(super) const SCHEDULE_OBSERVATION_FIELDS: &str = "trigger_id next_run_at";
-pub(super) const TRIGGER_FIELDS: &str = "agent_did trigger_id display_name description task_id source enabled concurrency created_at updated_at tags";
+pub(super) const TRIGGER_FIELDS: &str = "agent_did trigger_id display_name description task_id source session_id_template enabled concurrency created_at updated_at tags";
 pub(super) const TRIGGER_OBSERVATION_FIELDS: &str =
     "trigger_id last_attempt_at last_fired_source_doc_id last_status last_error fire_count";
 pub(super) const TOOLS_FIELDS: &str = "tools_id agent_did display_name host remote subagents built_ins datastore integrations self_config tags";

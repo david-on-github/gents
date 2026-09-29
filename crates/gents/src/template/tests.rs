@@ -12,6 +12,8 @@ fn authoring_rejects_invalid_rendering_syntax_without_invocation_values() {
 #[test]
 fn renders_event_var() {
     let scope = TemplateScope {
+        session: None,
+        request: None,
         event: serde_json::json!({"fired_at": "2026-04-21T00:00:00Z", "trigger_kind": "schedule"}),
         doc: None,
         args: None,
@@ -26,6 +28,8 @@ fn renders_event_var() {
 #[test]
 fn strict_undefined_errors_on_missing_var() {
     let scope = TemplateScope {
+        session: None,
+        request: None,
         event: serde_json::json!({}),
         doc: None,
         args: None,
@@ -40,6 +44,8 @@ fn strict_undefined_errors_on_missing_var() {
 #[test]
 fn renders_args_var_when_scope_has_args() {
     let scope = TemplateScope {
+        session: None,
+        request: None,
         event: serde_json::json!({"trigger_kind": "manual"}),
         doc: None,
         args: Some(serde_json::json!({"name": "Amy", "count": 3})),
@@ -54,6 +60,8 @@ fn renders_args_var_when_scope_has_args() {
 #[test]
 fn errors_on_missing_args_key() {
     let scope = TemplateScope {
+        session: None,
+        request: None,
         event: serde_json::json!({}),
         doc: None,
         args: Some(serde_json::json!({})), // args present but empty
@@ -70,6 +78,8 @@ fn enforces_rendered_size_cap() {
     // construct a template whose output exceeds MAX_RENDERED_BYTES
     let big = "x".repeat(2_000_000);
     let scope = TemplateScope {
+        session: None,
+        request: None,
         event: serde_json::json!({"big": big}),
         doc: None,
         args: None,
@@ -85,6 +95,8 @@ fn enforces_rendered_size_cap() {
 fn enforces_template_size_cap() {
     let big = "x".repeat(100_000); // exceeds 64 KB
     let scope = TemplateScope {
+        session: None,
+        request: None,
         event: serde_json::json!({}),
         doc: None,
         args: None,
@@ -472,6 +484,8 @@ fn conditional_name_arguments_that_admission_defers_render_for_their_invocations
     ] {
         check_template_vocabulary(template).expect(template);
         let scope = TemplateScope {
+            session: None,
+            request: None,
             event: serde_json::Value::Null,
             doc: Some(serde_json::json!({ "items": ["A", "B"], "flag": flag })),
             args: None,

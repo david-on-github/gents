@@ -556,6 +556,36 @@ def caseCoverage : List CoverageEntry :=
       "ProcessTransitions"
       "runtime_status::tests::generated_process_transition_cases_match_runtime_status_policy")
       "process-lifecycle" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "trigger_delivery"
+      "Triggers.Durable"
+      "trigger_engine::tests::durable_contract::generated_fire_transactions_are_atomic_and_owner_scoped")
+      "triggers" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "trigger_delivery"
+      "Triggers.Queue"
+      "trigger_engine::tests::durable_contract::durable_delivery_predicates_match_executable_lean_owners")
+      "triggers" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "trigger_delivery"
+      "EventDelivery.Durable"
+      "trigger_engine::tests::durable_contract::generated_arrival_checkpoints_preserve_committed_delivery_across_crashes")
+      "event-delivery" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "trigger_delivery"
+      "Triggers.Durable.Outcomes"
+      "trigger_engine::tests::durable_contract::generated_terminal_outcome_action_traces_use_native_owners")
+      "durable-goals" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "graph_session_continuation_cases"
+      "GraphPipeline.WorkspaceLineage.SessionContinuation"
+      "graph_pipeline::session_continuation_contract_tests::session_selection_matches_executable_graph_owner")
+      "triggers" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "graph_assignment_head_cases"
+      "GraphPipeline.LogicalInvocation.AssignmentHead"
+      "graph_pipeline::session_continuation_contract_tests::applied_assignment_heads_match_executable_graph_owner")
+      "durable-goals" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "trigger_cases"
       "TriggerDispatch"
@@ -1637,7 +1667,12 @@ def caseCoverage : List CoverageEntry :=
       "event_delivery_cases"
       "EventDeliveryTransitionCases"
       "conformance::event_delivery_transition_cases_match_contract"
-      "Observes five Watcher rescan/next-request cases, including real cooldown seeding, and two Watcher release cases driven by a real same-second overtaking head. Eight substrate bookkeeping rows remain unobserved; subscription loss/delivery, queue multiset state, and empty-rescan silence need owner observations rather than a copied World.")
+      "Observes five Watcher rescan/next-request cases, including real cooldown seeding. Native watcher unit consumers observe the two release cases. Eight substrate bookkeeping rows remain unobserved; subscription loss/delivery, queue multiset state, and empty-rescan silence need owner observations rather than a copied World.")
+      "event-delivery" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "event_delivery_cases"
+      "EventDeliveryTransitionCases"
+      "watcher::tests::generated_release_cases_preserve_native_session_order")
       "event-delivery" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "event_delivery_cases"

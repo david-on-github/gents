@@ -3,7 +3,7 @@ use defra_node::EmbeddedNode;
 use serde_json::Value;
 
 use crate::lifecycle::{
-    write_pending_agent_request_with_lineage_and_conversation_title, ExecutionOrigin,
+    write_pending_agent_request_with_lineage_workspace_and_conversation_title, ExecutionOrigin,
     TriggerLineage,
 };
 use crate::template::{render_template, task_node_ctx, TemplateScope};
@@ -42,7 +42,11 @@ pub async fn write_manual_agent_request_with_conversation_title(
 ) -> Result<String> {
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let (node_scope, ctx_scope) = task_node_ctx(agent_did, behavior_id, &now);
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let session_id = uuid::Uuid::new_v4().to_string();
     let scope = TemplateScope {
+        session: Some(serde_json::json!({"session_id": session_id})),
+        request: Some(serde_json::json!({"request_id": request_id})),
         event: serde_json::json!({
             "fired_at": now,
             "trigger_id": serde_json::Value::Null,
@@ -57,7 +61,7 @@ pub async fn write_manual_agent_request_with_conversation_title(
     let content = render_template(prompt_template, &scope)
         .map_err(|e| anyhow!("render manual template for task {task_id}: {e}"))?;
 
-    let enqueued = write_pending_agent_request_with_lineage_and_conversation_title(
+    let enqueued = write_pending_agent_request_with_lineage_workspace_and_conversation_title(
         node,
         actor,
         agent_did,
@@ -72,6 +76,11 @@ pub async fn write_manual_agent_request_with_conversation_title(
             trigger_context: None,
         },
         conversation_title,
+        None,
+        Some(&request_id),
+        None,
+        None,
+        Some(&session_id),
     )
     .await
     .map_err(|e| anyhow!("create manual AgentRequest for task {task_id}: {e}"))?;

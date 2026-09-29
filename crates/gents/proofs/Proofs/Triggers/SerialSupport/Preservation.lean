@@ -40,6 +40,31 @@ private theorem dispatchStep_preserves_target_seriality
           FireIntent.serialForKey_target_is_serial h_serial h_triggerId
         rw [h_conc] at h_intent_serial
         cases h_intent_serial
+    | queuedSerial =>
+      rw [h_disp, h_conc] at h_mem
+      rcases List.mem_append.mp h_mem with h_old | h_new
+      · exact h_before r h_old h_causedBy
+      · have h_new_req :
+          r =
+            { id := s!"dispatched-{s.requests.length}"
+            , causedBy :=
+                match seed.causedByTriggerId with
+                | none => none
+                | some tid => some tid
+            , concurrency := .queuedSerial
+            , isTerminal := false
+            , executionOrigin :=
+                match seed.causedByTriggerKind with
+                | .manual => .interactive
+                | .schedule | .event => .scheduled } := by
+          simpa using h_new
+        cases h_new_req
+        have h_triggerId :=
+          dispatch_key_matches_intent_target snap intent seed t h_disp h_causedBy
+        have h_intent_serial :=
+          FireIntent.serialForKey_target_is_serial h_serial h_triggerId
+        rw [h_conc] at h_intent_serial
+        cases h_intent_serial
     | serial =>
       cases h_key : seed.causedByTriggerId with
       | none =>

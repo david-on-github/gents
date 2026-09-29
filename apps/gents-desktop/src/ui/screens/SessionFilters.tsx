@@ -102,8 +102,8 @@ const matchesSource = (c: SessionSummary, source: SessionSource) =>
   source === "task"
     ? Boolean(c.taskId || c.triggerId)
     : source === "session"
-      ? Boolean(c.provenance?.parent_request_doc_id)
-      : !(c.taskId || c.triggerId || c.provenance?.parent_request_doc_id);
+      ? Boolean(c.startedBy)
+      : !(c.taskId || c.triggerId || c.startedBy);
 
 /* an axis passes when nothing on it is picked, or when one picked value
    matches: within an axis the options are a union, across axes they meet */

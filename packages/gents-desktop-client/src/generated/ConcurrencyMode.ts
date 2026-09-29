@@ -3,4 +3,4 @@
 /**
  * Shared concurrency vocabulary for all task-trigger entry points.
  */
-export type ConcurrencyMode = "parallel" | "serial" | "latest_only";
+export type ConcurrencyMode = "parallel" | "serial" | "queued_serial" | "latest_only";

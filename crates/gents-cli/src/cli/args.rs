@@ -2,6 +2,7 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use gents::optimization::target::JobTarget;
 use gents::{BackendProviderKind, OpenAiWireApi};
 use serde::{Deserialize, Serialize};
 
@@ -2842,9 +2843,15 @@ pub(crate) struct ConfigTaskRunArgs {
 
     /// Stable invocation key for a durable-goal Task run. Required when the
     /// Task declares goal_objective_template; the output session_id is derived
-    /// deterministically from this key and the Task identity.
+    /// deterministically from this key and the Task identity. For ordinary
+    /// Tasks, this retains its existing meaning as a session label.
     #[arg(long)]
     pub(crate) session_id: Option<String>,
+
+    /// Existing session to receive this Task. Queues behind its current request.
+    /// This is separate from --session-id, the stable invocation key.
+    #[arg(long)]
+    pub(crate) continue_session: Option<String>,
 
     /// GraphQL endpoint of the running agent's DefraDB. Defaults to local.
     #[arg(long)]
@@ -4253,17 +4260,11 @@ pub(crate) fn parse_subject(raw: &str) -> Result<SubjectArg, String> {
 /// `--target context` (the subject behavior's system prompt) or
 /// `--target task:<task_id>` (the prompt template of that task of the
 /// subject behavior).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum TargetArg {
-    Context,
-    Task(String),
-}
-
-pub(crate) fn parse_target(raw: &str) -> Result<TargetArg, String> {
+pub(crate) fn parse_target(raw: &str) -> Result<JobTarget, String> {
     match raw.trim() {
-        "context" => Ok(TargetArg::Context),
+        "context" => Ok(JobTarget::Context),
         other => match other.strip_prefix("task:").map(str::trim) {
-            Some(task_id) if !task_id.is_empty() => Ok(TargetArg::Task(task_id.to_owned())),
+            Some(task_id) if !task_id.is_empty() => Ok(JobTarget::Task(task_id.to_owned())),
             _ => Err(format!(
                 "unknown target {raw:?}; pass --target context or --target task:<task_id>"
             )),
@@ -4351,7 +4352,7 @@ pub(crate) struct OptimizationRunArgs {
     /// `context`: the behavior's system prompt; `task:<task_id>`: the prompt
     /// template of that task of the behavior.
     #[arg(long, value_parser = parse_target, default_value = "context")]
-    pub(crate) target: TargetArg,
+    pub(crate) target: JobTarget,
     #[arg(long, default_value_t = 3)]
     pub(crate) rounds: u32,
     #[arg(long, default_value_t = 2)]

@@ -730,6 +730,7 @@ async fn installed_review_area_handoff_materializes_bound_goal_scanner() {
         )).await;
         let row = &task_rows["Task"][0];
         let task = ResolvedTask {
+            emit_outcome: false,
             task_id: row["task_id"].as_str().unwrap().into(),
             name: row["display_name"].as_str().map(str::to_owned),
             behavior_id: row["behavior_id"].as_str().unwrap().into(),
@@ -801,6 +802,7 @@ async fn installed_review_area_handoff_materializes_bound_goal_scanner() {
     let scan_route = &routes["scan"];
     assert_eq!(scan_route.2, "CodeReviewArea");
     let trigger = ResolvedEventTrigger {
+        session_id_template: None,
         trigger_doc_id: scan_route.1.clone(),
         trigger_id: scan_route.0.clone(),
         task_id: tasks["scan"].task_id.clone(),
@@ -919,6 +921,8 @@ async fn installed_review_area_handoff_materializes_bound_goal_scanner() {
             "Publish one review area",
             Some("Close this review area set"),
             &format!("event:{}:doc:{}", routes["recon"].0, fx.run.seed_doc_id),
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -996,6 +1000,8 @@ async fn installed_review_area_handoff_materializes_bound_goal_scanner() {
             "Scan the emitted area",
             Some("Publish the required scan sentinel"),
             &fire.durable_fire_key,
+            None,
+            None,
         )
         .await
         .unwrap();

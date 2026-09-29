@@ -177,6 +177,23 @@ impl ObservedStore {
         self.update(|snapshot| snapshot.replace_agent_scope(agent_did, incoming))
     }
 
+    /// A reload may await database reads while an explicit request refresh
+    /// publishes newer facts. Check its captured revision under the same lock
+    /// as replacement so that older reads cannot erase those facts.
+    pub(crate) fn replace_reloaded_snapshot(
+        &self,
+        captured: StoreProjectionRevision,
+        agent_did: Option<&str>,
+        incoming: ClientStore,
+    ) -> bool {
+        let incoming = incoming.into_observer_projection();
+        self.update_at_revision(Some(captured), |snapshot| match agent_did {
+            Some(agent_did) => snapshot.replace_agent_scope(agent_did, incoming),
+            None => incoming,
+        })
+        .is_some()
+    }
+
     /// Publish a structural database change without retaining its transcript
     /// payload in the process-wide observer. Consumers reconcile by issuing a
     /// bounded DefraDB projection for the selected session.
@@ -197,8 +214,20 @@ impl ObservedStore {
     }
 
     fn update(&self, transform: impl FnOnce(&ClientStore) -> ClientStore) -> u64 {
+        self.update_at_revision(None, transform)
+            .expect("unconditional store update")
+    }
+
+    fn update_at_revision(
+        &self,
+        captured: Option<StoreProjectionRevision>,
+        transform: impl FnOnce(&ClientStore) -> ClientStore,
+    ) -> Option<u64> {
         let notice = {
             let mut state = self.state.write().expect("store snapshot lock poisoned");
+            if captured.is_some_and(|revision| revision != state.revision) {
+                return None;
+            }
             let store_version = state.revision.store_version.saturating_add(1);
             let reconcile_version = state.revision.reconcile_version.saturating_add(1);
             state.snapshot = Arc::new(transform(state.snapshot.as_ref()));
@@ -212,6 +241,50 @@ impl ObservedStore {
         };
         self.version_tx.send_replace(notice.revision.store_version);
         self.change_tx.send_replace(notice);
-        notice.revision.store_version
+        Some(notice.revision.store_version)
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    use crate::client::store::ClientStoreRows;
+    use gents_protocol::row::AgentRequestRow;
+
+    fn requests(ids: &[&str]) -> ClientStore {
+        ClientStore::from_rows(ClientStoreRows {
+            requests: ids
+                .iter()
+                .map(|id| AgentRequestRow {
+                    request_id: (*id).into(),
+                    agent_did: Some("did:test:reload".into()),
+                    session_id: Some("session".into()),
+                    purpose: Some(gents_protocol::request_admission::RequestPurpose::Normal),
+                    ..Default::default()
+                })
+                .collect(),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn late_reload_cannot_erase_a_request_refreshed_after_capture() {
+        for scope in [None, Some("did:test:reload")] {
+            let (store, _) = ObservedStore::new(requests(&["accounted"]));
+            let captured = store.projection_revision();
+            let old_database_read = requests(&["accounted"]);
+            store.merge_chat_patch(requests(&["pending"]));
+            let refreshed = store.projection_revision();
+            assert!(!store.replace_reloaded_snapshot(captured, scope, old_database_read));
+            assert_eq!(store.projection_revision(), refreshed);
+            assert!(store
+                .snapshot()
+                .requests
+                .iter()
+                .any(|row| row.request_id == "pending"));
+            assert!(store.replace_reloaded_snapshot(refreshed, scope, requests(&["pending"])));
+            assert_eq!(store.snapshot().requests.len(), 1);
+            assert_eq!(store.snapshot().requests[0].request_id, "pending");
+        }
     }
 }

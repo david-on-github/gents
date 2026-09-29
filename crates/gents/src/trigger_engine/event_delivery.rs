@@ -318,6 +318,7 @@ pub(crate) enum GroupOutcome {
     },
     Quiesced,
     Ready {
+        state_doc_id: String,
         first_seen: DateTime<Utc>,
         docs: Vec<Value>,
         complete: bool,
@@ -398,6 +399,7 @@ pub(crate) async fn evaluate_group(
     }
     let complete = expected == Some(docs.len());
     Ok(GroupOutcome::Ready {
+        state_doc_id: record.doc_id,
         first_seen,
         docs,
         complete,
@@ -551,10 +553,12 @@ mod tests {
             .group_key("batch-a")
         );
         let trigger = crate::runtime_snapshot::ResolvedEventTrigger {
+            session_id_template: None,
             trigger_doc_id: "physical".into(),
             trigger_id: binding.binding_id.clone(),
             task_id: "task".into(),
             task: crate::runtime_snapshot::ResolvedTask {
+                emit_outcome: false,
                 task_id: "task".into(),
                 name: None,
                 behavior_id: "behavior".into(),

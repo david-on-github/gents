@@ -1225,10 +1225,10 @@ fn subagent_target_entry_distinguishes_owner_from_destination() {
 
 #[test]
 fn parse_target_accepts_context_and_a_named_task_and_rejects_the_rest() {
-    assert_eq!(parse_target("context").unwrap(), TargetArg::Context);
+    assert_eq!(parse_target("context").unwrap(), JobTarget::Context);
     assert_eq!(
         parse_target("task:plan").unwrap(),
-        TargetArg::Task("plan".into())
+        JobTarget::Task("plan".into())
     );
     for bad in ["", "task", "task:", "task: ", "prompt", "context:x"] {
         let error = parse_target(bad).unwrap_err();
@@ -1253,7 +1253,7 @@ fn parse_target_accepts_context_and_a_named_task_and_rejects_the_rest() {
     };
     assert_eq!(
         args.target,
-        TargetArg::Context,
+        JobTarget::Context,
         "--target defaults to context"
     );
 }
@@ -1342,4 +1342,28 @@ fn optimization_run_takes_a_proposer_timeout() {
     };
     assert_eq!(parse(&[]), 600);
     assert_eq!(parse(&["--proposer-timeout-secs", "30"]), 30);
+}
+
+#[test]
+fn task_run_separates_invocation_identity_from_continued_session() {
+    let cli = Cli::try_parse_from([
+        "gents",
+        "task",
+        "run",
+        "worker",
+        "--session-id",
+        "run-42",
+        "--continue-session",
+        "existing-lead",
+    ])
+    .expect("continued Task run");
+    match cli.command {
+        Command::Task {
+            command: TaskCommand::Run(args),
+        } => {
+            assert_eq!(args.session_id.as_deref(), Some("run-42"));
+            assert_eq!(args.continue_session.as_deref(), Some("existing-lead"));
+        }
+        _ => panic!("expected Task run"),
+    }
 }

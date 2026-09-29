@@ -20,8 +20,8 @@ pub mod subject;
 pub mod target;
 
 pub use driver::{
-    baseline_dir, candidate_dir, job_dir, job_refused, run_cost, run_job, spend_so_far,
-    split_case_count, validate_job_id, JobOutcome, JobRefused, JobRequest, Spend,
+    baseline_dir, candidate_dir, check_request, job_dir, job_refused, run_cost, run_job,
+    spend_so_far, split_case_count, validate_job_id, JobOutcome, JobRefused, JobRequest, Spend,
 };
 pub use evidence::{
     decision_evidence, decision_seed, token_totals, totals, train_feedback, BASELINE_CELL,

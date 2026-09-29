@@ -32,17 +32,14 @@ theorem watcher_cooldown_excludes_handle
 
 /-- Whether delivering `head` releases the cooldown mark of `d`.
 
-Premise: the watcher delivers only the first pending request of a session in
-`(created_at, request_id)` order, and `created_at` has whole-second
-resolution. A request created later in the same second with a smaller
-`request_id` (a `background-completion-…` wake after a `goal-cont-…`
-continuation) therefore becomes the session head after the earlier request
-was already delivered. That earlier request's claim then observes a
-different earliest pending row, returns `Queued`, and stays pending with its
-cooldown mark held. Delivering the new head is the observation that the
-earlier delivery was overtaken, so it releases the marks of the other rows in
-that session. A duplicate delivery is harmless: the claim is a CAS on the
-pending lifecycle state. -/
+The watcher orders candidates through `Triggers.Queue` before selecting a
+session's first pending request. Journaled requests use receiving-node arrival
+order; historical requests without a journal entry retain their stable legacy
+order. A cooldown mark can survive a deferred claim while another request
+occupies the session. Delivering the selected head releases the other marks so
+a later rescan can offer those requests again. The canonical claim owner still
+enforces queue order and the pending-state CAS; releasing a local observation
+mark never admits a request. -/
 def releasedBy (session : DocId → String) (head d : DocId) : Prop :=
   d ≠ head ∧ session d = session head
 

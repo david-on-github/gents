@@ -22,6 +22,7 @@ struct ActiveRequestRecoveryReport {
 impl RequestLifecycle {
     pub async fn recover_all(node: &EmbeddedNode, agent_did: &str) -> Result<RecoveryReport> {
         let active = recover_active_requests(node, agent_did).await?;
+        crate::trigger_engine::durable::recover_outcomes(node, agent_did).await?;
         let background_wakes_redriven = Self::redrive_failed_background_wakeups(node, agent_did)
             .await?
             .redriven;

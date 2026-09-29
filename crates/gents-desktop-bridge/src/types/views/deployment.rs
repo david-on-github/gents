@@ -249,6 +249,7 @@ pub use gents::document_config::{
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskView {
+    pub emit_outcome: bool,
     pub task_id: String,
     pub name: Option<String>,
     pub description: Option<String>,
@@ -325,6 +326,7 @@ pub struct TriggerView {
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionSummary {
+    pub started_by: Option<super::LinkedSessionView>,
     pub session_id: String,
     pub agent_did: String,
     pub requester_did: Option<String>,

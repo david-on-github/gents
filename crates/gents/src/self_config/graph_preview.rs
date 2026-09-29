@@ -197,6 +197,7 @@ mod tests {
             agent_did: owner.to_owned(),
             graph_id: "session-evaluation".to_owned(),
             nodes: vec![GraphNode {
+                session: None,
                 node_id: "score".to_owned(),
                 capability_id: capability_id.to_owned(),
                 capability_revision: "v1".to_owned(),
