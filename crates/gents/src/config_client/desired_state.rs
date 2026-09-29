@@ -457,7 +457,11 @@ async fn validate_trigger_document_fields(
                 else {
                     continue;
                 };
-                if name.starts_with('_') || fields.contains_key(name) {
+                let own_field = |name: &String| {
+                    !name.starts_with('_')
+                        && !crate::defra_query::schema::is_aggregate_pseudo_field(name)
+                };
+                if name.starts_with('_') || fields.contains_key(name) && own_field(name) {
                     continue;
                 }
                 anyhow::bail!(
@@ -466,7 +470,7 @@ async fn validate_trigger_document_fields(
                     source.source_collection,
                     fields
                         .keys()
-                        .filter(|name| !name.starts_with('_'))
+                        .filter(|name| own_field(name))
                         .cloned()
                         .collect::<Vec<_>>()
                         .join(", ")

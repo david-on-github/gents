@@ -47,6 +47,11 @@ pub struct ConfigCommandParams {
 }
 
 impl ConfigCommandParams {
+    #[cfg(test)]
+    pub(crate) fn into_argv_for_test(self) -> Result<Vec<String>> {
+        self.into_argv()
+    }
+
     fn into_argv(self) -> Result<Vec<String>> {
         anyhow::ensure!(!self.argv.is_empty(), "argv requires a config command");
         if config_help_resource(&self.argv).is_some() {
@@ -89,11 +94,21 @@ impl ConfigCommandParams {
                 !argv.contains(&flag),
                 "option {flag} supplied in both argv and options"
             );
-            let value = match value {
-                Value::String(value) => value,
-                value => serde_json::to_string(&value)?,
+            // A list of strings is the repeated flag (cleanup targets, pack
+            // slots); any other structured value stays one JSON value.
+            let values = match value {
+                Value::String(value) => vec![value],
+                Value::Array(items) if !items.is_empty() && items.iter().all(Value::is_string) => {
+                    items
+                        .into_iter()
+                        .filter_map(|item| item.as_str().map(ToOwned::to_owned))
+                        .collect()
+                }
+                value => vec![serde_json::to_string(&value)?],
             };
-            argv.extend([flag, value]);
+            for value in values {
+                argv.extend([flag.clone(), value]);
+            }
         }
         for (field, value) in self.set {
             anyhow::ensure!(
@@ -806,6 +821,9 @@ impl ConfigCommandTool {
                 .await;
         }
         let (behavior_id, target_args) = extract_behavior_target(&argv[1..])?;
+        if behavior_id.is_none() && matches!(verb, "preview" | "edit") {
+            self.require_named_profile_owner(verb).await?;
+        }
         let core = self.target_core(behavior_id.as_deref(), "profile").await?;
         let mut rest = target_args.as_slice();
         let target_name = rest
@@ -1013,6 +1031,14 @@ impl ConfigCommandTool {
                 let (behavior_id, rest) = extract_behavior_target(&argv[3..])?;
                 let core = self.target_core(behavior_id.as_deref(), "automation").await?;
                 let patch = parse_patch(&rest, target)?;
+                anyhow::ensure!(
+                    target != SelfConfigTarget::EventSource
+                        || patch.iter().all(|(field, value)| {
+                            field != "filter"
+                                || value.as_ref().is_none_or(|value| value.is_string() || value.is_null())
+                        }),
+                    "filter must be a string holding a GraphQL object literal with unquoted keys, e.g. \"{{kind: {{_eq: \\\"review\\\"}}}}\", not a JSON object; see [\"help\",\"automation\"]"
+                );
                 self.patch(
                     &core,
                     verb,
@@ -1348,6 +1374,45 @@ impl ConfigCommandTool {
             }
             .into()
         })
+    }
+
+    /// A profile edit without options.behavior changes the invoking
+    /// behavior's own model and limits. Once the principal has other
+    /// behaviors that default is the likely mistake (the call was meant for
+    /// a worker), and the tool keeps no memory of which behaviors a caller
+    /// just created, so any second behavior makes the target explicit.
+    async fn require_named_profile_owner(&self, verb: &str) -> Result<()> {
+        let owner = escape_graphql_string(&self.agent_did);
+        let query = format!(
+            "{{ AgentBehavior(filter: {{agent_did: {{_eq: \"{owner}\"}}}}) {{behavior_id}} }}"
+        );
+        let response = crate::config_client::ConfigAccess::transact_local(
+            &self.node,
+            Some(self.core.identity()?),
+            "self_config.profile_owners",
+            |txn| {
+                let query = query.clone();
+                Box::pin(async move { txn.execute(&query).await })
+            },
+        )
+        .await?;
+        let mut ids =
+            gents_protocol::graphql::graphql_rows_from_response(&response, "AgentBehavior")
+                .into_iter()
+                .filter_map(|row| {
+                    row.get("behavior_id")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .collect::<Vec<_>>();
+        ids.sort();
+        anyhow::ensure!(
+            ids.len() <= 1,
+            "profile {verb} needs options.behavior because this principal has several behaviors: {}. Name the behavior whose profile to change; use {:?} for your own",
+            ids.join(", "),
+            self.core.behavior_id()
+        );
+        Ok(())
     }
 
     /// Create and clone derive the new ID from the display name, so an

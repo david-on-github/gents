@@ -59,10 +59,16 @@ impl CollectionSchema {
         self.fields
             .iter()
             .filter(|f| !is_restricted_field(collection, &f.name))
-            .filter(|f| !f.name.chars().all(|c| c.is_ascii_uppercase()))
+            .filter(|f| !is_aggregate_pseudo_field(&f.name))
             .filter(|f| !f.name.starts_with('_') || f.name == "_docID")
             .collect()
     }
+}
+
+/// DefraDB's aggregate pseudo-fields (`AVG`, `COUNT`, `GROUP`, ...) are the
+/// all-uppercase names introspection reports beside a collection's own fields.
+pub(crate) fn is_aggregate_pseudo_field(name: &str) -> bool {
+    name.chars().all(|c| c.is_ascii_uppercase())
 }
 
 /// The selection every introspection query asks of a `__type`.

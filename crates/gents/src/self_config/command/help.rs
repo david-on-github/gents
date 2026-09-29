@@ -296,7 +296,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "profile get PROFILE_ID",
                 "profile get|preview|edit [TARGET]  options.behavior; TARGET is profile (default), sampling, execution, retry-policy or compaction",
             ],
-            notes: "Without options.behavior these target the invoking behavior's profile; the receipt's behavior_id and target_id name what changed. Creating a profile binds nothing.",
+            notes: "Without options.behavior these target the invoking behavior's profile, and preview or edit refuses once the principal has more than one behavior; the receipt's behavior_id and target_id name what changed. Creating a profile binds nothing.",
             next: "select a new profile with behavior edit BEHAVIOR_ID and set.inference_profile_id.",
         },
         "backend" => Page {
@@ -326,8 +326,8 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "cleanup" => Page {
             what: "remove documents atomically by exact ID, checking every reference.",
             commands: &[
-                "cleanup preview --target RESOURCE=ID [--target ...]",
-                "cleanup remove --digest DIGEST --target RESOURCE=ID [...]  the same targets as the preview",
+                "cleanup preview  options.target: RESOURCE=ID or a list of them",
+                "cleanup remove  options.digest from the preview and the same options.target",
             ],
             notes: "RESOURCE: behavior, context, tools, subagent-target, profile, sampling, execution, retry-policy, compaction, backend, mcp-service, task, schedule, trigger, event-source. Datastore surfaces, skills and schemas cannot be removed. Remove refuses if any target changed since the preview. Behavior and context need the behavior catalog grant; the Setup behavior cannot be removed.",
             next: "read back to confirm the targets are gone.",

@@ -66,6 +66,17 @@ async fn behavior_ids_resolve_from_their_principal_local_slug() {
     assert_eq!(receipt["behavior_id"], worker);
     assert_eq!(receipt["target_id"], format!("{worker}:inference"));
 
+    // With several behaviors, a profile edit must name its target.
+    let error = refused(
+        &tools,
+        json!({"argv":["profile","preview"],"set":{"display_name":"Mine"}}),
+    )
+    .await;
+    assert!(
+        error.contains("needs options.behavior") && error.contains(&worker),
+        "{error}"
+    );
+
     // A local SubagentTarget stores the resolved ID.
     ok(
         &tools,
@@ -237,6 +248,20 @@ async fn automation_validation_refuses_what_every_fire_would_reject() {
     )
     .await;
     assert!(error.contains("not an installed collection"), "{error}");
+    // A native JSON object is not a filter string; the error names the field.
+    let error = refused(
+        &tools,
+        edit(
+            "event-source",
+            "input",
+            json!({"source_collection":"GapInput","filter":{"message":{"_eq":"x"}}}),
+        ),
+    )
+    .await;
+    assert!(
+        error.contains("filter must be a string holding a GraphQL object literal"),
+        "{error}"
+    );
     // A JSON-quoted filter key parses as a string but fails every query.
     let error = refused(
         &tools,
@@ -287,7 +312,9 @@ async fn automation_validation_refuses_what_every_fire_would_reject() {
     )
     .await;
     assert!(
-        error.contains("doc.not_a_field") && error.contains("message, reply_session_id"),
+        !error.contains("COUNT")
+            && error.contains("doc.not_a_field")
+            && error.contains("message, reply_session_id"),
         "{error}"
     );
     let error = refused(
@@ -499,4 +526,24 @@ async fn results_put_the_answer_first_and_execution_metadata_last() {
         other => panic!("expected an error: {other:?}"),
     };
     order(&error, &["error", "recovery", "config_execution"]);
+}
+
+#[test]
+fn a_list_of_strings_in_options_is_the_repeated_flag() {
+    let params: command::ConfigCommandParams = serde_json::from_value(json!({
+        "argv": ["cleanup", "preview"],
+        "options": {"target": ["task=a", "trigger=b"]}
+    }))
+    .unwrap();
+    assert_eq!(
+        json!(params.into_argv_for_test().unwrap()),
+        json!([
+            "cleanup",
+            "preview",
+            "--target",
+            "task=a",
+            "--target",
+            "trigger=b"
+        ])
+    );
 }

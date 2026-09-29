@@ -1698,11 +1698,12 @@ impl PackInstaller {
             crate::pack::DriftPolicy::Refuse,
         )
         .await?;
-        Ok(serde_json::to_string_pretty(&json!({
+        ordered! {
             "pack": coordinate,
             "removed": report,
             "effect": "The package's graph and documents were removed. Package SDL schemas and run history stay.",
-        }))?)
+        }
+        .pretty()
     }
 
     async fn preview(&self, operation: &str, args: PackInstallParams) -> anyhow::Result<String> {
