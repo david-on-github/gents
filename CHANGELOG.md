@@ -206,6 +206,12 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Fixed
 
+- `max_request_hop` bounds call depth again, not the number of calls (#2065).
+  An `agent_new`/`agent_message` result returned to the calling session keeps
+  that session's hop; only the outward call climbs. A caller can make any
+  number of sequential calls to a callee at depth one, while an A↔B message
+  loop is still refused at the bound.
+
 - Desktop observation retains other agents when a document is deleted and prevents
   an older reload from replacing a freshly observed request (#1960, #2054).
 

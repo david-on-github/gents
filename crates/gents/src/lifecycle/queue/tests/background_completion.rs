@@ -1096,12 +1096,13 @@ async fn a_lower_hop_wake_never_consumes_a_higher_hop_notification() {
     assert_eq!(lower["superseded_by_request_doc_id"], raised_wake.as_str());
 }
 
-/// An agent loop, Lean `CausalHop.continuation_preserves_admission`: session A
-/// messages B and starts a background process in the same turn. B's result
-/// needs a wake over the bound; A's process wake must not run that result at
-/// A's old hop, now or later.
+/// Lean `CausalHop.return_keeps_caller_hop` and
+/// `CausalHop.return_into_refused_session_is_refused`: B's result returned to
+/// A wakes A at A's own hop and joins A's pending process wake. Once a request
+/// over the bound is A's latest, a later returned result copies that hop and
+/// is refused too.
 #[tokio::test]
-async fn a_refused_cross_session_wake_refuses_every_later_native_wake() {
+async fn a_returned_result_keeps_the_callers_hop_until_the_session_is_refused() {
     let db = test_db("wake-hop-refusal").await;
     let parent = root_parent(db.agent_did(), "wake-hop-refusal-session");
     let bound = crate::document_config::DEFAULT_MAX_REQUEST_HOP;
@@ -1132,12 +1133,28 @@ async fn a_refused_cross_session_wake_refuses_every_later_native_wake() {
     .await
     .unwrap();
     let native_wake = native.request.expect("native wake").doc_id;
-    // B ran at the bound; its result's wake is over it.
-    let refused = persist_background_completion_with_message_waking(
+    // B's result returns at A's hop, so it rides the pending wake.
+    let returned = persist_background_completion_with_message_waking(
         &db.node,
         &parent,
         "B result",
         "background-completion-notification:b:tool",
+        "review notifications",
+        background_hints(&parent),
+        None,
+        crate::lifecycle::RequestHopCause::Return,
+    )
+    .await
+    .unwrap();
+    assert!(!returned.created_request);
+    assert_eq!(returned.request.expect("joined wake").doc_id, native_wake);
+    assert_eq!(hop_of(native_wake.clone()).await["subagent_depth"], 0);
+    // A request past the bound becomes A's latest.
+    let refused = persist_background_completion_with_message_waking(
+        &db.node,
+        &parent,
+        "C message",
+        "background-completion-notification:c:tool",
         "review notifications",
         background_hints(&parent),
         None,
@@ -1162,16 +1179,16 @@ async fn a_refused_cross_session_wake_refuses_every_later_native_wake() {
         ))
         .await;
     assert!(!response.has_errors(), "{:?}", response.errors);
-    // A later process wake copies the refused hop and is refused as well.
+    // A later returned result copies the refused hop and is refused as well.
     let later = persist_background_completion_with_message_waking(
         &db.node,
         &parent,
-        "another sleep done",
-        "background-completion-notification:sleep-2:tool",
+        "another B result",
+        "background-completion-notification:b-2:tool",
         "review notifications",
         background_hints(&parent),
         None,
-        crate::lifecycle::RequestHopCause::Continuation,
+        crate::lifecycle::RequestHopCause::Return,
     )
     .await
     .unwrap();

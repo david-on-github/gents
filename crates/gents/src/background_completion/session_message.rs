@@ -189,9 +189,7 @@ pub(crate) async fn settle_session_message_row(
         terminal.notification_status(),
         terminal.output(),
         terminal.completion_reason(),
-        crate::lifecycle::RequestHopCause::CrossSession {
-            cause_hop: crate::session_message::caused_hop(&caused),
-        },
+        crate::lifecycle::RequestHopCause::Return,
     )
     .await?;
     Ok(true)

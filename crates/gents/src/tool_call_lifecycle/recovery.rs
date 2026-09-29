@@ -555,21 +555,10 @@ impl super::ToolCallLifecycle {
                     continue;
                 }
             };
-            // A session-message completion's wake climbs past its caused
-            // request; a kill or an unbound verdict continues this session.
-            let wake = if crate::toolset::is_session_message_tool(&row.tool_name)
-                && !matches!(reason, Some("explicit_cancel" | "caused_request_unbound"))
-            {
-                match session_message_caused_hop(node, &row, agent_did, session_id).await {
-                    Ok(Some(cause_hop)) => {
-                        crate::lifecycle::RequestHopCause::CrossSession { cause_hop }
-                    }
-                    Ok(None) => continue,
-                    Err(error) => {
-                        tracing::warn!(doc_id = %row.doc_id, error = %format!("{error:#}"), "session-message completion cause is unresolved");
-                        continue;
-                    }
-                }
+            // A session-message completion returns its result to this session
+            // (Lean `CausalHop.return_keeps_caller_hop`).
+            let wake = if crate::toolset::is_session_message_tool(&row.tool_name) {
+                crate::lifecycle::RequestHopCause::Return
             } else {
                 crate::lifecycle::RequestHopCause::Continuation
             };
@@ -1069,34 +1058,6 @@ async fn load_pending_background_completion_rows(
         }
     }
     Ok(rows)
-}
-
-/// The hop of the request a terminal session-message row caused.
-async fn session_message_caused_hop(
-    node: &std::sync::Arc<EmbeddedNode>,
-    row: &TerminalBackgroundToolRow,
-    agent_did: &str,
-    session_id: &str,
-) -> Result<Option<u32>> {
-    let Some(lifecycle) = super::ToolCallLifecycle::load_by_doc_id(
-        node.clone(),
-        &row.doc_id,
-        agent_did,
-        session_id,
-        row.requester_did.as_deref(),
-    )
-    .await?
-    else {
-        return Ok(None);
-    };
-    Ok(
-        match crate::session_message::observe_caused_request(node, &lifecycle).await? {
-            crate::session_message::CausedObservation::Bound(caused) => {
-                Some(crate::session_message::caused_hop(&caused))
-            }
-            _ => None,
-        },
-    )
 }
 
 fn background_completion_projection(

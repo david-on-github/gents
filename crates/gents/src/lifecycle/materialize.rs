@@ -572,10 +572,12 @@ pub(crate) async fn write_pending_title_request(
 pub enum RequestHopCause {
     /// A user, trigger or schedule root.
     Root,
-    /// Caused by another session's action at `cause_hop`: a
-    /// `agent_new`/`agent_message` request or steering continuation, or a
-    /// session-message completion wake.
+    /// Outward: caused by another session's action at `cause_hop`, a
+    /// `agent_new`/`agent_message` request or steering continuation.
     CrossSession { cause_hop: u32 },
+    /// Return: a session-message completion wake delivering the caused
+    /// request's result back to the calling session.
+    Return,
     /// A retry, goal continuation, user steering or native completion wake.
     Continuation,
 }
@@ -586,7 +588,7 @@ pub fn next_request_hop(cause: RequestHopCause, own: u32) -> u32 {
     match cause {
         RequestHopCause::Root => 0,
         RequestHopCause::CrossSession { cause_hop } => own.max(cause_hop.saturating_add(1)),
-        RequestHopCause::Continuation => own,
+        RequestHopCause::Return | RequestHopCause::Continuation => own,
     }
 }
 

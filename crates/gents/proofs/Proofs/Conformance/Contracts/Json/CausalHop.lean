@@ -13,6 +13,7 @@ open Conformance.Contracts
 def causeString : CausalHop.Cause → String
   | .root => "root"
   | .crossSession _ => "cross_session"
+  | .returnEdge => "return"
   | .continuation => "continuation"
 
 def causeHopJson : CausalHop.Cause → String
@@ -47,7 +48,10 @@ def stepCases : List StepCase :=
       CausalHop.defaultMaxRequestHop⟩
   , ⟨"cross_session_beyond_bound_is_refused", .crossSession 8, 0,
       CausalHop.defaultMaxRequestHop⟩
-  , ⟨"completion_wake_beyond_bound_is_refused", .crossSession 8, 7,
+  , ⟨"completion_wake_keeps_caller_hop", .returnEdge, 3, CausalHop.defaultMaxRequestHop⟩
+  , ⟨"completion_wake_at_bound_stays_admitted", .returnEdge, 8,
+      CausalHop.defaultMaxRequestHop⟩
+  , ⟨"completion_wake_into_refused_session_is_refused", .returnEdge, 9,
       CausalHop.defaultMaxRequestHop⟩
   , ⟨"continuation_at_bound_stays_admitted", .continuation, 8, CausalHop.defaultMaxRequestHop⟩
   , ⟨"zero_bound_admits_root", .root, 0, 0⟩
@@ -68,6 +72,44 @@ def chainCases : List ChainCase :=
       [.cross 0, .cont, .cross 0, .cross 1, .cont, .cross 2, .cross 0, .cross 3,
         .cont, .cross 4, .cross 5, .cross 6]⟩
   , ⟨"continuations_never_extend_a_chain", 1, [.cross 0, .cont, .cont, .cont]⟩ ]
+
+/-- Calls and returns between a caller `a` and a callee `b` from root hop
+zero (`CausalHop.run`); each event's hop is admitted against one bound. -/
+structure CallCase where
+  name : String
+  maxRequestHop : Nat
+  events : List CausalHop.Event
+
+/-- A ping-pong in which each send's result is returned to its sender. -/
+def pingPongWithReturns : Nat → List CausalHop.Event
+  | 0 => []
+  | n + 1 => pingPongWithReturns n ++
+      (if n % 2 == 0 then [.aSendsB, .returnToA] else [.bSendsA, .returnToB])
+
+def callCases : List CallCase :=
+  [ ⟨"sequential_calls_to_one_callee_stay_at_depth_one", 1, CausalHop.sequentialCalls 12⟩
+  , ⟨"ping_pong_with_returns_is_cut_at_default_bound", CausalHop.defaultMaxRequestHop,
+      pingPongWithReturns 9⟩ ]
+
+/-- Hops of the requests a call trace materializes, from `start`. -/
+def callHops : CausalHop.Pair → List CausalHop.Event → List Nat
+  | _, [] => []
+  | p, e :: rest => e.hop p :: callHops (e.apply p) rest
+
+def eventString : CausalHop.Event → String
+  | .aSendsB => "a_sends_b"
+  | .bSendsA => "b_sends_a"
+  | .returnToA => "return_to_a"
+  | .returnToB => "return_to_b"
+
+def callCaseJson (c : CallCase) : String :=
+  let hops := callHops ⟨0, 0⟩ c.events
+  "{\"name\":" ++ jsonString c.name
+    ++ ",\"max_request_hop\":" ++ toString c.maxRequestHop
+    ++ ",\"events\":" ++ jsonArray (c.events.map (jsonString ∘ eventString))
+    ++ ",\"expected_hops\":" ++ jsonArray (hops.map toString)
+    ++ ",\"expected_admitted\":"
+      ++ jsonArray (hops.map (toString ∘ CausalHop.admitHop c.maxRequestHop)) ++ "}"
 
 def stepCaseJson (c : StepCase) : String :=
   let hop := CausalHop.nextHop c.cause c.ownPredecessorHop
@@ -160,12 +202,13 @@ def contractJson : String :=
   "{\"default_max_request_hop\":" ++ toString CausalHop.defaultMaxRequestHop
     ++ ",\"step_cases\":" ++ jsonArray (stepCases.map stepCaseJson)
     ++ ",\"chain_cases\":" ++ jsonArray (chainCases.map chainCaseJson)
+    ++ ",\"call_cases\":" ++ jsonArray (callCases.map callCaseJson)
     ++ ",\"interrupt_cases\":" ++ jsonArray (interruptCases.map interruptCaseJson)
     ++ ",\"write_cases\":" ++ jsonArray (writeCases.map writeCaseJson) ++ "}"
 
 /-- The fixture exercises every cause and both admission outcomes. -/
 theorem step_cases_cover_causes_and_outcomes :
-    ["root", "cross_session", "continuation"].all (fun cause =>
+    ["root", "cross_session", "return", "continuation"].all (fun cause =>
       stepCases.any (causeString ·.cause == cause)) = true ∧
     stepCases.any (fun c => CausalHop.admitHop c.maxRequestHop
       (CausalHop.nextHop c.cause c.ownPredecessorHop)) = true ∧
@@ -185,6 +228,23 @@ theorem loop_fixtures_are_cut :
 /-- The exported ping-pong chain is the model's `pingPongHops`. -/
 theorem ping_pong_fixture_matches_model :
     chainHops 0 (pingPongSteps 9) = (CausalHop.pingPongHops 9).drop 1 := by
+  native_decide
+
+/-- Sequential calls are all admitted at a bound of one. In the ping-pong the
+only refused request is the send past the default bound; the results
+returned to each sender, including that refused send's, are admitted. -/
+theorem call_fixtures_match_the_bound :
+    (callHops ⟨0, 0⟩ (CausalHop.sequentialCalls 12)).all (· ≤ 1) = true ∧
+    (callHops ⟨0, 0⟩ (pingPongWithReturns 9)).filter
+        (fun hop => !CausalHop.admitHop CausalHop.defaultMaxRequestHop hop) =
+      [CausalHop.defaultMaxRequestHop + 1] := by
+  native_decide
+
+/-- With its returns erased, the exported ping-pong is the model's
+`pingPongHops`. -/
+theorem ping_pong_with_returns_erases_to_model :
+    callHops ⟨0, 0⟩ ((pingPongWithReturns 9).filter (fun e => !e.isReturn)) =
+      (CausalHop.pingPongHops 9).drop 1 := by
   native_decide
 
 end Conformance.CausalHopContracts

@@ -1007,6 +1007,7 @@ pub(crate) struct LeanCausalHopContract {
     pub(crate) default_max_request_hop: u32,
     pub(crate) step_cases: Vec<LeanCausalHopStepCase>,
     pub(crate) chain_cases: Vec<LeanCausalHopChainCase>,
+    pub(crate) call_cases: Vec<LeanCausalHopCallCase>,
     pub(crate) interrupt_cases: Vec<LeanAgentInterruptCase>,
     pub(crate) write_cases: Vec<LeanSessionMessageWriteCase>,
 }
@@ -1036,8 +1037,8 @@ pub(crate) struct LeanAgentInterruptCase {
 }
 
 /// One materialization step: `cause` is `root`, `cross_session` (with its
-/// `cause_hop`) or `continuation`, from the hop of the request it continues in
-/// its own session.
+/// `cause_hop`), `return` or `continuation`, from the hop of the request it
+/// continues in its own session.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LeanCausalHopStepCase {
@@ -1066,6 +1067,18 @@ pub(crate) struct LeanCausalHopChainCase {
     pub(crate) name: String,
     pub(crate) max_request_hop: u32,
     pub(crate) steps: Vec<LeanCausalHopChainStep>,
+    pub(crate) expected_hops: Vec<u32>,
+    pub(crate) expected_admitted: Vec<bool>,
+}
+
+/// Calls and returns between a caller `a` and a callee `b` from hop zero
+/// (`CausalHop.run`); expectations are per materialized request.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LeanCausalHopCallCase {
+    pub(crate) name: String,
+    pub(crate) max_request_hop: u32,
+    pub(crate) events: Vec<String>,
     pub(crate) expected_hops: Vec<u32>,
     pub(crate) expected_admitted: Vec<bool>,
 }

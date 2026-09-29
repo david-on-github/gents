@@ -484,13 +484,12 @@ async fn generated_kill_cases_drive_the_session_message_kill() {
     }
 }
 
-/// Lean `CausalHop.same_second_tie_takes_the_highest_hop` through real
-/// admission: a session-message
-/// completion whose wake is over the woken principal's bound still delivers
-/// its notification; admission refuses the wake as a visible failure; and a
-/// later native completion wake copies the refused hop and is refused too.
+/// Lean `CausalHop.return_keeps_caller_hop` through real settlement and
+/// admission (#2065): a callee that ran at the bound returns its result to
+/// the caller at the caller's own hop, so the wake is admitted, and a native
+/// completion of the same turn rides that wake.
 #[tokio::test]
-async fn an_over_bound_completion_notifies_and_admission_refuses_its_wakes() {
+async fn a_completion_at_the_bound_returns_at_the_callers_hop() {
     use crate::identity::AgentIdentity;
     let message = published_session_message(PublishedAdmissionOptions {
         name: "session-message-wake-at-bound".to_owned(),
@@ -504,7 +503,7 @@ async fn an_over_bound_completion_notifies_and_admission_refuses_its_wakes() {
     let did = message.admission.agent_did.clone();
     let session_id = message.admission.tool.session_id().to_owned();
     let caller_doc_id = message.admission.tool.request_doc_id().unwrap().to_owned();
-    // The caused request runs at hop 1, the bound; its wake would be hop 2.
+    // The caused request runs at hop 1, the bound; its result returns at hop 0.
     crate::document_config::ensure_agent_principal(&node, &did)
         .await
         .unwrap();
@@ -586,24 +585,13 @@ async fn an_over_bound_completion_notifies_and_admission_refuses_its_wakes() {
     assert!(notifications[0].contains("result at the bound"));
     let wakes = pending_wakes(node.clone(), session_id.clone()).await;
     assert_eq!(wakes.len(), 1);
-    let (admitted, row) = admit(wakes[0].clone()).await;
-    assert!(!admitted);
-    assert_eq!(row["subagent_depth"], 2);
-    assert_eq!(row["lifecycle_state"], "failed");
-    assert!(
-        row["failure_reason"]
-            .as_str()
-            .unwrap()
-            .contains("max_request_hop"),
-        "{row}"
-    );
 
-    // A native process of the same turn completes afterwards.
+    // A native process of the same turn completes afterwards and joins it.
     let caller = crate::request_binding::load_agent_request_by_doc_id(&node, &caller_doc_id)
         .await
         .unwrap()
         .unwrap();
-    crate::lifecycle::queue::persist_background_completion_with_message_waking(
+    let native = crate::lifecycle::queue::persist_background_completion_with_message_waking(
         &node,
         &caller,
         "process done",
@@ -622,12 +610,13 @@ async fn an_over_bound_completion_notifies_and_admission_refuses_its_wakes() {
     )
     .await
     .unwrap();
-    let wakes = pending_wakes(node.clone(), session_id.clone()).await;
-    assert_eq!(wakes.len(), 1);
+    assert!(!native.created_request);
+    assert_eq!(pending_wakes(node.clone(), session_id.clone()).await, wakes);
+    crate::test_support::install_test_behavior(node.as_ref(), &did, &caller.behavior_id).await;
     let (admitted, row) = admit(wakes[0].clone()).await;
-    assert!(!admitted, "a later native wake copies the refused hop");
-    assert_eq!(row["subagent_depth"], 2);
-    assert_eq!(row["lifecycle_state"], "failed");
+    assert!(admitted, "{row}");
+    assert_eq!(row["subagent_depth"], caller.subagent_depth);
+    assert_eq!(row["lifecycle_state"], "pending");
     node.shutdown().await;
     std::fs::remove_dir_all(&message.admission.path).unwrap();
 }
