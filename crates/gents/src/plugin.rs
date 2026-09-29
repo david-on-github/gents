@@ -48,14 +48,18 @@
 //!    authority claim in rule 2 is only honest for a plugin admitted this
 //!    way.
 //! 5. **Every bound is real, and a default is one the artifact can start
-//!    under.** `budget.fuel`, `budget.memory_bytes`, and
-//!    `budget.wall_clock` go straight to `AfbRunRequest`, where the wall
-//!    clock is a genuine preemption rather than a deadline the host stops
-//!    waiting at. [`PluginBudget::for_artifact`] raises a default that
-//!    could not host this artifact at all, because a ceiling below what a
-//!    guest spends before its own code runs bounds nothing. Stdout and
-//!    stderr are each capped after the run, truncation is named in
-//!    `diagnostics`, never silently applied.
+//!    under.** `budget.memory_bytes` and `budget.wall_clock` go straight to
+//!    `AfbRunRequest`, where the wall clock is a genuine preemption rather
+//!    than a deadline the host stops waiting at. `budget.fuel` is `None` by
+//!    default (no instruction ceiling): Afterburner's own `None` means its
+//!    family's default budget instead, not "unlimited" (100 million for a
+//!    WASI command guest), so [`PluginRunner::call`] maps a `None` budget to
+//!    the largest ceiling Wasmtime accepts rather than passing `None`
+//!    through. [`PluginBudget::for_artifact`] raises a default that could
+//!    not host this artifact at all, because a ceiling below what a guest
+//!    spends before its own code runs bounds nothing. Stdout and stderr are
+//!    each capped after the run, truncation is named in `diagnostics`,
+//!    never silently applied.
 //! 6. **Output is validated, `input_schema` is not.** Stdout that is not
 //!    exactly one JSON value is [`PluginVerdict::BadOutput`] naming why.
 //!    `input_schema` describes the *arguments*, not the result, so this
@@ -91,9 +95,13 @@ const MAX_STDERR_BYTES: usize = 64 * 1024;
 /// [`AfbRunRequest`]'s `fuel`, `memory_bytes`, and `timeout` fields.
 #[derive(Debug, Clone, Copy)]
 pub struct PluginBudget {
-    /// Wasmtime fuel: a deterministic instruction budget, the real
-    /// backstop against a guest that never returns.
-    pub fuel: u64,
+    /// Wasmtime fuel: a deterministic instruction ceiling. `None` means no
+    /// ceiling at all (the default: the wall clock is the real backstop
+    /// against a guest that never returns); `Some(n)` bounds the call at
+    /// `n` instructions, for a caller or a later configuration that wants
+    /// one. See [`PluginRunner::call`] for how `None` is actually carried
+    /// to Afterburner, which has no "no ceiling" value of its own.
+    pub fuel: Option<u64>,
     /// Linear-memory ceiling in bytes, enforced by wasmtime on every
     /// `memory.grow`.
     pub memory_bytes: u64,
@@ -112,10 +120,9 @@ impl PluginBudget {
     /// bound: the run fails during startup, the plugin never executes a
     /// line, and the ceiling never bounds the thing it was meant to bound.
     /// A Pyodide-backed plugin carries CPython, which needs more memory to
-    /// instantiate than [`Self::default`] allows and spends orders of
-    /// magnitude more fuel booting than it allows for a whole call, so
-    /// admitting one and then handing it the default budget would admit a
-    /// language that can never answer. The floor comes from
+    /// instantiate than [`Self::default`] allows, so admitting one and then
+    /// handing it the default budget would admit a language whose runtime
+    /// cannot even start. The floor comes from
     /// [`afterburner::afb_run::startup_floor`], which is where the dispatch
     /// shape is known, rather than from a copy of that knowledge here.
     ///
@@ -123,15 +130,19 @@ impl PluginBudget {
     /// booting an interpreter is work the caller waits through before the
     /// plugin's own code starts, and a budget that cannot cover the boot
     /// reports `Timeout` on every call.
+    ///
+    /// Fuel is left as the caller's own choice: `None` (the default) stays
+    /// unbounded, since a startup floor only matters against a finite
+    /// ceiling; a caller that did set one gets it raised by the
+    /// interpreter's own startup cost, saturating rather than wrapping.
     pub fn for_artifact(afb: &afterburner_afb::Afb) -> Self {
         let default = Self::default();
         match afterburner::afb_run::startup_floor(afb) {
             Some(floor) => Self {
                 memory_bytes: default.memory_bytes.max(floor.memory_bytes),
-                // The startup cost plus the default's own allowance, so a
-                // plugin still gets its own budget to work in after the
-                // runtime has finished booting.
-                fuel: floor.fuel.saturating_add(default.fuel),
+                fuel: default
+                    .fuel
+                    .map(|ceiling| floor.fuel.saturating_add(ceiling)),
                 wall_clock: default.wall_clock.max(INTERPRETER_BOOT_ALLOWANCE),
                 ..default
             },
@@ -149,16 +160,16 @@ impl PluginBudget {
 const INTERPRETER_BOOT_ALLOWANCE: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Default for PluginBudget {
-    /// `fuel` mirrors `afterburner_wasi::embedder_vm`'s own default
-    /// instruction budget (100 million, "generous enough for unit
-    /// tests"); `memory_bytes` (64 MiB) is comfortable for a small
-    /// compiled transform without giving a runaway allocation the run of
-    /// the host; `wall_clock` (5 s) is long enough for a cold-ish
-    /// compute-bound call and short enough that a caller waiting on a
-    /// plugin result is not left hanging.
+    /// `fuel` is `None`: a plugin's instruction count grows with its input,
+    /// so any fixed ceiling refuses valid calls on large inputs; the wall
+    /// clock is the backstop against a guest that never returns. `memory_bytes`
+    /// (64 MiB) is comfortable for a small compiled transform without
+    /// giving a runaway allocation the run of the host; `wall_clock` (5 s)
+    /// is long enough for a cold-ish compute-bound call and short enough
+    /// that a caller waiting on a plugin result is not left hanging.
     fn default() -> Self {
         Self {
-            fuel: 100_000_000,
+            fuel: None,
             memory_bytes: 64 * 1024 * 1024,
             wall_clock: std::time::Duration::from_secs(5),
         }
@@ -336,7 +347,13 @@ impl PluginRunner {
         let request = AfbRunRequest {
             stdin,
             manifold: self.manifold.clone(),
-            fuel: Some(budget.fuel),
+            // Afterburner's own `None` means its family's default fuel
+            // budget (100 million for a WASI command guest), not
+            // "unlimited" - so a `budget.fuel` of `None` is carried as the
+            // largest ceiling Wasmtime's `Store::set_fuel` accepts, the
+            // same sentinel Afterburner's own daemon runtime uses for an
+            // unbounded guest.
+            fuel: Some(budget.fuel.unwrap_or(u64::MAX)),
             memory_bytes: Some(budget.memory_bytes),
             timeout: Some(budget.wall_clock),
             ..Default::default()
@@ -351,7 +368,13 @@ impl PluginRunner {
             AfbRunOutcome::OutOfFuel => Ok(PluginOutcome {
                 verdict: PluginVerdict::OutOfFuel,
                 output: serde_json::Value::Null,
-                diagnostics: "the plugin exhausted its fuel budget".to_owned(),
+                // A ceiling the caller actually set is a budget it
+                // exhausted; the unlimited default has no budget to name,
+                // only the sentinel this call carried in its place.
+                diagnostics: match budget.fuel {
+                    Some(_) => "the plugin exhausted its fuel budget".to_owned(),
+                    None => "the plugin ran out of fuel".to_owned(),
+                },
                 fuel_used: output.fuel_used,
                 wall_ms,
             }),
