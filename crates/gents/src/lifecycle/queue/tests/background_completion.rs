@@ -372,7 +372,7 @@ fn admission_verifier(db: &TestDb) -> crate::request_admission::AgentRequestAdmi
 /// started, is written under the desktop's requester, admitted, claimed and
 /// resumed in that same session.
 #[tokio::test]
-async fn a_paired_client_session_receives_an_agent_new_completion() {
+async fn a_returned_result_is_admitted_into_a_paired_client_session() {
     let db = test_db("paired-client-completion").await;
     let session_id = "desktop-owned-session";
     let (desktop, _, parent, _) = desktop_owned_session(&db, session_id).await;

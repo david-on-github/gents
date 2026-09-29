@@ -4,8 +4,8 @@
 
 use crate::identity::AgentIdentity;
 use crate::tool_call_lifecycle::admission_fixture::{
-    complete_child, published_admission, published_session_message, PublishedAdmission,
-    PublishedAdmissionOptions,
+    complete_child, published_admission, published_session_message,
+    published_session_message_with_owner, PublishedAdmission, PublishedAdmissionOptions,
 };
 use crate::tool_call_lifecycle::{AwaitMode, ToolCallLifecycle};
 use std::sync::Arc;
@@ -617,6 +617,126 @@ async fn a_completion_at_the_bound_returns_at_the_callers_hop() {
     assert!(admitted, "{row}");
     assert_eq!(row["subagent_depth"], caller.subagent_depth);
     assert_eq!(row["lifecycle_state"], "pending");
+    node.shutdown().await;
+    std::fs::remove_dir_all(&message.admission.path).unwrap();
+}
+
+/// #2064 through real settlement: an `agent_new` made from a paired client's
+/// session returns its result into that session under the client's
+/// requester, at the caller's hop; a redrive is inert, and the wake is
+/// admitted, claimed and resumed in that same session.
+#[tokio::test]
+async fn a_paired_client_session_receives_its_agent_new_result() {
+    let (message, mut calling) = published_session_message_with_owner(PublishedAdmissionOptions {
+        name: "paired-client-agent-new".to_owned(),
+        real_identity: true,
+        await_mode: AwaitMode::Background,
+        paired_client: true,
+        ..Default::default()
+    })
+    .await
+    .expect("publish a paired client's agent_new and materialize its request");
+    let node = message.admission.node.clone();
+    let did = message.admission.agent_did.clone();
+    let session_id = message.admission.tool.session_id().to_owned();
+    let caller_doc_id = message.admission.tool.request_doc_id().unwrap().to_owned();
+    let caller = crate::request_binding::load_agent_request_by_doc_id(&node, &caller_doc_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let client = caller
+        .requester_did
+        .clone()
+        .expect("paired client requester");
+    assert_ne!(client, did);
+
+    complete_child(&node, &message.caused_request_id, &did, "gatekeeper answer").await;
+    assert_eq!(
+        crate::background_completion::settle_running_session_message_rows(&node, &did)
+            .await
+            .unwrap(),
+        1
+    );
+    ToolCallLifecycle::reconcile_background_completion_side_effects(&node, &did)
+        .await
+        .unwrap();
+    let response = node
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{ session_id: {{ _eq: "{}" }}, execution_origin: {{ _eq: "scheduled" }} }}) {{ _docID }} }}"#,
+            crate::graphql::escape_graphql_string(&session_id)
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let wakes = response.data.unwrap()["AgentRequest"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(wakes.len(), 1, "{wakes:?}");
+    let wake = crate::request_binding::load_agent_request_by_doc_id(
+        &node,
+        wakes[0]["_docID"].as_str().unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(wake.requester_did.as_deref(), Some(client.as_str()));
+    assert_eq!(wake.subagent_depth, caller.subagent_depth);
+    // The calling turn ends; its session's queued result is next.
+    calling
+        .terminalize_owned(
+            crate::lifecycle::RequestTerminalOutcome::Completed,
+            gents_protocol::output::TerminalOutput::Message {
+                message_doc_id: message
+                    .admission
+                    .tool
+                    .accepted_header_doc_id()
+                    .expect("accepted caller assistant header")
+                    .to_owned(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+
+    crate::test_support::install_test_behavior(node.as_ref(), &did, &caller.behavior_id).await;
+    let identity: Arc<dyn AgentIdentity> = Arc::new(
+        crate::KeyIdentity::load_or_create(message.admission.path.join("test-agent.key"), None)
+            .unwrap(),
+    );
+    let verifier = crate::request_admission::AgentRequestAdmissionVerifier::new(
+        node.clone(),
+        identity,
+        crate::agent::p2p_reconcile::enrollment_authority_channel().1,
+    );
+    let verified = crate::agent::daemon::verify_request_at_claim_boundary(
+        &verifier,
+        node.clone(),
+        &wake.behavior_id,
+        wake.clone(),
+    )
+    .await
+    .expect("the returned result is admitted into the client's session");
+    let mut lifecycle = crate::RequestLifecycle::new_with_agent_did(
+        node.clone(),
+        &wake.behavior_id,
+        &did,
+        verified.clone(),
+        60,
+    );
+    assert_eq!(
+        lifecycle.claim_with_identity().await.unwrap(),
+        crate::lifecycle::ClaimOutcome::Claimed
+    );
+    crate::hook::DefraSessionHook::resume_with_identity_policy(
+        node.clone(),
+        &session_id,
+        &wake.behavior_id,
+        &did,
+        verified.requester_did.as_deref(),
+        crate::hook::FailurePolicy::FailClosed,
+    )
+    .await
+    .expect("the result resumes the client's session");
     node.shutdown().await;
     std::fs::remove_dir_all(&message.admission.path).unwrap();
 }

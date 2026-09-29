@@ -987,11 +987,13 @@ pub(super) async fn apply_request_session_projection(
     let rows = response["data"]["AgentSession"]
         .as_array()
         .context("AgentSession query omitted rows")?;
-    anyhow::ensure!(
-        rows.len() <= 1,
-        "duplicate AgentSession rows for session_id={}",
-        request.session_id
-    );
+    if rows.len() > 1 {
+        return Err(ClaimAdmissionError::SessionScopeMismatch {
+            session_id: request.session_id.clone(),
+            reason: "ambiguous session owner".to_owned(),
+        }
+        .into());
+    }
     if let Some(existing) = rows.first().map(session::decode_session_row).transpose()? {
         if existing.session.requester_did != request.requester_did {
             return Err(ClaimAdmissionError::SessionScopeMismatch {

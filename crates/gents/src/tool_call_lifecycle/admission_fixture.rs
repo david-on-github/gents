@@ -72,6 +72,9 @@ pub struct PublishedAdmissionOptions {
     /// Native tool name; `None` publishes `SPAWN_PROCESS_TOOL_NAME`. Only a
     /// `agent_new`/`agent_message` name publishes in background.
     pub tool_name: Option<String>,
+    /// With `real_identity`, the calling request is an enrolled request of a
+    /// paired client DID, in a session that client owns.
+    pub paired_client: bool,
 }
 
 impl Default for PublishedAdmissionOptions {
@@ -83,6 +86,7 @@ impl Default for PublishedAdmissionOptions {
             start_running: true,
             request_created_at: None,
             tool_name: None,
+            paired_client: false,
         }
     }
 }
@@ -372,6 +376,64 @@ pub(crate) async fn claimed_signed_request_with_trigger(
     lifecycle
 }
 
+/// A claimed enrolled request of a paired client (`paired-client.key`) in a
+/// session that client owns on `agent`.
+async fn claimed_paired_client_request(
+    node: &Arc<EmbeddedNode>,
+    request_id: &str,
+    session_id: &str,
+    agent: &dyn AgentIdentity,
+    path: &std::path::Path,
+) -> RequestLifecycle {
+    let client = crate::KeyIdentity::load_or_create(path.join("paired-client.key"), None)
+        .expect("paired client identity");
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    ensure_fixture_session(node, session_id, agent.did(), Some(client.did()), &now).await;
+    let mut create = gents_protocol::request_admission::AgentRequestCreate::base(
+        gents_protocol::request_admission::RequestPurpose::Normal,
+        request_id,
+        agent.did(),
+        client.did(),
+        "general",
+        session_id,
+        "spawn",
+        "interactive",
+        now,
+        gents_protocol::request_admission::AgentRequestAdmissionRecord::enrollment(
+            client.did(),
+            "enrollment",
+            "digest",
+            agent.did(),
+            1,
+            "2099-01-01T00:00:00Z",
+        ),
+    );
+    crate::sign_agent_request_create(&client, &mut create)
+        .await
+        .expect("sign paired client request");
+    let created = node.execute(&create.graphql_mutation().unwrap()).await;
+    assert!(!created.has_errors(), "{:#?}", created.errors);
+    let request_id = crate::graphql::escape_graphql_string(request_id);
+    let row = node
+        .execute(&format!(
+            r#"{{ AgentRequest(filter: {{ request_id: {{ _eq: "{request_id}" }} }}) {{ {} }} }}"#,
+            crate::watcher::AGENT_REQUEST_FIELDS,
+        ))
+        .await;
+    let row: gents_protocol::row::AgentRequestRow = crate::graphql::first_row(&row, "AgentRequest")
+        .unwrap()
+        .unwrap();
+    let mut lifecycle = RequestLifecycle::new_with_agent_did(
+        node.clone(),
+        "general",
+        agent.did(),
+        row.try_into().unwrap(),
+        60,
+    );
+    assert_eq!(lifecycle.claim().await.unwrap(), ClaimOutcome::Claimed);
+    lifecycle
+}
+
 /// Generalized publication fixture.
 ///
 /// Starts an embedded node under a fresh tempdir with runtime schemas, claims
@@ -420,6 +482,16 @@ pub async fn published_admission_with_owner(
         |identity| identity.did().to_owned(),
     );
     let mut request = match identity.as_ref() {
+        Some(identity) if options.paired_client => {
+            claimed_paired_client_request(
+                &node,
+                &format!("request-{name}"),
+                &format!("session-{name}"),
+                identity,
+                &path,
+            )
+            .await
+        }
         Some(identity) => {
             claimed_signed_request(
                 &node,
