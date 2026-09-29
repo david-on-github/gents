@@ -24,8 +24,8 @@ use super::documents::{
     CallbackResultInvocationRow,
 };
 use super::run::{
-    apply_planner_deny, can_emit_callback_result, can_start_executing, emit_plan_from_source,
-    journal_has_started_host_execution, plan_from_callback, resolve_action_plan,
+    apply_planner_deny, can_emit_callback_result, can_start_executing, decode_journal,
+    emit_plan_from_source, plan_from_callback, resolve_action_plan,
     resolve_action_plan_with_module,
 };
 use super::wasm::{
@@ -41,6 +41,82 @@ fn binding() -> CallbackBindingDoc {
 }
 fn callback() -> crate::document_config::Callback {
     serde_json::from_value(json!({"callback_id":"cb-1","agent_did":"did:key:zWriter","handler":{"kind":"built_in","emitter":"create_workspace"},"capabilities":["create_workspace","observe_dirty_base","clone_artifacts"]})).unwrap()
+}
+
+fn lean_journal(states: &[String]) -> Vec<ActionJournalEntry> {
+    serde_json::from_value(json!(states
+        .iter()
+        .enumerate()
+        .map(|(index, state)| json!({ "index": index, "state": state }))
+        .collect::<Vec<_>>()))
+    .unwrap()
+}
+
+#[test]
+fn generated_recovery_and_denial_match_runtime_owners() {
+    let cases = crate::lean_vocab_test::lean_callback_recovery_cases();
+    assert_eq!(cases.len(), 28, "Lean must emit the whole recovery matrix");
+    for case in cases {
+        let journal = lean_journal(&case.journal);
+        let (state, recovered) = match crate::workspace::recover_running(&journal) {
+            Some(failed) => (LIFECYCLE_FAILED, failed),
+            None => (LIFECYCLE_RUNNING, journal.clone()),
+        };
+        assert_eq!(state, case.post_state, "{}: recovered state", case.name);
+        assert_eq!(recovered, lean_journal(&case.post_journal), "{}", case.name);
+        assert_eq!(
+            crate::workspace::retry_allowed(state, &recovered, case.attempts, case.max_attempts),
+            case.retry_allowed_after,
+            "{}: retry after recovery",
+            case.name,
+        );
+
+        let mut denied = CallbackInvocationDoc {
+            invocation_id: "inv-1".into(),
+            owner_agent_did: "did:key:zWriter".into(),
+            callback_id: "cb-1".into(),
+            input: json!({}),
+            origin: crate::document_config::CallbackInvocationOrigin::Event {
+                binding_id: "bind-1".into(),
+                source_collection: "WorkUnit".into(),
+                source_doc_id: "doc-1".into(),
+                source_version: None,
+            },
+            caused_by_correlation: None,
+            idempotency_key: "bind-1:doc-1".into(),
+            lifecycle_state: LIFECYCLE_RUNNING.into(),
+            attempts: Some(i64::from(case.attempts)),
+            action_plan: None,
+            action_journal: Some(serde_json::to_string(&journal).unwrap()),
+            error: None,
+            claimed_at: None,
+            created_at: None,
+        };
+        apply_planner_deny(&mut denied, "callback is disabled");
+        let denied_journal = decode_journal(denied.action_journal.as_deref()).unwrap();
+        assert_eq!(
+            denied.lifecycle_state, case.deny_post_state,
+            "{}: denied state",
+            case.name
+        );
+        assert_eq!(
+            denied_journal,
+            lean_journal(&case.deny_post_journal),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            crate::workspace::retry_allowed(
+                &denied.lifecycle_state,
+                &denied_journal,
+                case.attempts,
+                case.max_attempts
+            ),
+            case.retry_allowed_after_deny,
+            "{}: retry after denial",
+            case.name,
+        );
+    }
 }
 
 #[test]
@@ -376,12 +452,16 @@ fn wasm_recovery_reuses_stored_plan_without_reloading_module() {
             panic!("expected create_workspace")
         }
     }
-    assert!(journal_has_started_host_execution(&journal));
-
     let mut denied = invocation.clone();
     apply_planner_deny(&mut denied, "CallbackModule mod-gone not found");
     assert_eq!(denied.lifecycle_state, LIFECYCLE_FAILED);
-    assert_eq!(denied.action_journal, invocation.action_journal);
+    assert_eq!(
+        denied.action_journal,
+        Some(
+            serde_json::to_string(&[ActionJournalEntry::new(0, ActionJournalState::Interrupted)])
+                .unwrap()
+        )
+    );
     assert_eq!(denied.action_plan, invocation.action_plan);
     assert!(denied.error.as_deref().unwrap().contains("mod-gone"));
 

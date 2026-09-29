@@ -462,6 +462,9 @@ pub(crate) struct LeanCallbackRecoveryCase {
     pub(crate) post_state: String,
     pub(crate) post_journal: Vec<String>,
     pub(crate) retry_allowed_after: bool,
+    pub(crate) deny_post_state: String,
+    pub(crate) deny_post_journal: Vec<String>,
+    pub(crate) retry_allowed_after_deny: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]

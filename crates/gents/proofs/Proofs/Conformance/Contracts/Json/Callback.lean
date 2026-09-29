@@ -59,7 +59,11 @@ def callbackRecoveryCasesJson : String :=
       ++ ",\"post_state\":" ++ jsonString c.post.state.toDefraDB
       ++ ",\"post_journal\":"
         ++ jsonStringArray (c.post.journal.map fun e => e.state.toDefraDB)
-      ++ ",\"retry_allowed_after\":" ++ boolString c.retryAllowedAfter ++ "}")
+      ++ ",\"retry_allowed_after\":" ++ boolString c.retryAllowedAfter
+      ++ ",\"deny_post_state\":" ++ jsonString c.denied.state.toDefraDB
+      ++ ",\"deny_post_journal\":"
+        ++ jsonStringArray (c.denied.journal.map fun e => e.state.toDefraDB)
+      ++ ",\"retry_allowed_after_deny\":" ++ boolString c.retryAllowedAfterDeny ++ "}")
 
 def callbackTransitionCaseCount : Nat := Callback.Conformance.transitionCases.length
 

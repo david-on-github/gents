@@ -317,11 +317,18 @@ async fn a_failed_plugin_node_is_retried_and_the_run_then_succeeds() {
     node.shutdown().await;
 }
 
-/// A plugin call cut off mid-run may already have done something outside the
-/// runtime, so recovery fails it and no retry repeats it, whatever the budget.
-/// The echo plugin's output document counts executions: a rerun would write one.
-#[tokio::test]
-async fn interrupted_plugin_invocation_is_not_rerun_on_recovery() {
+/// A real echo invocation on a callback allowing three attempts, seeded as a
+/// plugin call cut off mid-run: running, `[Executing]`, one attempt, claimed at
+/// `claimed_at`. Returns its invocation and callback ids. The echo plugin's
+/// output document counts executions: a rerun would write one.
+async fn seed_interrupted_echo_invocation(
+    claimed_at: &str,
+) -> (
+    tempfile::TempDir,
+    Arc<EmbeddedNode>,
+    Arc<crate::plugin::executor::PluginExecutor>,
+    (String, String),
+) {
     let (home, record) = crate::plugin::tests::executor::installed_echo();
     let node = Arc::new(EmbeddedNode::builder().build().await.unwrap());
     crate::ensure_runtime_schemas(&node).await.unwrap();
@@ -410,8 +417,7 @@ async fn interrupted_plugin_invocation_is_not_rerun_on_recovery() {
         .unwrap(),
     );
     interrupted.error = None;
-    // Long past any backoff, so only the journal can hold a retry back.
-    interrupted.claimed_at = Some("2020-01-01T00:00:00Z".to_owned());
+    interrupted.claimed_at = Some(claimed_at.to_owned());
     assert!(
         crate::callback::update_invocation(&node, &interrupted, None)
             .await
@@ -419,12 +425,16 @@ async fn interrupted_plugin_invocation_is_not_rerun_on_recovery() {
     );
     std::fs::write(&artifact, &bytes).unwrap();
 
-    for _ in 0..2 {
-        crate::callback::recover_local_invocations(&node, graph_test_owner(), None, &plugins)
-            .await
-            .unwrap();
-    }
-    let recovered = crate::callback::load_invocation(&node, &invocation_id, graph_test_owner())
+    (
+        home,
+        node,
+        plugins,
+        (interrupted.invocation_id, interrupted.callback_id),
+    )
+}
+
+async fn assert_interrupted_invocation_not_rerun(node: &EmbeddedNode, invocation_id: &str) {
+    let recovered = crate::callback::load_invocation(node, invocation_id, graph_test_owner())
         .await
         .unwrap()
         .unwrap();
@@ -441,11 +451,60 @@ async fn interrupted_plugin_invocation_is_not_rerun_on_recovery() {
         )]
     );
     assert!(
-        rows(&node, "{ EchoOutput { payload } }", "EchoOutput")
+        rows(node, "{ EchoOutput { payload } }", "EchoOutput")
             .await
             .is_empty(),
         "the interrupted plugin call ran again"
     );
+}
+
+async fn recover(node: &EmbeddedNode, plugins: &crate::plugin::executor::PluginExecutor) {
+    crate::callback::recover_local_invocations(node, graph_test_owner(), None, plugins)
+        .await
+        .unwrap();
+}
+
+/// A plugin call cut off mid-run may already have done something outside the
+/// runtime, so recovery fails it and no retry repeats it, whatever the budget.
+#[tokio::test]
+async fn interrupted_plugin_invocation_is_not_rerun_on_recovery() {
+    // Long past any backoff, so only the journal can hold a retry back.
+    let (_home, node, plugins, (invocation_id, _)) =
+        seed_interrupted_echo_invocation("2020-01-01T00:00:00Z").await;
+    for _ in 0..2 {
+        recover(&node, &plugins).await;
+    }
+    assert_interrupted_invocation_not_rerun(&node, &invocation_id).await;
+    node.shutdown().await;
+}
+
+/// Recovery that meets a disabled callback denies the cut-off call, which must
+/// still mark it interrupted: re-enabling the callback once its backoff has
+/// passed must not rerun it.
+#[tokio::test]
+async fn interrupted_plugin_invocation_on_a_disabled_callback_is_not_rerun_when_re_enabled() {
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let (_home, node, plugins, (invocation_id, callback_id)) =
+        seed_interrupted_echo_invocation(&now).await;
+    let set_enabled = |enabled: bool| {
+        let node = node.clone();
+        let mutation = format!(
+            r#"mutation {{ update_Callback(filter: {{ callback_id: {{ _eq: "{}" }} }}, input: {{ enabled: {enabled} }}) {{ _docID }} }}"#,
+            callback_id
+        );
+        async move {
+            let rows = rows(&node, &mutation, "update_Callback").await;
+            assert_eq!(rows.len(), 1, "{rows:?}");
+        }
+    };
+    set_enabled(false).await;
+    recover(&node, &plugins).await;
+    set_enabled(true).await;
+    tokio::time::sleep(crate::plugin::retry_backoff(1) + Duration::from_millis(1100)).await;
+    for _ in 0..2 {
+        recover(&node, &plugins).await;
+    }
+    assert_interrupted_invocation_not_rerun(&node, &invocation_id).await;
     node.shutdown().await;
 }
 

@@ -173,9 +173,9 @@ def retryCases : List RetryCase :=
 
 theorem retryCases_count : retryCases.length = 224 := by native_decide
 
-/-- Recovery of every running invocation over a matrix of journals and
-attempts. The expected outcome and later retry decision are the model's own
-`recover` and `retryAllowed`. -/
+/-- Recovery and denial of every running invocation over a matrix of journals
+and attempts. The expected outcomes and later retry decisions are the model's
+own `recover`, `deny` and `retryAllowed`. -/
 structure RecoveryCase where
   name : String
   journal : List ActionJournalState
@@ -183,6 +183,8 @@ structure RecoveryCase where
   maxAttempts : Nat
   post : CallbackInvocation
   retryAllowedAfter : Bool
+  denied : CallbackInvocation
+  retryAllowedAfterDeny : Bool
   deriving Repr
 
 def recoveryCases : List RecoveryCase :=
@@ -195,18 +197,14 @@ def recoveryCases : List RecoveryCase :=
         { invocationId := "inv-1", ownerAgentDid := "dep-1", state := .running,
           journal := numberedJournal journal, resultEmitted := false, attempts := attempts }
       let post := recover inv
+      let denied := deny inv
       { name := String.intercalate "," (journal.map ActionJournalState.toDefraDB) ++ ":"
           ++ toString attempts ++ "/3"
         journal := journal, attempts := attempts, maxAttempts := 3, post := post,
-        retryAllowedAfter := retryAllowed post 3 }
+        retryAllowedAfter := retryAllowed post 3, denied := denied,
+        retryAllowedAfterDeny := retryAllowed denied 3 }
 
 theorem recoveryCases_count : recoveryCases.length = 28 := by native_decide
-
-/-- The matrix holds a cut-off executing attempt with budget left, and recovery
-refuses to retry it. -/
-theorem recoveryCases_refuse_interrupted_retry :
-    recoveryCases.any (fun c => c.journal = [.executing] && c.attempts = 1 &&
-      c.post.state = .failed && !c.retryAllowedAfter) = true := by native_decide
 
 end Conformance
 end Callback

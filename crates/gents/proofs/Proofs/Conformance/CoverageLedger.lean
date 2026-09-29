@@ -1745,7 +1745,7 @@ def caseCoverage : List CoverageEntry :=
   , tagged (consumerCoverage
       "callback_recovery_cases"
       "CallbackRecoveryCases"
-      "conformance::callback_lifecycle::generated_recovery_matches_runtime_owner")
+      "callback::tests::generated_recovery_and_denial_match_runtime_owners")
       "isolated-workspaces" [Surface.runtimeInternal]
 
   , tagged (consumerWithFollowUp "runtime_cases" "RuntimeReconcileCases"

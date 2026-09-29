@@ -225,6 +225,32 @@ theorem recovered_attempt_never_retried (inv : CallbackInvocation) (maxAttempts 
     interruptJournal, List.mem_map]
   exact ⟨e, he, by simp [hs, ActionJournalState.markInterrupted]⟩
 
+/-- A denial of a running invocation whose actions started is recovery. -/
+theorem deny_started_is_recover (inv : CallbackInvocation)
+    (hjournal : inv.journal ≠ []) : deny inv = recover inv := by
+  simp [deny, hjournal]
+
+/-- A denial of a running invocation is a model step: `deny_running` before any
+action started, `interrupt` after. -/
+theorem deny_steps (inv : CallbackInvocation) (hrun : inv.state = .running) :
+    Transition inv (deny inv) := by
+  by_cases hjournal : inv.journal = []
+  · exact .deny_running hrun hjournal (by simp [deny, hjournal])
+  · rw [deny_started_is_recover inv hjournal]
+    exact recover_steps_by_interrupt inv hrun hjournal
+
+/-- A denial never leaves a started attempt where a retry could run it again,
+so re-enabling a disabled callback cannot repeat an interrupted action. -/
+theorem denied_attempt_never_retried (inv : CallbackInvocation) (maxAttempts : Nat)
+    (hrun : inv.state = .running) (hexec : ∃ e ∈ inv.journal, e.state = .executing) :
+    retryAllowed (deny inv) maxAttempts = false := by
+  have hjournal : inv.journal ≠ [] := by
+    obtain ⟨e, he, _⟩ := hexec
+    intro hnil
+    simp [hnil] at he
+  rw [deny_started_is_recover inv hjournal]
+  exact recovered_attempt_never_retried inv maxAttempts hrun hexec
+
 /-- Retries are bounded by the attempt budget. -/
 theorem retry_is_bounded (inv : CallbackInvocation) (maxAttempts : Nat)
     (h : retryAllowed inv maxAttempts = true) : inv.attempts < maxAttempts := by

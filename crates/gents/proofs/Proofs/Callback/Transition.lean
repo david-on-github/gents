@@ -67,4 +67,13 @@ def recover (inv : CallbackInvocation) : CallbackInvocation :=
     { inv with state := .failed, journal := interruptJournal inv.journal, resultEmitted := false }
   else inv
 
+/-- What a denial does with a running invocation, such as recovery meeting a
+disabled callback or an illegal journal. Before any action started it is denied
+with an empty journal. After, the host may already have acted and the denial
+cannot observe what it did, so it fails the invocation exactly as `recover`
+does: a denial is never a way around marking an attempt interrupted. -/
+def deny (inv : CallbackInvocation) : CallbackInvocation :=
+  if inv.journal = [] then { inv with state := .denied, resultEmitted := false }
+  else recover inv
+
 end CallbackInvocation
