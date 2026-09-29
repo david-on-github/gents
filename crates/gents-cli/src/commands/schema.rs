@@ -436,11 +436,10 @@ fn filter_existing_field_adds(
 
 async fn patch_collection_http(endpoint: &GraphqlEndpoint, patch: &Value) -> Result<()> {
     let api_base = graphql_api_base(endpoint.url())?;
-    let client = schema_http_client(endpoint)?;
+    let client = schema_http_client()?;
     let url = format!("{api_base}/collections");
-    let response = client
-        .patch(&url)
-        .json(&json!({ "Patch": patch }))
+    let response = endpoint
+        .authorize(client.patch(&url).json(&json!({ "Patch": patch })))?
         .send()
         .await
         .with_context(|| format!("patching collection schema via {url}"))?;
@@ -449,32 +448,11 @@ async fn patch_collection_http(endpoint: &GraphqlEndpoint, patch: &Value) -> Res
 
 async fn describe_collection_http(endpoint: &GraphqlEndpoint, collection: &str) -> Result<Value> {
     let api_base = graphql_api_base(endpoint.url())?;
-    let client = schema_http_client(endpoint)?;
-    http_get_json(
-        &client,
-        &format!("{api_base}/collections/{collection}/describe"),
+    let client = schema_http_client()?;
+    crate::http_get_json(
+        endpoint.authorize(client.get(format!("{api_base}/collections/{collection}/describe")))?,
     )
     .await
-}
-
-async fn http_get_json(client: &reqwest::Client, url: &str) -> Result<Value> {
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .with_context(|| format!("sending GET request to {url}"))?;
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("reading GET response body from {url}"))?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "GET {url} failed with {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-    }
-    serde_json::from_slice(&bytes).with_context(|| format!("decoding JSON response from {url}"))
 }
 
 async fn ensure_success(response: reqwest::Response, operation: &str, url: &str) -> Result<()> {
@@ -492,9 +470,10 @@ async fn ensure_success(response: reqwest::Response, operation: &str, url: &str)
     Ok(())
 }
 
-fn schema_http_client(endpoint: &GraphqlEndpoint) -> Result<reqwest::Client> {
-    endpoint
-        .http_client(Some(std::time::Duration::from_secs(30)))
+fn schema_http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
         .context("building schema HTTP client")
 }
 

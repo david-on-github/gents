@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use gents::agent::p2p_reconcile::{EmbeddedRemoteP2pAdmin, RemoteP2pAdmin};
 use gents::config_client::ConfigAccess;
-use gents::defra_node::{EmbeddedNode, HttpConfig, P2PConfig, StorageBackend};
+use gents::defra_node::{EmbeddedNode, HttpConfig, StorageBackend};
 use gents::{AgentIdentity, KeyIdentity};
 
 const SCHEMA: &str = "type NodeAccessProbe { name: String }";
@@ -18,32 +18,15 @@ fn free_address() -> SocketAddr {
     address
 }
 
-fn p2p_config() -> P2PConfig {
-    P2PConfig {
-        port: 0,
-        bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
-        relay_mode: p2p::iroh::IrohRelayModeConfig::Disabled,
-        discovery: p2p::iroh::IrohDiscoveryConfig::Disabled,
-        allowlist: p2p::iroh::IrohAllowlistConfig::AcceptAll,
-        max_concurrent_multipath_paths: None,
-        secret_key_path: None,
-        load_persisted_collections: false,
-        max_concurrent_dag_fetches: p2p::sync::DEFAULT_MAX_CONCURRENT_DAG_FETCHES,
-        max_concurrent_push_tasks: p2p::sync::DEFAULT_MAX_CONCURRENT_PUSH_TASKS,
-        rate_limit_burst: p2p::sync::DEFAULT_RATE_LIMIT_BURST,
-        rate_limit_rate: p2p::sync::DEFAULT_RATE_LIMIT_RATE,
-        max_doc_sync_request_doc_ids: p2p::sync::DEFAULT_MAX_DOC_SYNC_REQUEST_DOC_IDS,
-        max_pending_dags: p2p::sync::DEFAULT_MAX_PENDING_DAGS,
-        rebroadcast_on_merge: false,
-    }
-}
-
 async fn served_home(data_dir: &Path, principal: &str, address: SocketAddr) -> Arc<EmbeddedNode> {
     let node = EmbeddedNode::builder()
         .data_path(data_dir)
         .with_storage_backend(StorageBackend::Regolith)
         .with_http(HttpConfig::with_addr(address))
-        .with_p2p(p2p_config())
+        .with_p2p(crate::support::test_p2p_config(
+            &crate::support::TestP2pAdmission::default(),
+            data_dir,
+        ))
         .with_node_identity_did(principal)
         .with_node_acp_enabled()
         .build()

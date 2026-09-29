@@ -177,17 +177,8 @@ const DEFRADB_BEARER_LIFETIME: std::time::Duration = std::time::Duration::from_s
 pub fn defradb_bearer_authorization(did: &str, audience: &str) -> Result<String> {
     let config = defra_core::signing::get_identity(did)
         .ok_or_else(|| anyhow!("no signing identity is loaded for {did}"))?;
-    if !config.has_local_private_key() {
-        anyhow::bail!(
-            "identity {did} has no exportable private key, so it cannot authenticate DefraDB HTTP requests"
-        );
-    }
-    let identity = RawIdentity::from_bytes(
-        signing_key_type_to_crypto_key_type(config.key_type)?,
-        &config.private_key_bytes,
-    )
-    .map_err(anyhow::Error::from)
-    .with_context(|| format!("loading signing identity {did}"))?;
+    let identity = raw_identity_from_signing_config(&config)
+        .with_context(|| format!("loading signing identity {did}"))?;
     let token = identity::new_token(
         &identity,
         DEFRADB_BEARER_LIFETIME,
@@ -206,6 +197,9 @@ pub fn can_mint_defradb_bearer(did: &str) -> bool {
 }
 
 /// Run `operation` with the node's own DID as the acting identity.
+///
+/// Mirrors DefraDB's private `EmbeddedNode::as_node_identity` until DefraDB
+/// installs the node identity on its P2P operations handle itself.
 ///
 /// DefraDB node access control resolves the actor from the ambient request
 /// identity. `EmbeddedNode` installs it for queries, transactions and schema

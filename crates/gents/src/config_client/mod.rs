@@ -126,10 +126,6 @@ impl GraphqlEndpoint {
         &self.url
     }
 
-    pub fn principal_did(&self) -> Option<&str> {
-        self.principal_did.as_deref()
-    }
-
     /// `Authorization` header value for requests sent now, or `None` for an
     /// anonymous endpoint.
     pub fn authorization(&self) -> Result<Option<String>> {
@@ -166,22 +162,6 @@ impl GraphqlEndpoint {
             Some(value) => request.header(reqwest::header::AUTHORIZATION, value),
             None => request,
         })
-    }
-
-    /// Client whose requests all carry one bearer minted now, for a one-shot
-    /// command that finishes within the bearer's lifetime. Long-lived or
-    /// multi-step owners use [`Self::authorize`] per request instead.
-    pub fn http_client(&self, timeout: Option<std::time::Duration>) -> Result<reqwest::Client> {
-        let mut builder = reqwest::Client::builder();
-        if let Some(timeout) = timeout {
-            builder = builder.timeout(timeout);
-        }
-        if let Some(value) = self.authorization_header()? {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(reqwest::header::AUTHORIZATION, value);
-            builder = builder.default_headers(headers);
-        }
-        builder.build().context("building DefraDB HTTP client")
     }
 }
 

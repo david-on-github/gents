@@ -516,23 +516,18 @@ impl ClientRouteManager {
         Ok(())
     }
 
-    /// HTTP P2P admin for a runtime's management endpoint. A co-hosted
-    /// runtime's node access control admits its own principal only, so the
-    /// desktop signs as that principal when it can load the runtime's key;
-    /// other runtimes see the desktop's actor alone and refuse
-    /// administration.
+    /// HTTP P2P admin for a runtime's management endpoint, acting as the
+    /// runtime's principal exactly when the operator endpoint does.
     fn remote_admin(
         &self,
         record: &PeerRecord,
         graphql: &str,
     ) -> gents::agent::p2p_reconcile::RemoteP2pAdminResult<HttpRemoteP2pAdmin> {
         let admin = HttpRemoteP2pAdmin::new_with_actor(graphql, Arc::clone(&self.actor))?;
-        Ok(
-            match crate::local_runtime::load_operator_principal(record) {
-                Ok(()) => admin.with_node_principal(graphql, &record.agent_did),
-                Err(_) => admin,
-            },
-        )
+        Ok(match crate::local_runtime::operator_endpoint(record) {
+            Some(endpoint) => admin.with_node_principal(endpoint),
+            None => admin,
+        })
     }
 
     async fn teardown_remote(&self, record: &PeerRecord) -> Result<()> {

@@ -46,8 +46,20 @@ impl EmbeddedRemoteP2pAdmin {
     where
         F: Future<Output = P2PResult<T>>,
     {
+        self.run_within(operation, self.timeout, future).await
+    }
+
+    async fn run_within<T, F>(
+        &self,
+        operation: &'static str,
+        within: Duration,
+        future: F,
+    ) -> RemoteP2pAdminResult<T>
+    where
+        F: Future<Output = P2PResult<T>>,
+    {
         match timeout(
-            self.timeout,
+            within,
             crate::identity::as_node_identity(&self.node, future),
         )
         .await
@@ -189,16 +201,13 @@ impl RemoteP2pAdmin for EmbeddedRemoteP2pAdmin {
         timeout_override: Option<Duration>,
     ) -> RemoteP2pAdminResult<()> {
         let p2p = self.p2p()?;
-        let sync_timeout = timeout_override.unwrap_or(self.timeout);
-        let future = crate::identity::as_node_identity(
-            &self.node,
-            p2p.sync_documents(collection_name, doc_ids.to_vec(), Some(sync_timeout)),
-        );
-        match timeout(sync_timeout, future).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(map_p2p_error("sync_documents", error)),
-            Err(_) => Err(RemoteP2pAdminError::RpcTimeout),
-        }
+        let within = timeout_override.unwrap_or(self.timeout);
+        self.run_within(
+            "sync_documents",
+            within,
+            p2p.sync_documents(collection_name, doc_ids.to_vec(), Some(within)),
+        )
+        .await
     }
 
     async fn sync_collection_versions(
@@ -207,15 +216,12 @@ impl RemoteP2pAdmin for EmbeddedRemoteP2pAdmin {
         timeout_override: Option<Duration>,
     ) -> RemoteP2pAdminResult<()> {
         let p2p = self.p2p()?;
-        let future = crate::identity::as_node_identity(
-            &self.node,
+        self.run_within(
+            "sync_collection_versions",
+            timeout_override.unwrap_or(self.timeout),
             p2p.sync_collection_versions(version_ids.to_vec()),
-        );
-        match timeout(timeout_override.unwrap_or(self.timeout), future).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(map_p2p_error("sync_collection_versions", error)),
-            Err(_) => Err(RemoteP2pAdminError::RpcTimeout),
-        }
+        )
+        .await
     }
 
     async fn sync_branchable_collection(
@@ -224,15 +230,12 @@ impl RemoteP2pAdmin for EmbeddedRemoteP2pAdmin {
         timeout_override: Option<Duration>,
     ) -> RemoteP2pAdminResult<()> {
         let p2p = self.p2p()?;
-        let future = crate::identity::as_node_identity(
-            &self.node,
+        self.run_within(
+            "sync_branchable_collection",
+            timeout_override.unwrap_or(self.timeout),
             p2p.sync_branchable_collection(collection_id),
-        );
-        match timeout(timeout_override.unwrap_or(self.timeout), future).await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(error)) => Err(map_p2p_error("sync_branchable_collection", error)),
-            Err(_) => Err(RemoteP2pAdminError::RpcTimeout),
-        }
+        )
+        .await
     }
 }
 

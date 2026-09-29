@@ -44,13 +44,9 @@ impl HttpRemoteP2pAdmin {
         Self::new_inner(graphql_url, Some(actor))
     }
 
-    /// Authenticate every admin request as `principal_did`, whose key must be
-    /// loaded in this process.
-    pub fn with_node_principal(mut self, graphql_url: &str, principal_did: &str) -> Self {
-        self.node_principal = Some(gents::config_client::GraphqlEndpoint::as_principal(
-            graphql_url,
-            principal_did,
-        ));
+    /// Authenticate every admin request as `endpoint`'s principal.
+    pub fn with_node_principal(mut self, endpoint: gents::config_client::GraphqlEndpoint) -> Self {
+        self.node_principal = Some(endpoint);
         self
     }
 
@@ -117,14 +113,11 @@ impl HttpRemoteP2pAdmin {
         }
 
         if let Some(principal) = self.node_principal.as_ref() {
-            let authorization = principal.authorization().map_err(|error| {
+            request = principal.authorize(request).map_err(|error| {
                 RemoteP2pAdminError::LocalError(format!(
                     "authenticating remote admin request: {error:#}"
                 ))
             })?;
-            if let Some(authorization) = authorization {
-                request = request.header(reqwest::header::AUTHORIZATION, authorization);
-            }
         }
 
         if let Some(body) = body {

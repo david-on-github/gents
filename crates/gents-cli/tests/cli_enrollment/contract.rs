@@ -779,9 +779,8 @@ async fn pairing_diagnostics(core: &ClientCore, graphql: &str) -> String {
     let sync = core.sync_state();
     let database_now = timeout(Duration::from_secs(3), core.p2p().sync_status()).await;
     let runtime_database = crate::support::graphql::served_endpoint(graphql)
-        .http_client(None)
-        .expect("runtime diagnostics client")
-        .get(graphql.replace("/graphql", "/p2p/sync/status"))
+        .authorize(reqwest::Client::new().get(graphql.replace("/graphql", "/p2p/sync/status")))
+        .expect("runtime diagnostics request")
         .timeout(Duration::from_secs(3))
         .send()
         .await;
@@ -790,9 +789,8 @@ async fn pairing_diagnostics(core: &ClientCore, graphql: &str) -> String {
         Err(_) => None,
     };
     let runtime_replicators = crate::support::graphql::served_endpoint(graphql)
-        .http_client(None)
-        .expect("runtime diagnostics client")
-        .get(graphql.replace("/graphql", "/p2p/replicators"))
+        .authorize(reqwest::Client::new().get(graphql.replace("/graphql", "/p2p/replicators")))
+        .expect("runtime diagnostics request")
         .timeout(Duration::from_secs(3))
         .send()
         .await;

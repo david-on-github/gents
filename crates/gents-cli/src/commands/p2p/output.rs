@@ -59,7 +59,7 @@ pub(super) async fn load_collection_name_by_id(
     api_base: &str,
 ) -> BTreeMap<String, String> {
     let Ok(collections) =
-        http_get_json::<Vec<Value>>(client, &format!("{api_base}/collections/versions")).await
+        http_get_json::<Vec<Value>>(client.get(format!("{api_base}/collections/versions"))).await
     else {
         return BTreeMap::new();
     };
@@ -128,37 +128,13 @@ pub(crate) async fn load_live_http_p2p_status(
     }
 }
 
-/// GET `url` on `graphql`'s node with a bearer minted for this request, over
-/// one process-wide client: the runtime's `/status` and `/metrics` scrape
-/// this repeatedly.
+/// GET `url` on `graphql`'s node with a bearer minted for this request: the
+/// runtime's `/status` and `/metrics` scrape this repeatedly over one client.
 async fn get_authorized_json<T: serde::de::DeserializeOwned>(
     graphql: &GraphqlEndpoint,
     url: &str,
 ) -> Result<T> {
-    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
-    let client = CLIENT.get_or_init(|| {
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .expect("building the process-wide P2P status client")
-    });
-    let response = graphql
-        .authorize(client.get(url))?
-        .send()
-        .await
-        .with_context(|| format!("sending GET request to {url}"))?;
-    let status = response.status();
-    let body = response
-        .bytes()
-        .await
-        .with_context(|| format!("reading GET response body from {url}"))?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "GET {url} failed with {status}: {}",
-            String::from_utf8_lossy(&body)
-        );
-    }
-    serde_json::from_slice(&body).with_context(|| format!("decoding JSON response from {url}"))
+    http_get_json(graphql.authorize(super::p2p_http_client()?.get(url))?).await
 }
 
 pub(crate) async fn fetch_live_http_p2p_status(

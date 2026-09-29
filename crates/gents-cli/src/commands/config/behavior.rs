@@ -25,10 +25,7 @@ pub(super) async fn behavior_set(args: BehaviorUpsertArgs) -> Result<()> {
         .behavior_id
         .clone()
         .unwrap_or_else(|| default_behavior_id_for_agent(&args.agent_did));
-    let access = ConfigAccess::Graphql(crate::home_graphql_endpoint(
-        &crate::resolve_home_dir(None),
-        args.graphql.clone(),
-    ));
+    let access = ConfigAccess::Graphql(crate::resolve_graphql_endpoint(Some(&args.graphql), None)?);
     // Raw set means one complete canonical document: omitted optionals clear,
     // no sparse legacy merge. `write_agent_behavior_document` validates
     // references (same-principal context/profile existence) inside its
@@ -200,10 +197,7 @@ pub(super) async fn behavior_create(args: BehaviorCreateArgs) -> Result<()> {
     );
     let request_key = record.request_key.clone();
     let behavior_id = submit_local_persona(
-        &crate::home_graphql_endpoint(
-            &crate::resolve_home_dir(args.home.as_deref()),
-            args.graphql.clone(),
-        ),
+        &crate::resolve_graphql_endpoint(Some(&args.graphql), args.home.as_deref())?,
         args.home.as_deref(),
         record,
     )
@@ -213,15 +207,8 @@ pub(super) async fn behavior_create(args: BehaviorCreateArgs) -> Result<()> {
 
 pub(super) async fn behavior_clone(args: BehaviorCloneArgs) -> Result<()> {
     let agent_did = local_identity(args.home.as_deref())?.did().to_owned();
-    require_source_behavior(
-        &crate::home_graphql_endpoint(
-            &crate::resolve_home_dir(args.home.as_deref()),
-            args.graphql.clone(),
-        ),
-        &agent_did,
-        &args.source_behavior_id,
-    )
-    .await?;
+    let graphql = crate::resolve_graphql_endpoint(Some(&args.graphql), args.home.as_deref())?;
+    require_source_behavior(&graphql, &agent_did, &args.source_behavior_id).await?;
     // Profile is required, no implicit fallback: the materializer validates the
     // published profile under the target agent's scope.
     let record = local_record(
@@ -237,29 +224,14 @@ pub(super) async fn behavior_clone(args: BehaviorCloneArgs) -> Result<()> {
         Some(args.profile_id.clone()),
     );
     let request_key = record.request_key.clone();
-    let behavior_id = submit_local_persona(
-        &crate::home_graphql_endpoint(
-            &crate::resolve_home_dir(args.home.as_deref()),
-            args.graphql.clone(),
-        ),
-        args.home.as_deref(),
-        record,
-    )
-    .await?;
+    let behavior_id = submit_local_persona(&graphql, args.home.as_deref(), record).await?;
     print_json(&json!({"status":"applied", "request_key":request_key, "behavior_id":behavior_id}))
 }
 
 pub(super) async fn behavior_disable(args: BehaviorDisableArgs) -> Result<()> {
     let agent_did = local_identity(args.home.as_deref())?.did().to_owned();
-    require_source_behavior(
-        &crate::home_graphql_endpoint(
-            &crate::resolve_home_dir(args.home.as_deref()),
-            args.graphql.clone(),
-        ),
-        &agent_did,
-        &args.behavior_id,
-    )
-    .await?;
+    let graphql = crate::resolve_graphql_endpoint(Some(&args.graphql), args.home.as_deref())?;
+    require_source_behavior(&graphql, &agent_did, &args.behavior_id).await?;
     let record = local_record(
         agent_did,
         "disable",
@@ -273,15 +245,7 @@ pub(super) async fn behavior_disable(args: BehaviorDisableArgs) -> Result<()> {
         None,
     );
     let request_key = record.request_key.clone();
-    let behavior_id = submit_local_persona(
-        &crate::home_graphql_endpoint(
-            &crate::resolve_home_dir(args.home.as_deref()),
-            args.graphql.clone(),
-        ),
-        args.home.as_deref(),
-        record,
-    )
-    .await?;
+    let behavior_id = submit_local_persona(&graphql, args.home.as_deref(), record).await?;
     print_json(&json!({"status":"applied", "request_key":request_key, "behavior_id":behavior_id}))
 }
 

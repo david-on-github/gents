@@ -107,7 +107,7 @@ pub fn operator_endpoint(
 /// Only a record for a runtime this desktop hosts qualifies, and only when
 /// its home's live `runtime.json` names both the record's endpoint and
 /// agent, so a bearer is never sent to a remote or re-pointed endpoint.
-pub(crate) fn load_operator_principal(record: &crate::client::PeerRecord) -> Result<()> {
+fn load_operator_principal(record: &crate::client::PeerRecord) -> Result<()> {
     let endpoint = record
         .operator_graphql()
         .context("runtime record is not a runtime this desktop hosts")?;

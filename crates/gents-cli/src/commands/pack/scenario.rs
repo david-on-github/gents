@@ -3139,10 +3139,10 @@ pub(crate) async fn seed(args: PackSeedArgs) -> Result<()> {
     let port = args.http_port;
     // The pack node refuses anonymous writes; the seed signs as the default
     // home's principal (`GENTS_HOME` selects another home).
-    let graphql = crate::home_graphql_endpoint(
-        &crate::resolve_home_dir(None),
-        format!("http://127.0.0.1:{port}/api/v0/graphql"),
-    );
+    let graphql = crate::resolve_graphql_endpoint(
+        Some(&format!("http://127.0.0.1:{port}/api/v0/graphql")),
+        None,
+    )?;
     let healthz = format!("http://127.0.0.1:{port}/healthz");
     wait_http_ok(&healthz, Duration::from_secs(120))
         .await
@@ -3291,8 +3291,10 @@ pub(crate) async fn run(args: PackRunArgs) -> Result<()> {
     )?;
 
     let port = args.http_port;
-    let graphql =
-        crate::home_graphql_endpoint(&home, format!("http://127.0.0.1:{port}/api/v0/graphql"));
+    let graphql = crate::resolve_graphql_endpoint(
+        Some(&format!("http://127.0.0.1:{port}/api/v0/graphql")),
+        Some(&home),
+    )?;
     let log = run_dir.join("server.log");
     let started = Instant::now();
 

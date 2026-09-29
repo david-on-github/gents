@@ -72,10 +72,7 @@ pub(super) async fn skill_add(args: SkillAddArgs) -> Result<()> {
         ),
         None => args.instructions.clone(),
     };
-    let access = ConfigAccess::Graphql(crate::home_graphql_endpoint(
-        &crate::resolve_home_dir(None),
-        args.graphql.clone(),
-    ));
+    let access = ConfigAccess::Graphql(crate::resolve_graphql_endpoint(Some(&args.graphql), None)?);
     let skill = SkillDocument {
         skill_id: args.skill_id.clone(),
         agent_did: args.agent_did.clone(),
@@ -110,10 +107,7 @@ fn skill_rows(response: &Value) -> Vec<Value> {
 }
 
 pub(super) async fn skill_list(args: SkillListArgs) -> Result<()> {
-    let access = ConfigAccess::Graphql(crate::home_graphql_endpoint(
-        &crate::resolve_home_dir(None),
-        args.graphql.clone(),
-    ));
+    let access = ConfigAccess::Graphql(crate::resolve_graphql_endpoint(Some(&args.graphql), None)?);
     let agent_did = escape_graphql_string(&args.agent_did);
     let query = format!(
         r#"{{ Skill(filter: {{ agent_did: {{ _eq: "{agent_did}" }} }}) {{ {EXPORT_SKILL_FIELDS} }} }}"#
@@ -135,10 +129,7 @@ pub(super) async fn skill_list(args: SkillListArgs) -> Result<()> {
 }
 
 pub(super) async fn skill_show(args: SkillShowArgs) -> Result<()> {
-    let access = ConfigAccess::Graphql(crate::home_graphql_endpoint(
-        &crate::resolve_home_dir(None),
-        args.graphql.clone(),
-    ));
+    let access = ConfigAccess::Graphql(crate::resolve_graphql_endpoint(Some(&args.graphql), None)?);
     let skill_id = escape_graphql_string(&args.skill_id);
     let query = format!(
         r#"{{ Skill(filter: {{ skill_id: {{ _eq: "{skill_id}" }} }}, limit: 1) {{ {EXPORT_SKILL_FIELDS} }} }}"#
@@ -152,10 +143,7 @@ pub(super) async fn skill_show(args: SkillShowArgs) -> Result<()> {
 }
 
 pub(super) async fn skill_rm(args: SkillRefArgs) -> Result<()> {
-    let access = ConfigAccess::Graphql(crate::home_graphql_endpoint(
-        &crate::resolve_home_dir(None),
-        args.graphql.clone(),
-    ));
+    let access = ConfigAccess::Graphql(crate::resolve_graphql_endpoint(Some(&args.graphql), None)?);
     let skill_id = escape_graphql_string(&args.skill_id);
     let mutation = format!(
         r#"mutation {{ delete_Skill(filter: {{ skill_id: {{ _eq: "{skill_id}" }} }}) {{ _docID }} }}"#
@@ -175,10 +163,7 @@ pub(super) async fn skill_rm(args: SkillRefArgs) -> Result<()> {
 }
 
 pub(super) async fn skill_set_enabled(args: SkillRefArgs, enabled: bool) -> Result<()> {
-    let access = ConfigAccess::Graphql(crate::home_graphql_endpoint(
-        &crate::resolve_home_dir(None),
-        args.graphql.clone(),
-    ));
+    let access = ConfigAccess::Graphql(crate::resolve_graphql_endpoint(Some(&args.graphql), None)?);
     let skill_id = escape_graphql_string(&args.skill_id);
     let mutation = format!(
         r#"mutation {{
@@ -254,10 +239,7 @@ fn find_skill_dirs(root: &std::path::Path, max_depth: usize) -> Vec<std::path::P
 pub(super) async fn skill_import(args: SkillImportArgs) -> Result<()> {
     let source = std::fs::canonicalize(&args.dir)
         .with_context(|| format!("resolving {}", args.dir.display()))?;
-    let access = ConfigAccess::Graphql(crate::home_graphql_endpoint(
-        &crate::resolve_home_dir(None),
-        args.graphql.clone(),
-    ));
+    let access = ConfigAccess::Graphql(crate::resolve_graphql_endpoint(Some(&args.graphql), None)?);
 
     let mut imported = Vec::new();
     let mut errors = Vec::new();
@@ -415,10 +397,7 @@ fn render_openai_yaml(skill: &Value) -> Result<Option<String>> {
 }
 
 pub(super) async fn skill_export(args: SkillExportArgs) -> Result<()> {
-    let access = ConfigAccess::Graphql(crate::home_graphql_endpoint(
-        &crate::resolve_home_dir(None),
-        args.graphql.clone(),
-    ));
+    let access = ConfigAccess::Graphql(crate::resolve_graphql_endpoint(Some(&args.graphql), None)?);
     let agent_did = escape_graphql_string(&args.agent_did);
     let query = format!(
         r#"{{ Skill(filter: {{ agent_did: {{ _eq: "{agent_did}" }} }}) {{ {EXPORT_SKILL_FIELDS} }} }}"#

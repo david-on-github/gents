@@ -135,8 +135,7 @@ async fn seed_backend_catalog(
         chrono::Utc::now().to_rfc3339(),
     );
     let response = support::graphql::served_endpoint(graphql)
-        .http_client(None)?
-        .post(graphql)
+        .authorize(reqwest::Client::new().post(graphql))?
         .json(&json!({
             "query": query,
             "variables": {

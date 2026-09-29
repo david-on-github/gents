@@ -210,33 +210,23 @@ pub(crate) fn resolve_graphql_endpoint(
 /// home refuses everything else with an authorization error.
 pub(crate) fn home_graphql_endpoint(home_dir: &Path, url: impl Into<String>) -> GraphqlEndpoint {
     let url = url.into();
-    let config = match read_init_config(home_dir) {
-        Ok(Some(config)) if !config.agent_did.trim().is_empty() => config,
-        _ => return GraphqlEndpoint::anonymous(url),
+    let principal = match read_init_config(home_dir) {
+        Ok(Some(config)) if endpoint_serves_home(home_dir, &url) => {
+            load_initialized_home_identity(home_dir, &config)
+                .map(|identity| identity.did().to_string())
+                .map_err(|error| format!("{error:#}"))
+                .and_then(|did| {
+                    gents::identity::can_mint_defradb_bearer(&did)
+                        .then_some(did)
+                        .ok_or_else(|| "identity has no exportable signing key".to_string())
+                })
+        }
+        _ => Err("the endpoint is not this initialized home's runtime".to_string()),
     };
-    if !endpoint_serves_home(home_dir, &url) {
-        eprintln!(
-            "warning: not authenticating to {url} as {}: it is neither this home's runtime nor a loopback address; writes and P2P administration there will be refused",
-            config.agent_did.trim()
-        );
-        return GraphqlEndpoint::anonymous(url);
-    }
-    match load_initialized_home_identity(home_dir, &config) {
-        Ok(identity) if gents::identity::can_mint_defradb_bearer(identity.did()) => {
-            GraphqlEndpoint::as_principal(url, identity.did())
-        }
-        Ok(identity) => {
-            eprintln!(
-                "warning: identity {} has no exportable signing key, so requests to {url} are anonymous; writes and P2P administration will be refused",
-                identity.did()
-            );
-            GraphqlEndpoint::anonymous(url)
-        }
-        Err(error) => {
-            eprintln!(
-                "warning: could not load the identity of home {} ({error:#}), so requests to {url} are anonymous; writes and P2P administration will be refused",
-                home_dir.display()
-            );
+    match principal {
+        Ok(did) => GraphqlEndpoint::as_principal(url, did),
+        Err(reason) => {
+            tracing::debug!(%url, %reason, "reaching the runtime anonymously");
             GraphqlEndpoint::anonymous(url)
         }
     }

@@ -83,8 +83,7 @@ async fn session_fork(args: SessionForkArgs) -> Result<()> {
         .context("resolving caller agent_did")?;
 
     if let Some(graphql) = args.graphql.as_deref() {
-        let endpoint =
-            crate::home_graphql_endpoint(&resolve_home_dir(args.home.as_deref()), graphql);
+        let endpoint = crate::resolve_graphql_endpoint(Some(graphql), args.home.as_deref())?;
         let outcome = fork_via_http(
             &endpoint,
             ForkParams {

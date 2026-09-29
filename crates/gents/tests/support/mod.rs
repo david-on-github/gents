@@ -141,7 +141,7 @@ pub async fn test_p2p_db_with_admission(name: &str, admission: TestP2pAdmission)
     test_db_from_home(home)
 }
 
-fn test_p2p_config(admission: &TestP2pAdmission, data_path: &std::path::Path) -> P2PConfig {
+pub fn test_p2p_config(admission: &TestP2pAdmission, data_path: &std::path::Path) -> P2PConfig {
     P2PConfig {
         port: 0,
         bind_addr: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
