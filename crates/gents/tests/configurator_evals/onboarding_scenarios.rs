@@ -278,9 +278,30 @@ pub(super) fn assert_preview_calls(calls: &[Value]) -> Result<()> {
             ),
             "preview config call has no terminal outcome"
         );
+        // Help is answered before any command parses and returns only its
+        // page, so a completed help call carries no execution receipt.
+        let help = call["args"]
+            .as_str()
+            .and_then(|args| serde_json::from_str::<Value>(args).ok())
+            .and_then(|args| {
+                let argv = args["argv"].as_array()?.clone();
+                let words = argv.iter().filter_map(Value::as_str).collect::<Vec<_>>();
+                Some(
+                    matches!(words.first(), Some(&"help" | &"--help" | &"-h"))
+                        || words.get(1) == Some(&"help")
+                        || words.iter().any(|word| matches!(*word, "--help" | "-h")),
+                )
+            })
+            .unwrap_or(false);
         let result = call["result"]
             .as_str()
             .and_then(|text| serde_json::from_str::<Value>(text).ok());
+        let receipt_present = result
+            .as_ref()
+            .is_some_and(|value| value.get("config_execution").is_some());
+        if help && !receipt_present && call["lifecycle_state"] == "completed" {
+            continue;
+        }
         // Typed argument rejection can precede the config adapter entirely.
         // A receipt, when present, takes precedence over the failure class.
         if result
@@ -352,9 +373,12 @@ fn preview_grader_uses_execution_evidence_not_command_or_error_text() {
     assert!(assert_preview_calls(&[rejected]).is_ok());
     for state in ["completed", "failed", "running"] {
         let missing = serde_json::json!({"tool_name":"config","lifecycle_state":state,
-            "args":"[\"help\"]", "result":"nothing was written"});
+            "args":"{\"argv\":[\"tools\",\"edit\"]}", "result":"nothing was written"});
         assert!(assert_preview_calls(&[missing]).is_err());
     }
+    let help = serde_json::json!({"tool_name":"config","lifecycle_state":"completed",
+        "args":"{\"argv\":[\"help\",\"tools\"]}", "result":"tools: a behavior's Tools"});
+    assert!(assert_preview_calls(&[help]).is_ok());
 }
 
 #[test]

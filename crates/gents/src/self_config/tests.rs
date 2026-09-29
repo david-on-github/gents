@@ -75,7 +75,7 @@ impl rig::completion::CompletionModel for RootReadModel {
     }
 }
 
-fn config(categories: &[&str]) -> SelfConfigToolConfig {
+pub(super) fn config(categories: &[&str]) -> SelfConfigToolConfig {
     SelfConfigToolConfig {
         enabled: true,
         behavior_id: "beh-test".to_string(),
@@ -345,11 +345,21 @@ async fn build_registers_gated_family() {
     );
     assert_eq!(tools[0].name(), CONFIG_TOOL_NAME);
     let definition = tools[0].definition(String::new()).await;
-    assert!(definition.description.contains("Behavior -> Context"));
-    assert!(definition.description.contains("one Tools document"));
-    assert!(definition
-        .description
-        .contains("Behavior -> InferenceProfile -> Backend"));
+    // The description is the small core of the layered text (#2088); fields,
+    // recipes and the configuration model live in help and the Engineer prompt.
+    assert!(
+        definition.description.len() <= 700,
+        "config description grew to {} chars",
+        definition.description.len()
+    );
+    for core in [
+        "native API",
+        "\"<DID>:<slug>\"",
+        "preview, apply, then read back",
+        "[\"help\"] lists resources",
+    ] {
+        assert!(definition.description.contains(core), "missing {core}");
+    }
     assert_eq!(definition.parameters["required"], json!(["argv"]));
 }
 
@@ -832,7 +842,7 @@ fn behavior_edit_arguments_distinguish_omission_clear_and_set() {
     assert_eq!(args.system_prompt, StringUpdate::Omitted);
 }
 
-async fn build_persona_node() -> std::sync::Arc<defra_node::EmbeddedNode> {
+pub(super) async fn build_persona_node() -> std::sync::Arc<defra_node::EmbeddedNode> {
     let tempdir = tempfile::tempdir().expect("tempdir");
     let node = defra_node::EmbeddedNode::builder()
         .data_path(tempdir.path().join("data"))
@@ -845,7 +855,7 @@ async fn build_persona_node() -> std::sync::Arc<defra_node::EmbeddedNode> {
     std::sync::Arc::new(node)
 }
 
-fn persona_identity(label: &str) -> std::sync::Arc<dyn crate::AgentIdentity> {
+pub(super) fn persona_identity(label: &str) -> std::sync::Arc<dyn crate::AgentIdentity> {
     let tempdir = tempfile::tempdir().expect("identity tempdir");
     std::sync::Arc::new(
         crate::KeyIdentity::load_or_create(&tempdir.path().join(format!("{label}.key")), None)
@@ -1275,7 +1285,7 @@ async fn configuration_discovery_is_read_only_root_bounded_and_sanitized() {
     let help = call_config_tool(&denied_tools, command(&["help", "discovery"]))
         .await
         .unwrap();
-    assert!(help.contains("discovery commands"), "{help}");
+    assert!(help.starts_with("discovery: "), "{help}");
     let legacy = call_config_tool(&denied_tools, command(&["discover", "scan"]))
         .await
         .unwrap_err();
@@ -1620,16 +1630,31 @@ async fn datastore_preview_create_and_sparse_edit_use_owned_patch_path() {
     let expected_help = call_config_tool(&tools, command(&["help", "datastore"]))
         .await
         .unwrap();
-    for args in [
-        vec!["datastore", "--help"],
-        vec!["datastore", "preview", "create", "-h"],
-        vec!["datastore", "help", "create"],
-    ] {
-        assert_eq!(
-            call_config_tool(&tools, command(&args)).await.unwrap(),
-            expected_help
-        );
-    }
+    assert_eq!(
+        call_config_tool(&tools, command(&["datastore", "--help"]))
+            .await
+            .unwrap(),
+        expected_help
+    );
+    // A command's --help narrows to that command's syntax and field shapes.
+    let create_help = call_config_tool(&tools, command(&["datastore", "preview", "create", "-h"]))
+        .await
+        .unwrap();
+    assert!(
+        create_help.starts_with("datastore [preview] create|edit"),
+        "{create_help}"
+    );
+    assert!(
+        create_help.contains("DatastoreToolSurface fields"),
+        "{create_help}"
+    );
+    assert!(!create_help.contains("Recipe:"), "{create_help}");
+    assert_eq!(
+        call_config_tool(&tools, command(&["datastore", "help", "create"]))
+            .await
+            .unwrap(),
+        create_help
+    );
     for args in [
         vec!["datastore", "create", "--set", "display_name=\"Test\""],
         vec![
@@ -1875,7 +1900,7 @@ async fn structured_config_preview_and_apply_round_trip_literal_prompt() {
     node.shutdown().await;
 }
 
-async fn call_config_tool(
+pub(super) async fn call_config_tool(
     tools: &[Box<dyn crate::llm::tool::ToolDyn>],
     argv: Vec<String>,
 ) -> Result<String, String> {
@@ -1913,31 +1938,24 @@ async fn connected_plan_preview_validates_pending_references_without_writes() {
     let args = |documents: Value| {
         json!({"argv":["plan","preview"],"options":{"documents":documents}}).to_string()
     };
-    for resource in ["behavior", "tools", "datastore", "automation", "schema"] {
-        let help: Value = serde_json::from_str(
-            &tool
-                .call(json!({"argv":[resource,"--help"]}).to_string())
-                .await
-                .unwrap(),
-        )
+    // Connected preview is named once, in the index, not on every page.
+    let index = tool
+        .call(json!({"argv":["help"]}).to_string())
+        .await
         .unwrap();
-        assert_eq!(
-            help["connected_preview"]["preview_argv"],
-            json!(["plan", "preview"])
-        );
-        assert_eq!(
-            help["connected_preview"]["input_field"],
-            "options.documents"
-        );
-        let plan_help: Value = serde_json::from_str(
-            &tool
-                .call(json!({"argv":help["connected_preview"]["help_argv"]}).to_string())
-                .await
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(plan_help["ok"], true);
+    assert!(index.contains("  plan:"), "{index}");
+    for resource in ["behavior", "tools", "datastore", "subagent-target"] {
+        let help = tool
+            .call(json!({"argv":[resource,"--help"]}).to_string())
+            .await
+            .unwrap();
+        assert!(!help.contains("  plan:"), "{resource}: {help}");
     }
+    let plan_help = tool
+        .call(json!({"argv":["plan","--help"]}).to_string())
+        .await
+        .unwrap();
+    assert!(plan_help.contains("options.documents"), "{plan_help}");
     let error = tool.call(json!({"argv":["tools","preview"],"options":{"behavior":"proposed-behavior"},"set":{"host":{"bash":{"mode":"read_only"}}}}).to_string()).await.unwrap_err();
     let crate::llm::tool::ToolError::ToolCallError(error) = error else {
         panic!("missing typed config error: {error}");
@@ -2012,15 +2030,12 @@ async fn connected_plan_preview_validates_pending_references_without_writes() {
             .iter()
             .find(|tool| tool.name() == CONFIG_TOOL_NAME)
             .unwrap();
-        let help: Value = serde_json::from_str(
-            &tool
-                .call(json!({"argv":["--help"]}).to_string())
-                .await
-                .unwrap(),
-        )
-        .unwrap();
+        let help = tool
+            .call(json!({"argv":["--help"]}).to_string())
+            .await
+            .unwrap();
         assert_eq!(
-            help["connected_preview"].is_object(),
+            help.contains("  plan:"),
             preview && categories.contains(&"persona")
         );
     }
@@ -2084,7 +2099,7 @@ async fn config_execution_receipts_separate_rejected_syntax_from_write_dispatch(
         (json!({"argv":["schema","install"]}), false),
         (
             json!({"argv":["automation","edit","task"],"target_id":"missing","set":{"display_name":"Missing behavior"},"options":{"behavior":"missing"}}),
-            true,
+            false,
         ),
     ] {
         let text = match tool.call(args.to_string()).await {
@@ -2101,7 +2116,7 @@ async fn config_execution_receipts_separate_rejected_syntax_from_write_dispatch(
     // A write in one invocation cannot contaminate a later read's receipt.
     let read: Value = serde_json::from_str(
         &tool
-            .call(json!({"argv":["datastore","--help"]}).to_string())
+            .call(json!({"argv":["datastore","get"],"target_id":"notifications"}).to_string())
             .await
             .unwrap(),
     )
@@ -2557,36 +2572,28 @@ async fn config_targets_owned_working_behavior_for_all_bound_documents() {
         "Working profile"
     );
 
-    let help: Value = serde_json::from_str(
-        &call_config_tool(&tools, vec!["help".into(), "tools".into()])
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert!(help["patch_contracts"][0]["writable_fields"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|field| field == "subagents"));
-    assert!(help["patch_contracts"][0]["field_shapes"]["subagents"]
-        .get("target_ids")
-        .is_some());
-
-    let mailbox_help: Value = serde_json::from_str(
-        &call_config_tool(&tools, vec!["help".into(), "datastore".into()])
-            .await
-            .unwrap(),
-    )
-    .unwrap();
-    assert_eq!(
-        mailbox_help["canonical_mailbox_entries"],
-        json!({"entries": [
-            crate::document_config::SurfaceToolDecl::Create(crate::mailbox::canonical_mailbox_write_decl())
-        ]})
+    let help = call_config_tool(&tools, vec!["help".into(), "tools".into()])
+        .await
+        .unwrap();
+    assert!(
+        help.contains("Fields of Tools:") && help.contains("subagents"),
+        "{help}"
     );
-    assert_eq!(
-        mailbox_help["mailbox_values"]["notification_identity"]["condition"],
-        json!({"mode":"condition","key":"monitor-summary"})
+    let shapes = call_config_tool(&tools, vec!["tools".into(), "edit".into(), "--help".into()])
+        .await
+        .unwrap();
+    assert!(shapes.contains("\"subagents\":{\"enabled\""), "{shapes}");
+    assert!(shapes.contains("target_ids"), "{shapes}");
+
+    let mailbox_help = call_config_tool(
+        &tools,
+        vec!["datastore".into(), "create".into(), "--help".into()],
+    )
+    .await
+    .unwrap();
+    assert!(
+        mailbox_help.contains("{\"key\":\"monitor-summary\",\"mode\":\"condition\"}"),
+        "{mailbox_help}"
     );
 
     let create_profile_args = vec![
@@ -4314,9 +4321,27 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     )
     .await
     .is_err());
-    ok(call_config_tool(
+    let refused = call_config_tool(
         &tools,
         command(&["tools", "edit", "--set", r#"subagents={"enabled":true}"#]),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        refused.contains("drop existing settings from your own Tools: subagents.target_ids")
+            && refused.contains("allow-drop"),
+        "{refused}"
+    );
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "tools",
+            "edit",
+            "--allow-drop",
+            "subagents",
+            "--set",
+            r#"subagents={"enabled":true}"#,
+        ]),
     )
     .await);
     let cleanup = ok(call_config_tool(

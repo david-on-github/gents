@@ -28,7 +28,7 @@ use crate::toolset::CommandNetworkMode;
 
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "behavior {behavior_id} not found; self-config is anchored on the running behavior document"
+    "unknown behavior_id {behavior_id:?}; copy an exact ID from [\"behavior\",\"list\"] (behavior create returns \"<DID>:<slug>\")"
 )]
 pub(super) struct MissingBehavior {
     pub behavior_id: String,
@@ -53,15 +53,23 @@ pub struct SelfConfigCore {
     process_ceiling: SelfConfigProcessCeiling,
 }
 
-/// Outcome of an applied (or previewed) patch.
+/// Outcome of an applied (or previewed) patch. Field order is the order the
+/// model reads the receipt: outcome, what changed, what happens next, then
+/// identifiers.
 #[derive(Debug, serde::Serialize)]
 pub struct PatchOutcome {
-    pub collection: &'static str,
-    pub doc_id: Option<String>,
-    pub created: bool,
     pub committed: bool,
+    pub collection: &'static str,
+    /// The target document's logical ID.
+    pub target_id: String,
+    /// The behavior the command targeted. A command without an explicit
+    /// behavior targets the invoking one, so the receipt names it rather than
+    /// leaving that default implicit.
+    pub behavior_id: String,
+    pub created: bool,
     pub changed: Vec<FieldDelta>,
     pub effect: &'static str,
+    pub doc_id: Option<String>,
 }
 
 /// Behavior anchor loaded fresh per call, so a prior `config behavior` edit
@@ -301,6 +309,8 @@ impl SelfConfigCore {
 
         Ok(PatchOutcome {
             collection: request.target.collection_name(),
+            behavior_id: self.behavior_id.clone(),
+            target_id: unique_value,
             doc_id: Some(doc_id),
             created: creating,
             committed: false,
@@ -468,11 +478,13 @@ impl SelfConfigCore {
         validate_desired_state_plan(txn, &replacement_plan(request.target, &merged)?).await?;
         Ok(PatchOutcome {
             collection: request.target.collection_name(),
+            behavior_id: self.behavior_id.clone(),
+            changed: safe_diff(request.target, &stored_doc, &merged),
+            target_id: unique_value,
             doc_id: None,
             created: creating,
             committed: false,
-            changed: safe_diff(request.target, &stored_doc, &merged),
-            effect: "dry-run: nothing was written",
+            effect: "preview: nothing was written; send the same call with edit (or without preview) to apply",
         })
     }
 }

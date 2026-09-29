@@ -89,6 +89,12 @@ pub struct InferenceRetryPolicy {
     pub tags: Vec<String>,
 }
 
+/// Largest admitted `deadline_duration_secs`: 100 years. A claim computes
+/// `now + deadline` and stores it as an RFC 3339 timestamp, so the bound keeps
+/// that sum inside four-digit years for any wall clock this runtime will see
+/// (#2079); larger values could not be claimed.
+pub const MAX_DEADLINE_DURATION_SECS: i64 = 100 * 365 * 24 * 60 * 60;
+
 impl InferenceExecution {
     /// Execution-owned validation, the single owner every write path calls.
     /// Authored `max_total_tokens` must be positive when set; unset is
@@ -118,6 +124,14 @@ impl InferenceExecution {
                     "InferenceExecution {execution_id} {name} must be positive"
                 ));
             }
+        }
+        if self
+            .deadline_duration_secs
+            .is_some_and(|value| value > MAX_DEADLINE_DURATION_SECS)
+        {
+            violations.push(format!(
+                "InferenceExecution {execution_id} deadline_duration_secs must be at most {MAX_DEADLINE_DURATION_SECS} (100 years)"
+            ));
         }
         let liveness = self
             .stream_liveness_timeout_secs

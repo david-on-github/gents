@@ -13,6 +13,8 @@ mod ops;
 mod read;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod text_tests;
 
 pub use ops::{
     apply_tool_grant_selection, guard_behavior_keeps_reach, guard_tools_keep_control,
@@ -58,6 +60,102 @@ pub const SELF_CONFIG_TOOL_NAMES: [&str; 7] = [
     GET_GRAPH_RUN_TOOL_NAME,
     GET_GRAPH_RESULT_TOOL_NAME,
     CANCEL_GRAPH_RUN_TOOL_NAME,
+];
+
+/// A JSON object that keeps its keys in the order given, for model-facing
+/// results that must read top to bottom: the answer, then how to proceed, then
+/// metadata. This build's `serde_json::Map` sorts keys (`preserve_order` is
+/// off, and canonical digests such as `desired_state_document_digest` rely on
+/// sorted keys), so `json!` alone would alphabetize them. Values are kept
+/// pre-serialized so a nested `Ordered` keeps its order too. Null values are
+/// omitted.
+pub(crate) struct Ordered(
+    Vec<(
+        std::borrow::Cow<'static, str>,
+        Box<serde_json::value::RawValue>,
+    )>,
+);
+
+impl serde::Serialize for Ordered {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let present = self.0.iter().filter(|(_, value)| value.get() != "null");
+        let mut map = serializer.serialize_map(Some(present.clone().count()))?;
+        for (key, value) in present {
+            map.serialize_entry(key, value)?;
+        }
+        map.end()
+    }
+}
+
+impl Ordered {
+    pub(crate) fn entry(
+        key: impl Into<std::borrow::Cow<'static, str>>,
+        value: &impl serde::Serialize,
+    ) -> (
+        std::borrow::Cow<'static, str>,
+        Box<serde_json::value::RawValue>,
+    ) {
+        (
+            key.into(),
+            serde_json::value::to_raw_value(value).expect("model-facing results serialize"),
+        )
+    }
+
+    pub(crate) fn new(
+        entries: Vec<(
+            std::borrow::Cow<'static, str>,
+            Box<serde_json::value::RawValue>,
+        )>,
+    ) -> Self {
+        Self(entries)
+    }
+
+    /// An object's keys with `first` in that order, then the rest.
+    pub(crate) fn reading_order(value: Value, first: &[&'static str]) -> Self {
+        let Value::Object(mut object) = value else {
+            return Self(vec![Self::entry("value", &value)]);
+        };
+        let mut entries = first
+            .iter()
+            .filter_map(|key| object.remove(*key).map(|value| Self::entry(*key, &value)))
+            .collect::<Vec<_>>();
+        entries.extend(
+            object
+                .into_iter()
+                .map(|(key, value)| Self::entry(key, &value)),
+        );
+        Self(entries)
+    }
+
+    pub(crate) fn pretty(&self) -> Result<String> {
+        serde_json::to_string_pretty(self).map_err(|error| anyhow!("serialize result: {error}"))
+    }
+}
+
+/// `ordered!{"key": expr, ...}`: each value is any `Serialize` expression
+/// (use `json!` for literal objects).
+macro_rules! ordered {
+    ($($key:literal : $value:expr),* $(,)?) => {
+        $crate::self_config::Ordered::new(vec![$($crate::self_config::Ordered::entry($key, &$value)),*])
+    };
+}
+pub(crate) use ordered;
+
+/// Reading order of an effective configuration: the behavior and its chain,
+/// then what it may do, then grants and timing.
+const EFFECTIVE_ORDER: &[&str] = &[
+    "behavior_id",
+    "behavior",
+    "context",
+    "inference_profile",
+    "documents",
+    "automation",
+    "skills",
+    "runtime_effective",
+    "tool_grants",
+    "self_config",
+    "effect_timing",
 ];
 
 /// Error wrapper mirroring `DefraQueryError`: render the full anyhow chain to
@@ -235,6 +333,83 @@ fn tools_request(
     request.guard = Box::new(|_, stored, merged| guard_tools_keep_control(stored, merged));
     request
 }
+/// A set of a nested Tools group replaces the whole group, so a partial group
+/// silently drops what it omits. On the invoker's own Tools that loses its
+/// working surfaces (the mailbox surface, defra_query) without a lockout the
+/// no-lockout guard would catch, so such a patch is refused and names what it
+/// would drop unless `allow_drop` names the group. This confirms intent; it
+/// narrows no legal transition (Lean `SelfConfig.keepsControl` stays the only
+/// self-protection). Like that guard it applies only to the invoker under
+/// no_lockout, which the Engineer's grant sets.
+fn refuse_silent_tools_drops(
+    mut request: ApplyRequest<'static>,
+    allow_drop: BTreeSet<String>,
+) -> ApplyRequest<'static> {
+    let groups = request
+        .patch
+        .iter()
+        .map(|(field, _)| field.clone())
+        .filter(|field| !allow_drop.contains(field))
+        .collect::<Vec<_>>();
+    // Rides the invoker-only guard slot, after the lockout guard so a lockout
+    // is reported as one.
+    let guard = request.guard;
+    request.guard = Box::new(move |anchor, stored, merged| {
+        guard(anchor, stored, merged)?;
+        let mut dropped = Vec::new();
+        for group in &groups {
+            dropped_settings(
+                group,
+                stored.get(group).unwrap_or(&Value::Null),
+                merged.get(group).unwrap_or(&Value::Null),
+                &mut dropped,
+            );
+        }
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        let mut groups = dropped
+            .iter()
+            .map(|path| path.split(['.', ' ']).next().unwrap_or_default())
+            .collect::<Vec<_>>();
+        groups.dedup();
+        bail!(
+            "this would drop existing settings from your own Tools: {}. Send them back in set (see [\"tools\",\"get\"]), or to drop them on purpose add options.allow-drop = {:?}",
+            dropped.join(", "),
+            groups.join(",")
+        )
+    });
+    request
+}
+
+/// Settings present in `before` and absent from `after`: removed keys, removed
+/// array items, and values cleared to null. A changed value is a choice, not a
+/// drop.
+fn dropped_settings(path: &str, before: &Value, after: &Value, out: &mut Vec<String>) {
+    match (before, after) {
+        (Value::Null, _) => {}
+        (Value::Object(before), Value::Object(after)) => {
+            for (key, value) in before {
+                dropped_settings(
+                    &format!("{path}.{key}"),
+                    value,
+                    after.get(key).unwrap_or(&Value::Null),
+                    out,
+                );
+            }
+        }
+        (Value::Array(before), Value::Array(after)) => {
+            out.extend(
+                before
+                    .iter()
+                    .filter(|item| !after.contains(item))
+                    .map(|item| format!("{path} item {item}")),
+            );
+        }
+        (_, Value::Null) => out.push(path.to_owned()),
+        _ => {}
+    }
+}
 fn profile_request(patch: SelfConfigPatch) -> ApplyRequest<'static> {
     anchored_request(
         SelfConfigTarget::InferenceProfile,
@@ -395,6 +570,17 @@ fn automation_request(
                     merged.get("behavior_id").and_then(Value::as_str) == Some(core.behavior_id()),
                     "task belongs to another behavior"
                 );
+            }
+            // Packs may publish an event source before installing its schema;
+            // self-config installs schemas first (["help","schema"]), so a
+            // collection it cannot see here is a typo that would never fire.
+            if target == SelfConfigTarget::EventSource {
+                if let Some(collection) = merged.get("source_collection").and_then(Value::as_str) {
+                    anyhow::ensure!(
+                        crate::config_client::collection_is_installed(txn, collection).await?,
+                        "event source source_collection {collection:?} is not an installed collection; install its schema first (see [\"help\",\"schema\"])"
+                    );
+                }
             }
             if target == SelfConfigTarget::Trigger {
                 for doc in [&stored, &merged].into_iter().filter(|doc| !doc.is_empty()) {
@@ -806,7 +992,7 @@ async fn persona_inspect(
     let catalog = store.load_catalog_view(agent_did).await?;
     let reference = catalog.behaviors.get(behavior_id).with_context(|| {
         format!(
-            "unknown behavior_id {behavior_id:?}; run config behavior list and use an exact returned ID"
+            "unknown behavior_id {behavior_id:?}; copy an exact ID from [\"behavior\",\"list\"]"
         )
     })?;
     let default_behavior_id = principal_default_behavior(node, agent_did).await?;
@@ -819,8 +1005,19 @@ async fn persona_inspect(
         default_behavior_id.as_deref(),
     )
     .await?;
-    serde_json::to_string_pretty(&snapshot)
-        .map_err(|error| anyhow!("serialize behavior inspection: {error}"))
+    let Value::Object(mut snapshot) = snapshot else {
+        bail!("behavior snapshot must be an object");
+    };
+    let effective = snapshot.remove("effective_config").unwrap_or_default();
+    let mut result = Ordered::reading_order(
+        Value::Object(snapshot),
+        &["behavior_id", "is_default", "protected"],
+    );
+    result.0.push(Ordered::entry(
+        "effective_config",
+        &Ordered::reading_order(effective, EFFECTIVE_ORDER),
+    ));
+    result.pretty()
 }
 
 async fn persona_preview(
@@ -924,18 +1121,18 @@ async fn persona_preview(
             })
         })
     });
-    serde_json::to_string_pretty(&json!({
-        "committed": false,
+    ordered! {
         "admitted": matches!(verdict, PersonaVerdict::Admit),
         "rejection": rejection,
+        "committed": false,
         "operation": operation,
-        "proposed_ids": {
+        "proposed_ids": json!({
             "behavior_id": behavior_id,
             "context_id": matches!(&op, PersonaOp::Create { .. }).then(|| format!("context-{request_key}")),
             "tools_id": matches!(&op, PersonaOp::Create { .. }).then(|| format!("tools-{request_key}")),
             "profile_id": args.profile_id.value(),
-        },
-        "proposed_values": {
+        }),
+        "proposed_values": json!({
             "display_name": args.display_name.value(),
             "description": args.description.value(),
             "context_description": args.description.value(),
@@ -944,13 +1141,13 @@ async fn persona_preview(
             "preset": args.preset.value(),
             "edit_fields": (operation == "edit").then(|| persona_edit_fields(args)),
             "make_default": args.make_default,
-        },
+        }),
+        "note": "Preview checks request admission without writing; it does not verify materialization or runtime readiness. Preset values are requested authority, narrowed by the process ceiling at runtime. Inspect the applied behavior for effective authority. Applied create IDs use the admitted request key and will differ from these preview-only IDs.",
         "preset_requested": preset_requested,
         "inherited_config": inherited_config,
         "process_ceiling": process_ceiling,
-        "note": "Preview checks request admission without writing; it does not verify materialization or runtime readiness. Preset values are requested authority, narrowed by the process ceiling at runtime. Inspect the applied behavior for effective authority. Applied create IDs use the admitted request key and will differ from these preview-only IDs.",
-    }))
-    .map_err(|error| anyhow!("serialize behavior preview: {error}"))
+    }
+    .pretty()
 }
 
 async fn persona_mutate(
@@ -1054,7 +1251,7 @@ async fn persona_mutate(
     .await?;
 
     let row = poll_persona_request(node, &request_key, agent_did).await?;
-    let mut output = json!({"request": row});
+    let status = json!(row.status);
     if row.status.as_deref() == Some("applied") {
         let applied_behavior_id = row
             .applied_behavior_id
@@ -1070,22 +1267,26 @@ async fn persona_mutate(
                 !behavior.enabled,
                 "applied disable outcome still resolves the behavior as enabled"
             );
-            output["effective"] = json!({
-                "behavior": behavior,
-                "is_default": principal_default_behavior(node, agent_did).await?.as_deref()
-                    == Some(applied_behavior_id),
-            });
-            output["activation"] = json!({
-                "durable": "confirmed",
-                "runtime": "new requests cannot select the disabled behavior after reconciliation",
-                "current_turn": "unchanged",
-            });
-            return serde_json::to_string_pretty(&output)
-                .map_err(|error| anyhow!("serialize behavior disable outcome: {error}"));
+            let is_default = principal_default_behavior(node, agent_did)
+                .await?
+                .as_deref()
+                == Some(applied_behavior_id);
+            return ordered! {
+                "status": status,
+                "behavior_id": applied_behavior_id,
+                "activation": json!({
+                    "durable": "confirmed",
+                    "runtime": "new requests cannot select the disabled behavior after reconciliation",
+                    "current_turn": "unchanged",
+                }),
+                "effective": json!({"behavior": behavior, "is_default": is_default}),
+                "request": row,
+            }
+            .pretty();
         }
-        let effective: Value = serde_json::from_str(
-            &persona_inspect(node, agent_did, applied_behavior_id, process_ceiling).await?,
-        )?;
+        let inspected =
+            persona_inspect(node, agent_did, applied_behavior_id, process_ceiling).await?;
+        let effective: Value = serde_json::from_str(&inspected)?;
         let effective_config = &effective["effective_config"];
         let required_materialized_id = |pointer: &str, name: &str| -> Result<String> {
             effective_config
@@ -1200,28 +1401,34 @@ async fn persona_mutate(
                 "applied behavior request reported success but did not select the behavior as principal default"
             );
         }
-        output["materialized_ids"] = json!({
+        return ordered! {
+            "status": status,
             "behavior_id": applied_behavior_id,
-            "context_id": context_id,
-            "tools_id": tools_id,
-            "profile_id": profile_id,
-        });
-        output["effective"] = effective;
-        output["activation"] = json!({
-            "durable": "confirmed",
-            "runtime": "applies to requests dispatched after the reconciler publishes the new generation",
-            "current_turn": "unchanged",
-            "test": "start a new session explicitly selecting applied_behavior_id",
-            "restart_and_pairing": "durable canonical documents and the terminal request outcome survive restart and replicate to authorized paired clients",
-        });
-    } else if row.status.as_deref() == Some("rejected") {
-        output["recovery"] = json!({
+            "materialized_ids": json!({
+                "behavior_id": applied_behavior_id,
+                "context_id": context_id,
+                "tools_id": tools_id,
+                "profile_id": profile_id,
+            }),
+            "activation": json!({
+                "durable": "confirmed",
+                "runtime": "applies to requests dispatched after the reconciler publishes the new generation",
+                "current_turn": "unchanged",
+                "test": "start a new session explicitly selecting applied_behavior_id",
+                "restart_and_pairing": "durable canonical documents and the terminal request outcome survive restart and replicate to authorized paired clients",
+            }),
+            "effective": serde_json::value::RawValue::from_string(inspected)?,
+            "request": row,
+        }
+        .pretty();
+    }
+    let recovery = (row.status.as_deref() == Some("rejected")).then(|| {
+        json!({
             "guidance": row.status_detail,
             "next": "list or inspect behavior configuration and retry only with published profile/root/preset choices",
-        });
-    }
-    serde_json::to_string_pretty(&output)
-        .map_err(|error| anyhow!("serialize behavior configuration outcome: {error}"))
+        })
+    });
+    ordered! {"status": status, "recovery": recovery, "request": row}.pretty()
 }
 
 /// Install bundled or registry graph packs through the canonical resolver,
@@ -2137,10 +2344,12 @@ pub fn build_self_config_tools(
         };
 
     let mut tools: Vec<Box<dyn ToolDyn>> = Vec::new();
-    if config.enable_graph_tools {
+    if previews_graphs(config) {
         tools.push(Box::new(graph_preview::PreviewGraphTool {
             core: core.clone(),
         }));
+    }
+    if config.enable_graph_tools {
         tools.push(Box::new(ListGraphsTool {
             core: core.clone(),
             node: node.clone(),
@@ -2180,12 +2389,21 @@ pub fn build_self_config_tools(
     tools
 }
 
+/// A graph intent reaches storage only through pack installation, so the
+/// preview is offered only with that grant; without it the tool's schema is a
+/// per-turn cost with no path to publication.
+fn previews_graphs(config: &SelfConfigToolConfig) -> bool {
+    config.enable_graph_tools && config.enable_pack_install
+}
+
 /// Advertised tool names for a resolved self-config surface.
 pub fn self_config_tool_names(config: &SelfConfigToolConfig) -> Vec<String> {
     let mut names = Vec::new();
+    if previews_graphs(config) {
+        names.push(PREVIEW_GRAPH_TOOL_NAME.to_string());
+    }
     if config.enable_graph_tools {
         names.extend([
-            PREVIEW_GRAPH_TOOL_NAME.to_string(),
             LIST_GRAPHS_TOOL_NAME.to_string(),
             RUN_GRAPH_TOOL_NAME.to_string(),
             GET_GRAPH_RUN_TOOL_NAME.to_string(),

@@ -2,73 +2,35 @@ use super::*;
 
 mod datastore;
 mod discovery;
+pub(super) mod help;
 mod plan;
 mod schema;
 mod skill;
 
-const CONFIG_USAGE: &str = r#"config commands (argv excludes the tool name):
-  ["help"] or ["help", RESOURCE]
-  ["get", ["--behavior", BEHAVIOR_ID]]
-  ["plan", "preview", "--documents", DOCUMENTS_JSON]
-  ["behavior", "list", "--limit", N, "--cursor", ID]
-  ["behavior", "get", BEHAVIOR_ID]
-  ["behavior", "preview", "edit", BEHAVIOR_ID, PATCH_FLAGS]
-  ["behavior", "preview", "create"|"clone"|"disable"|"default", ...flags]
-  ["behavior", "edit", BEHAVIOR_ID, PATCH_FLAGS]
-  ["behavior", "create"|"clone"|"disable", ...flags]
-  ["behavior", "default", BEHAVIOR_ID]
-  ["profile"|"backend", "list", "--limit", N, "--cursor", ID]
-  ["profile", "preview", "create", PROFILE_ID, PATCH_FLAGS]
-  ["profile", "create", PROFILE_ID, PATCH_FLAGS]
-  ["backend", "preview", "create", BACKEND_ID, "--endpoint", URL, ["--name", NAME], ["--wire-api", API]]
-  ["backend", "create", BACKEND_ID, "--endpoint", URL, ["--name", NAME], ["--wire-api", API]]
-  ["backend", "discover", BACKEND_ID]
-  ["tools", "get"|"preview"|"edit", [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]]
-  ["backend", "get", [BACKEND_ID], [--behavior BEHAVIOR_ID]]
-  ["backend", "preview"|"edit", [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]]
-  ["profile", "get"|"preview"|"edit", [profile|sampling|execution|retry-policy|compaction], [--behavior BEHAVIOR_ID] PATCH_FLAGS]
-  ["mcp-service", "get", SERVICE_ID]
-  ["subagent-target"|"execution", "list", "--limit", N, "--cursor", ID]
-  ["subagent-target"|"execution", "get", ID]
-  ["subagent-target"|"execution", ["preview"], "create"|"edit", ID, PATCH_FLAGS]
-  ["datastore", "get"|"create"|"edit", SURFACE_ID, PATCH_FLAGS]
-  ["datastore", "preview", "create"|"edit", SURFACE_ID, PATCH_FLAGS]
-  ["skill", "get", SKILL_ID]
-  ["skill", "preview", "import", SKILL_ID, PATH]
-  ["skill", "import", SKILL_ID, PATH]
-  ["discovery", "scan", "--source", SOURCE_ID, claude|codex|grok, user|project, PATH, ...]
-  ["mcp-service", "preview"|"edit", SERVICE_ID, PATCH_FLAGS]
-  ["automation", "get", task|schedule|trigger|event-source, ID, [--behavior BEHAVIOR_ID]]
-  ["schema", "get", COLLECTION]
-  ["schema", "preview", "install", --sdl SDL]
-  ["schema", "install", --sdl SDL, --digest SHA256]
-  ["automation", "preview"|"edit", KIND, ID, [--behavior BEHAVIOR_ID] PATCH_FLAGS]
-  ["cleanup", "preview", --target RESOURCE=ID [--target RESOURCE=ID ...]]
-  ["cleanup", "remove", --digest SHA256, --target RESOURCE=ID [--target RESOURCE=ID ...]]
-  ["pack", "list", ["--limit", N] ["--cursor", NAME]]
-  ["pack", "get", PACKAGE]
-  ["pack", "preview", "install"|"update", PACKAGE, [--inference-slot NAME=PROFILE_ID] [--var NAME=VALUE]]
-  ["pack", "install"|"update", PACKAGE, --digest SHA256, [--inference-slot NAME=PROFILE_ID] [--var NAME=VALUE]]
+/// Resource index returned by `["help"]`: one line per resource, filtered to
+/// the granted ones. Fields, syntax and recipes live in `["help", RESOURCE]`.
+const HELP_INDEX: &[(&str, &str)] = &[
+    ("get", "effective configuration of one behavior (options.behavior)"),
+    ("behavior", "behaviors and their Context (system prompt, skills)"),
+    ("tools", "a behavior's Tools groups: host, subagents, built_ins, datastore, remote, integrations, self_config"),
+    ("datastore", "DatastoreToolSurface: model tools that create or query one collection"),
+    ("subagent-target", "an agent that agent_new may start"),
+    ("skill", "import a SKILL.md and attach it to a Context"),
+    ("discovery", "scan external Claude, Codex or Grok configuration"),
+    ("profile", "model selection plus sampling, execution, retry-policy and compaction"),
+    ("execution", "InferenceExecution run limits and binding them to a profile"),
+    ("backend", "inference endpoints and model discovery"),
+    ("mcp-service", "existing MCP service registrations"),
+    ("automation", "event-source, schedule, trigger and task documents"),
+    ("schema", "node-wide collection schemas"),
+    ("cleanup", "remove documents atomically by exact ID"),
+    ("pack", "install packs; the only way graphs are created"),
+    ("plan", "preview a connected set of new documents"),
+];
 
-Behavior create/clone/disable flags: --id, --from, --display-name, --description,
---system-prompt, --root, --preset, --profile, and --default. In native tool calls,
-put those named create/clone options in options (for example options.id), not set;
-the create/clone behavior ID is never positional. PATCH_FLAGS are repeated
---set FIELD=JSON and --clear FIELD where the command help lists them; omitted
-fields preserve.
-This tool is a native config API, not a shell. Put native JSON patch values in the
-top-level set object for commands whose help accepts PATCH_FLAGS (including
-datastore create/edit), removals in clear, and named options in options (keys
-without --). Behavior create/clone options use options, not set. JSON-valued
-options use native JSON objects.
-For datastore, subagent-target, execution, automation and mcp-service document commands, target_id supplies
-the document ID instead of its positional argv operand. Never supply both.
-Example: {"argv":["automation","preview","task","ID"],"options":{"behavior":"BEHAVIOR_ID"},"set":{"prompt_template":"Read {{ doc.message }}","enabled":true}}
-Do not JSON-stringify values inside set. The --set/--clear/--mailbox forms below
-are CLI argv notation; in this native tool use set, clear, and options.mailbox.
-Use RESOURCE --help (or -h), RESOURCE OPERATION --help, or help RESOURCE before a write."#;
-
-const DATA_MODEL: &str = "A principal owns exact-ID configuration documents. Requests, tasks, and sessions select a Behavior. Behavior -> Context controls the system prompt, selected skills, compaction, and one Tools document; Tools contains nested host, built-in, integration, MCP, and self-config settings. Behavior -> InferenceProfile -> Backend controls model execution; the profile selects model and reasoning effort and may reference sampling and execution settings. A Trigger selects a Task and a Schedule or EventSource. A Pack declares configuration and inference roles; installation binds every role to an existing principal-owned profile, then publishes the pack's documents and graph revision without copying inference configuration. Reads never mutate. Document edits are sparse patches: omission preserves, explicit --clear removes an optional value, and preview/apply validate same-principal references within the document transaction. Schema registration is node-wide and separate from document publication; it never grants document access. Credentials and OAuth consent remain operator-owned and are never returned by config.";
+/// Where `preview` goes, and the help aliases, stated once in the index.
+const HELP_GRAMMAR: &str = "Preview: tools, profile, backend and automation take preview in place of edit (profile preview); the others take it before the verb (datastore preview create). A preview writes nothing.
+Aliases: help agent and help context show behavior; task, trigger, schedule and event-source show automation; graph explains graphs.";
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,7 +68,7 @@ impl ConfigCommandParams {
                 | ["mcp-service", "get" | "preview" | "edit", ..] => 2,
                 ["automation", "get" | "preview" | "edit", _, ..] => 3,
                 _ => bail!(
-                    "target_id is supported for datastore, subagent-target, execution, automation and mcp-service document commands; use --help for the command path"
+                    "target_id is supported for datastore, subagent-target, execution, automation and mcp-service document commands; see [\"help\"]"
                 ),
             };
             anyhow::ensure!(
@@ -173,12 +135,42 @@ fn config_help_resource(argv: &[String]) -> Option<Option<&str>> {
     None
 }
 
+/// The command words a `RESOURCE ... --help` path names, so help can narrow
+/// to that command: operands after the resource, without `preview` or flags.
+fn help_verb(argv: &[String]) -> Vec<&str> {
+    if argv
+        .first()
+        .is_none_or(|first| matches!(first.as_str(), "help" | "--help" | "-h"))
+    {
+        return Vec::new();
+    }
+    let mut words = argv[1..]
+        .iter()
+        .map(String::as_str)
+        .take_while(|word| !matches!(*word, "--help" | "-h"))
+        .filter(|word| !word.starts_with('-') && *word != "help")
+        .take(3)
+        .collect::<Vec<_>>();
+    // `preview create` narrows to create; a bare `preview` is the verb.
+    if words.len() > 1 && words[0] == "preview" {
+        words.remove(0);
+    }
+    words
+}
+
 fn required_resource_id<'a>(value: Option<&'a String>, label: &str) -> Result<&'a String> {
     value
         .filter(|id| !id.trim().is_empty() && !id.starts_with('-'))
-        .with_context(|| format!("missing {label}: supply a non-empty resource ID before options or patch fields; use --help for syntax"))
+        .with_context(|| format!("missing {label}: supply a non-empty resource ID before options or patch fields; see [\"help\"]"))
 }
 
+/// Native `config` tool. Its model-facing text is layered for progressive
+/// disclosure (#2088): the description is a small core (call shape, ID and
+/// write rules, how to get more); `["help"]` lists resources; `["help",
+/// RESOURCE]` gives that resource's commands, fields and one recipe; errors
+/// name the next call. Every layer is paid for in tokens on each turn or help
+/// call, so nothing is repeated across layers or responses, and concepts that
+/// explain how documents fit together belong to the Engineer prompt, not here.
 #[derive(Clone)]
 pub struct ConfigCommandTool {
     pub(super) node: Arc<EmbeddedNode>,
@@ -204,7 +196,10 @@ impl Tool for ConfigCommandTool {
         ToolDefinition {
             name: Self::NAME.to_owned(),
             description: format!(
-                "Inspect and change this principal's configuration through a native API, never a shell. Put command words in argv; use target_id for datastore, automation and mcp-service document IDs, or the positional ID shown in help (never both). Put patch values directly in set for commands whose help accepts patch fields (including datastore create/edit), optional removals in clear, and named behavior create/clone options in options (keys without --; behavior creation uses options.id, never a positional ID). Use native JSON for object-valued options such as mailbox. Do not stringify or escape JSON inside set or options. Example patch: {{\"argv\":[\"behavior\",\"context\",\"preview\"],\"options\":{{\"behavior\":\"ID\"}},\"set\":{{\"system_prompt\":\"Your literal prompt\"}}}}. Example create: {{\"argv\":[\"behavior\",\"create\"],\"options\":{{\"id\":\"monitor\",\"display-name\":\"Monitor\",\"system-prompt\":\"Observe only\",\"preset\":\"readonly\",\"profile\":\"PROFILE_ID\"}}}}. {DATA_MODEL} Enabled resources: {}. Common reads: [\"behavior\",\"list\"] and [\"behavior\",\"get\",BEHAVIOR_ID]. Append --help or -h to a command path, or call [\"help\",RESOURCE], for syntax and fields before writing.",
+                r#"Read and change this node's configuration: a native API, not a shell.
+Call {{"argv":[words],"target_id"?,"set"?:{{field:value}},"clear"?:[field],"options"?:{{name:value}}}}. Verbs: get, list, create, edit, preview (writes nothing): preview, apply, then read back.
+Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.behavior a command targets you.
+["help"] lists resources. Granted: {}."#,
                 resources.join(", ")
             ),
             parameters: json!({
@@ -214,12 +209,12 @@ impl Tool for ConfigCommandTool {
                         "type": "array",
                         "items": {"type": "string"},
                         "minItems": 1,
-                        "description": "One allowlisted config command as argv elements; this is parsed internally and is never passed to a shell."
+                        "description": "Command words, never passed to a shell."
                     },
-                    "target_id": {"type":"string", "description":"Named document ID for datastore, automation or mcp-service get/preview/create/edit commands. Omit the positional ID from argv when using this. Behavior selection remains options.behavior."},
-                    "set": {"type":"object", "additionalProperties":true, "description":"Patch fields with native JSON values, not FIELD=JSON strings. Omitted fields stay unchanged; nested objects replace the complete group."},
-                    "clear": {"type":"array", "items":{"type":"string"}, "description":"Optional fields to remove explicitly. Do not also supply them in set."},
-                    "options": {"type":"object", "additionalProperties":true, "description":"Named options without --. Text options (behavior, id, display-name, system-prompt, root, profile, sdl, digest) use literal strings. Behavior create/clone uses options (including id), not set or positional IDs. Structured options such as mailbox use native JSON objects, never JSON-encoded strings. Boolean switches remain in argv."}
+                    "target_id": {"type":"string", "description":"Document ID for datastore, subagent-target, execution, automation and mcp-service commands. Do not also put it in argv."},
+                    "set": {"type":"object", "additionalProperties":true, "description":"Fields to write, as native JSON. Each replaces the whole field."},
+                    "clear": {"type":"array", "items":{"type":"string"}, "description":"Optional fields to remove."},
+                    "options": {"type":"object", "additionalProperties":true, "description":"Named options without --. Object options stay JSON objects."}
                 },
                 "required": ["argv"],
                 "additionalProperties": false
@@ -232,40 +227,64 @@ impl Tool for ConfigCommandTool {
             execution: Arc::new(super::execution::ExecutionObservation::default()),
             ..self.clone()
         };
+        let mut previewing = false;
+        let mut help = false;
         let result = async {
             let argv = args.into_argv()?;
+            previewing = argv.iter().any(|word| word == "preview");
+            help = config_help_resource(&argv).is_some();
             call.dispatch(&argv).await
         }
         .await;
         let receipt = call.execution.receipt();
         match result {
-            Ok(text) => {
-                let mut value: Value = serde_json::from_str(&text).map_err(anyhow::Error::from)?;
-                let object = value
-                    .as_object_mut()
-                    .context("config output must be an object")?;
-                object.insert(
-                    "config_execution".into(),
-                    serde_json::to_value(receipt).map_err(anyhow::Error::from)?,
-                );
-                serde_json::to_string_pretty(&value)
-                    .map_err(|error| anyhow::Error::from(error).into())
-            }
+            // Help is the page itself: plain text with no envelope. It is
+            // answered before any command parses, so it never mutates.
+            Ok(text) if help => Ok(text),
+            Ok(text) => append_receipt(&text, &receipt).map_err(Into::into),
             Err(error) => {
-                let recovery = if error
-                    .downcast_ref::<super::ops::MissingBehavior>()
-                    .is_some()
+                // A preview may name a behavior that is still only proposed;
+                // connected preview is the path for that, not for a typo.
+                let recovery = if previewing
+                    && error
+                        .downcast_ref::<super::ops::MissingBehavior>()
+                        .is_some()
                 {
                     call.connected_preview_contract()
                 } else {
                     Value::Null
                 };
-                Err(anyhow::anyhow!(
-                    json!({"config_execution":receipt,"error":format!("{error:#}"),"recovery":recovery}).to_string()
-                ).into())
+                let failure = ordered! {
+                    "error": format!("{error:#}"),
+                    "recovery": recovery,
+                    "config_execution": receipt,
+                };
+                Err(
+                    anyhow::anyhow!(serde_json::to_string(&failure).map_err(anyhow::Error::from)?)
+                        .into(),
+                )
             }
         }
     }
+}
+
+/// Every non-help result ends with the execution receipt, after the answer
+/// and its next step, without re-serializing (and so re-sorting) the answer.
+fn append_receipt(
+    text: &str,
+    receipt: &super::execution::ConfigExecutionReceipt,
+) -> Result<String> {
+    let body = text
+        .trim_end()
+        .strip_suffix('}')
+        .filter(|_| text.trim_start().starts_with('{'))
+        .context("config output must be an object")?
+        .trim_end();
+    let separator = if body.ends_with('{') { "" } else { "," };
+    Ok(format!(
+        "{body}{separator}\n  \"config_execution\": {}\n}}",
+        serde_json::to_string(receipt)?
+    ))
 }
 
 fn model_resources(categories: &BTreeSet<String>, pack: bool) -> Vec<&'static str> {
@@ -309,24 +328,24 @@ fn model_resources(categories: &BTreeSet<String>, pack: bool) -> Vec<&'static st
 impl ConfigCommandTool {
     async fn dispatch(&self, argv: &[String]) -> Result<String> {
         if let Some(resource) = config_help_resource(argv) {
-            return self.help(resource);
+            return self.help(resource, help_verb(argv));
         }
         let Some(command) = argv.first().map(String::as_str) else {
-            bail!("missing config command\n{CONFIG_USAGE}");
+            bail!("missing config command; see [\"help\"]");
         };
         match command {
-            "help" => self.help(argv.get(1).map(String::as_str)),
+            "help" => self.help(argv.get(1).map(String::as_str), Vec::new()),
             "get" => {
                 let (behavior_id, rest) = extract_behavior_target(&argv[1..])?;
                 anyhow::ensure!(
                     rest.is_empty(),
                     "config get accepts only --behavior BEHAVIOR_ID"
                 );
-                let core = self.target_core(behavior_id.as_deref(), "get")?;
+                let core = self.target_core(behavior_id.as_deref(), "get").await?;
                 let value = core
                     .read_effective_config(&self.categories, self.no_lockout, self.preview)
                     .await?;
-                Ok(serde_json::to_string_pretty(&value)?)
+                Ordered::reading_order(value, EFFECTIVE_ORDER).pretty()
             }
             "behavior" => self.behavior(&argv[1..]).await,
             "tools" => self.bound_document("tools", &argv[1..]).await,
@@ -350,195 +369,10 @@ impl ConfigCommandTool {
             "schema" => self.schema(&argv[1..]).await,
             "plan" => self.plan(&argv[1..]).await,
             other => bail!(
-                "unknown config resource or command {other:?}; accepted: help, get, {}\n{CONFIG_USAGE}",
+                "unknown config resource or command {other:?}; accepted: help, get, {}. See [\"help\"]",
                 model_resources(&self.categories, self.allow_pack_install).join(", ")
             ),
         }
-    }
-
-    fn help(&self, resource: Option<&str>) -> Result<String> {
-        let detail = match resource {
-            None => CONFIG_USAGE,
-            Some("plan") => {
-                r#"plan preview --documents DOCUMENTS_JSON
-Preview a connected set of NEW canonical configuration documents without publishing any of them. Put an array of {"collection":"AgentBehavior", "document":{...}} entries in options.documents as native JSON. Use exact IDs and include all proposed Behavior, Context, Tools, SubagentTarget, InferenceExecution, datastore and automation dependencies. Existing same-principal references may be reused. Every new document must include agent_did. Existing documents cannot be replaced by this command.
-For a mailbox surface, add "mailbox": POLICY alongside "collection" and "document" in that proposal entry, and omit document.entries. This uses the same canonical declaration as datastore --mailbox; do not reconstruct file_mailbox_item fields yourself.
-This uses the publication owner's canonical type and retained-reference validation; it does not register application schemas, grant approval, publish documents, or prove live tool/service readiness. After explicit approval, use the normal resource commands to create the configuration and verify effective state. Schema preview is separate. Never create temporary documents just to make a preview pass."#
-            }
-            Some("schema") => {
-                r#"schema commands (requires automation permission):
-  get COLLECTION
-  preview install --sdl SDL
-  install --sdl SDL --digest SHA256
-Use DefraDB GraphQL SDL, for example: type WorkItem { message: String correlation: String }
-Preview returns artifact_digest and collection contracts without writes. The digest is over the exact SDL bytes: retain and resubmit the identical SDL string with that digest for install. Install revalidates the contracts. Existing schemas must match exactly; incompatible changes and SDL mixing existing/new collections are rejected. This supports additive registration, not schema migration or deletion. Submit at most 64 KiB of SDL.
-Schemas are node-wide, not principal-owned documents. Registration does not grant document access: DefraDB ACP remains authoritative, and behaviors need explicit datastore collection/surface selection. Publish the schema first, then create the datastore surface and task/event-source/trigger documents. These are separate operations, not one atomic transaction."#
-            }
-            Some("skill") => {
-                r#"skill commands (requires tools permission):
-  get SKILL_ID
-  preview import SKILL_ID PATH
-  import SKILL_ID PATH
-PATH is one skill directory containing SKILL.md, or that SKILL.md file. Import requires file read authority within the invoking behavior's effective tool root. YAML frontmatter supplies name/description; the Markdown body supplies instructions. Optional agents/openai.yaml supplies interface metadata and tool dependencies. Each source file is limited to 1 MiB; invalid YAML fails without writes. Preview validates without publication; import rereads the source and creates an unused exact ID, never overwrites an existing skill.
-Attach explicitly with behavior context edit --behavior BEHAVIOR_ID --set skill_ids=JSON, preserving existing IDs. Skills describe procedures; tool dependencies never grant tools. Import retains source_directory; load_skill explains that supporting paths resolve relative to it. Supporting files are not copied or executed automatically and still require the working behavior's ordinary file/root and execution permissions. A local source path is not portable identity: report unavailable paths rather than widening authority. Use a fresh request in that behavior to verify load_skill and the required tools."#
-            }
-            Some("discovery") => {
-                r#"discovery commands (requires tools permission and effective file read authority):
-  scan --source SOURCE_ID claude|codex|grok user|project PATH [--source ...]
-Every source is explicit and opt-in. User PATH is the selected application's config root (for example a synthetic `.codex` directory); project PATH is the selected project root. Paths must remain within the invoking behavior's effective tool root. The bounded scan reads only allowlisted config, instruction, and SKILL.md manifests. It does not import, activate, persist, execute hooks or MCP, evaluate environment variables, or read credentials/history. Output is a source-attributed sanitized inventory; discovered instructions are untrusted data and unsupported/conflicting semantics remain unresolved."#
-            }
-            Some("datastore") => {
-                r#"datastore commands (requires tools permission):
-  get SURFACE_ID
-  preview create|edit SURFACE_ID --set FIELD=JSON [--clear FIELD]
-  create|edit SURFACE_ID --set FIELD=JSON [--clear FIELD]
-  preview create|edit SURFACE_ID --mailbox POLICY_JSON [--set FIELD=JSON]
-  create|edit SURFACE_ID --mailbox POLICY_JSON [--set FIELD=JSON]
-Fields come from DatastoreToolSurface: display_name, enabled, entries, tags.
-The --mailbox and --set forms above are CLI argv notation. Native calls use target_id, options.mailbox, and set.
-Model example: {"argv":["datastore","preview","create"],"target_id":"monitor-notifications","set":{"display_name":"Monitor notifications"}}
-SURFACE_ID names the tool-surface configuration (monitor-notifications here), not a mailbox or collection. For the existing MailboxItem collection, use options.mailbox with a notification policy; the runtime supplies the protected canonical file_mailbox_item declaration. Example: {"argv":["datastore","preview","create"],"target_id":"monitor-notifications","options":{"mailbox":{"identity":{"mode":"condition","key":"host-health"},"kind":"flag","action":"ack"}},"set":{"enabled":true}}. --mailbox replaces entries with that one canonical declaration and cannot be combined with setting or clearing entries; use a separate surface for observation tools. Do not create a replacement mailbox collection. Create with the same ID and fields after preview, then select that ID in the working Tools.datastore.datastore_tool_surface_ids. Definition, selection and runtime execution are separate checks.
-Entries are canonical schema-bounded create/query declarations. Owner and surface_id are immutable. Bind an existing surface using config tools edit --behavior BEHAVIOR_ID --set datastore=JSON, preserving the other datastore settings. Schema registration is a separate operation."#
-            }
-            Some("subagent-target") => {
-                r#"subagent-target commands (requires tools permission):
-  list [--limit N] [--cursor TARGET_ID]
-  get TARGET_ID
-  preview create|edit TARGET_ID --set FIELD=JSON [--clear FIELD]
-  create|edit TARGET_ID --set FIELD=JSON [--clear FIELD]
-A SubagentTarget names one behavior that agent_new may start: name (the model-facing agent name), target_agent_did, behavior_id, description, tags. Create requires an unused exact ID; a same-principal target must reference an existing behavior. Select it with tools edit --behavior BEHAVIOR_ID --set subagents=JSON, preserving the existing target_ids. Delete with cleanup --target subagent-target=ID after removing it from every Tools selection."#
-            }
-            Some("execution") => {
-                r#"execution commands (requires profile permission):
-  list [--limit N] [--cursor EXECUTION_ID]
-  get EXECUTION_ID
-  preview create|edit EXECUTION_ID [--set FIELD=JSON] [--clear FIELD]
-  create|edit EXECUTION_ID [--set FIELD=JSON] [--clear FIELD]
-An InferenceExecution owns run limits (max_turns, deadline_duration_secs, token budget, stream timeouts, retry_policy_id). Create requires an unused exact ID; omitted fields use the canonical defaults. Bind it with profile edit --behavior BEHAVIOR_ID --set execution_id=JSON (or profile create ... --set execution_id=JSON), then preview/edit limits with profile edit execution --behavior BEHAVIOR_ID or execution edit EXECUTION_ID. Delete with cleanup --target execution=ID once no profile references it."#
-            }
-            Some("behavior") => {
-                r#"behavior commands:
-  list [--limit N] [--cursor BEHAVIOR_ID]
-  get [BEHAVIOR_ID]
-  context get [--behavior BEHAVIOR_ID]
-  context preview|edit [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-  preview edit BEHAVIOR_ID [--set FIELD=JSON] [--clear FIELD]
-  preview create|clone|disable FLAGS
-  preview default BEHAVIOR_ID
-  create --display-name NAME --system-prompt TEXT --preset readonly|write --profile PROFILE_ID [--description TEXT] [--root PATH] [--default]
-  clone --from BEHAVIOR_ID --display-name NAME --profile PROFILE_ID [overrides]
-  edit BEHAVIOR_ID [--set FIELD=JSON] [--clear FIELD]
-  disable --id BEHAVIOR_ID
-  default BEHAVIOR_ID
-Behavior edit patches the canonical AgentBehavior document, including display_name, description, context_id, inference_profile_id, enabled, and tags. Context prompt/skills and all tool groups are edited through their own targeted commands. Omitted fields preserve and --clear removes an optional field. All IDs come from list/get; never guess IDs."#
-            }
-            Some("tools") => {
-                r#"tools commands:
-  get [--behavior BEHAVIOR_ID]
-  preview [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-  edit [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-This targets the Tools document referenced by the selected owned working behavior. Nested values are JSON. A patch is atomic; omitted fields preserve and --clear removes an optional field.
-host.bash.mode selects the capability (Off by default). execution_mode, argv constraints, and background_enabled only constrain a selected capability; none enables it. For a scoped write command, select mode Unrestricted and an allowed_argv_prefixes array containing only the approved command's argv prefix. The process ceiling still limits effective authority. Read behavior get's runtime_effective after editing and test the tool in that working behavior; a saved constraint is not proof that a tool is available."#
-            }
-            Some("profile") => {
-                r#"profile commands:
-  list [--limit N] [--cursor PROFILE_ID]
-  preview create PROFILE_ID --set backend_id=JSON --set model_name=JSON [PATCH_FLAGS]
-  create PROFILE_ID --set backend_id=JSON --set model_name=JSON [PATCH_FLAGS]
-  get [profile|sampling|execution|retry-policy|compaction] [--behavior BEHAVIOR_ID]
-  get PROFILE_ID
-  preview [TARGET] [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-  edit [TARGET] [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-The profile selects backend/model/effort. Creation requires an unused exact ID plus an existing same-principal backend_id and model_name; it does not bind a behavior. Use behavior edit to select it. Optional sampling and execution documents own their respective controls; compaction is referenced by Context."#
-            }
-            Some("backend") => {
-                r#"backend commands:
-  list [--limit N] [--cursor BACKEND_ID]
-  preview create BACKEND_ID --endpoint URL [--name NAME] [--wire-api chat_completions|responses]
-  create BACKEND_ID --endpoint URL [--name NAME] [--wire-api chat_completions|responses]
-  discover BACKEND_ID
-  get [BACKEND_ID] [--behavior BEHAVIOR_ID]
-  preview [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-  edit [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-Create is deliberately limited to an enabled, unauthenticated OpenAI-compatible server and never accepts a credential. List, get and discover include the backend's last credential-free catalog observation (model IDs, context windows, supported reasoning efforts). For an unauthenticated OpenAI-compatible backend, discover contacts only that exact persisted backend through the canonical provider/catalog owner and records its advertised catalog; for a credentialed or subscription backend it returns the catalog last published by operator discovery or the runtime prober without contacting the provider. Discover never creates a profile or selects a model. Preview creation before applying it. Without BACKEND_ID, get/edit targets the backend referenced by the selected behavior's profile. Raw credentials cannot be read or changed; OAuth and API-key setup remain operator-owned."#
-            }
-            Some("mcp-service") => {
-                r#"mcp-service commands:
-  get SERVICE_ID
-  preview SERVICE_ID [--set FIELD=JSON] [--clear FIELD]
-  edit SERVICE_ID [--set FIELD=JSON] [--clear FIELD]
-The service must already exist under this principal."#
-            }
-            Some("automation") => {
-                r#"automation commands:
-  get task|schedule|trigger|event-source ID [--behavior BEHAVIOR_ID]
-  preview KIND ID [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-  edit KIND ID [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-Tasks belong to the selected behavior. Triggers may reference only its tasks. Schedules and event sources are included only through those trigger links.
-For automation only, preview/edit are exact-ID upserts: a missing ID is previewed or created with the supplied fields; an existing ID is patched. Use target_id in native calls to supply ID and options.behavior to select the working behavior. The --set/--clear forms above are CLI argv notation; native calls use set/clear.
-For per-document triggers, parallel (default) allows independent invocations; queued_serial durably queues each fire behind prior work; serial skips a fire while prior work is active (it is not a queue); latest_only supersedes prior active work. Use queued_serial for ordered handoffs. Disabling a document trigger pauses delivery; re-enabling catches up its documents.
-Trigger session_id_template targets an existing session, for example {{ doc.lead_session_id }}; a busy target queues the request. Leave it absent to start a new session.
-Task templates use MiniJinja: {{ doc.message }} reads a source document field; {{ args.name }} reads an invocation argument; {{ session.session_id }} and {{ request.request_id }} identify the receiving session and request, including in goal_objective_template. Missing values fail rendering; use an explicit default filter for optional fields. Go-style {{.message}} is invalid. Syntax is checked before publication, while available document fields depend on the linked source schema.
-Task emit_outcome defaults to false. Opt in for one FireOutcome at request completion, or for a goal-backed task when its Goal completes, blocks or exhausts its budget. Paused or usage-limited Goals and continuing requests do not emit outcomes. Outcome-consuming inbox Tasks must leave emit_outcome false.
-Render every source field the behavior needs into the prompt, or grant an explicit scoped read tool. For example, passing only {{ doc.correlation }} does not give the behavior the message to transform.
-Delimit source values separately from instructions and metadata. Appending punctuation or a correlation ID beside a value can change what the model treats as input; specify the exact output contract and verify it with representative documents.
-Document automation: define the input collection's schema, connect an event source to a task through a trigger, and template source fields into the task prompt. Grant datastore reads/writes to behaviors that consume or publish documents. An external client may submit the input instead. Inspect available schema/datastore authoring tools; these automation commands do not create schemas or datastore tools.
-Results can feed later stages. Use canonical graph tools or graph packs for coordinated dependencies, branching, parallel work, and completion. Verify a workflow with a sample input and its resulting request/output, not just configuration reads."#
-            }
-            Some("cleanup") => {
-                r#"cleanup commands:
-  preview --target RESOURCE=ID [--target RESOURCE=ID ...]
-  remove --digest SHA256 --target RESOURCE=ID [--target RESOURCE=ID ...]
-Resources: behavior, context, tools, subagent-target, profile, sampling, execution, retry-policy, compaction, backend, mcp-service, task, schedule, trigger, event-source.
-Cleanup is exact-ID, same-principal, and reference-aware. Preview performs the same complete retained-reference validation without writing and returns the digest required by remove. Remove requires the same target set and refuses if any target changed, then revalidates and deletes the whole set atomically, so related unreferenced cycles can be removed together. A retained document may never be left with a missing reference. Behavior/context cleanup requires the behavior catalog grant; the protected Setup behavior cannot be removed."#
-            }
-            Some("pack") if self.allow_pack_install => {
-                r#"pack commands:
-  list [--limit N] [--cursor NAME]
-  get PACKAGE
-  preview install|update PACKAGE [--inference-slot NAME=PROFILE_ID] [--var NAME=VALUE]
-  install|update PACKAGE --digest SHA256 [--inference-slot NAME=PROFILE_ID] [--var NAME=VALUE]
-  remove PACKAGE
-Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-selected registry. Preview is read-only and returns the exact canonical content digest required by install/update; registry receipts also expose the verified archive digest. Repeat --inference-slot for every declared slot; values are existing principal-owned profile IDs. Non-inference variables remain explicit --var NAME=VALUE. Remove deletes the package's graph and documents (refused while a run has not finished); it releases no plugin bytes or archive, since this tool has no filesystem home. Installation activates configuration but does not run a graph."#
-            }
-            Some(other) => bail!(
-                "unknown config help resource {other:?}; enabled resources: {}",
-                model_resources(&self.categories, self.allow_pack_install).join(", ")
-            ),
-        };
-        Ok(serde_json::to_string_pretty(&json!({
-            "ok": true,
-            "data_model": DATA_MODEL,
-            "help": detail,
-            "enabled_resources": model_resources(&self.categories, self.allow_pack_install),
-            "connected_preview": self.connected_preview_contract(),
-            "patch_contracts": help_patch_contracts(resource),
-            "examples": if resource == Some("datastore") { datastore::entry_examples() } else { Value::Null },
-            "canonical_mailbox_entries": if resource == Some("datastore") {
-                json!({"entries": [crate::document_config::SurfaceToolDecl::Create(crate::mailbox::canonical_mailbox_write_decl())]})
-            } else { Value::Null },
-            "mailbox_values": if resource == Some("datastore") {
-                json!({
-                    "kind": crate::mailbox::MailboxKind::ALL.map(crate::mailbox::MailboxKind::as_str),
-                    "action": crate::mailbox::MailboxAction::ALL.map(crate::mailbox::MailboxAction::as_str),
-                    "notification_identity": {
-                        "event": {"mode":"event"},
-                        "condition": {"mode":"condition","key":"monitor-summary"},
-                    },
-                    "document_response": {
-                        "action": "write_document",
-                        "expected_collection": "Name of an installed application collection",
-                        "required_schema_field": "mailbox_item_key: String @immutable @index(unique: true)",
-                        "correlation": "The responder writes the stored MailboxItem.item_key into mailbox_item_key. A matching document resolves attention; its contents determine the workflow outcome, not mailbox status.",
-                        "authority": "Use DefraDB ACP for response writers. Do not grant the working behavior a response-writing tool when a human decision is required. Filter the event/task route on the approved decision; decline must not dispatch repairs."
-                    },
-                    "notification_contract": "Set the canonical entry's notification policy before binding the surface. Event mode files one item per runtime request. Condition mode maintains one open item per requester/behavior/configured key across requests, updating its content. Use a combined summary for multiple findings. The model supplies only title, summary and payload; identity, routing and request provenance are runtime-owned. The receipt returns outcome created/reused/updated and the stored item. Terminal items are never updated or reopened.",
-                })
-            } else { Value::Null },
-            "current_limitations": {
-                "pack_remove": "unavailable because installation records do not yet distinguish documents created by an install from matching documents the install reused",
-            },
-        }))?)
     }
 
     fn connected_preview_contract(&self) -> Value {
@@ -562,7 +396,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             model_resources(&self.categories, self.allow_pack_install).join(", ")
         );
         let Some(verb) = argv.first().map(String::as_str) else {
-            bail!("behavior command is required; run config help behavior");
+            bail!("behavior command is required; see [\"help\",\"behavior\"]");
         };
         match verb {
             "list" => {
@@ -588,19 +422,18 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 let flags = ParsedArgs::parse(&argv[1..])?;
                 anyhow::ensure!(
                     flags.switches.is_empty() && flags.options.is_empty(),
-                    "behavior get accepts only an optional behavior_id; run config help behavior"
+                    "behavior get accepts only an optional behavior_id; see [\"help\",\"behavior\"]"
                 );
-                let id = flags
-                    .positionals
-                    .first()
-                    .map(String::as_str)
-                    .unwrap_or(self.core.behavior_id());
                 anyhow::ensure!(
                     flags.positionals.len() <= 1,
                     "behavior get accepts at most one behavior_id"
                 );
-                self.ensure_behavior_catalog("get", Some(id))?;
-                persona_inspect(&self.node, &self.agent_did, id, &self.process_ceiling).await
+                let id = match flags.positionals.first() {
+                    Some(id) => self.resolve_behavior_id(id).await?,
+                    None => self.core.behavior_id().to_owned(),
+                };
+                self.ensure_behavior_catalog("get", Some(&id))?;
+                persona_inspect(&self.node, &self.agent_did, &id, &self.process_ceiling).await
             }
             "preview" => {
                 let operation = argv
@@ -614,8 +447,9 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                         argv.len() == 3,
                         "behavior preview default accepts exactly one BEHAVIOR_ID"
                     );
-                    self.ensure_behavior_catalog("preview default", Some(behavior_id))?;
-                    let params = default_behavior_params("preview", behavior_id);
+                    let behavior_id = self.resolve_behavior_id(behavior_id).await?;
+                    self.ensure_behavior_catalog("preview default", Some(&behavior_id))?;
+                    let params = default_behavior_params("preview", &behavior_id);
                     return persona_preview(
                         &self.node,
                         &self.agent_did,
@@ -628,8 +462,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     let behavior_id = argv.get(2).context(
                         "behavior preview edit requires BEHAVIOR_ID followed by patch flags",
                     )?;
-                    self.ensure_behavior_catalog("preview edit", Some(behavior_id))?;
-                    let core = self.target_core(Some(behavior_id), "preview edit")?;
+                    let core = self.target_core(Some(behavior_id), "preview edit").await?;
                     let patch = parse_patch(&argv[3..], SelfConfigTarget::AgentBehavior)?;
                     return self
                         .patch(
@@ -639,7 +472,8 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                         )
                         .await;
                 }
-                let params = behavior_params("preview", Some(operation.clone()), &argv[2..])?;
+                let mut params = behavior_params("preview", Some(operation.clone()), &argv[2..])?;
+                self.resolve_persona_ids(operation, &mut params).await?;
                 self.ensure_behavior_operation(operation, params.behavior_id.as_deref())?;
                 self.ensure_default_selection(&params)?;
                 persona_preview(&self.node, &self.agent_did, &params, &self.process_ceiling).await
@@ -648,8 +482,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 let behavior_id = argv
                     .get(1)
                     .context("behavior edit requires BEHAVIOR_ID followed by patch flags")?;
-                self.ensure_behavior_catalog("edit", Some(behavior_id))?;
-                let core = self.target_core(Some(behavior_id), "edit")?;
+                let core = self.target_core(Some(behavior_id), "edit").await?;
                 let patch = parse_patch(&argv[2..], SelfConfigTarget::AgentBehavior)?;
                 self.patch(
                     &core,
@@ -662,7 +495,8 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 let identity = self.identity.as_deref().context(
                     "behavior writes require the exact local principal signer; reads remain available",
                 )?;
-                let params = behavior_params(verb, None, &argv[1..])?;
+                let mut params = behavior_params(verb, None, &argv[1..])?;
+                self.resolve_persona_ids(verb, &mut params).await?;
                 self.ensure_behavior_operation(verb, params.behavior_id.as_deref())?;
                 self.ensure_default_selection(&params)?;
                 anyhow::ensure!(
@@ -689,7 +523,8 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     argv.len() == 2,
                     "behavior default accepts exactly one BEHAVIOR_ID"
                 );
-                self.ensure_behavior_catalog("default", Some(behavior_id))?;
+                let behavior_id = self.resolve_behavior_id(behavior_id).await?;
+                self.ensure_behavior_catalog("default", Some(&behavior_id))?;
                 let identity = self.identity.as_deref().context(
                     "behavior writes require the exact local principal signer; reads remain available",
                 )?;
@@ -698,13 +533,13 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     &self.node,
                     &self.agent_did,
                     identity,
-                    &default_behavior_params("edit", behavior_id),
+                    &default_behavior_params("edit", &behavior_id),
                     &self.process_ceiling,
                 )
                 .await
             }
             "context" => self.behavior_context(&argv[1..]).await,
-            other => bail!("unknown behavior command {other:?}; run config help behavior"),
+            other => bail!("unknown behavior command {other:?}; see [\"help\",\"behavior\"]"),
         }
     }
 
@@ -718,7 +553,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             .map(String::as_str)
             .context("behavior context requires get, preview, or edit")?;
         let (behavior_id, rest) = extract_behavior_target(&argv[1..])?;
-        let core = self.target_core(behavior_id.as_deref(), "context")?;
+        let core = self.target_core(behavior_id.as_deref(), "context").await?;
         match verb {
             "get" => {
                 anyhow::ensure!(
@@ -728,10 +563,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 let effective = core
                     .read_effective_config(&self.categories, self.no_lockout, self.preview)
                     .await?;
-                Ok(serde_json::to_string_pretty(&json!({
-                    "resource": "AgentContext",
-                    "document": effective.get("context"),
-                }))?)
+                ordered! {"resource": "AgentContext", "document": effective.get("context")}.pretty()
             }
             "preview" | "edit" => {
                 let patch = parse_patch(&rest, SelfConfigTarget::AgentContext)?;
@@ -755,8 +587,9 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
     async fn bound_document(&self, resource: &str, argv: &[String]) -> Result<String> {
         self.ensure_resource(resource)?;
         let verb = argv.first().map(String::as_str).with_context(|| {
-            format!("{resource} command is required; run config help {resource}")
+            format!("{resource} command is required; see [\"help\",\"{resource}\"]")
         })?;
+        reject_preview_verb(resource, argv)?;
         let target = match resource {
             "tools" => SelfConfigTarget::Tools,
             "backend" => SelfConfigTarget::InferenceBackend,
@@ -775,7 +608,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     rest.len() <= 1,
                     "{resource} get accepts at most one ID and --behavior BEHAVIOR_ID"
                 );
-                let core = self.target_core(behavior_id.as_deref(), resource)?;
+                let core = self.target_core(behavior_id.as_deref(), resource).await?;
                 match rest.first() {
                     Some(id) => self.exact_read(target, id).await,
                     None => self.bound_read(&core, target).await,
@@ -783,10 +616,18 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             }
             "preview" | "edit" => {
                 let (behavior_id, rest) = extract_behavior_target(&argv[1..])?;
-                let core = self.target_core(behavior_id.as_deref(), resource)?;
+                let core = self.target_core(behavior_id.as_deref(), resource).await?;
+                let (allow_drop, rest) = extract_allow_drop(&rest)?;
+                anyhow::ensure!(
+                    allow_drop.is_empty() || target == SelfConfigTarget::Tools,
+                    "allow-drop applies only to tools; see [\"help\",\"tools\"]"
+                );
                 let patch = parse_patch(&rest, target)?;
                 let request = match target {
-                    SelfConfigTarget::Tools => tools_request(&core, patch, self.allow_pack_install),
+                    SelfConfigTarget::Tools => refuse_silent_tools_drops(
+                        tools_request(&core, patch, self.allow_pack_install),
+                        allow_drop,
+                    ),
                     SelfConfigTarget::InferenceBackend => backend_request(patch),
                     _ => unreachable!("bound resource"),
                 };
@@ -794,7 +635,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     .await
             }
             other => bail!(
-                "unknown {resource} command {other:?}; accepted: get, preview, edit; run config help {resource}"
+                "unknown {resource} command {other:?}; accepted: get, preview, edit; see [\"help\",\"{resource}\"]"
             ),
         }
     }
@@ -804,7 +645,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         let verb = argv
             .first()
             .map(String::as_str)
-            .context("backend command is required; run config help backend")?;
+            .context("backend command is required; see [\"help\",\"backend\"]")?;
         if verb == "list" {
             let parsed = ParsedArgs::parse(&argv[1..])?;
             parsed.reject_mutation_flags()?;
@@ -886,15 +727,16 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 let observation = self
                     .backend_observation_view(backend_id, backend.provider_kind)
                     .await?;
-                return Ok(serde_json::to_string_pretty(&json!({
-                    "resource": "InferenceBackend",
+                return ordered! {
                     "backend_id": backend_id,
+                    "refreshed": false,
+                    "observation": observation,
+                    "note": "This backend is credentialed, so self-config did not contact the provider. The catalog is the last credential-free observation published by operator discovery (desktop setup, gents config backend discover-models --backend-id) or the runtime prober; null means none has been recorded yet.",
+                    "resource": "InferenceBackend",
                     "endpoint": backend.endpoint,
                     "provider_kind": backend.provider_kind,
-                    "observation": observation,
-                    "refreshed": false,
-                    "note": "This backend is credentialed, so self-config did not contact the provider. The catalog is the last credential-free observation published by operator discovery (desktop setup, gents config backend discover-models --backend-id) or the runtime prober; null means none has been recorded yet."
-                }))?);
+                }
+                .pretty();
             }
             self.execution.enter_mutation();
             let observation =
@@ -904,13 +746,15 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 &self.agent_did,
                 backend.provider_kind,
             )?;
-            return Ok(serde_json::to_string_pretty(&json!({
-                "resource": "InferenceBackend",
+            return ordered! {
                 "backend_id": backend_id,
-                "endpoint": backend.endpoint,
+                "refreshed": true,
                 "observation": observation,
-                "note": "Provider-advertised facts were recorded for this persisted backend. Discovery did not create a profile, select a model, or change a behavior."
-            }))?);
+                "note": "Provider-advertised facts were recorded for this persisted backend. Discovery did not create a profile, select a model, or change a behavior.",
+                "resource": "InferenceBackend",
+                "endpoint": backend.endpoint,
+            }
+            .pretty();
         }
         self.bound_document("backend", argv).await
     }
@@ -920,7 +764,8 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         let verb = argv
             .first()
             .map(String::as_str)
-            .context("profile command is required; run config help profile")?;
+            .context("profile command is required; see [\"help\",\"profile\"]")?;
+        reject_preview_verb("profile", argv)?;
         if verb == "list" {
             let parsed = ParsedArgs::parse(&argv[1..])?;
             parsed.reject_mutation_flags()?;
@@ -961,7 +806,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 .await;
         }
         let (behavior_id, target_args) = extract_behavior_target(&argv[1..])?;
-        let core = self.target_core(behavior_id.as_deref(), "profile")?;
+        let core = self.target_core(behavior_id.as_deref(), "profile").await?;
         let mut rest = target_args.as_slice();
         let target_name = rest
             .first()
@@ -998,7 +843,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 .await
             }
             other => bail!(
-                "unknown profile command {other:?}; accepted: get, preview, edit; run config help profile"
+                "unknown profile command {other:?}; accepted: get, preview, edit; see [\"help\",\"profile\"]"
             ),
         }
     }
@@ -1017,7 +862,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         let preview = argv.first().is_some_and(|arg| arg == "preview");
         let argv = if preview { &argv[1..] } else { argv };
         let verb = argv.first().map(String::as_str).with_context(|| {
-            format!("{resource} command is required; run config help {resource}")
+            format!("{resource} command is required; see [\"help\",\"{resource}\"]")
         })?;
         if verb == "list" && !preview {
             let parsed = ParsedArgs::parse(&argv[1..])?;
@@ -1033,14 +878,17 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         }
         anyhow::ensure!(
             matches!(verb, "create" | "edit"),
-            "unknown {resource} command {verb:?}; run config help {resource}"
+            "unknown {resource} command {verb:?}; see [\"help\",\"{resource}\"]"
         );
         // Creation may rely entirely on canonical defaults; edits need a field.
-        let patch = if verb == "create" && argv.len() == 2 {
+        let mut patch = if verb == "create" && argv.len() == 2 {
             Vec::new()
         } else {
             parse_patch(&argv[2..], target)?
         };
+        if target == SelfConfigTarget::SubagentTarget {
+            self.resolve_target_behavior(id, &mut patch).await?;
+        }
         let mut request = ApplyRequest::new(target, patch);
         let unique = id.clone();
         request.resolve_unique = Box::new(move |_| Ok(unique.clone()));
@@ -1060,12 +908,69 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         .await
     }
 
+    /// A local SubagentTarget names its behavior by the same short slug; a
+    /// foreign target_agent_did keeps the ID exactly as given.
+    async fn resolve_target_behavior(
+        &self,
+        target_id: &str,
+        patch: &mut SelfConfigPatch,
+    ) -> Result<()> {
+        let Some(index) = patch.iter().position(|(field, value)| {
+            field == "behavior_id" && value.as_ref().is_some_and(Value::is_string)
+        }) else {
+            return Ok(());
+        };
+        let local = match patch.iter().find(|(field, _)| field == "target_agent_did") {
+            Some((_, value)) => {
+                value.as_ref().and_then(Value::as_str) == Some(self.agent_did.as_str())
+            }
+            None => {
+                let owner = self.agent_did.clone();
+                let target_id = target_id.to_owned();
+                crate::config_client::ConfigAccess::transact_local(
+                    &self.node,
+                    Some(self.core.identity()?),
+                    "self_config.subagent_target_owner",
+                    |txn| {
+                        let owner = owner.clone();
+                        let target_id = target_id.clone();
+                        Box::pin(async move {
+                            Ok(ops::read_owned_doc(
+                                txn,
+                                SelfConfigTarget::SubagentTarget,
+                                &owner,
+                                &target_id,
+                            )
+                            .await?
+                            .and_then(|(_, doc)| doc.get("target_agent_did").cloned())
+                                == Some(json!(owner)))
+                        })
+                    },
+                )
+                .await?
+            }
+        };
+        if !local {
+            return Ok(());
+        }
+        let short = patch[index]
+            .1
+            .as_ref()
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        if let Ok(resolved) = self.resolve_behavior_id(&short).await {
+            patch[index].1 = Some(json!(resolved));
+        }
+        Ok(())
+    }
+
     async fn mcp_service(&self, argv: &[String]) -> Result<String> {
         self.ensure_resource("mcp-service")?;
         let verb = argv
             .first()
             .map(String::as_str)
-            .context("mcp-service command is required; run config help mcp-service")?;
+            .context("mcp-service command is required; see [\"help\",\"mcp-service\"]")?;
         let id = required_resource_id(argv.get(1), "SERVICE_ID")?;
         match verb {
             "get" => {
@@ -1079,7 +984,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     .await
             }
             other => bail!(
-                "unknown mcp-service command {other:?}; accepted: get, preview, edit; run config help mcp-service"
+                "unknown mcp-service command {other:?}; accepted: get, preview, edit; see [\"help\",\"mcp-service\"]"
             ),
         }
     }
@@ -1089,7 +994,8 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         let verb = argv
             .first()
             .map(String::as_str)
-            .context("automation command is required; run config help automation")?;
+            .context("automation command is required; see [\"help\",\"automation\"]")?;
+        reject_preview_verb("automation", argv)?;
         let kind = argv.get(1).context("automation requires KIND")?;
         let id = required_resource_id(argv.get(2), "automation ID")?;
         let target = automation_target(&kind.replace('-', "_"))?;
@@ -1100,12 +1006,12 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     rest.is_empty(),
                     "automation get accepts KIND, ID, and --behavior BEHAVIOR_ID"
                 );
-                let core = self.target_core(behavior_id.as_deref(), "automation")?;
+                let core = self.target_core(behavior_id.as_deref(), "automation").await?;
                 self.automation_read(&core, target, id).await
             }
             "preview" | "edit" => {
                 let (behavior_id, rest) = extract_behavior_target(&argv[3..])?;
-                let core = self.target_core(behavior_id.as_deref(), "automation")?;
+                let core = self.target_core(behavior_id.as_deref(), "automation").await?;
                 let patch = parse_patch(&rest, target)?;
                 self.patch(
                     &core,
@@ -1115,7 +1021,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 .await
             }
             other => bail!(
-                "unknown automation command {other:?}; accepted: get, preview, edit; run config help automation"
+                "unknown automation command {other:?}; accepted: get, preview, edit; see [\"help\",\"automation\"]"
             ),
         }
     }
@@ -1124,7 +1030,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         let verb = argv
             .first()
             .map(String::as_str)
-            .context("cleanup requires preview or remove; run config help cleanup")?;
+            .context("cleanup requires preview or remove; see [\"help\",\"cleanup\"]")?;
         anyhow::ensure!(
             matches!(verb, "preview" | "remove"),
             "unknown cleanup command {verb:?}; accepted: preview, remove"
@@ -1173,13 +1079,19 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 "cleanup target {resource:?} requires a non-empty ID"
             );
             let target = cleanup_target(resource)?;
+            let id = if target == SelfConfigTarget::AgentBehavior {
+                self.resolve_behavior_id(id).await?
+            } else {
+                id.to_owned()
+            };
+            let id = id.as_str();
             if matches!(
                 target,
                 SelfConfigTarget::AgentBehavior | SelfConfigTarget::AgentContext
             ) {
                 anyhow::ensure!(
                     self.categories.contains("persona"),
-                    "{resource} cleanup requires the behavior catalog grant"
+                    "{resource} cleanup requires the behavior catalog grant (category persona)"
                 );
             } else {
                 self.ensure_resource(match target.category() {
@@ -1279,22 +1191,23 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             },
         )
         .await?;
-        Ok(serde_json::to_string_pretty(&json!({
+        ordered! {
             "committed": !preview,
             "operation": if preview { "preview cleanup" } else { "cleanup" },
-            "owner": self.agent_did,
-            "plan_digest": plan_digest,
             "targets": receipt_targets,
-            "apply_with": preview.then(|| json!({
-                "argv_prefix": ["cleanup", "remove", "--digest", plan_digest],
-                "repeat_targets": targets.iter().map(|(resource, _, id)| format!("{resource}={id}")).collect::<Vec<_>>(),
-            })),
             "effect": if preview {
                 "No documents were changed. Repeat the same exact targets and plan digest with cleanup remove to revalidate and apply atomically."
             } else {
                 "The exact target set was removed atomically after retained-reference validation."
             },
-        }))?)
+            "apply_with": preview.then(|| json!({
+                "argv_prefix": ["cleanup", "remove", "--digest", plan_digest],
+                "repeat_targets": targets.iter().map(|(resource, _, id)| format!("{resource}={id}")).collect::<Vec<_>>(),
+            })),
+            "plan_digest": plan_digest,
+            "owner": self.agent_did,
+        }
+        .pretty()
     }
 
     async fn pack(&self, argv: &[String]) -> Result<String> {
@@ -1306,7 +1219,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         let verb = argv
             .first()
             .map(String::as_str)
-            .context("pack command is required; run config help pack")?;
+            .context("pack command is required; see [\"help\",\"pack\"]")?;
         match verb {
             "list" => {
                 let parsed = ParsedArgs::parse(&argv[1..])?;
@@ -1341,7 +1254,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 self.execution.enter_mutation();
                 installer.remove(&argv[1]).await
             }
-            other => bail!("unknown pack command {other:?}; run config help pack"),
+            other => bail!("unknown pack command {other:?}; see [\"help\",\"pack\"]"),
         }
     }
 
@@ -1362,7 +1275,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         let current_only = behavior_id.is_some_and(|id| id == self.core.behavior_id());
         anyhow::ensure!(
             self.categories.contains("persona") || current_only,
-            "behavior {operation} outside the current behavior is not granted; the behavior catalog grant is required"
+            "behavior {operation} outside the current behavior is not granted; the behavior catalog grant (category persona) is required"
         );
         Ok(())
     }
@@ -1372,7 +1285,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             operation == "edit" && behavior_id.is_some_and(|id| id == self.core.behavior_id());
         anyhow::ensure!(
             self.categories.contains("persona") || current_edit,
-            "behavior {operation} is not granted; only editing the current behavior is allowed without the behavior catalog grant"
+            "behavior {operation} is not granted; only editing the current behavior is allowed without the behavior catalog grant (category persona)"
         );
         Ok(())
     }
@@ -1380,13 +1293,95 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
     fn ensure_default_selection(&self, params: &ConfigurePersonaParams) -> Result<()> {
         anyhow::ensure!(
             !params.make_default || self.categories.contains("persona"),
-            "--default changes the principal's behavior selection and requires the behavior catalog grant"
+            "--default changes the principal's behavior selection and requires the behavior catalog grant (category persona)"
         );
         Ok(())
     }
 
-    fn target_core(&self, behavior_id: Option<&str>, operation: &str) -> Result<SelfConfigCore> {
-        let behavior_id = behavior_id.unwrap_or(self.core.behavior_id());
+    /// Behavior create stores `<principal DID>:<slug>`
+    /// (`persona_ops::derive_behavior_id`) while every other configuration ID
+    /// is stored as given, so wherever config accepts a behavior ID it also
+    /// accepts that principal-local slug. An exact ID wins, and the slug only
+    /// resolves under this principal's own DID.
+    async fn resolve_behavior_id(&self, id: &str) -> Result<String> {
+        let current = self.core.behavior_id();
+        if !self.categories.contains("persona") {
+            // Only the current behavior is reachable; the catalog check names
+            // the missing grant for any other ID.
+            let slug_of_current = format!("{}:{id}", self.agent_did) == current;
+            return Ok(if slug_of_current { current } else { id }.to_owned());
+        }
+        if id == current {
+            return Ok(id.to_owned());
+        }
+        let owner = self.agent_did.clone();
+        let candidates = [id.to_owned(), format!("{owner}:{id}")];
+        let found = crate::config_client::ConfigAccess::transact_local(
+            &self.node,
+            Some(self.core.identity()?),
+            "self_config.resolve_behavior",
+            |txn| {
+                let owner = owner.clone();
+                let candidates = candidates.clone();
+                Box::pin(async move {
+                    for candidate in candidates {
+                        if ops::read_owned_doc(
+                            txn,
+                            SelfConfigTarget::AgentBehavior,
+                            &owner,
+                            &candidate,
+                        )
+                        .await?
+                        .is_some()
+                        {
+                            return Ok(Some(candidate));
+                        }
+                    }
+                    Ok(None)
+                })
+            },
+        )
+        .await?;
+        found.ok_or_else(|| {
+            ops::MissingBehavior {
+                behavior_id: id.to_owned(),
+            }
+            .into()
+        })
+    }
+
+    /// Create and clone derive the new ID from the display name, so an
+    /// explicit ID would be silently ignored; clone sources and disable
+    /// targets resolve like every other behavior ID.
+    async fn resolve_persona_ids(
+        &self,
+        operation: &str,
+        params: &mut ConfigurePersonaParams,
+    ) -> Result<()> {
+        if matches!(operation, "create" | "clone") {
+            anyhow::ensure!(
+                params.behavior_id.is_none(),
+                "behavior {operation} takes no id: it derives behavior_id \"<DID>:<slug of display-name>\" and returns it; remove options.id"
+            );
+        } else if let Some(id) = params.behavior_id.take() {
+            params.behavior_id = Some(self.resolve_behavior_id(&id).await?);
+        }
+        if let Some(source) = params.clone_from.take() {
+            params.clone_from = Some(self.resolve_behavior_id(&source).await?);
+        }
+        Ok(())
+    }
+
+    async fn target_core(
+        &self,
+        behavior_id: Option<&str>,
+        operation: &str,
+    ) -> Result<SelfConfigCore> {
+        let behavior_id = match behavior_id {
+            Some(id) => self.resolve_behavior_id(id).await?,
+            None => self.core.behavior_id().to_owned(),
+        };
+        let behavior_id = behavior_id.as_str();
         self.ensure_behavior_catalog(operation, Some(behavior_id))?;
         let invoking_behavior_id = self.core.behavior_id().to_owned();
         SelfConfigCore::new(
@@ -1452,16 +1447,9 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
         })?;
         if target == SelfConfigTarget::InferenceBackend {
             let observation = self.backend_document_observation(value).await?;
-            return Ok(serde_json::to_string_pretty(&json!({
-                "resource": target.collection_name(),
-                "document": value,
-                "observation": observation,
-            }))?);
+            return ordered! {"resource": target.collection_name(), "document": value, "observation": observation}.pretty();
         }
-        Ok(serde_json::to_string_pretty(&json!({
-            "resource": target.collection_name(),
-            "document": value,
-        }))?)
+        ordered! {"resource": target.collection_name(), "document": value}.pretty()
     }
 
     /// Credential-free observation of one owned backend in its own
@@ -1539,16 +1527,9 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             );
             let document = Value::Object(document);
             let observation = self.backend_document_observation(&document).await?;
-            return Ok(serde_json::to_string_pretty(&json!({
-                "resource": target.collection_name(),
-                "document": document,
-                "observation": observation,
-            }))?);
+            return ordered! {"resource": target.collection_name(), "document": document, "observation": observation}.pretty();
         }
-        Ok(serde_json::to_string_pretty(&json!({
-            "resource": target.collection_name(),
-            "document": document,
-        }))?)
+        ordered! {"resource": target.collection_name(), "document": document}.pretty()
     }
 
     async fn automation_read(
@@ -1574,10 +1555,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     core.behavior_id()
                 )
             })?;
-        Ok(serde_json::to_string_pretty(&json!({
-            "resource": target.collection_name(),
-            "document": document,
-        }))?)
+        ordered! {"resource": target.collection_name(), "document": document}.pretty()
     }
 
     async fn inference_inventory(
@@ -1681,19 +1659,37 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     .map(ToOwned::to_owned)
             })
             .flatten();
-        Ok(serde_json::to_string_pretty(&json!({
+        ordered! {
             "resource": collection,
-            "page": {
+            "items": selected,
+            "page": json!({
                 "limit": limit,
                 "total": total,
                 "returned": selected.len(),
                 "truncated": truncated,
                 "next_cursor": next_cursor,
-            },
-            "items": selected,
+            }),
             "note": "Inventory is read-only and does not rebind any behavior. Backend credentials are excluded.",
-        }))?)
+        }
+        .pretty()
     }
+}
+
+/// Resources patched in place take "preview" instead of "edit"; the others
+/// take it before their verb. Name the right shape rather than misreading the
+/// verb as the next operand.
+fn reject_preview_verb(resource: &str, argv: &[String]) -> Result<()> {
+    if argv.first().is_some_and(|word| word == "preview")
+        && argv.get(1).is_some_and(|word| word == "edit")
+    {
+        let example = if resource == "automation" {
+            "[\"automation\",\"preview\",KIND]".to_owned()
+        } else {
+            format!("[\"{resource}\",\"preview\"]")
+        };
+        bail!("{resource} preview replaces edit: use {example} with the same options and set");
+    }
+    Ok(())
 }
 
 fn cleanup_plan_digest(owner: &str, targets: &[Value]) -> Result<String> {
@@ -1734,9 +1730,7 @@ fn cleanup_target(name: &str) -> Result<SelfConfigTarget> {
         "schedule" => Ok(SelfConfigTarget::Schedule),
         "trigger" => Ok(SelfConfigTarget::Trigger),
         "event-source" => Ok(SelfConfigTarget::EventSource),
-        other => bail!(
-            "unknown cleanup resource {other:?}; run config help cleanup for accepted resources"
-        ),
+        other => bail!("unknown cleanup resource {other:?}; see [\"help\",\"cleanup\"]"),
     }
 }
 
@@ -1794,6 +1788,44 @@ fn extract_behavior_target(argv: &[String]) -> Result<(Option<String>, Vec<Strin
         index += 1;
     }
     Ok((behavior_id, rest))
+}
+
+/// `--allow-drop GROUP[,GROUP]`, repeatable: the Tools groups whose omitted
+/// settings the caller means to drop.
+fn extract_allow_drop(argv: &[String]) -> Result<(BTreeSet<String>, Vec<String>)> {
+    let mut groups = BTreeSet::new();
+    let mut rest = Vec::with_capacity(argv.len());
+    let mut index = 0;
+    while index < argv.len() {
+        if argv[index] == "--allow-drop" {
+            index += 1;
+            let value = argv
+                .get(index)
+                .filter(|value| !value.starts_with("--"))
+                .context("--allow-drop requires a Tools group name")?;
+            let names: Vec<String> = if value.starts_with('[') {
+                serde_json::from_str(value).context("allow-drop must name Tools groups")?
+            } else {
+                value
+                    .split(',')
+                    .map(|name| name.trim().to_owned())
+                    .collect()
+            };
+            for name in names {
+                anyhow::ensure!(
+                    SelfConfigTarget::Tools
+                        .writable_fields()
+                        .contains(&name.as_str()),
+                    "allow-drop names unknown Tools group {name:?}; see [\"help\",\"tools\"]"
+                );
+                groups.insert(name);
+            }
+        } else {
+            rest.push(argv[index].clone());
+        }
+        index += 1;
+    }
+    Ok((groups, rest))
 }
 
 fn patch_contract(target: SelfConfigTarget, field_shapes: Value) -> Value {
@@ -1867,7 +1899,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
                 "built_ins": {"enable_graph_tools":"boolean|null","enable_goal_tools":"boolean|null","enable_goal_creation":"boolean|null","enable_memory":"boolean|null","enable_session_history_tool":"boolean|null","enable_context_budget":"boolean|null"},
                 "datastore": {"enable_defra_query":"boolean|null","defra_query_collections":"array<string>|null","datastore_tool_surface_ids":"array<existing same-principal DatastoreToolSurface ID>|null"},
                 "integrations": {"lsp":{"config":"JSON encoded as a string|null","timeout_secs":"positive integer|null; default 20","max_timeout_secs":"positive integer|null; default 300; clamped to 300"},"eth_tool_ids":"array<existing same-principal EthTool ID>|null","plugins":"array<{plugin: installed namespace/name, digest: sha256:<hex>|null}>|null"},
-                "self_config": {"enable_self_config":"boolean|null; absent is disabled","self_config_categories":"array<behavior|tools|profile|backend|mcp_service|automation|persona>|null; absent selects behavior, tools, profile","self_config_no_lockout":"boolean|null","self_config_preview":"boolean|null; grants the preview verb","enable_pack_install":"boolean|null; cannot be self-granted"},
+                "self_config": {"enable_self_config":"boolean|null; absent is disabled","self_config_categories":"array<behavior|tools|profile|backend|mcp_service|automation|persona>|null; absent selects behavior, tools, profile; persona is the behavior catalog grant (every behavior, not only the current one)","self_config_no_lockout":"boolean|null","self_config_preview":"boolean|null; grants the preview verb","enable_pack_install":"boolean|null; cannot be self-granted"},
                 "tags": "array<string>; default []",
             }),
         )],
@@ -1887,7 +1919,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
             patch_contract(
                 SelfConfigTarget::InferenceExecution,
                 json!({
-                    "display_name":"string|null","max_turns":format!("positive integer|null; default {}", crate::config::DEFAULT_MAX_TURNS),"max_total_tokens":"positive integer|null; null is unlimited","stream_batch_ms":"positive integer|null; default 1000","stream_liveness_timeout_secs":format!("positive integer|null; default {} and less than deadline", crate::config::DEFAULT_STREAM_LIVENESS_TIMEOUT_SECS),"provider_idle_timeout_secs":format!("positive integer|null; default {}", crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS),"deadline_duration_secs":"positive integer|null; default 86400","retry_policy_id":"existing same-principal retry policy ID|null","tags":"array<string>; default []"
+                    "display_name":"string|null","max_turns":format!("positive integer|null; default {}", crate::config::DEFAULT_MAX_TURNS),"max_total_tokens":"positive integer|null; null is unlimited","stream_batch_ms":"positive integer|null; default 1000","stream_liveness_timeout_secs":format!("positive integer|null; default {} and less than deadline", crate::config::DEFAULT_STREAM_LIVENESS_TIMEOUT_SECS),"provider_idle_timeout_secs":format!("positive integer|null; default {}", crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS),"deadline_duration_secs":format!("positive integer|null; default 86400; at most {}", crate::document_config::MAX_DEADLINE_DURATION_SECS),"retry_policy_id":"existing same-principal retry policy ID|null","tags":"array<string>; default []"
                 }),
             ),
             patch_contract(
@@ -1919,7 +1951,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
             patch_contract(
                 SelfConfigTarget::Task,
                 json!({
-                    "display_name":"string|null","description":"string|null","prompt_template":"string; rendered per invocation","emit_outcome":"boolean; default false; leave false for outcome consumers","goal_objective_template":"string|null","goal_token_budget":"positive integer|null; absent means unlimited","hooks":"array<{hook_id:string,phase:before|after_success|after_failure|finally,command:nonempty array<string>,timeout_secs?:positive integer}>; default []","enabled":"boolean; default true","output_schema_ref":"string|null","tags":"array<string>; default []"
+                    "display_name":"string|null","description":"string|null","prompt_template":"string; rendered per invocation","emit_outcome":"boolean; default false; leave false for outcome consumers","goal_objective_template":"string|null","goal_token_budget":"positive integer|null; requires goal_objective_template; absent means unlimited","hooks":"array<{hook_id:string,phase:before|after_success|after_failure|finally,command:nonempty array<string>,timeout_secs?:positive integer}>; default []","enabled":"boolean; default true","output_schema_ref":"string|null","tags":"array<string>; default []"
                 }),
             ),
             patch_contract(
@@ -1931,13 +1963,13 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
             patch_contract(
                 SelfConfigTarget::Trigger,
                 json!({
-                    "display_name":"string|null","description":"string|null","task_id":"existing task ID owned by selected behavior","source":"{kind:schedule,schedule_id:string}|{kind:event,event_source_id:string}","enabled":"boolean; default true","concurrency":"parallel|queued_serial|serial|latest_only|null; default parallel","session_id_template":"string|null; render an existing target session ID","tags":"array<string>; default []"
+                    "display_name":"string|null","description":"string|null","task_id":"existing task ID owned by selected behavior","source":"{kind:schedule,schedule_id:string}|{kind:event,event_source_id:string}","enabled":"boolean; default true","concurrency":"parallel|queued_serial|serial|latest_only|null; default parallel; queued_serial needs an event source","session_id_template":"string|null; template rendering an existing session ID; event sources only","tags":"array<string>; default []"
                 }),
             ),
             patch_contract(
                 SelfConfigTarget::EventSource,
                 json!({
-                    "display_name":"string|null","source_collection":"valid GraphQL collection name","event_kind":"created|null; default created","filter":"GraphQL filter fragment|null","correlation_field":"GraphQL field name|null","group":"{expected_count?:positive integer|{source_field:string},timeout_secs?:positive integer,min_count?:positive integer}|null","workspace_authority":"canonical workspace authority object|null","tags":"array<string>; default []"
+                    "display_name":"string|null","source_collection":"installed collection name","event_kind":"created|null; default created","filter":"string|null; a GraphQL filter object literal with unquoted keys","correlation_field":"GraphQL field name|null","group":"{expected_count?:positive integer|{source_field:string},timeout_secs?:positive integer,min_count?:positive integer}|null","workspace_authority":"canonical workspace authority object|null","tags":"array<string>; default []"
                 }),
             ),
         ],
@@ -1967,7 +1999,7 @@ fn parse_pack_change(argv: &[String]) -> Result<PackInstallParams> {
     let parsed = ParsedArgs::parse(&argv[1..])?;
     anyhow::ensure!(
         parsed.positionals.is_empty() && parsed.switches.is_empty(),
-        "unexpected pack argument; run config help pack"
+        "unexpected pack argument; see [\"help\",\"pack\"]"
     );
     for name in parsed.options.keys() {
         anyhow::ensure!(
@@ -2146,12 +2178,12 @@ pub(super) fn behavior_params(
     for option in parsed.options.keys() {
         anyhow::ensure!(
             allowed.contains(&option.as_str()),
-            "unknown behavior option --{option}; run config help behavior"
+            "unknown behavior option --{option}; see [\"help\",\"behavior\"]"
         );
     }
     anyhow::ensure!(
         parsed.positionals.is_empty(),
-        "unexpected positional argument {:?}; run config help behavior",
+        "unexpected positional argument {:?}; see [\"help\",\"behavior\"]",
         parsed.positionals[0]
     );
     let clear: BTreeSet<&str> = parsed
@@ -2420,6 +2452,6 @@ mod tests {
         let error =
             behavior_params("edit", None, &["--persona-name".into(), "Review".into()]).unwrap_err();
         assert!(error.to_string().contains("--persona-name"));
-        assert!(error.to_string().contains("config help behavior"));
+        assert!(error.to_string().contains("[\"help\",\"behavior\"]"));
     }
 }

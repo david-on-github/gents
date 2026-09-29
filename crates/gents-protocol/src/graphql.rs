@@ -233,16 +233,30 @@ pub fn validate_graphql_filter_fragment(filter: &str) -> Result<()> {
     let mut in_string = false;
     let mut escaped = false;
     let mut closed_at: Option<usize> = None;
+    let mut after_string = false;
 
     for (index, ch) in trimmed.char_indices() {
         if in_string {
             match ch {
                 _ if escaped => escaped = false,
                 '\\' => escaped = true,
-                '"' => in_string = false,
+                '"' => {
+                    in_string = false;
+                    after_string = true;
+                }
                 _ => {}
             }
             continue;
+        }
+        // GraphQL object keys are names; a JSON-style quoted key parses as a
+        // string here but fails when the runtime queries with the filter.
+        if after_string && !ch.is_whitespace() {
+            after_string = false;
+            if ch == ':' {
+                return Err(anyhow!(
+                    "invalid filter: object keys are unquoted GraphQL names, e.g. {{kind: {{_eq: \"review\"}}}}"
+                ));
+            }
         }
         // A depth-0 token after the object already closed means the value is
         // not a single fragment — trailing text is someone else's query.
@@ -1054,6 +1068,8 @@ mod tests {
             "   ",
             // Unterminated string literal.
             r#"{ a: { _eq: "open } }"#,
+            // JSON-style quoted keys.
+            r#"{"instructions": {"_eq": "b"}}"#,
         ] {
             assert!(
                 validate_graphql_filter_fragment(filter).is_err(),

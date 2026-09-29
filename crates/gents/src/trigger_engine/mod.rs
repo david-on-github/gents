@@ -957,7 +957,7 @@ impl TriggerEngine {
     }
 }
 
-fn validate_non_document_task_options(
+pub(crate) fn validate_non_document_task_options(
     emit_outcome: bool,
     concurrency: crate::runtime_snapshot::ConcurrencyMode,
     session_template: bool,

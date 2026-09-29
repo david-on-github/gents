@@ -439,6 +439,19 @@ impl ConfigReferences {
                 let forbidden: &[&str] = match &doc.source {
                     TriggerSource::Schedule { schedule_id } => {
                         require(Collection::Schedule, schedule_id, "source.schedule_id")?;
+                        // The fire-time owner, so publication refuses exactly
+                        // what every schedule fire would error on (#2080).
+                        crate::trigger_engine::validate_non_document_task_options(
+                            task.emit_outcome,
+                            doc.concurrency.unwrap_or_default(),
+                            doc.session_id_template.is_some(),
+                        )
+                        .with_context(|| {
+                            format!(
+                                "trigger {} has a schedule source; use an event source or remove the option",
+                                doc.trigger_id
+                            )
+                        })?;
                         &["doc", "args", "group"]
                     }
                     TriggerSource::Event { event_source_id } => {
@@ -469,11 +482,17 @@ impl ConfigReferences {
                     }
                 };
                 for (field, template) in
-                    std::iter::once(("prompt_template", task.prompt_template.as_str())).chain(
-                        task.goal_objective_template
-                            .as_deref()
-                            .map(|value| ("goal_objective_template", value)),
-                    )
+                    std::iter::once(("prompt_template", task.prompt_template.as_str()))
+                        .chain(
+                            task.goal_objective_template
+                                .as_deref()
+                                .map(|value| ("goal_objective_template", value)),
+                        )
+                        .chain(
+                            doc.session_id_template
+                                .as_deref()
+                                .map(|value| ("session_id_template", value)),
+                        )
                 {
                     for reference in crate::template::parse_template_for_validation(template)? {
                         ensure!(

@@ -165,8 +165,12 @@ mod tests {
 
     #[test]
     fn discovery_is_the_only_public_command_vocabulary() {
-        assert!(CONFIG_USAGE.contains("[\"discovery\", \"scan\""));
-        assert!(!CONFIG_USAGE.contains("[\"discover\", \"scan\""));
+        let help = super::super::help::page("discovery")
+            .unwrap()
+            .commands
+            .join("\n");
+        assert!(help.contains("discovery scan --source"));
+        assert!(!help.contains("discover scan"));
         assert!(parse_sources(
             &["scan", "--source", "bad/source", "codex", "user", ".",].map(str::to_owned)
         )

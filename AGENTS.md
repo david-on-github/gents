@@ -127,6 +127,13 @@ minimal install steps. Before deleting prose, move any non-derivable obligation
 it holds to its owner, and never remove a file a build, test or coverage check
 reads.
 
+Model-facing tool text and agent prompts use progressive disclosure (#2088): a
+small tool core, then help that adds detail per resource and command, and
+errors that name the next call. Prompts hold concepts, tools hold syntax and
+recipes; nothing is repeated across layers or on every response. Model-facing
+tool results read top to bottom: the answer first, then how to proceed, then
+metadata.
+
 ## Repository rules
 
 - Escape every interpolated GraphQL string with

@@ -55,32 +55,6 @@ fn mailbox_option_uses_canonical_declaration_and_rejects_ambiguous_patches() {
     assert!(surface_patch(&duplicate).is_err());
 }
 
-pub(super) fn entry_examples() -> Value {
-    use crate::document_config::{
-        SurfaceToolDecl, WriteToolDecl, WriteToolField, WriteToolFieldFill,
-    };
-    let create = SurfaceToolDecl::Create(WriteToolDecl {
-        notification: None,
-        tool_name: "record_result".into(),
-        collection: "WorkResult".into(),
-        description: "Record the result for the current input".into(),
-        fields: vec![
-            WriteToolField {
-                name: "result".into(),
-                required: true,
-                fill: None,
-            },
-            WriteToolField {
-                name: "correlation".into(),
-                required: false,
-                fill: Some(WriteToolFieldFill::Correlation),
-            },
-        ],
-        output_obligation: None,
-    });
-    json!({"entries": [create]})
-}
-
 impl ConfigCommandTool {
     pub(super) async fn datastore(&self, argv: &[String]) -> Result<String> {
         self.ensure_resource("tools")?;
@@ -89,7 +63,7 @@ impl ConfigCommandTool {
         let verb = argv
             .first()
             .map(String::as_str)
-            .context("run config help datastore")?;
+            .context("see [\"help\",\"datastore\"]")?;
         let id = required_resource_id(argv.get(1), "SURFACE_ID")?;
         let target = SelfConfigTarget::DatastoreToolSurface;
         if verb == "get" && !preview {
@@ -98,7 +72,7 @@ impl ConfigCommandTool {
         }
         anyhow::ensure!(
             matches!(verb, "create" | "edit"),
-            "run config help datastore; expected create or edit"
+            "see [\"help\",\"datastore\"]; expected create or edit"
         );
         let mut request = ApplyRequest::new(target, surface_patch(&argv[2..])?);
         let surface_id = id.clone();

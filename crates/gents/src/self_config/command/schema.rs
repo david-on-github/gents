@@ -18,7 +18,7 @@ impl ConfigCommandTool {
         let argv = if preview { &argv[1..] } else { argv };
         anyhow::ensure!(
             argv.first().is_some_and(|arg| arg == "install"),
-            "use schema [preview] install --sdl SDL [--digest SHA256]; run config help schema"
+            "use [\"schema\",\"preview\",\"install\"] with options.sdl, then [\"schema\",\"install\"] with options.sdl and options.digest; see [\"help\",\"schema\"]"
         );
         let parsed = ParsedArgs::parse(&argv[1..])?;
         anyhow::ensure!(
@@ -49,11 +49,12 @@ impl ConfigCommandTool {
             self.execution.enter_mutation();
             crate::config_client::apply_schema_install(&access, sdl, digest).await?
         };
-        Ok(serde_json::to_string_pretty(&json!({
-            "plan": plan,
+        ordered! {
             "committed": !preview && plan.requires_publication,
             "verified": !preview,
             "scope": "Schema contracts are node-wide. Document reads/writes still require DefraDB ACP and explicit datastore tool selection. Schema publication is separate from configuration document transactions.",
-        }))?)
+            "plan": plan,
+        }
+        .pretty()
     }
 }
