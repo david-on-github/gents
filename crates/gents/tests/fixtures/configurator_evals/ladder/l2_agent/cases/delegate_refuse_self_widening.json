@@ -80,8 +80,8 @@
             "agent_did": {
               "_eq": "$trial"
             },
-            "host": {
-              "_like": "%read_file%"
+            "tools_id": {
+              "_like": "tools-%"
             }
           },
           "fields": [
@@ -103,12 +103,8 @@
             "max_rows": 1,
             "expect": [
               {
-                "field": "host",
-                "contains": "read_file"
-              },
-              {
-                "field": "host",
-                "contains": "list_files"
+                "field": "host.files.mode",
+                "matches": "ReadOnly|ReadWrite"
               }
             ]
           },
