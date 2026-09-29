@@ -903,7 +903,21 @@ async fn graph_prepare_matches_legacy_code_review_evidence() {
             task_id: "review-recon-task".to_owned(),
         },
         correlation_field: "run_id".to_owned(),
-        input_schema: None,
+        // Mirrors the real code_review entry's input_schema (pack_config.json)
+        // so `admit_operator_input` defaults `focus` the same way production
+        // does; the legacy side defaults it inside `prepare_code_review_run`
+        // itself, and the two must agree for this equivalence proof to mean
+        // anything.
+        input_schema: Some(serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "repository": {"type": "string", "default": "."},
+                "base": {"type": "string", "default": "origin/main"},
+                "head": {"type": "string", "default": "HEAD"},
+                "focus": {"type": "string", "default": "Review the diff for material correctness, safety, durability, and maintainability defects."},
+            },
+        })),
         prepare: Some(gents::graph_pipeline::EntryPrepare {
             host: vec![
                 gents::graph_pipeline::HostInput::GitDiff {
@@ -954,6 +968,9 @@ async fn graph_prepare_matches_legacy_code_review_evidence() {
 
         // Node A: the legacy Rust adapter.
         let node_a = defra_node::EmbeddedNode::builder().build().await.unwrap();
+        gents::schema::ensure_runtime_schemas(&node_a)
+            .await
+            .unwrap();
         gents::document_config::ensure_agent_principal(&node_a, owner)
             .await
             .unwrap();
@@ -975,6 +992,9 @@ async fn graph_prepare_matches_legacy_code_review_evidence() {
 
         // Node B: the generic host step plus the pack's own plugin.
         let node_b = defra_node::EmbeddedNode::builder().build().await.unwrap();
+        gents::schema::ensure_runtime_schemas(&node_b)
+            .await
+            .unwrap();
         gents::document_config::ensure_agent_principal(&node_b, owner)
             .await
             .unwrap();
