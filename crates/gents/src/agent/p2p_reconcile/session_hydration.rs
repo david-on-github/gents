@@ -330,6 +330,19 @@ pub fn begin_hydration_request(session_id: &str, agent_did: &str) -> ClientHydra
     }
 }
 
+/// Whether a receiver may start its first request (`SessionHydration.canStart`).
+/// A header naming another requester never starts: the server's ownership
+/// check would refuse it. Otherwise an owned header permits a start during a
+/// live turn, and local rows permit one only once no request is in flight.
+pub fn can_start_hydration(
+    foreign_header: bool,
+    owned_session: bool,
+    has_documents: bool,
+    nonterminal_request: bool,
+) -> bool {
+    !foreign_header && (owned_session || (has_documents && !nonterminal_request))
+}
+
 /// Retry admission is target-specific and terminal-state-specific.
 pub fn can_retry_hydration(
     prev: &ClientHydrationProgress,

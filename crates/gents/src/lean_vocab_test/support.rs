@@ -105,6 +105,7 @@ pub(crate) struct LeanContractSnapshot {
     pub(crate) session_hydration_apply_cases: Vec<LeanSessionHydrationApplyCase>,
     pub(crate) session_hydration_progress_cases: Vec<LeanSessionHydrationProgressCase>,
     pub(crate) session_hydration_durable_cases: Vec<LeanSessionHydrationDurableCase>,
+    pub(crate) session_hydration_start_cases: Vec<LeanSessionHydrationStartCase>,
     pub(crate) enrollment_cases: Vec<LeanEnrollmentCase>,
     pub(crate) enrollment_durable_projection_cases: Vec<LeanEnrollmentDurableProjectionCase>,
     pub(crate) enrollment_encoding_cases: Vec<LeanEnrollmentEncodingCase>,
@@ -816,6 +817,16 @@ pub(crate) struct LeanSessionHydrationDurableCase {
     pub(crate) expected_phase: String,
     pub(crate) expected_merged: usize,
     pub(crate) expected_covered: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct LeanSessionHydrationStartCase {
+    pub(crate) name: String,
+    pub(crate) foreign_header: bool,
+    pub(crate) owned_session: bool,
+    pub(crate) has_documents: bool,
+    pub(crate) nonterminal_request: bool,
+    pub(crate) expected_start: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -2061,6 +2072,10 @@ pub(crate) fn lean_session_hydration_progress_cases() -> &'static [LeanSessionHy
 
 pub(crate) fn lean_session_hydration_durable_cases() -> &'static [LeanSessionHydrationDurableCase] {
     &lean_contract_snapshot().session_hydration_durable_cases
+}
+
+pub(crate) fn lean_session_hydration_start_cases() -> &'static [LeanSessionHydrationStartCase] {
+    &lean_contract_snapshot().session_hydration_start_cases
 }
 
 pub(crate) fn lean_enrollment_cases() -> &'static [LeanEnrollmentCase] {

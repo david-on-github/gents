@@ -676,6 +676,11 @@ def caseCoverage : List CoverageEntry :=
       "The durable canonical manifest cases are executable Lean witnesses; the native storage projection has not migrated to this contract.")
       "session-hydration" [Surface.runtimeInternal]
   , tagged (consumerCoverage
+      "session_hydration_start_cases"
+      "SessionHydrationStartCases"
+      "conformance::session_hydration::generated_session_hydration_start_cases_match_receiver_start")
+      "session-hydration" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
       "enrollment_cases"
       "EnrollmentCases"
       "conformance::enrollment::generated_enrollment_cases_match_production_transition_core")

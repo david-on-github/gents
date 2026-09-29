@@ -538,4 +538,36 @@ def sessionHydrationDurableCaseJson (w : SessionHydrationDurableCase) : String :
 def sessionHydrationDurableCasesJson : String :=
   jsonArray (sessionHydrationDurableCases.map sessionHydrationDurableCaseJson)
 
+structure SessionHydrationStartCase where
+  name : String
+  foreignHeader : Bool
+  ownedSession : Bool
+  hasDocuments : Bool
+  nonterminalRequest : Bool
+
+/-- Every receiver-start input combination; expectations come from
+`SessionHydration.canStart`. -/
+def sessionHydrationStartCases : List SessionHydrationStartCase :=
+  [false, true].flatMap fun foreignHeader =>
+  [false, true].flatMap fun ownedSession =>
+  [false, true].flatMap fun hasDocuments =>
+  [false, true].map fun nonterminalRequest =>
+    { name := s!"foreign_{foreignHeader}_owned_{ownedSession}_documents_{hasDocuments}_nonterminal_{nonterminalRequest}"
+      foreignHeader, ownedSession, hasDocuments, nonterminalRequest }
+
+def sessionHydrationStartCaseJson (w : SessionHydrationStartCase) : String :=
+  "{"
+    ++ "\"name\":" ++ jsonString w.name ++ ","
+    ++ "\"foreign_header\":" ++ boolString w.foreignHeader ++ ","
+    ++ "\"owned_session\":" ++ boolString w.ownedSession ++ ","
+    ++ "\"has_documents\":" ++ boolString w.hasDocuments ++ ","
+    ++ "\"nonterminal_request\":" ++ boolString w.nonterminalRequest ++ ","
+    ++ "\"expected_start\":" ++ boolString
+      (SessionHydration.canStart w.foreignHeader w.ownedSession w.hasDocuments
+        w.nonterminalRequest)
+    ++ "}"
+
+def sessionHydrationStartCasesJson : String :=
+  jsonArray (sessionHydrationStartCases.map sessionHydrationStartCaseJson)
+
 end Conformance.Contracts

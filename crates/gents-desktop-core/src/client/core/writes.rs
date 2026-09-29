@@ -1540,12 +1540,9 @@ impl ClientCore {
     ) -> Result<()> {
         let session_id = normalize_required("session_id", session_id)?;
         let agent_did = normalize_required("agent_did", agent_did)?;
-        if self
+        let foreign_header = self
             .session_unreadable_reason(&session_id, &agent_did)
-            .is_some()
-        {
-            return Ok(());
-        }
+            .is_some();
         let _transition = self.hydration_transition.lock().await;
         let progress = self
             .session_hydration_progress(&session_id, &agent_did)
@@ -1560,7 +1557,7 @@ impl ClientCore {
             &agent_did,
         )
         .await?;
-        if !hydration_start_evidence_is_ready(&progress, &evidence) {
+        if !hydration_start_evidence_is_ready(foreign_header, &progress, &evidence) {
             return Ok(());
         }
         self.request_session_hydration(&session_id, &agent_did)
@@ -1765,13 +1762,16 @@ fn should_start_session_hydration_request(
 }
 
 fn hydration_start_evidence_is_ready(
+    foreign_header: bool,
     progress: &gents::agent::p2p_reconcile::session_hydration::ClientHydrationProgress,
     evidence: &LocalHydrationStartEvidence,
 ) -> bool {
-    // SessionHydration.canStartInitial: once the owned header exists, waiting
-    // for request completion would prevent this session from receiving its stream.
-    evidence.owned_session_present
-        || (progress.merged_count > 0 && !evidence.nonterminal_request_present)
+    gents::agent::p2p_reconcile::session_hydration::can_start_hydration(
+        foreign_header,
+        evidence.owned_session_present,
+        progress.merged_count > 0,
+        evidence.nonterminal_request_present,
+    )
 }
 
 async fn load_local_hydration_start_evidence(
@@ -2189,10 +2189,12 @@ mod delete_source_tests {
             "did:agent",
         ));
         assert!(!hydration_start_evidence_is_ready(
+            false,
             &idle,
             &LocalHydrationStartEvidence::default(),
         ));
         assert!(hydration_start_evidence_is_ready(
+            false,
             &ClientHydrationProgress {
                 merged_count: 1,
                 ..idle.clone()
@@ -2200,6 +2202,7 @@ mod delete_source_tests {
             &LocalHydrationStartEvidence::default(),
         ));
         assert!(hydration_start_evidence_is_ready(
+            false,
             &idle,
             &LocalHydrationStartEvidence {
                 owned_session_present: true,
@@ -2207,6 +2210,7 @@ mod delete_source_tests {
             },
         ));
         assert!(hydration_start_evidence_is_ready(
+            false,
             &ClientHydrationProgress {
                 merged_count: 1,
                 ..idle
@@ -2260,9 +2264,13 @@ mod delete_source_tests {
                 nonterminal_request_present: active,
             };
             assert_eq!(
-                hydration_start_evidence_is_ready(&progress, &evidence),
+                hydration_start_evidence_is_ready(false, &progress, &evidence),
                 expected,
                 "owned={owned}, documents={documents}, active={active}"
+            );
+            assert!(
+                !hydration_start_evidence_is_ready(true, &progress, &evidence),
+                "a foreign header never starts: owned={owned}, documents={documents}, active={active}"
             );
         }
     }
