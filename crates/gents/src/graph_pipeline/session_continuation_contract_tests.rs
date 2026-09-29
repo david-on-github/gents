@@ -379,10 +379,18 @@ async fn native_same_behavior_graph_continues_session_with_distinct_stage_roots(
     super::super::activate_graph_revision(&node, None, owner, &plan.graph_id, &plan.digest, None)
         .await
         .unwrap();
-    let run =
-        super::super::start_graph_run(&node, None, owner, &plan.graph_id, None, "input", json!({}))
-            .await
-            .unwrap();
+    let run = super::super::start_graph_run(
+        &node,
+        None,
+        owner,
+        &plan.graph_id,
+        None,
+        "input",
+        json!({}),
+        super::super::EntryInputOrigin::Operator,
+    )
+    .await
+    .unwrap();
     let first = admit_session_graph_task(
         &node,
         &plan,

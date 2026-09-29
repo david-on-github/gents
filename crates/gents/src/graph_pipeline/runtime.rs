@@ -81,6 +81,16 @@ pub struct GraphRunReceipt {
     pub seed_doc_id: String,
 }
 
+/// Where a graph run's entry input came from: the operator (validated against
+/// the entry's `input_schema`, if it declares one) or the host's own prepare
+/// step (host facts plus a pack plugin, already admitted and already
+/// persisted as the entry's evidence documents).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryInputOrigin {
+    Operator,
+    Prepared,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RevisionGateDecision {
     pub may_activate: bool,
@@ -1324,6 +1334,7 @@ pub async fn set_graph_enabled_with_access(
 
 /// Pin a run to the active immutable manifest and seed exactly one compiled
 /// entry collection in the same transaction as the GraphRun record.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_graph_run(
     node: &EmbeddedNode,
     identity: Option<Did>,
@@ -1332,6 +1343,7 @@ pub async fn start_graph_run(
     expected_revision_digest: Option<&str>,
     entry_name: &str,
     input: Value,
+    origin: EntryInputOrigin,
 ) -> Result<GraphRunReceipt> {
     let input = &input;
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -1347,6 +1359,7 @@ pub async fn start_graph_run(
                 expected_revision_digest,
                 entry_name,
                 input,
+                origin,
                 run_id,
                 now,
             )
@@ -1364,6 +1377,7 @@ pub async fn start_graph_run_with_access(
     expected_revision_digest: Option<&str>,
     entry_name: &str,
     input: Value,
+    origin: EntryInputOrigin,
 ) -> Result<GraphRunReceipt> {
     let input = &input;
     let run_id = uuid::Uuid::new_v4().to_string();
@@ -1380,6 +1394,7 @@ pub async fn start_graph_run_with_access(
                     expected_revision_digest,
                     entry_name,
                     input,
+                    origin,
                     run_id,
                     now,
                 )
@@ -1396,6 +1411,7 @@ async fn start_run_in_txn(
     expected_revision_digest: Option<&str>,
     entry_name: &str,
     input: &Value,
+    origin: EntryInputOrigin,
     run_id: &str,
     now: &str,
 ) -> Result<GraphRunReceipt> {
@@ -1455,9 +1471,24 @@ async fn start_run_in_txn(
         .context("unknown graph entry")?;
     validate_collection_identifier(&entry.collection)?;
 
-    let mut input = match input {
-        Value::Object(object) => object.clone(),
-        _ => anyhow::bail!("graph entry input must be a JSON object"),
+    let mut input = match origin {
+        EntryInputOrigin::Operator => {
+            anyhow::ensure!(
+                entry.prepare.is_none(),
+                "entry {entry_name} prepares its input on the host; start it with `gents graph run`"
+            );
+            crate::graph_pipeline::admit_operator_input(entry, input.clone())?
+        }
+        EntryInputOrigin::Prepared => {
+            anyhow::ensure!(
+                entry.prepare.is_some(),
+                "entry {entry_name} does not declare a host prepare step"
+            );
+            match input {
+                Value::Object(object) => object.clone(),
+                _ => anyhow::bail!("graph entry input must be a JSON object"),
+            }
+        }
     };
     if let Some(existing) = input.get(&entry.correlation_field) {
         if existing.as_str() != Some(run_id) {
@@ -1666,6 +1697,8 @@ mod tests {
                     collection: input.collection.clone(),
                     schema: input.schema.clone(),
                     input_contract: None,
+                    input_schema: None,
+                    prepare: None,
                     to: PortRef {
                         node_id: "worker".to_owned(),
                         port: input.name.clone(),
@@ -1775,6 +1808,8 @@ mod tests {
                     collection: input.collection.clone(),
                     schema: input.schema.clone(),
                     input_contract: None,
+                    input_schema: None,
+                    prepare: None,
                     to: super::super::PortRef {
                         node_id: "producer".to_owned(),
                         port: "input".to_owned(),
@@ -1866,6 +1901,8 @@ mod tests {
                     collection: input.collection.clone(),
                     schema: input.schema.clone(),
                     input_contract: None,
+                    input_schema: None,
+                    prepare: None,
                     to: PortRef {
                         node_id: "worker".to_owned(),
                         port: "input".to_owned(),
@@ -2099,6 +2136,7 @@ mod tests {
             Some(&first.digest),
             "input",
             json!({ "payload": "disabled" }),
+            EntryInputOrigin::Operator,
         )
         .await
         .unwrap_err()
@@ -2125,6 +2163,7 @@ mod tests {
             Some(&stale_digest),
             "input",
             json!({ "payload": "stale" }),
+            EntryInputOrigin::Operator,
         )
         .await
         .unwrap_err();
@@ -2146,6 +2185,7 @@ mod tests {
             None,
             "input",
             json!({ "payload": "hello" }),
+            EntryInputOrigin::Operator,
         )
         .await
         .unwrap();
@@ -2373,6 +2413,7 @@ mod tests {
             None,
             "input",
             json!({ "payload": "review" }),
+            EntryInputOrigin::Operator,
         )
         .await
         .unwrap();
@@ -2694,6 +2735,7 @@ mod tests {
             None,
             "input",
             json!({ "payload": "fail-fast cause regression" }),
+            EntryInputOrigin::Operator,
         )
         .await
         .unwrap();

@@ -109,6 +109,7 @@ impl Fixture {
             None,
             "review",
             input,
+            super::super::EntryInputOrigin::Operator,
         )
         .await
         .unwrap();

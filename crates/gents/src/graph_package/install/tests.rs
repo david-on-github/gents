@@ -1,5 +1,5 @@
 use super::*;
-use crate::graph_pipeline::{activate_graph_revision, start_graph_run};
+use crate::graph_pipeline::{activate_graph_revision, start_graph_run, EntryInputOrigin};
 use crate::test_support::{install_test_graph_package, load_test_graph_package};
 use defra_node::EmbeddedNode;
 use serde_json::json;
@@ -349,6 +349,7 @@ async fn graph_fixture_install_is_idempotent_shared_home_safe_and_runnable() {
             "repository_path":"/tmp/repo", "base_ref":"base-sha", "head_ref":"head-sha",
             "lens_count":"4", "lens_min":"4", "lens_max":"4", "focus":"durability"
         }),
+        EntryInputOrigin::Operator,
     )
     .await
     .unwrap();

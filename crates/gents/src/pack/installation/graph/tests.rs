@@ -154,6 +154,7 @@ async fn a_non_terminal_graph_run_refuses_removal_and_names_it() {
             "repository_path": "/tmp/repo", "base_ref": "base-sha", "head_ref": "head-sha",
             "lens_count": "4", "lens_min": "4", "lens_max": "4", "focus": "durability"
         }),
+        crate::graph_pipeline::EntryInputOrigin::Operator,
     )
     .await
     .unwrap();

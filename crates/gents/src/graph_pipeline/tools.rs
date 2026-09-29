@@ -223,6 +223,8 @@ mod tests {
                 collection: "PipelineInput".to_owned(),
                 schema: "PipelineInput/v1".to_owned(),
                 input_contract: None,
+                input_schema: None,
+                prepare: None,
                 to: PortRef {
                     node_id: "worker".to_owned(),
                     port: "input".to_owned(),

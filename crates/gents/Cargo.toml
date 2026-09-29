@@ -81,6 +81,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 regex = "1"
 schemars = "1"
+jsonschema = { version = "0.46.5", default-features = false }
 sha2.workspace = true
 hmac.workspace = true
 thiserror.workspace = true
@@ -158,7 +159,6 @@ tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
 gents-lean-contract.workspace = true
 gents-callback-fixture-create-workspace = { path = "../gents-callbacks/fixture_create_workspace", default-features = false }
-jsonschema = { version = "0.46.5", default-features = false }
 syn = { version = "2", features = ["full", "visit"] }
 wat = "1.254"
 [build-dependencies]

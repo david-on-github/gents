@@ -1084,7 +1084,8 @@ async fn graph_fixture_root_binding_survives_task_metadata_changes() {
     .await
     .unwrap();
     let run = start_graph_run(&node, None, identity.did(), &installed.graph_id, None, "review",
-        serde_json::json!({"repository_path": "/tmp/repo", "base_ref": "base-sha", "head_ref": "head-sha", "lens_count": "4", "lens_min": "4", "lens_max": "4", "focus": "authorization"})).await.unwrap();
+        serde_json::json!({"repository_path": "/tmp/repo", "base_ref": "base-sha", "head_ref": "head-sha", "lens_count": "4", "lens_min": "4", "lens_max": "4", "focus": "authorization"}),
+        EntryInputOrigin::Operator).await.unwrap();
     let trigger =
         runtime::graph_trigger_id(&installed.revision_digest, "entry:review:recon:job").unwrap();
     let route = execute(

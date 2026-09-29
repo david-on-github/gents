@@ -99,6 +99,8 @@ fn linear_intent() -> GraphIntent {
             collection: "ExperimentJob".to_owned(),
             schema: "ExperimentJob/v1".to_owned(),
             input_contract: None,
+            input_schema: None,
+            prepare: None,
             to: PortRef {
                 node_id: "extract".to_owned(),
                 port: "job".to_owned(),
