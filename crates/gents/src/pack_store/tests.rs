@@ -12,25 +12,6 @@ fn mailbox_pack() -> (Vec<u8>, PackHeader) {
     crate::pack_archive::pack_dir(dir.path()).expect("packing")
 }
 
-/// The mailbox fixture, renamed and re-versioned, for name-index tests: a
-/// coordinate and version chosen by the test rather than fixed content.
-fn mailbox_pack_named(name: &str, version: &str) -> (Vec<u8>, PackHeader) {
-    let pack = crate::pack::resolve_pack("mailbox").expect("a bundled pack");
-    let dir = tempfile::tempdir().expect("tempdir");
-    for path in declared_paths(&pack.manifest) {
-        let target = dir.path().join(&path);
-        std::fs::create_dir_all(target.parent().expect("a parent")).expect("mkdir");
-        std::fs::write(&target, pack.asset(&path).expect("asset")).expect("write");
-    }
-    let manifest_path = dir.path().join("manifest.json");
-    let mut manifest: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
-    manifest["name"] = serde_json::json!(name);
-    manifest["version"] = serde_json::json!(version);
-    std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    crate::pack_archive::pack_dir(dir.path()).expect("packing")
-}
-
 fn store_files(store: &PackStore) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(&store.root)
         .expect("store dir")
@@ -156,13 +137,13 @@ fn release_removes_the_archive_and_its_unpacked_copy() {
     assert!(!store.release(&header.digest).unwrap());
 }
 
-// --- name index (design D1) ---------------------------------------------
+// --- name index -----------------------------------------------------------
 
 #[test]
 fn an_import_indexes_the_pack_by_coordinate_and_version() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (bytes, header) = mailbox_pack_named("name_index_a", "1.0.0");
+    let (bytes, header) = test_pack_named("name_index_a", "1.0.0");
     store.import(bytes.as_slice(), None).unwrap();
 
     let found = store.lookup("gents", "name_index_a", None).unwrap();
@@ -201,8 +182,8 @@ fn an_import_indexes_the_pack_by_coordinate_and_version() {
 fn lookup_prefers_the_highest_semver_not_the_lexicographically_largest() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (v1, _) = mailbox_pack_named("name_index_b", "1.2.0");
-    let (v2, v2_header) = mailbox_pack_named("name_index_b", "1.10.0");
+    let (v1, _) = test_pack_named("name_index_b", "1.2.0");
+    let (v2, v2_header) = test_pack_named("name_index_b", "1.10.0");
     store.import(v1.as_slice(), None).unwrap();
     store.import(v2.as_slice(), None).unwrap();
 
@@ -222,8 +203,8 @@ fn lookup_prefers_the_highest_semver_not_the_lexicographically_largest() {
 fn non_semver_versions_sort_after_every_semver_version() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (semver_bytes, semver_header) = mailbox_pack_named("name_index_c", "1.0.0");
-    let (other_bytes, _) = mailbox_pack_named("name_index_c", "latest");
+    let (semver_bytes, semver_header) = test_pack_named("name_index_c", "1.0.0");
+    let (other_bytes, _) = test_pack_named("name_index_c", "latest");
     store.import(semver_bytes.as_slice(), None).unwrap();
     store.import(other_bytes.as_slice(), None).unwrap();
 
@@ -240,7 +221,7 @@ fn non_semver_versions_sort_after_every_semver_version() {
 fn a_version_with_a_path_separator_is_stored_but_not_indexed() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (bytes, header) = mailbox_pack_named("name_index_d", "../escape");
+    let (bytes, header) = test_pack_named("name_index_d", "../escape");
     let stored = store.import(bytes.as_slice(), None).unwrap();
 
     assert_eq!(stored.header.digest, header.digest);
@@ -257,7 +238,7 @@ fn a_bare_dot_or_dot_dot_version_is_stored_but_not_indexed() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
     for (name, version) in [("name_index_f", ".."), ("name_index_g", ".")] {
-        let (bytes, header) = mailbox_pack_named(name, version);
+        let (bytes, header) = test_pack_named(name, version);
         store.import(bytes.as_slice(), None).unwrap();
         assert!(store.contains(&header.digest).unwrap());
         assert_eq!(store.lookup("gents", name, None).unwrap(), None);
@@ -271,12 +252,23 @@ fn a_bare_dot_or_dot_dot_version_is_stored_but_not_indexed() {
 fn release_deletes_the_matching_name_index_entry_and_keeps_the_rest() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (v1_bytes, v1_header) = mailbox_pack_named("name_index_e", "1.0.0");
-    let (v2_bytes, v2_header) = mailbox_pack_named("name_index_e", "2.0.0");
+    let (v1_bytes, v1_header) = test_pack_named("name_index_e", "1.0.0");
+    let (v2_bytes, v2_header) = test_pack_named("name_index_e", "2.0.0");
     store.import(v1_bytes.as_slice(), None).unwrap();
     store.import(v2_bytes.as_slice(), None).unwrap();
+    let v1_entry = store.by_name_root().join("gents/name_index_e/1.0.0");
+    let v2_entry = store.by_name_root().join("gents/name_index_e/2.0.0");
+    assert!(v1_entry.is_file(), "indexed before release");
+    assert!(v2_entry.is_file(), "indexed before release");
 
     store.release(&v1_header.digest).unwrap();
+
+    // The index file itself is gone, not merely unresolvable because
+    // `lookup` filters out entries whose archive disappeared: deleting
+    // `remove_name_entries_for_digest`/`remove_indexed_entry` entirely would
+    // make `lookup` alone insufficient to catch the regression.
+    assert!(!v1_entry.exists(), "release deleted the index entry itself");
+    assert!(v2_entry.is_file(), "the other version's entry is untouched");
 
     assert_eq!(
         store
@@ -292,4 +284,49 @@ fn release_deletes_the_matching_name_index_entry_and_keeps_the_rest() {
             .map(|entry| entry.digest),
         Some(v2_header.digest)
     );
+}
+
+/// When the archive is already gone before `release` runs (a prior release,
+/// or the file was removed out from under the store), there is no header
+/// left to read the coordinate and version from; `release` must still find
+/// and delete the index entry, by falling back to a full scan.
+#[test]
+fn releasing_a_digest_whose_archive_is_already_gone_still_cleans_its_index_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (bytes, header) = test_pack_named("name_index_h", "1.0.0");
+    store.import(bytes.as_slice(), None).unwrap();
+    let entry = store.by_name_root().join("gents/name_index_h/1.0.0");
+    assert!(entry.is_file());
+
+    std::fs::remove_file(store.path(&header.digest).unwrap()).unwrap();
+    assert!(
+        !store.release(&header.digest).unwrap(),
+        "nothing left in the content-addressed store to remove"
+    );
+
+    assert!(
+        !entry.exists(),
+        "the index entry is cleaned up even though the archive was gone first"
+    );
+}
+
+#[test]
+fn an_uppercase_version_is_stored_but_not_indexed() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (bytes, header) = test_pack_named("name_index_i", "1.0.0-RC1");
+    store.import(bytes.as_slice(), None).unwrap();
+
+    assert!(
+        store.contains(&header.digest).unwrap(),
+        "still content-addressed"
+    );
+    assert_eq!(
+        store.lookup("gents", "name_index_i", None).unwrap(),
+        None,
+        "uppercase would collide on a case-insensitive filesystem (macOS APFS \
+         by default), so it is refused rather than indexed"
+    );
+    assert!(store.names().unwrap().is_empty());
 }
