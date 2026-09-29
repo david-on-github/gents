@@ -693,6 +693,58 @@ mod evidence_equivalence {
             .to_owned()
     }
 
+    fn git_stdout(repo: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("run git");
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    fn amend_commit(repo: &Path) -> String {
+        git_stdout(repo, &["add", "-A"]);
+        git_stdout(repo, &["commit", "--amend", "--quiet", "-m", "head"]);
+        git_stdout(repo, &["rev-parse", "HEAD"]).trim().to_owned()
+    }
+
+    /// Whether the evidence packet (summary + patch, at the legacy adapter's
+    /// unified=12/renames=50 settings) has byte 1800 land inside a multibyte
+    /// character's encoding, mirroring `code_review_evidence`'s own
+    /// assembly. Used only to search for content that exercises the
+    /// straddle for real, not to assert equivalence (the outer test already
+    /// compares the two implementations' actual output).
+    fn evidence_packet_straddles_1800(repo: &Path, base: &str, head: &str) -> bool {
+        let changed = git_stdout(repo, &["diff", "--name-status", base, head, "--"]);
+        let stat = git_stdout(repo, &["diff", "--stat", base, head, "--"]);
+        let patch = git_stdout(
+            repo,
+            &[
+                "-c",
+                "core.quotepath=true",
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--binary",
+                "--find-renames=50%",
+                "--unified=12",
+                base,
+                head,
+                "--",
+            ],
+        );
+        let summary = format!(
+            "PINNED BASE: {base}\nPINNED HEAD: {head}\n\nCHANGED FILES:\n{}\n\nDIFF STAT:\n{}",
+            changed.trim(),
+            stat.trim()
+        );
+        let packet = format!("{summary}\n\nCOMPLETE PATCH:\n{patch}");
+        packet.len() > 1800 && !packet.is_char_boundary(1800)
+    }
+
     /// Six repos exercising the same shapes the packs-repo golden generator
     /// covers: an ASCII edit, a multibyte boundary, a rename plus a binary
     /// file, an empty diff, a large edit, and a non-ASCII filename.
@@ -708,12 +760,39 @@ mod evidence_equivalence {
             cases.push(("ascii-edit", directory, base, head));
         }
         {
+            // A multibyte UTF-8 character positioned so its encoding
+            // straddles byte 1800 of the evidence packet: the exact prefix
+            // length before the patch content depends on git's own diff
+            // header formatting, so this searches for the ASCII padding
+            // that lands the straddle there rather than hand-computing it.
             let directory = init_repo();
             let repo = directory.path();
-            std::fs::write(repo.join("multibyte.txt"), "é日".repeat(50)).unwrap();
+            std::fs::write(repo.join("multibyte.txt"), "seed\n").unwrap();
             let base = commit(repo, "base");
-            std::fs::write(repo.join("multibyte.txt"), "é日".repeat(500)).unwrap();
-            let head = commit(repo, "head");
+            let mut head = String::new();
+            let mut straddles = false;
+            for pad in 0..64 {
+                let content = format!(
+                    "{}{}{}",
+                    "a".repeat(200 + pad),
+                    "日".repeat(3),
+                    "é日".repeat(500)
+                );
+                std::fs::write(repo.join("multibyte.txt"), &content).unwrap();
+                head = if pad == 0 {
+                    commit(repo, "head")
+                } else {
+                    amend_commit(repo)
+                };
+                if evidence_packet_straddles_1800(repo, &base, &head) {
+                    straddles = true;
+                    break;
+                }
+            }
+            assert!(
+                straddles,
+                "could not construct an evidence packet whose byte 1800 straddles a multibyte character"
+            );
             cases.push(("multibyte-boundary", directory, base, head));
         }
         {
@@ -753,6 +832,18 @@ mod evidence_equivalence {
         }
         cases
     }
+}
+
+/// The six equivalence repos build without the real `review_evidence`
+/// plugin, so a regression in their construction (in particular, the
+/// multibyte case's search for a straddle at byte 1800) is caught without
+/// needing `GENTS_CODE_REVIEW_PACK_DIR`.
+#[tokio::test]
+async fn evidence_equivalence_cases_build_six_distinct_repos() {
+    let cases = evidence_equivalence::cases();
+    assert_eq!(cases.len(), 6);
+    let names: std::collections::BTreeSet<_> = cases.iter().map(|(name, ..)| *name).collect();
+    assert_eq!(names.len(), 6, "case names must be distinct");
 }
 
 /// Proves the pack plugin reproduces the legacy Rust adapter's evidence
@@ -908,6 +999,15 @@ async fn graph_prepare_matches_legacy_code_review_evidence() {
         .await
         .unwrap_or_else(|error| panic!("{name}: generic prepare failed: {error:#}"));
 
+        let legacy_evidence_id = legacy.input["evidence_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name}: legacy input missing evidence_id"))
+            .to_owned();
+        let generic_evidence_id = prepared.input["evidence_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{name}: generic input missing evidence_id"))
+            .to_owned();
+
         let mut legacy_input = legacy.input.clone();
         let mut generic_input = prepared.input.clone();
         for stripped in ["workspace_id", "workspace_owner_agent_did", "evidence_id"] {
@@ -919,28 +1019,48 @@ async fn graph_prepare_matches_legacy_code_review_evidence() {
         assert_eq!(legacy_input, generic_input, "{name}: entry input");
 
         let manifests_a = access_a
-            .execute("{ CodeReviewEvidenceManifest { format_version page_count evidence_chunk_count evidence_byte_count evidence_sha256 } }")
+            .execute("{ CodeReviewEvidenceManifest { evidence_id format_version page_count evidence_chunk_count evidence_byte_count evidence_sha256 } }")
             .await
             .unwrap();
         let manifests_b = access_b
-            .execute("{ CodeReviewEvidenceManifest { format_version page_count evidence_chunk_count evidence_byte_count evidence_sha256 } }")
+            .execute("{ CodeReviewEvidenceManifest { evidence_id format_version page_count evidence_chunk_count evidence_byte_count evidence_sha256 } }")
             .await
             .unwrap();
+        let manifest_a = &manifests_a["data"]["CodeReviewEvidenceManifest"][0];
+        let manifest_b = &manifests_b["data"]["CodeReviewEvidenceManifest"][0];
+        // A plugin that got the nonce linkage wrong (e.g. minted its own
+        // evidence_id instead of using the one on its stdin) would still
+        // pass a comparison that only strips these fields; check each
+        // side's manifest actually carries the evidence_id its own prepared
+        // input names.
         assert_eq!(
-            manifests_a["data"]["CodeReviewEvidenceManifest"],
-            manifests_b["data"]["CodeReviewEvidenceManifest"],
+            manifest_a["evidence_id"], legacy_evidence_id,
+            "{name}: legacy manifest evidence_id must equal the legacy input's evidence_id"
+        );
+        assert_eq!(
+            manifest_b["evidence_id"], generic_evidence_id,
+            "{name}: generic manifest evidence_id must equal the generic input's evidence_id"
+        );
+        let strip_evidence_id = |value: &Value| {
+            let mut value = value.clone();
+            value.as_object_mut().unwrap().remove("evidence_id");
+            value
+        };
+        assert_eq!(
+            strip_evidence_id(manifest_a),
+            strip_evidence_id(manifest_b),
             "{name}: manifest"
         );
 
-        // `page_key` and `evidence_id` embed the nonce, which each side
-        // mints independently; every other field, including all sixteen
-        // chunk slots, is the byte-identity proof and must match exactly.
+        // `page_key` embeds the nonce, which each side mints independently;
+        // every other field, including all sixteen chunk slots, is the
+        // byte-identity proof and must match exactly.
         let chunk_fields: String = (0..16)
             .map(|slot| format!("evidence_chunk_{slot} "))
             .collect();
         let page_query = format!(
-            "{{ CodeReviewEvidencePage {{ page_index page_count evidence_chunk_count \
-             evidence_byte_count evidence_sha256 {chunk_fields}}} }}"
+            "{{ CodeReviewEvidencePage {{ page_key evidence_id page_index page_count \
+             evidence_chunk_count evidence_byte_count evidence_sha256 {chunk_fields}}} }}"
         );
         let mut pages_a = access_a.execute(&page_query).await.unwrap()["data"]
             ["CodeReviewEvidencePage"]
@@ -961,6 +1081,40 @@ async fn graph_prepare_matches_legacy_code_review_evidence() {
         };
         pages_a.sort_by_key(by_page_index);
         pages_b.sort_by_key(by_page_index);
-        assert_eq!(pages_a, pages_b, "{name}: pages");
+        for (side, pages, evidence_id) in [
+            ("legacy", &pages_a, &legacy_evidence_id),
+            ("generic", &pages_b, &generic_evidence_id),
+        ] {
+            for page in pages {
+                let page_index = page["page_index"].as_str().unwrap();
+                assert_eq!(
+                    page["evidence_id"].as_str().unwrap(),
+                    evidence_id.as_str(),
+                    "{name}: {side} page {page_index} evidence_id"
+                );
+                assert_eq!(
+                    page["page_key"].as_str().unwrap(),
+                    format!("{evidence_id}:{page_index:0>8}"),
+                    "{name}: {side} page {page_index} page_key"
+                );
+            }
+        }
+        let strip_page_identity = |pages: &[Value]| {
+            pages
+                .iter()
+                .map(|page| {
+                    let mut page = page.clone();
+                    let object = page.as_object_mut().unwrap();
+                    object.remove("page_key");
+                    object.remove("evidence_id");
+                    page
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            strip_page_identity(&pages_a),
+            strip_page_identity(&pages_b),
+            "{name}: pages"
+        );
     }
 }
