@@ -46,19 +46,56 @@ pub(super) struct ParkedArrival {
 }
 
 impl EventSource {
-    /// Release parks held by an updated source document, so a repaired
-    /// document is retried under the same configuration.
-    pub(super) fn release_parked_document(&mut self, collection: &str, doc_id: &str) {
+    /// Re-check parks held by a notified source document, so a repaired
+    /// document is retried under the same configuration. The notification may
+    /// be the document's own late creation event, so only changed content
+    /// releases a park.
+    pub(super) async fn release_parked_document(&mut self, collection: &str, doc_id: &str) {
         if collection == crate::Collection::Trigger.graphql_type() {
             return;
         }
-        self.parked_arrivals
-            .retain(|_, parked| parked.collection != collection || parked.source_doc_id != doc_id);
+        let parked = self
+            .parked_arrivals
+            .iter()
+            .filter(|(_, parked)| parked.collection == collection && parked.source_doc_id == doc_id)
+            .map(|(trigger_id, _)| trigger_id.clone())
+            .collect::<Vec<_>>();
+        if parked.is_empty() {
+            return;
+        }
+        let Ok(current) = self.read_source_doc(collection, doc_id).await else {
+            return;
+        };
+        for trigger_id in parked {
+            self.release_if_changed(&trigger_id, current.as_ref());
+        }
+    }
+
+    fn release_if_changed(&mut self, trigger_id: &str, current: Option<&serde_json::Value>) {
+        if self
+            .parked_arrivals
+            .get(trigger_id)
+            .is_some_and(|parked| current.is_none() || parked.source_document.as_ref() != current)
+        {
+            tracing::debug!(%trigger_id, deleted = current.is_none(),
+                "refused source document changed; retrying its fire");
+            self.parked_arrivals.remove(trigger_id);
+        }
     }
 }
 
 impl EventSource {
+    /// Runs at most once per rescan interval: durable passes also follow
+    /// every notification, and a notified repair is released directly.
     async fn release_changed_refusals(&mut self) {
+        let now = Instant::now();
+        if self
+            .last_refusal_scan
+            .is_some_and(|last| now.duration_since(last) < self.rescan_interval)
+        {
+            return;
+        }
+        self.last_refusal_scan = Some(now);
         let refused = self
             .parked_arrivals
             .iter()
@@ -72,17 +109,13 @@ impl EventSource {
             })
             .collect::<Vec<_>>();
         for (trigger_id, collection, doc_id) in refused {
-            // An unreadable document (deleted, or hidden by ACP) is released
-            // too: the arrival owner then excludes or retries it without a
-            // fire, so this costs at most one read per rescan.
-            let current = self.fetch_source_doc(&collection, &doc_id).await.ok();
-            if self
-                .parked_arrivals
-                .get(&trigger_id)
-                .is_some_and(|parked| current.is_none() || parked.source_document != current)
-            {
-                self.parked_arrivals.remove(&trigger_id);
-            }
+            // A document this reader no longer sees (deleted, or hidden by
+            // ACP) is released too; the arrival owner then excludes it
+            // without a fire. A failed read keeps the park.
+            let Ok(current) = self.read_source_doc(&collection, &doc_id).await else {
+                continue;
+            };
+            self.release_if_changed(&trigger_id, current.as_ref());
         }
     }
 }

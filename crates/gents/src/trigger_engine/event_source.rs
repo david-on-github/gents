@@ -164,6 +164,7 @@ pub struct EventSource {
     /// Per-trigger arrivals whose last fire was not acknowledged; see
     /// [`durable::ParkedArrival`].
     parked_arrivals: HashMap<String, durable::ParkedArrival>,
+    last_refusal_scan: Option<Instant>,
     durable_after_trigger: Option<String>,
     runtime_observer: Option<Arc<dyn crate::agent::RuntimeSnapshotObserver>>,
     snapshot_rx: watch::Receiver<Arc<ActiveRuntimeSnapshot>>,
@@ -338,6 +339,7 @@ impl EventSource {
             durable_checkpoint: None,
             durable_ready: true,
             parked_arrivals: HashMap::new(),
+            last_refusal_scan: None,
             durable_after_trigger: None,
             seen_docs: HashMap::new(),
             partially_seen_triggers: HashMap::new(),
@@ -951,6 +953,17 @@ impl EventSource {
         collection: &str,
         source_doc_id: &str,
     ) -> anyhow::Result<serde_json::Value> {
+        self.read_source_doc(collection, source_doc_id)
+            .await?
+            .with_context(|| format!("source doc {source_doc_id} not found in {collection}"))
+    }
+
+    /// The hydrated source document, or `None` when this reader sees no row.
+    pub(super) async fn read_source_doc(
+        &self,
+        collection: &str,
+        source_doc_id: &str,
+    ) -> anyhow::Result<Option<serde_json::Value>> {
         // `fields_for` validates this same binding and `?`-propagates before
         // the query below is built, so it is the one gate for both sites.
         let fields = self
@@ -984,14 +997,7 @@ impl EventSource {
                 collection
             );
         };
-        let Some(row) = rows.first() else {
-            anyhow::bail!(
-                "source doc {} not found in {} (empty rows)",
-                source_doc_id,
-                collection
-            );
-        };
-        Ok(row.clone())
+        Ok(rows.first().cloned())
     }
 
     fn trigger_context_for_doc(
@@ -2039,7 +2045,8 @@ impl TriggerSource for EventSource {
                 if !self.desired_collections.contains(&collection_name) {
                     continue;
                 }
-                self.release_parked_document(&collection_name, &doc_id);
+                self.release_parked_document(&collection_name, &doc_id)
+                    .await;
                 if self
                     .subscription_seed_failures
                     .contains_key(&collection_name)
