@@ -13,7 +13,6 @@ mod remove;
 pub(crate) use remove::remove;
 mod scaffold;
 mod scenario;
-mod secscan;
 mod server;
 mod test;
 pub(crate) mod update;
