@@ -204,6 +204,13 @@ describe("mailbox question", () => {
         ],
       },
       { multi_select: "yes" },
+      { extra: true },
+      {
+        options: [
+          { id: "a", label: "A", icon: "x" },
+          { id: "b", label: "B" },
+        ],
+      },
       { prompt: " " },
     ]) {
       const { unmount } = render(

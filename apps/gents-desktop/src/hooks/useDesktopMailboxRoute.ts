@@ -141,6 +141,11 @@ export function useDesktopMailboxRoute({
         causedBySourceDocId: item.itemId,
         answer,
       });
+      /* the reply consumed the item, so a compose route opened on it must
+         not carry it as the next message's source */
+      if (pendingMailboxRouteRef.current?.itemId === item.itemId) {
+        clearPendingMailboxCause();
+      }
       setError(null);
       await refreshSnapshot();
     } catch (error) {

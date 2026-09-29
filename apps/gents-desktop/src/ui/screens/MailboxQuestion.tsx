@@ -20,9 +20,14 @@ import { useState } from "react";
 const text = (value: unknown): value is string =>
   typeof value === "string" && value.trim() !== "";
 const flag = (value: unknown) => value === undefined || typeof value === "boolean";
+/* the runtime's types deny unknown fields; a payload it could not decode
+   must not offer answers the bridge would refuse */
+const only = (value: object, keys: string[]) =>
+  Object.keys(value).every((key) => keys.includes(key));
 
 function option(value: unknown): MailboxQuestionOption | null {
   if (typeof value !== "object" || value === null) return null;
+  if (!only(value, ["id", "label", "description"])) return null;
   const { id, label, description } = value as Record<string, unknown>;
   if (!text(id) || !text(label)) return null;
   if (
@@ -45,7 +50,12 @@ export function parseQuestion(item: MailboxItemView): MailboxQuestion | null {
   } catch {
     return null;
   }
-  if (typeof value !== "object" || value === null) return null;
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  if (
+    !only(value, ["version", "prompt", "options", "multi_select", "allow_free_text"])
+  ) {
+    return null;
+  }
   const { version, prompt, options, multi_select, allow_free_text } = value as Record<
     string,
     unknown
