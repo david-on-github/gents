@@ -433,3 +433,82 @@ fn a_plugin_node_the_pack_cannot_run_is_refused() {
         }
     );
 }
+
+fn prepare_pack_config(entry_extra: Value) -> Result<PackConfig> {
+    let manifest: PackManifest = serde_json::from_value(json!({
+        "manifest_version":1,"name":"example","namespace":"team","version":"1",
+        "description":"Example","kind":"graph","authors":["Example"],
+        "assets":["README.md","config/bundle.json","plugins/prepare.afb"],
+        "config":"config/bundle.json",
+        "compiler_version": crate::graph_pipeline::COMPILER_VERSION,
+        "plugins":[{"name":"prepare","description":"Prepares evidence","artifact":"plugins/prepare.afb",
+                    "language":"rust","input_schema":{"type":"object"}}],
+    }))
+    .unwrap();
+    let mut entry = json!({
+        "name":"job","collection":"Job","schema":"Job/v1",
+        "to":{"node_id":"worker","port":"job"},
+    });
+    for (key, value) in entry_extra.as_object().unwrap() {
+        entry[key] = value.clone();
+    }
+    let config = json!({"agent_principal":{},"graph_intents":[{
+        "graph_id":"g",
+        "nodes":[{"node_id":"worker","capability_id":"worker","capability_revision":"1"}],
+        "edges":[],
+        "entries":[entry],
+        "results":[],
+        "limits":{"max_nodes":1,"max_edges":1,"max_depth":1,"max_fan_out":1,
+                  "max_total_invocations":1,"max_runtime_secs":60},
+        "tags":[],
+    }]});
+    load_pack_config(
+        &manifest,
+        &PackInstallOptions {
+            agent_did: "did:key:owner".into(),
+        },
+        &|path| match path {
+            "config/bundle.json" => Ok(serde_json::to_vec(&config)?),
+            "plugins/prepare.afb" => Ok(b"artifact bytes".to_vec()),
+            _ => anyhow::bail!("unexpected asset {path}"),
+        },
+        &|_| None,
+    )
+}
+
+#[test]
+fn an_entry_prepare_plugin_is_pinned_to_the_packs_artifact() {
+    let prepare = json!({
+        "host": [{"kind":"git_diff","repository_field":"repository","base_field":"base",
+                  "head_field":"head","unified_context_lines":3,"rename_similarity_percent":50}],
+        "plugin": "prepare",
+        "writes": ["FixtureEvidence"],
+    });
+    let config = prepare_pack_config(json!({"prepare": prepare})).unwrap();
+    let prepare = config.graph_intents[0].entries[0].prepare.as_ref().unwrap();
+    assert_eq!(prepare.plugin, "team/prepare");
+    assert_eq!(prepare.digest.as_deref(), Some(shipped_digest().as_str()));
+}
+
+#[test]
+fn an_entry_prepare_plugin_the_pack_cannot_run_is_refused() {
+    let prepare = json!({"host": [], "plugin": "missing", "writes": ["FixtureEvidence"]});
+    let error = prepare_pack_config(json!({"prepare": prepare})).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("does not declare"),
+        "{error:#}"
+    );
+}
+
+#[test]
+fn an_entry_input_schema_must_compile_and_declare_an_object() {
+    let error = prepare_pack_config(json!({"input_schema": {"type": "string"}})).unwrap_err();
+    assert!(
+        format!("{error:#}").contains("\"type\": \"object\""),
+        "{error:#}"
+    );
+
+    let too_big = json!({"type": "object", "filler": "a".repeat(70 * 1024)});
+    let error = prepare_pack_config(json!({"input_schema": too_big})).unwrap_err();
+    assert!(format!("{error:#}").contains("byte ceiling"), "{error:#}");
+}
