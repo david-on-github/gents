@@ -41,6 +41,25 @@ pub async fn desktop_session_snapshot(
     });
 
     if let Some(agent_did) = agent_did.as_deref() {
+        // Its transcript reads as empty here and a hydration request would be
+        // refused, so the local header alone answers without any remote read.
+        if core
+            .session_unreadable_reason(&session_id, agent_did)
+            .is_some()
+        {
+            return Ok(build_session_snapshot_for_agent_with_transcript(
+                core.as_ref(),
+                Some(agent_did),
+                &session_id,
+                request_id.as_deref(),
+                None,
+                None,
+                None,
+                false,
+                false,
+            )
+            .await);
+        }
         if let Err(error) = core
             .ensure_session_hydration_started(&session_id, agent_did)
             .await
