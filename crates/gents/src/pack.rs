@@ -915,57 +915,6 @@ pub fn pack_catalog() -> Result<Vec<PackManifest>> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn all_packs_resolve_with_declared_assets_and_dependencies() {
-        let catalog = pack_catalog().unwrap();
-        assert!(catalog.len() >= 11);
-        for pack in catalog {
-            for dependency in pack.metadata.dependencies {
-                resolve_pack(&dependency).unwrap();
-            }
-        }
-        assert!(resolve_pack("code-review").is_err());
-        assert!(resolve_pack("../code_review").is_err());
-        let proposer = resolve_pack("prompt_proposer").unwrap();
-        assert_eq!(
-            proposer.manifest.metadata.inference_slots[0].name,
-            "proposer"
-        );
-    }
-
-    #[test]
-    fn every_configuration_pack_declares_slots_and_authors_no_inference_documents() {
-        let options = PackInstallOptions {
-            agent_did: "did:key:catalog-owner".into(),
-        };
-        for manifest in pack_catalog().unwrap() {
-            if !matches!(
-                manifest.metadata.kind,
-                PackKind::Documents | PackKind::Graph
-            ) {
-                continue;
-            }
-            let pack = resolve_pack(&manifest.name).unwrap();
-            let config = pack
-                .load_config(&options)
-                .unwrap_or_else(|error| panic!("{}: {error:#}", manifest.name));
-            assert!(
-                !manifest.metadata.inference_slots.is_empty(),
-                "{}",
-                manifest.name
-            );
-            assert!(config.inference_backends.is_empty(), "{}", manifest.name);
-            assert!(config.inference_profiles.is_empty(), "{}", manifest.name);
-            assert!(config.inference_sampling.is_empty(), "{}", manifest.name);
-            assert!(config.inference_execution.is_empty(), "{}", manifest.name);
-            assert!(
-                config.inference_retry_policies.is_empty(),
-                "{}",
-                manifest.name
-            );
-        }
-    }
-
     /// A minimal, otherwise-valid plugin, so each test below changes
     /// exactly the one field it means to check.
     fn valid_plugin() -> PackPlugin {

@@ -1,15 +1,9 @@
 use super::*;
-use crate::pack::declared_paths;
 
-fn mailbox_pack() -> (Vec<u8>, PackHeader) {
-    let pack = crate::pack::resolve_pack("mailbox").expect("a bundled pack");
-    let dir = tempfile::tempdir().expect("tempdir");
-    for path in declared_paths(&pack.manifest) {
-        let target = dir.path().join(&path);
-        std::fs::create_dir_all(target.parent().expect("a parent")).expect("mkdir");
-        std::fs::write(&target, pack.asset(&path).expect("asset")).expect("write");
-    }
-    crate::pack_archive::pack_dir(dir.path()).expect("packing")
+/// A pack built from the `assets_fixture` fixture, under a coordinate and
+/// version generic import/store tests do not otherwise care about.
+fn store_test_pack() -> (Vec<u8>, PackHeader) {
+    test_pack_named("store_import_fixture", "1.0.0")
 }
 
 fn store_files(store: &PackStore) -> Vec<String> {
@@ -25,7 +19,7 @@ fn store_files(store: &PackStore) -> Vec<String> {
 fn an_imported_pack_is_stored_under_its_digest_and_reopens_verified() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (bytes, header) = mailbox_pack();
+    let (bytes, header) = store_test_pack();
 
     let stored = store
         .import(bytes.as_slice(), Some(&header.digest))
@@ -56,7 +50,7 @@ fn an_imported_pack_is_stored_under_its_digest_and_reopens_verified() {
 fn importing_the_same_pack_twice_keeps_one_file() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (bytes, header) = mailbox_pack();
+    let (bytes, header) = store_test_pack();
     store.import(bytes.as_slice(), None).unwrap();
     store
         .import(bytes.as_slice(), Some(&header.digest))
@@ -68,7 +62,7 @@ fn importing_the_same_pack_twice_keeps_one_file() {
 fn a_pack_with_another_digest_than_asked_for_is_not_stored() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (bytes, _) = mailbox_pack();
+    let (bytes, _) = store_test_pack();
     let wanted = format!("sha256:{}", "0".repeat(64));
     let error = store
         .import(bytes.as_slice(), Some(&wanted))
@@ -85,7 +79,7 @@ fn a_file_that_is_not_a_pack_is_not_stored() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
     assert!(store.import(&b"definitely not gzip"[..], None).is_err());
-    let (mut bytes, _) = mailbox_pack();
+    let (mut bytes, _) = store_test_pack();
     bytes.extend_from_slice(b"trailing");
     let error = store.import(bytes.as_slice(), None).expect_err("refused");
     assert!(
@@ -99,7 +93,7 @@ fn a_file_that_is_not_a_pack_is_not_stored() {
 fn a_stored_file_whose_content_no_longer_matches_its_name_is_refused() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (bytes, header) = mailbox_pack();
+    let (bytes, header) = store_test_pack();
     let stored = store.import(bytes.as_slice(), None).unwrap();
     let mut damaged = bytes.clone();
     let middle = damaged.len() / 2;
@@ -120,7 +114,7 @@ fn only_a_sha256_digest_names_a_stored_pack() {
 fn release_removes_the_archive_and_its_unpacked_copy() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (bytes, header) = mailbox_pack();
+    let (bytes, header) = store_test_pack();
     let stored = store.import(bytes.as_slice(), None).unwrap();
     store.open(&header.digest).unwrap();
     let unpacked = store

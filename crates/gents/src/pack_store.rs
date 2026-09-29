@@ -694,24 +694,27 @@ impl<R: Read, W: Write> Read for TeeReader<R, W> {
     }
 }
 
-/// The bundled `mailbox` pack, renamed and re-versioned, for tests that need
-/// a pack under a coordinate and version of their own choosing rather than
-/// its real one. Shared by this module's tests and [`crate::pack_resolve`]'s,
-/// so the two do not carry copies of the same fixture-building code; a fixed
-/// pack directory replaces the `resolve_pack("mailbox")` dependency here once
-/// one exists.
+/// The `assets_fixture` fixture pack, renamed and re-versioned, for tests
+/// that need a pack under a coordinate and version of their own choosing
+/// rather than its real one. Shared by this module's tests and
+/// [`crate::pack_resolve`]'s, so the two do not carry copies of the same
+/// fixture-building code.
 #[cfg(test)]
 pub(crate) fn test_pack_named(name: &str, version: &str) -> (Vec<u8>, PackHeader) {
-    let pack = crate::pack::resolve_pack("mailbox").expect("a bundled pack");
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/packs/assets_fixture");
+    let manifest: crate::pack::PackManifest =
+        serde_json::from_slice(&std::fs::read(source.join("manifest.json")).unwrap()).unwrap();
     let dir = tempfile::tempdir().expect("tempdir");
-    for path in crate::pack::declared_paths(&pack.manifest) {
+    for path in crate::pack::declared_paths(&manifest) {
         let target = dir.path().join(&path);
         std::fs::create_dir_all(target.parent().expect("a parent")).expect("mkdir");
-        std::fs::write(&target, pack.asset(&path).expect("asset")).expect("write");
+        std::fs::copy(source.join(&path), &target).expect("copy");
     }
     let manifest_path = dir.path().join("manifest.json");
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["namespace"] = serde_json::json!("gents");
     manifest["name"] = serde_json::json!(name);
     manifest["version"] = serde_json::json!(version);
     std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
