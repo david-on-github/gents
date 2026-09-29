@@ -13,6 +13,8 @@ struct CheckpointArrival {
     collection: String,
     position: String,
     source_doc_id: String,
+    /// The hydrated source document the fire was built from.
+    source_document: Option<serde_json::Value>,
     generation: u64,
 }
 
@@ -29,12 +31,15 @@ const MAX_RETRY_BACKOFF_INTERVALS: u32 = 64;
 /// exponential backoff. A refusal (`FireResult::Rejected`) is decided by the
 /// configuration and source document, so it waits for a configuration change,
 /// an update of that source document, or a restart; other triggers keep
-/// delivering meanwhile. Updates of `Trigger` documents never release a park:
-/// the fire's own runtime-field write is one.
+/// delivering meanwhile. Update notifications of `Trigger` documents never
+/// release a park: the fire's own runtime-field write is one. Notifications
+/// are lossy, so each rescan also re-reads a refused document and releases the
+/// park when its hydrated content differs from the refused fire's.
 pub(super) struct ParkedArrival {
     position: String,
     collection: String,
     source_doc_id: String,
+    source_document: Option<serde_json::Value>,
     generation: u64,
     retry_at: Option<Instant>,
     attempts: u32,
@@ -49,6 +54,35 @@ impl EventSource {
         }
         self.parked_arrivals
             .retain(|_, parked| parked.collection != collection || parked.source_doc_id != doc_id);
+    }
+}
+
+impl EventSource {
+    async fn release_changed_refusals(&mut self) {
+        let refused = self
+            .parked_arrivals
+            .iter()
+            .filter(|(_, parked)| parked.retry_at.is_none())
+            .map(|(trigger_id, parked)| {
+                (
+                    trigger_id.clone(),
+                    parked.collection.clone(),
+                    parked.source_doc_id.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (trigger_id, collection, doc_id) in refused {
+            let Ok(current) = self.fetch_source_doc(&collection, &doc_id).await else {
+                continue;
+            };
+            if self
+                .parked_arrivals
+                .get(&trigger_id)
+                .is_some_and(|parked| parked.source_document.as_ref() != Some(&current))
+            {
+                self.parked_arrivals.remove(&trigger_id);
+            }
+        }
     }
 }
 
@@ -159,6 +193,7 @@ impl EventSource {
                 position: pending.position.clone(),
                 collection: pending.collection.clone(),
                 source_doc_id: pending.source_doc_id.clone(),
+                source_document: pending.source_document.clone(),
                 generation: pending.generation,
                 retry_at,
                 attempts,
@@ -185,6 +220,7 @@ impl EventSource {
             parked.generation == snapshot.generation
                 && triggers.iter().any(|t| &t.trigger_id == trigger_id)
         });
+        self.release_changed_refusals().await;
         triggers.retain(|t| {
             self.parked_arrivals
                 .get(&t.trigger_id)
@@ -262,6 +298,7 @@ impl EventSource {
                 }
                 anyhow::bail!("source document {doc_id} could not be rendered into a fire")
             };
+            let source_document = intent.doc_vars.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
             let observe = intent.on_result;
             intent.on_result = Box::new(move |result| {
@@ -275,6 +312,7 @@ impl EventSource {
                     collection: trigger.source_collection.clone(),
                     position: position.into(),
                     source_doc_id: doc_id.into(),
+                    source_document,
                     generation: snapshot.generation,
                 },
                 result: rx,

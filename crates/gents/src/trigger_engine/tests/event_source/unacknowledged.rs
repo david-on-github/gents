@@ -264,6 +264,16 @@ async fn transient_fire_failure_retries_on_a_bounded_backoff() {
 /// repaired, without a configuration change, and delivered exactly once.
 #[tokio::test]
 async fn refused_fire_is_retried_once_when_its_source_document_is_repaired() {
+    repaired_document_is_delivered_once(false).await;
+}
+
+/// The same repair is found by the rescan when its notification is lost.
+#[tokio::test]
+async fn refused_fire_repair_is_found_without_its_notification() {
+    repaired_document_is_delivered_once(true).await;
+}
+
+async fn repaired_document_is_delivered_once(drop_notification: bool) {
     let (mut delivery, intent) = first_delivery_on(
         "type OutcomePing { message: String handoff_id: String }",
         true,
@@ -286,6 +296,9 @@ async fn refused_fire_is_retried_once_when_its_source_document_is_repaired() {
         )
         .await
         .unwrap();
+    if drop_notification {
+        delivery.source.drop_subscription();
+    }
     let node = delivery.node.clone();
     let intent = tokio::time::timeout(Duration::from_secs(5), delivery.source.next_fire())
         .await

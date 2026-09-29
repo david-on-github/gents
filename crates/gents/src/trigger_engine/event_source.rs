@@ -393,6 +393,13 @@ impl EventSource {
         v
     }
 
+    /// Lose every buffered and future notification until the source
+    /// resubscribes on its next rescan tick. Test-only.
+    #[cfg(test)]
+    pub(crate) fn drop_subscription(&mut self) {
+        self.subscription = None;
+    }
+
     #[cfg(test)]
     pub(crate) fn group_recovery_page_query_count(&self) -> usize {
         self.group_recovery_page_queries.load(Ordering::Relaxed)
