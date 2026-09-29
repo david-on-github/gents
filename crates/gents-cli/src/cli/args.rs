@@ -1051,6 +1051,12 @@ pub(crate) struct PackRunArgs {
         help = "Keep the generated home after the run (for debugging)"
     )]
     pub(crate) keep_home: bool,
+    #[arg(
+        long,
+        default_value_t = false,
+        help = "Allow a prepare-step plugin that declares standing authority (bind_dir alone needs none)"
+    )]
+    pub(crate) grant_authority: bool,
 }
 
 #[derive(clap::Args)]
