@@ -22,7 +22,7 @@ use super::write_telemetry::{
     ConflictSource, ReceiptRecovery, RetryOwner, RollbackStatus, WriteAttemptEvent,
     WriteAttemptOrdinal, WriteBackend, WriteMode, WriteOperation, WriteOutcome,
 };
-use super::{graphql_api_base, ConfigAccess};
+use super::{graphql_api_base, ConfigAccess, GraphqlEndpoint};
 
 enum TxnBackend<'a> {
     Http {
@@ -448,7 +448,7 @@ where
 }
 
 async fn begin_http_owned(
-    endpoint: String,
+    endpoint: GraphqlEndpoint,
     cancellation_rollback_scheduled: Arc<AtomicBool>,
 ) -> Result<(reqwest::Client, String, RollbackOnDrop)> {
     // Keep the response owner alive if the caller is cancelled while DefraDB
@@ -458,7 +458,7 @@ async fn begin_http_owned(
         .await
         .map_err(retry::transaction_storage_failure)?;
     let rollback = RollbackOnDrop::Http {
-        endpoint,
+        endpoint: endpoint.url().to_owned(),
         id: id.clone(),
         client: client.clone(),
         armed: true,
@@ -745,18 +745,18 @@ impl<'a> ConfigApplyTxn<'a> {
     }
 
     async fn begin_http(
-        endpoint: &'a str,
+        endpoint: &'a GraphqlEndpoint,
         cancellation_rollback_scheduled: Arc<AtomicBool>,
     ) -> Result<Self> {
         let (client, id, rollback_on_drop) = tokio::spawn(begin_http_owned(
-            endpoint.to_owned(),
+            endpoint.clone(),
             cancellation_rollback_scheduled,
         ))
         .await
         .context("begin HTTP transaction task")??;
         let txn = Self {
             backend: TxnBackend::Http {
-                endpoint,
+                endpoint: endpoint.url(),
                 id: id.clone(),
                 client: client.clone(),
             },

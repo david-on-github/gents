@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use gents::config_client::GraphqlEndpoint;
 use gents::identity::{
     load_macos_keychain_identity, load_macos_secure_enclave_identity, AgentIdentity, KeyIdentity,
 };
@@ -181,19 +182,61 @@ pub(crate) fn clear_runtime_state(home_dir: &Path) -> Result<bool> {
 pub(crate) fn resolve_graphql_endpoint(
     explicit: Option<&str>,
     home: Option<&Path>,
-) -> Result<String> {
-    if let Some(graphql) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
-        return Ok(graphql.to_string());
-    }
-
+) -> Result<GraphqlEndpoint> {
     let home_dir = resolve_home_dir(home);
-    if let Some(runtime_state) = read_runtime_state(&home_dir)? {
-        return Ok(runtime_state.graphql);
+    if let Some(graphql) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(home_graphql_endpoint(&home_dir, graphql));
     }
 
-    Ok(format!(
-        "http://127.0.0.1:{DEFAULT_HTTP_PORT}/api/v0/graphql"
+    if let Some(runtime_state) = read_runtime_state(&home_dir)? {
+        return Ok(home_graphql_endpoint(&home_dir, runtime_state.graphql));
+    }
+
+    Ok(home_graphql_endpoint(
+        &home_dir,
+        format!("http://127.0.0.1:{DEFAULT_HTTP_PORT}/api/v0/graphql"),
     ))
+}
+
+/// `url` acting as the home's principal when this process can load that
+/// principal's signing key.
+///
+/// A served home admits HTTP writes, schema changes and P2P administration
+/// only from its own principal. A home that is not initialized, or whose key
+/// cannot sign a DefraDB bearer, reaches the endpoint anonymously, which such
+/// a node limits to reads and refuses everything else with an authorization
+/// error.
+pub(crate) fn home_graphql_endpoint(home_dir: &Path, url: impl Into<String>) -> GraphqlEndpoint {
+    let url = url.into();
+    let principal = match read_init_config(home_dir) {
+        Ok(Some(config)) if !config.agent_did.trim().is_empty() => {
+            match load_initialized_home_identity(home_dir, &config) {
+                Ok(identity) if gents::identity::can_mint_defradb_bearer(identity.did()) => {
+                    Some(identity.did().to_string())
+                }
+                Ok(identity) => {
+                    tracing::warn!(
+                        did = identity.did(),
+                        "home identity cannot sign DefraDB bearers; using anonymous HTTP access"
+                    );
+                    None
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        home = %home_dir.display(),
+                        error = %format!("{error:#}"),
+                        "home identity unavailable; using anonymous HTTP access"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    };
+    match principal {
+        Some(did) => GraphqlEndpoint::as_principal(url, did),
+        None => GraphqlEndpoint::anonymous(url),
+    }
 }
 
 pub(crate) fn resolve_agent_did(home: Option<&Path>, explicit: Option<&str>) -> Result<String> {

@@ -309,7 +309,7 @@ async fn generated_interrupt_queue_events_bind_to_native_rows() {
             let (node, _dir, parent) = fixture_with_http(case, address).await;
             let access = match address {
                 Some(address) => {
-                    let access = ConfigAccess::Graphql(format!("http://{address}/api/v0/graphql"));
+                    let access = ConfigAccess::graphql(format!("http://{address}/api/v0/graphql"));
                     wait_http_ready(&access).await;
                     access
                 }
@@ -516,7 +516,7 @@ async fn generated_http_overlap_cases_preserve_cutoff() {
         let address = free_http_address();
         let (node, _dir, parent) = fixture_with_http(case, Some(address)).await;
         let endpoint = format!("http://{address}/api/v0/graphql");
-        let access = ConfigAccess::Graphql(endpoint);
+        let access = ConfigAccess::graphql(endpoint);
         wait_http_ready(&access).await;
         let mut bound = HashMap::new();
         if let Some(entry) = before_capture {

@@ -99,7 +99,7 @@ async fn configure_live_research_inference_profile(
     agent_did: &str,
     profile_id: &str,
 ) -> Result<()> {
-    let access = ConfigAccess::Graphql(graphql.to_owned());
+    let access = ConfigAccess::Graphql(crate::support::graphql::served_endpoint(&graphql));
     access
         .transact("test.web_research.inference", |txn| {
             Box::pin(async move {

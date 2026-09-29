@@ -612,14 +612,13 @@ pub(crate) async fn resolve_config_access(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Ok((ConfigAccess::Graphql(graphql.to_string()).into(), home_dir));
+        let endpoint = home_graphql_endpoint(&home_dir, graphql);
+        return Ok((ConfigAccess::Graphql(endpoint).into(), home_dir));
     }
     if let Some(runtime_state) = read_runtime_state(&home_dir)? {
         if graphql_endpoint_available(&runtime_state.graphql).await {
-            return Ok((
-                ConfigAccess::Graphql(runtime_state.graphql).into(),
-                home_dir,
-            ));
+            let endpoint = home_graphql_endpoint(&home_dir, runtime_state.graphql);
+            return Ok((ConfigAccess::Graphql(endpoint).into(), home_dir));
         }
     }
 

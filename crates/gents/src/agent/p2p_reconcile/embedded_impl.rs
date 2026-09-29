@@ -46,7 +46,12 @@ impl EmbeddedRemoteP2pAdmin {
     where
         F: Future<Output = P2PResult<T>>,
     {
-        match timeout(self.timeout, future).await {
+        match timeout(
+            self.timeout,
+            crate::identity::as_node_identity(&self.node, future),
+        )
+        .await
+        {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(error)) => Err(map_p2p_error(operation, error)),
             Err(_) => Err(RemoteP2pAdminError::RpcTimeout),
@@ -185,7 +190,10 @@ impl RemoteP2pAdmin for EmbeddedRemoteP2pAdmin {
     ) -> RemoteP2pAdminResult<()> {
         let p2p = self.p2p()?;
         let sync_timeout = timeout_override.unwrap_or(self.timeout);
-        let future = p2p.sync_documents(collection_name, doc_ids.to_vec(), Some(sync_timeout));
+        let future = crate::identity::as_node_identity(
+            &self.node,
+            p2p.sync_documents(collection_name, doc_ids.to_vec(), Some(sync_timeout)),
+        );
         match timeout(sync_timeout, future).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(map_p2p_error("sync_documents", error)),
@@ -199,7 +207,10 @@ impl RemoteP2pAdmin for EmbeddedRemoteP2pAdmin {
         timeout_override: Option<Duration>,
     ) -> RemoteP2pAdminResult<()> {
         let p2p = self.p2p()?;
-        let future = p2p.sync_collection_versions(version_ids.to_vec());
+        let future = crate::identity::as_node_identity(
+            &self.node,
+            p2p.sync_collection_versions(version_ids.to_vec()),
+        );
         match timeout(timeout_override.unwrap_or(self.timeout), future).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(map_p2p_error("sync_collection_versions", error)),
@@ -213,7 +224,10 @@ impl RemoteP2pAdmin for EmbeddedRemoteP2pAdmin {
         timeout_override: Option<Duration>,
     ) -> RemoteP2pAdminResult<()> {
         let p2p = self.p2p()?;
-        let future = p2p.sync_branchable_collection(collection_id);
+        let future = crate::identity::as_node_identity(
+            &self.node,
+            p2p.sync_branchable_collection(collection_id),
+        );
         match timeout(timeout_override.unwrap_or(self.timeout), future).await {
             Ok(Ok(())) => Ok(()),
             Ok(Err(error)) => Err(map_p2p_error("sync_branchable_collection", error)),
@@ -253,7 +267,7 @@ pub(super) async fn push_documents_to_peer(
         .collect::<Vec<_>>();
     timeout(
         DEFAULT_EMBEDDED_ADMIN_TIMEOUT,
-        p2p.push_documents_to_peer(peer_id, docs),
+        crate::identity::as_node_identity(node, p2p.push_documents_to_peer(peer_id, docs)),
     )
     .await
     .with_context(|| format!("push hydration documents to peer {peer_id} timed out"))?

@@ -1069,7 +1069,7 @@ mod provider_account_tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind temporary port");
         let address = listener.local_addr().expect("local address");
         drop(listener);
-        gents::ConfigAccess::Graphql(format!("http://{address}/api/v0/graphql"))
+        gents::ConfigAccess::graphql(format!("http://{address}/api/v0/graphql"))
     }
 
     async fn serving_node() -> std::sync::Arc<gents::defra_node::EmbeddedNode> {

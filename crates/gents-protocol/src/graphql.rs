@@ -368,19 +368,22 @@ pub async fn graphql_endpoint_available(graphql: &str, options: GraphqlRequestOp
 }
 
 /// Execute a GraphQL read. Mutation documents are rejected before network I/O.
+/// `authorization` is sent verbatim as the `Authorization` header.
 #[cfg(feature = "native")]
 pub async fn execute_graphql_async(
     graphql: &str,
+    authorization: Option<&str>,
     query: &str,
     options: GraphqlRequestOptions,
 ) -> Result<serde_json::Value> {
     ensure_query_document(query)?;
-    execute_graphql_async_with_tx(graphql, query, options, None).await
+    execute_graphql_async_with_tx(graphql, authorization, query, options, None).await
 }
 
 #[cfg(feature = "native")]
 async fn execute_graphql_async_with_tx(
     graphql: &str,
+    authorization: Option<&str>,
     query: &str,
     options: GraphqlRequestOptions,
     txn_id: Option<&str>,
@@ -395,6 +398,9 @@ async fn execute_graphql_async_with_tx(
             .json(&serde_json::json!({ "query": query }));
         if let Some(id) = txn_id {
             request = request.header("x-defradb-tx", id);
+        }
+        if let Some(authorization) = authorization {
+            request = request.header(reqwest::header::AUTHORIZATION, authorization);
         }
         let response = request.send().await;
         let response = match response {
@@ -1199,12 +1205,12 @@ mod tx_tests {
             retry_backoff: std::time::Duration::from_millis(50),
         };
 
-        execute_graphql_async_with_tx(&endpoint, "{ __typename }", options, Some("42"))
+        execute_graphql_async_with_tx(&endpoint, None, "{ __typename }", options, Some("42"))
             .await
             .unwrap();
         assert_eq!(state.last_tx_header.lock().unwrap().as_deref(), Some("42"));
 
-        execute_graphql_async_with_tx(&endpoint, "{ __typename }", options, None)
+        execute_graphql_async_with_tx(&endpoint, None, "{ __typename }", options, None)
             .await
             .unwrap();
         assert_eq!(state.last_tx_header.lock().unwrap().as_deref(), None);
@@ -1230,12 +1236,12 @@ mod tx_tests {
             max_attempts: 1,
             retry_backoff: Duration::ZERO,
         };
-        assert!(execute_graphql_async(&endpoint, "{ ok }", options)
+        assert!(execute_graphql_async(&endpoint, None, "{ ok }", options)
             .await
             .is_err());
         options.timeout = Duration::from_secs(2);
         assert_eq!(
-            execute_graphql_async(&endpoint, "{ ok }", options)
+            execute_graphql_async(&endpoint, None, "{ ok }", options)
                 .await
                 .unwrap()["data"]["ok"],
             true
@@ -1260,7 +1266,7 @@ mod tx_tests {
             retry_backoff: std::time::Duration::from_millis(1),
         };
 
-        let response = execute_graphql_async(&endpoint, "{ __typename }", options)
+        let response = execute_graphql_async(&endpoint, None, "{ __typename }", options)
             .await
             .unwrap();
 
@@ -1277,6 +1283,7 @@ mod tx_tests {
     async fn public_transport_rejects_mutations_before_network_io() {
         let error = execute_graphql_async(
             "http://127.0.0.1:1/api/v0/graphql",
+            None,
             "mutation { create_X(input: {}) { _docID } }",
             GraphqlRequestOptions::default(),
         )

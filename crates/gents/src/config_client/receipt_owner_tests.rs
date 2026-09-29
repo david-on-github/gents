@@ -112,7 +112,7 @@ const MUTATION: &str =
 async fn confirmed_receipt_recovers_without_reposting() -> Result<()> {
     let state = ScriptedWrite::new(Scenario::CommitThenAmbiguous);
     let (endpoint, server) = start_server(state.clone()).await?;
-    let access = ConfigAccess::Graphql(endpoint.clone());
+    let access = ConfigAccess::graphql(endpoint.clone());
 
     access
         .write_with_receipt("test.receipt_recovered", MUTATION, || {
@@ -130,7 +130,7 @@ async fn confirmed_receipt_recovers_without_reposting() -> Result<()> {
 async fn successful_absent_receipt_allows_one_repost() -> Result<()> {
     let state = ScriptedWrite::new(Scenario::AbsentThenCommit);
     let (endpoint, server) = start_server(state.clone()).await?;
-    let access = ConfigAccess::Graphql(endpoint.clone());
+    let access = ConfigAccess::graphql(endpoint.clone());
 
     access
         .write_with_receipt("test.receipt_absent", MUTATION, || receipt_once(&endpoint))
@@ -146,7 +146,7 @@ async fn successful_absent_receipt_allows_one_repost() -> Result<()> {
 async fn transient_receipt_read_retries_without_reposting() -> Result<()> {
     let state = ScriptedWrite::new(Scenario::ReceiptTransientThenPresent);
     let (endpoint, server) = start_server(state.clone()).await?;
-    let access = ConfigAccess::Graphql(endpoint.clone());
+    let access = ConfigAccess::graphql(endpoint.clone());
 
     access
         .write_with_receipt("test.receipt_read_retry", MUTATION, || {

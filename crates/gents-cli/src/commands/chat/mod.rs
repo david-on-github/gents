@@ -1,5 +1,6 @@
 mod streaming;
 
+use gents::config_client::GraphqlEndpoint;
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
@@ -22,11 +23,13 @@ pub(crate) async fn chat(args: ChatArgs) -> Result<()> {
     let home_dir = resolve_home_dir(args.home.as_deref());
     let runtime_state = crate::read_runtime_state(&home_dir)?;
     let init_config = crate::read_init_config(&home_dir)?;
-    let graphql = args
-        .graphql
-        .clone()
-        .or_else(|| runtime_state.as_ref().map(|state| state.graphql.clone()))
-        .unwrap_or_else(|| format!("http://127.0.0.1:{DEFAULT_HTTP_PORT}/api/v0/graphql"));
+    let graphql = crate::home_graphql_endpoint(
+        &home_dir,
+        args.graphql
+            .clone()
+            .or_else(|| runtime_state.as_ref().map(|state| state.graphql.clone()))
+            .unwrap_or_else(|| format!("http://127.0.0.1:{DEFAULT_HTTP_PORT}/api/v0/graphql")),
+    );
     let agent_did = match args
         .agent_did
         .clone()
@@ -173,7 +176,7 @@ struct GoalBackedSubmission<'a> {
 }
 
 async fn submit_chat_turn_with_goal(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     session_id: &str,
     behavior_id: Option<&str>,
@@ -221,7 +224,7 @@ async fn submit_chat_turn_with_goal(
 }
 
 async fn submit_chat_turn_json(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     session_id: &str,
     behavior_id: Option<&str>,

@@ -77,7 +77,7 @@ async fn decide_identity_access(
         ));
     }
 
-    let api_base = crate::graphql_access::graphql_api_base(&state.graphql)
+    let api_base = crate::graphql_access::graphql_api_base(state.graphql.url())
         .map_err(|error| IdentityDecideError::Internal(error.to_string()))?;
     let url = format!("{}/acp/document/decide", api_base.trim_end_matches('/'));
 

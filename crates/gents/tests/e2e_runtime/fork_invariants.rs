@@ -286,9 +286,12 @@ async fn fork_via_http_uses_same_header_contract() {
     .unwrap();
     setup(&node, "parent-http").await;
     let source = import_message(&node, "parent-http", 1, MessageRole::User, "u", true).await;
-    let outcome = fork_via_http(&endpoint, params("parent-http", 1))
-        .await
-        .unwrap();
+    let outcome = fork_via_http(
+        &gents::config_client::GraphqlEndpoint::anonymous(endpoint),
+        params("parent-http", 1),
+    )
+    .await
+    .unwrap();
     let copied = headers(&node, &outcome.session_id).await;
     assert!(
         matches!(&copied[0].message.publication, MessagePublication::Fork { origin_message_doc_id } if origin_message_doc_id == &source.header)

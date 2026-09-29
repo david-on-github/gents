@@ -470,6 +470,57 @@ async fn ready_json_without_recovery_still_fails_on_a_held_port() -> Result<()> 
     Ok(())
 }
 
+/// `gents server` turns on DefraDB node access control owned by the home's
+/// principal: anonymous HTTP writes are refused, the principal's signed
+/// writes and the CLI's P2P administration through the runtime state are
+/// admitted, and a restart of the same store keeps both.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn served_home_admits_only_its_principal_over_http() -> Result<()> {
+    let tempdir = tempfile::tempdir().context("creating tempdir")?;
+    let home_dir = tempdir.path().join("home");
+    fs::create_dir_all(&home_dir)?;
+    let model_name = format!("mock-nac-model-{}", Uuid::new_v4().simple());
+    let mock_endpoint = MockModelEndpoint::start(&model_name)?;
+    let agent_name = format!("cli-nac-{}", Uuid::new_v4().simple());
+    run_init_json(
+        &home_dir,
+        &[
+            "--agent-name",
+            &agent_name,
+            "--model-name",
+            &model_name,
+            "--inference-url",
+            mock_endpoint.endpoint(),
+        ],
+    )?;
+
+    for phase in ["first", "restarted"] {
+        let (serve, port, _) =
+            spawn_server_with_ready_json_recovering(&home_dir, allocate_port()?, &[], &[])?;
+        let graphql = graphql_url(port);
+        let mutation = format!(
+            r#"mutation {{ create_CompactionEntry(input: {{ compaction_key: "nac-{phase}", agent_did: "did:test:nac", session_id: "nac-session", sequence: 1, original_tokens: 2, compacted_tokens: 1, created_at: "2026-06-02T10:00:00Z" }}) {{ _docID }} }}"#
+        );
+        let refused = gents::config_client::ConfigAccess::graphql(graphql.clone())
+            .write("test.nac.anonymous", &mutation)
+            .await
+            .expect_err("anonymous HTTP writes must be refused");
+        assert!(
+            refused.to_string().contains("not authorized"),
+            "{phase}: unexpected refusal: {refused:#}"
+        );
+        gents::config_client::ConfigAccess::Graphql(support::graphql::served_endpoint(&graphql))
+            .write("test.nac.signed", &mutation)
+            .await
+            .with_context(|| format!("{phase}: principal-signed HTTP write"))?;
+        let replicators = run_cli_json(&home_dir, &["p2p", "admin", "replicators", "list"])
+            .with_context(|| format!("{phase}: CLI P2P administration over HTTP"))?;
+        assert_eq!(replicators["status"], "ok", "{phase}: {replicators}");
+        drop(serve);
+    }
+    Ok(())
+}
+
 #[test]
 fn port_replacement_requires_address_in_use_for_the_requested_address() {
     let addr = "127.0.0.1:20001";
@@ -798,7 +849,9 @@ async fn server_exposes_prometheus_metrics_endpoint() -> Result<()> {
     let request_doc_id = first_graphql_row(&request, "AgentRequest")?["_docID"]
         .as_str()
         .context("self-budget request physical ID")?;
-    let access = gents::config_client::ConfigAccess::Graphql(graphql.clone());
+    let access = gents::config_client::ConfigAccess::Graphql(
+        crate::support::graphql::served_endpoint(&graphql),
+    );
     let segment = OutputSegment {
         agent_did: agent_did.clone(),
         requester_did: None,
@@ -2155,7 +2208,9 @@ async fn query_command_reconstructs_a_trace() -> Result<()> {
     };
     use gents_protocol::rendered_request::{CaptureScope, CaptureScopeKind};
 
-    let access = gents::config_client::ConfigAccess::Graphql(graphql.clone());
+    let access = gents::config_client::ConfigAccess::Graphql(
+        crate::support::graphql::served_endpoint(&graphql),
+    );
     let segment = OutputSegment {
         agent_did: agent_did.clone(),
         requester_did: None,
@@ -2351,7 +2406,9 @@ async fn query_command_reconstructs_a_trace() -> Result<()> {
         "completed"
     );
     let output = gents::session::observe_request_output(
-        &gents::config_client::ConfigAccess::Graphql(graphql.clone()),
+        &gents::config_client::ConfigAccess::Graphql(crate::support::graphql::served_endpoint(
+            &graphql,
+        )),
         &request_row,
     )
     .await?;

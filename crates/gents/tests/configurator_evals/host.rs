@@ -202,6 +202,7 @@ impl Host {
             anyhow::bail!("host activation fence requires GraphQL access");
         };
         let endpoint = graphql
+            .url()
             .strip_suffix("/api/v0/graphql")
             .context("host GraphQL endpoint has unexpected path")?;
         let response = reqwest::Client::new()
@@ -571,7 +572,7 @@ impl Host {
         }
         Ok(Self {
             id,
-            access: ConfigAccess::Graphql(endpoint),
+            access: ConfigAccess::graphql(endpoint),
             evidence: evidence.into(),
             inference_endpoint,
         })
@@ -604,7 +605,7 @@ impl Host {
         let endpoint = receipt["graphql"]
             .as_str()
             .context("restart endpoint missing")?;
-        self.access = ConfigAccess::Graphql(endpoint.into());
+        self.access = ConfigAccess::graphql(endpoint);
         reporting::write_json_new(
             &self.evidence.join(format!("{stage}-restart.json")),
             &receipt,

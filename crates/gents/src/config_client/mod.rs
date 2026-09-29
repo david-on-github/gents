@@ -9,9 +9,9 @@
 //! optional `identity::Did`, and every statement executed inside that
 //! transaction carries it as the DefraDB ACP actor. Authorization remains at
 //! the node. Embedded CLI paths default to the node DID and signer. HTTP paths
-//! require bearer authentication for a caller ACP identity; without it, the
-//! server still signs committed mutations as the node but evaluates the query
-//! anonymously.
+//! authenticate as the [`GraphqlEndpoint`] principal with a DefraDB bearer; a
+//! served home's node access control admits writes only from its own
+//! principal, so anonymous HTTP access is read-only.
 //!
 //! Write conventions (load-bearing — see `AGENTS.md`):
 //! - every interpolated value goes through
@@ -91,16 +91,115 @@ use futures::future::BoxFuture;
 use gents_protocol::graphql::GraphqlRequestOptions;
 use serde_json::{json, Value};
 
+/// A served node's HTTP GraphQL endpoint and the principal its requests act
+/// as.
+///
+/// A node with node access control enabled refuses anonymous writes, schema
+/// changes and P2P administration. Requests from an endpoint with a principal
+/// carry a short-lived DefraDB bearer signed by that principal's key, which
+/// must be loaded in this process; minting fails instead of degrading to an
+/// anonymous request.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GraphqlEndpoint {
+    url: String,
+    principal_did: Option<String>,
+}
+
+impl GraphqlEndpoint {
+    pub fn anonymous(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            principal_did: None,
+        }
+    }
+
+    pub fn as_principal(url: impl Into<String>, principal_did: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            principal_did: Some(principal_did.into()),
+        }
+    }
+
+    /// **Must end with `/graphql`** — transaction begin/commit/discard derive
+    /// the REST API base by stripping that suffix.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn principal_did(&self) -> Option<&str> {
+        self.principal_did.as_deref()
+    }
+
+    /// `Authorization` header value for requests sent now, or `None` for an
+    /// anonymous endpoint.
+    pub fn authorization(&self) -> Result<Option<String>> {
+        let Some(did) = self.principal_did.as_deref() else {
+            return Ok(None);
+        };
+        let url = reqwest::Url::parse(self.url.trim())
+            .with_context(|| format!("parsing GraphQL endpoint {}", self.url))?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("GraphQL endpoint {} has no host", self.url))?;
+        // DefraDB checks the token audience against the `Host` header, which
+        // carries the port only when it is not the scheme default.
+        let audience = match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        };
+        crate::identity::defradb_bearer_authorization(did, &audience).map(Some)
+    }
+
+    /// HTTP client whose requests carry this endpoint's authorization. The
+    /// bearer is minted now, so the client serves one bounded operation.
+    pub fn http_client(&self, timeout: Option<std::time::Duration>) -> Result<reqwest::Client> {
+        let mut builder = reqwest::Client::builder();
+        if let Some(timeout) = timeout {
+            builder = builder.timeout(timeout);
+        }
+        if let Some(authorization) = self.authorization()? {
+            let mut value = reqwest::header::HeaderValue::from_str(&authorization)
+                .context("encoding DefraDB bearer header")?;
+            value.set_sensitive(true);
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::AUTHORIZATION, value);
+            builder = builder.default_headers(headers);
+        }
+        builder.build().context("building DefraDB HTTP client")
+    }
+}
+
+/// Serialized as its URL: the principal is an access decision, not output.
+impl serde::Serialize for GraphqlEndpoint {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.url)
+    }
+}
+
+impl std::fmt::Display for GraphqlEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.url)
+    }
+}
+
 pub enum ConfigAccess {
-    /// HTTP GraphQL endpoint. **Must end with `/graphql`** — transaction
-    /// begin/commit/discard derive the REST API base by stripping that suffix.
-    Graphql(String),
+    Graphql(GraphqlEndpoint),
     /// Shared so callers that already hold the node (desktop client) can
     /// construct access without moving it; `EmbeddedNode` is not `Clone`.
     Local(Arc<EmbeddedNode>),
 }
 
 impl ConfigAccess {
+    /// Anonymous HTTP access: reads only on a node with access control.
+    pub fn graphql(url: impl Into<String>) -> Self {
+        Self::Graphql(GraphqlEndpoint::anonymous(url))
+    }
+
+    /// HTTP access acting as `principal_did`, whose key must be loaded here.
+    pub fn graphql_as(url: impl Into<String>, principal_did: impl Into<String>) -> Self {
+        Self::Graphql(GraphqlEndpoint::as_principal(url, principal_did))
+    }
+
     pub fn mode(&self) -> &'static str {
         match self {
             Self::Graphql(_) => "graphql",
@@ -134,11 +233,9 @@ impl ConfigAccess {
     pub async fn add_schema(&self, sdl: &str) -> Result<()> {
         match self {
             Self::Graphql(graphql) => {
-                let api_base = graphql_api_base(graphql)?;
+                let api_base = graphql_api_base(graphql.url())?;
                 let url = format!("{api_base}/schema");
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()?;
+                let client = graphql.http_client(Some(std::time::Duration::from_secs(30)))?;
                 let response = client
                     .post(&url)
                     .header(reqwest::header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -191,11 +288,10 @@ impl ConfigAccess {
                 .transpose()
                 .context("serializing active collection version"),
             Self::Graphql(graphql) => {
-                let api_base = graphql_api_base(graphql)?;
+                let api_base = graphql_api_base(graphql.url())?;
                 let url = format!("{api_base}/collections/versions");
-                let versions: Value = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(30))
-                    .build()?
+                let versions: Value = graphql
+                    .http_client(Some(std::time::Duration::from_secs(30)))?
                     .get(&url)
                     .send()
                     .await
@@ -264,7 +360,7 @@ pub fn graphql_diagnostic_hint(graphql: &str) -> String {
     }
 }
 
-pub async fn post_graphql(graphql: &str, query: &str) -> Result<Value> {
+pub async fn post_graphql(graphql: &GraphqlEndpoint, query: &str) -> Result<Value> {
     query_graphql_with_options(
         graphql,
         query,
@@ -282,11 +378,11 @@ pub async fn post_graphql(graphql: &str, query: &str) -> Result<Value> {
 /// Mutations are rejected before network I/O so HTTP reads cannot bypass the
 /// canonical committed-write owner.
 pub async fn query_graphql_with_options(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     query: &str,
     options: GraphqlRequestOptions,
 ) -> Result<Value> {
     graphql::query_with_options(graphql, query, options)
         .await
-        .map_err(|error| anyhow::anyhow!("{error}\n{}", graphql_diagnostic_hint(graphql)))
+        .map_err(|error| anyhow::anyhow!("{error}\n{}", graphql_diagnostic_hint(graphql.url())))
 }

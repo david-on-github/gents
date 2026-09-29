@@ -18,8 +18,7 @@ use crate::cli::args::{
 };
 
 pub(crate) use output::{
-    fetch_live_http_p2p_status_with_client, flatten_p2p_fields, load_live_http_p2p_status,
-    persisted_p2p_status,
+    fetch_live_http_p2p_status, flatten_p2p_fields, load_live_http_p2p_status, persisted_p2p_status,
 };
 
 pub(crate) async fn dispatch(command: P2pCommand) -> Result<()> {
@@ -96,17 +95,13 @@ pub(crate) async fn dispatch(command: P2pCommand) -> Result<()> {
     }
 }
 
-pub(crate) fn p2p_http_client() -> Result<reqwest::Client> {
-    use std::sync::OnceLock;
-    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    Ok(CLIENT
-        .get_or_init(|| {
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .expect("building process-wide P2P HTTP client")
-        })
-        .clone())
+/// Client for one P2P administration command against `graphql`'s node,
+/// authenticated as its principal: a served home refuses anonymous P2P
+/// administration.
+pub(crate) fn p2p_http_client(
+    graphql: &gents::config_client::GraphqlEndpoint,
+) -> Result<reqwest::Client> {
+    graphql.http_client(Some(std::time::Duration::from_secs(5)))
 }
 
 pub(super) async fn p2p_probe_get(client: &reqwest::Client, url: &str) -> Value {

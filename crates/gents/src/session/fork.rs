@@ -79,11 +79,11 @@ pub async fn fork(node: &EmbeddedNode, params: ForkParams<'_>) -> Result<ForkOut
 }
 
 pub async fn fork_via_http(
-    endpoint: &str,
+    endpoint: &crate::config_client::GraphqlEndpoint,
     params: ForkParams<'_>,
 ) -> Result<ForkOutcome, ForkError> {
     let child = uuid::Uuid::new_v4().to_string();
-    ConfigAccess::Graphql(endpoint.to_owned())
+    ConfigAccess::Graphql(endpoint.clone())
         .transact("session.fork", |txn| {
             let child = child.clone();
             let params = params.clone();

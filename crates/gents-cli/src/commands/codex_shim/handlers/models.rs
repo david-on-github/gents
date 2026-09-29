@@ -411,7 +411,7 @@ async fn apply_model_to_bound_behavior(
     state: &ShimState,
     selection: &ModelSelection,
 ) -> Result<()> {
-    let access = ConfigAccess::Graphql(state.graphql.as_ref().to_string());
+    let access = ConfigAccess::Graphql(state.graphql.clone());
     apply_model_to_bound_behavior_with_access(state, selection, &access).await
 }
 

@@ -11,6 +11,7 @@
 //! silence, because triggers are created/first-seen only. `pack scenario seed` waits
 //! for `/healthz` and an enabled event-backed Trigger, then confirms a correlated
 //! AgentRequest actually fired.
+use gents::config_client::GraphqlEndpoint;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -912,7 +913,7 @@ fn validate_manifest(manifest: &ScenarioManifest) -> Result<()> {
 async fn install_bundled_graph_dependencies(
     bin: &Path,
     home: &Path,
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     inference_profile_id: &str,
     packages: &[String],
@@ -927,7 +928,7 @@ async fn install_bundled_graph_dependencies(
             "--home".to_owned(),
             path_arg(home),
             "--graphql".to_owned(),
-            graphql.to_owned(),
+            graphql.url().to_owned(),
             "--agent-did".to_owned(),
             agent_did.to_owned(),
             "--output".to_owned(),
@@ -1296,8 +1297,11 @@ struct StageResult {
 
 /// Pack assertions consume the same reconstructed payloads as trace and desktop;
 /// lifecycle documents no longer contain tool arguments or results.
-async fn canonical_stage_tool_rows(graphql: &str, request_id: &str) -> Result<Vec<Value>> {
-    let access = ConfigAccess::Graphql(graphql.to_owned());
+async fn canonical_stage_tool_rows(
+    graphql: &GraphqlEndpoint,
+    request_id: &str,
+) -> Result<Vec<Value>> {
+    let access = ConfigAccess::Graphql(graphql.clone());
     let timeline = gents::run_timeline_fetch::load_run_timeline_rows(&access, request_id).await?;
     let request_doc_id = timeline
         .request
@@ -1320,7 +1324,7 @@ async fn canonical_stage_tool_rows(graphql: &str, request_id: &str) -> Result<Ve
 }
 
 async fn verify_stage_tool_sequences(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     stage: &StageResult,
     expectations: &[StageToolSequenceExpectation],
 ) -> Result<()> {
@@ -1491,7 +1495,7 @@ struct SourceEdgeEvidence {
 }
 
 async fn verify_tool_call_expectations(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     stages: &[StageResult],
     expectations: &[ToolCallExpectation],
 ) -> Result<()> {
@@ -1578,7 +1582,7 @@ fn result_looks_failed(result: &str) -> bool {
     gents::toolset::result_looks_failed(result)
 }
 
-async fn graphql_rows(graphql: &str, field: &str, query: &str) -> Result<Vec<Value>> {
+async fn graphql_rows(graphql: &GraphqlEndpoint, field: &str, query: &str) -> Result<Vec<Value>> {
     let response = post_graphql(graphql, query).await?;
     if let Some(errors) = response.get("errors").and_then(Value::as_array) {
         if !errors.is_empty() {
@@ -1593,7 +1597,7 @@ async fn graphql_rows(graphql: &str, field: &str, query: &str) -> Result<Vec<Val
 }
 
 async fn load_result_documents(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     expected: &[ResultDocumentExpectation],
     correlation: &str,
 ) -> Result<BTreeMap<String, Vec<Value>>> {
@@ -1613,7 +1617,7 @@ async fn load_result_documents(
     Ok(documents)
 }
 
-async fn composite_commits(graphql: &str, doc_id: &str) -> Result<Vec<Value>> {
+async fn composite_commits(graphql: &GraphqlEndpoint, doc_id: &str) -> Result<Vec<Value>> {
     let query = format!(
         r#"query {{
             _commits(docID: "{}") {{
@@ -1663,7 +1667,7 @@ fn require_signed_commits(
 }
 
 async fn verify_request_fact_collection(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     stage: &StageResult,
     request_doc_id: &str,
     signer_identity: &str,
@@ -1703,7 +1707,7 @@ async fn verify_request_fact_collection(
 }
 
 async fn verify_stage_provenance(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     stage: &StageResult,
     signer_identity: &str,
     require_tool_call: bool,
@@ -1835,7 +1839,7 @@ async fn verify_stage_provenance(
         TerminalOutput::Message { message_doc_id } => {
             // Use the same exact terminal observation owner as other consumers;
             // provenance checking must not introduce its own header eligibility.
-            let access = ConfigAccess::Graphql(graphql.to_owned());
+            let access = ConfigAccess::Graphql(graphql.clone());
             let observation = gents::session::observe_request_output(&access, &request)
                 .await
                 .context("resolving the selected canonical terminal output")?;
@@ -1968,7 +1972,7 @@ fn provenance_for_stage<'a>(
 }
 
 async fn verify_source_edges(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     expected_edges: &[SourceEdgeExpectation],
     stages: &[StageResult],
     provenance: &[StageProvenance],
@@ -2098,7 +2102,7 @@ async fn verify_source_edges(
 
 async fn render_projection_artifacts(
     bin: &Path,
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     run_dir: &Path,
     stages: &[StageResult],
     projections: &[String],
@@ -2157,7 +2161,7 @@ async fn render_projection_artifacts(
 }
 
 async fn sourced_trigger_request_count(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     source: &TriggerRequestCountSource,
     correlation: &str,
 ) -> Result<Option<usize>> {
@@ -2230,7 +2234,7 @@ async fn sourced_trigger_request_count(
 }
 
 async fn verify_workspace_receipt_paths(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     expected: &WorkspaceReceiptPathExpectation,
     correlation: &str,
 ) -> Result<()> {
@@ -2335,7 +2339,7 @@ fn validate_workspace_receipt_path_rows(
 }
 
 async fn await_stages(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     trigger_ids: &[String],
     trigger_request_counts: &BTreeMap<String, usize>,
     trigger_request_count_sources: &BTreeMap<String, TriggerRequestCountSource>,
@@ -2458,7 +2462,7 @@ fn stage_requests_query(trigger_id: &str, correlation: &str) -> String {
 }
 
 /// The trigger's own `last_error`, when it recorded a failed fire.
-async fn trigger_error(graphql: &str, trigger_id: &str) -> Option<String> {
+async fn trigger_error(graphql: &GraphqlEndpoint, trigger_id: &str) -> Option<String> {
     let query = format!(
         r#"{{ Trigger(filter: {{ trigger_id: {{ _eq: "{}" }} }}) {{ last_status last_error }} }}"#,
         escape_graphql_string(trigger_id)
@@ -2477,7 +2481,7 @@ async fn trigger_error(graphql: &str, trigger_id: &str) -> Option<String> {
 }
 
 async fn verify_fan_in(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     expected: &FanInExpectation,
     correlation: &str,
     agent_did: &str,
@@ -2875,7 +2879,7 @@ async fn verify_fan_in(
     }))
 }
 
-async fn count_rows(graphql: &str, collection: &str) -> u64 {
+async fn count_rows(graphql: &GraphqlEndpoint, collection: &str) -> u64 {
     let query = format!("{{ {collection} {{ _docID }} }}");
     post_graphql(graphql, &query)
         .await
@@ -2888,7 +2892,7 @@ async fn count_rows(graphql: &str, collection: &str) -> u64 {
         .unwrap_or(0)
 }
 
-async fn token_totals(graphql: &str) -> (u64, u64) {
+async fn token_totals(graphql: &GraphqlEndpoint) -> (u64, u64) {
     let query = "{ InferenceCall { prompt_tokens completion_tokens } }";
     let Ok(resp) = post_graphql(graphql, query).await else {
         return (0, 0);
@@ -2924,7 +2928,7 @@ fn usize_field(value: &Value, pointer: &str) -> Result<usize> {
 async fn load_background_completion_evidence(
     bin: &Path,
     home: &Path,
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
 ) -> Result<BackgroundCompletionEvidence> {
     let status = run_cli_json(
@@ -3027,7 +3031,7 @@ async fn load_background_completion_evidence(
 async fn await_background_completion(
     bin: &Path,
     home: &Path,
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     expected: &BackgroundCompletionExpectation,
     deadline: Duration,
@@ -3133,7 +3137,12 @@ pub(crate) async fn seed(args: PackSeedArgs) -> Result<()> {
     let manifest = load_manifest(&pack, &distribution)?;
 
     let port = args.http_port;
-    let graphql = format!("http://127.0.0.1:{port}/api/v0/graphql");
+    // The pack node refuses anonymous writes; the seed signs as the default
+    // home's principal (`GENTS_HOME` selects another home).
+    let graphql = crate::home_graphql_endpoint(
+        &crate::resolve_home_dir(None),
+        format!("http://127.0.0.1:{port}/api/v0/graphql"),
+    );
     let healthz = format!("http://127.0.0.1:{port}/healthz");
     wait_http_ok(&healthz, Duration::from_secs(120))
         .await
@@ -3282,7 +3291,8 @@ pub(crate) async fn run(args: PackRunArgs) -> Result<()> {
     )?;
 
     let port = args.http_port;
-    let graphql = format!("http://127.0.0.1:{port}/api/v0/graphql");
+    let graphql =
+        crate::home_graphql_endpoint(&home, format!("http://127.0.0.1:{port}/api/v0/graphql"));
     let log = run_dir.join("server.log");
     let started = Instant::now();
 

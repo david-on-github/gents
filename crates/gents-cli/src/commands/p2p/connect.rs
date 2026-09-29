@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
@@ -11,11 +9,8 @@ use super::{p2p_http_client, p2p_probe_get};
 
 pub(super) async fn p2p_connect(args: P2pConnectArgs) -> Result<()> {
     let graphql = resolve_graphql_endpoint(args.graphql.as_deref(), args.home.as_deref())?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .context("building P2P connect HTTP client")?;
-    let api_base = crate::graphql_access::graphql_api_base(&graphql)?;
+    let client = super::p2p_http_client(&graphql).context("building P2P connect HTTP client")?;
+    let api_base = crate::graphql_access::graphql_api_base(graphql.url())?;
     http_post_json(
         &client,
         &format!("{api_base}/p2p/connect"),
@@ -41,8 +36,8 @@ pub(super) async fn p2p_connect(args: P2pConnectArgs) -> Result<()> {
 
 pub(super) async fn p2p_diagnose(args: P2pAccessArgs) -> Result<()> {
     let graphql = resolve_graphql_endpoint(args.graphql.as_deref(), args.home.as_deref())?;
-    let client = p2p_http_client()?;
-    let api_base = crate::graphql_access::graphql_api_base(&graphql)?;
+    let client = p2p_http_client(&graphql)?;
+    let api_base = crate::graphql_access::graphql_api_base(graphql.url())?;
     let p2p = load_live_http_p2p_status(args.home.as_deref(), &graphql).await;
     let checks = json!({
         "info": p2p_probe_get(&client, &format!("{api_base}/p2p/info")).await,

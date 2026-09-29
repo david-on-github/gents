@@ -18,8 +18,8 @@ use super::p2p_http_client;
 
 pub(super) async fn p2p_replicators_list(args: P2pAccessArgs) -> Result<()> {
     let graphql = resolve_graphql_endpoint(args.graphql.as_deref(), args.home.as_deref())?;
-    let client = p2p_http_client()?;
-    let api_base = crate::graphql_access::graphql_api_base(&graphql)?;
+    let client = p2p_http_client(&graphql)?;
+    let api_base = crate::graphql_access::graphql_api_base(graphql.url())?;
     let raw_replicators: Vec<P2pReplicatorRow> =
         crate::http_get_json(&client, &format!("{api_base}/p2p/replicators")).await?;
     let collection_names_by_id = load_collection_name_by_id(&client, &api_base).await;
@@ -41,8 +41,8 @@ pub(super) async fn p2p_replicators_add(args: P2pReplicatorAddArgs) -> Result<()
     let filters = parse_replicator_filters(&args.filters)
         .context("parsing --filter arguments for p2p admin replicators add")?;
     let graphql = resolve_graphql_endpoint(args.graphql.as_deref(), args.home.as_deref())?;
-    let client = p2p_http_client()?;
-    let api_base = crate::graphql_access::graphql_api_base(&graphql)?;
+    let client = p2p_http_client(&graphql)?;
+    let api_base = crate::graphql_access::graphql_api_base(graphql.url())?;
     // Translate the parsed PairingFilters into defradb's wire shape and forward
     // them in the request body. The node installs a filtered replicator (#1033)
     // that pushes only matching documents; an empty map requests an unfiltered
@@ -126,8 +126,8 @@ pub(super) fn parse_replicator_filters(filters: &[String]) -> Result<PairingFilt
 pub(super) async fn p2p_replicators_remove(args: P2pReplicatorRemoveArgs) -> Result<()> {
     let collections = expand_p2p_collection_args(&args.collections, &args.profiles)?;
     let graphql = resolve_graphql_endpoint(args.graphql.as_deref(), args.home.as_deref())?;
-    let client = p2p_http_client()?;
-    let api_base = crate::graphql_access::graphql_api_base(&graphql)?;
+    let client = p2p_http_client(&graphql)?;
+    let api_base = crate::graphql_access::graphql_api_base(graphql.url())?;
     let request = P2pReplicatorDeleteRequest {
         id: args.peer.clone(),
         collections: collections.clone(),

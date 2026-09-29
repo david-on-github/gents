@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use crate::cli::args::{SchemaApplyArgs, SchemaCommand};
 use crate::config_writes::ConfigAccess;
 use crate::{graphql_api_base, print_json, resolve_config_access};
+use gents::config_client::GraphqlEndpoint;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SchemaInputKind {
@@ -70,7 +71,7 @@ pub(crate) async fn schema_apply(args: SchemaApplyArgs) -> Result<()> {
     let (access, home_dir) =
         resolve_config_access(args.home.as_deref(), args.graphql.as_deref()).await?;
     let graphql = match &*access {
-        ConfigAccess::Graphql(endpoint) => Some(endpoint.clone()),
+        ConfigAccess::Graphql(endpoint) => Some(endpoint.url().to_owned()),
         ConfigAccess::Local(_) => None,
     };
 
@@ -433,9 +434,9 @@ fn filter_existing_field_adds(
     Ok((Value::Array(filtered), applied_fields, skipped_fields))
 }
 
-async fn patch_collection_http(endpoint: &str, patch: &Value) -> Result<()> {
-    let api_base = graphql_api_base(endpoint)?;
-    let client = schema_http_client()?;
+async fn patch_collection_http(endpoint: &GraphqlEndpoint, patch: &Value) -> Result<()> {
+    let api_base = graphql_api_base(endpoint.url())?;
+    let client = schema_http_client(endpoint)?;
     let url = format!("{api_base}/collections");
     let response = client
         .patch(&url)
@@ -446,9 +447,9 @@ async fn patch_collection_http(endpoint: &str, patch: &Value) -> Result<()> {
     ensure_success(response, "schema patch", &url).await
 }
 
-async fn describe_collection_http(endpoint: &str, collection: &str) -> Result<Value> {
-    let api_base = graphql_api_base(endpoint)?;
-    let client = schema_http_client()?;
+async fn describe_collection_http(endpoint: &GraphqlEndpoint, collection: &str) -> Result<Value> {
+    let api_base = graphql_api_base(endpoint.url())?;
+    let client = schema_http_client(endpoint)?;
     http_get_json(
         &client,
         &format!("{api_base}/collections/{collection}/describe"),
@@ -491,10 +492,9 @@ async fn ensure_success(response: reqwest::Response, operation: &str, url: &str)
     Ok(())
 }
 
-fn schema_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
+fn schema_http_client(endpoint: &GraphqlEndpoint) -> Result<reqwest::Client> {
+    endpoint
+        .http_client(Some(std::time::Duration::from_secs(30)))
         .context("building schema HTTP client")
 }
 

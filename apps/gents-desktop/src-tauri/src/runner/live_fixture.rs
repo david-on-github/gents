@@ -466,7 +466,7 @@ fn live_runtime() -> Result<Arc<Runtime>> {
 }
 
 async fn wait_for_operator_graphql(endpoint: &str, agent_did: &str) -> Result<()> {
-    let access = ConfigAccess::Graphql(endpoint.to_string());
+    let access = ConfigAccess::graphql(endpoint);
     let escaped_did = escape_graphql_string(agent_did);
     let query = format!(
         r#"{{ AgentPrincipal(filter: {{ agent_did: {{ _eq: "{escaped_did}" }} }}) {{ agent_did }} }}"#

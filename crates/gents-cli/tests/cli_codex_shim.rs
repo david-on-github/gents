@@ -134,7 +134,8 @@ async fn seed_backend_catalog(
         escape_graphql_string(backend_id),
         chrono::Utc::now().to_rfc3339(),
     );
-    let response = reqwest::Client::new()
+    let response = support::graphql::served_endpoint(graphql)
+        .http_client(None)?
         .post(graphql)
         .json(&json!({
             "query": query,

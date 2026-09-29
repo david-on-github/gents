@@ -178,7 +178,7 @@ impl ClientRouteManager {
             }
         };
         let endpoint = if let Some(graphql) = management_endpoint(saved) {
-            match HttpRemoteP2pAdmin::new_with_actor(graphql, Arc::clone(&self.actor)) {
+            match self.remote_admin(saved, graphql) {
                 Ok(admin) => admin
                     .peer_info()
                     .await
@@ -248,31 +248,29 @@ impl ClientRouteManager {
             enrollment_remote_route_state(enrollment_remote_applied)
         } else {
             match management_endpoint(record) {
-                Some(graphql) => {
-                    match HttpRemoteP2pAdmin::new_with_actor(graphql, Arc::clone(&self.actor)) {
-                        Ok(admin) => {
-                            self.reconcile_route(
-                                &admin.with_local_resolver(Arc::clone(&self.node)),
-                                &store,
-                                PairingDirection::RuntimeToClient,
-                                record,
-                                sync_state,
-                            )
-                            .await
-                        }
-                        Err(error) => {
-                            self.publish_unavailable_route(
-                                &store,
-                                PairingDirection::RuntimeToClient,
-                                record,
-                                sync_state,
-                                format!("invalid remote GraphQL endpoint: {error}"),
-                                true,
-                            )
-                            .await
-                        }
+                Some(graphql) => match self.remote_admin(record, graphql) {
+                    Ok(admin) => {
+                        self.reconcile_route(
+                            &admin.with_local_resolver(Arc::clone(&self.node)),
+                            &store,
+                            PairingDirection::RuntimeToClient,
+                            record,
+                            sync_state,
+                        )
+                        .await
                     }
-                }
+                    Err(error) => {
+                        self.publish_unavailable_route(
+                            &store,
+                            PairingDirection::RuntimeToClient,
+                            record,
+                            sync_state,
+                            format!("invalid remote GraphQL endpoint: {error}"),
+                            true,
+                        )
+                        .await
+                    }
+                },
                 None => {
                     self.publish_unavailable_route(
                         &store,
@@ -518,6 +516,25 @@ impl ClientRouteManager {
         Ok(())
     }
 
+    /// HTTP P2P admin for a runtime's management endpoint. A co-hosted
+    /// runtime's node access control admits its own principal only, so the
+    /// desktop signs as that principal when it can load the runtime's key;
+    /// other runtimes see the desktop's actor alone and refuse
+    /// administration.
+    fn remote_admin(
+        &self,
+        record: &PeerRecord,
+        graphql: &str,
+    ) -> gents::agent::p2p_reconcile::RemoteP2pAdminResult<HttpRemoteP2pAdmin> {
+        let admin = HttpRemoteP2pAdmin::new_with_actor(graphql, Arc::clone(&self.actor))?;
+        Ok(
+            match crate::local_runtime::load_operator_principal(record) {
+                Ok(()) => admin.with_node_principal(graphql, &record.agent_did),
+                Err(_) => admin,
+            },
+        )
+    }
+
     async fn teardown_remote(&self, record: &PeerRecord) -> Result<()> {
         if is_enrollment_peer(record) {
             // The runtime enrollment owner retracts its own return route from
@@ -547,7 +564,7 @@ impl ClientRouteManager {
             .graphql
             .as_deref()
             .context("remote GraphQL endpoint is required to teardown the return route")?;
-        let admin = HttpRemoteP2pAdmin::new_with_actor(graphql, Arc::clone(&self.actor))?;
+        let admin = self.remote_admin(record, graphql)?;
         for address in &addresses {
             teardown_owned_replicators_at_endpoint(&admin, address).await?;
         }

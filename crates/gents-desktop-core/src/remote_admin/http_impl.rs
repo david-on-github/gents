@@ -26,6 +26,9 @@ pub struct HttpRemoteP2pAdmin {
     api_base_path: String,
     client: Client,
     actor: Option<Arc<PrincipalIdentity>>,
+    /// Bearer principal for the node's access control, which admits P2P
+    /// administration only from the served home's principal.
+    node_principal: Option<gents::config_client::GraphqlEndpoint>,
     local_resolver: Option<Arc<EmbeddedNode>>,
 }
 
@@ -39,6 +42,16 @@ impl HttpRemoteP2pAdmin {
         actor: Arc<PrincipalIdentity>,
     ) -> RemoteP2pAdminResult<Self> {
         Self::new_inner(graphql_url, Some(actor))
+    }
+
+    /// Authenticate every admin request as `principal_did`, whose key must be
+    /// loaded in this process.
+    pub fn with_node_principal(mut self, graphql_url: &str, principal_did: &str) -> Self {
+        self.node_principal = Some(gents::config_client::GraphqlEndpoint::as_principal(
+            graphql_url,
+            principal_did,
+        ));
+        self
     }
 
     pub fn with_local_resolver(mut self, node: Arc<EmbeddedNode>) -> Self {
@@ -73,6 +86,7 @@ impl HttpRemoteP2pAdmin {
             api_base_path,
             client,
             actor,
+            node_principal: None,
             local_resolver: None,
         })
     }
@@ -100,6 +114,17 @@ impl HttpRemoteP2pAdmin {
                 .header(ACTOR_DID_HEADER, actor.did())
                 .header(ACTOR_SIGNATURE_HEADER, hex_encode(&signature))
                 .header(ACTOR_SIGNATURE_VERSION_HEADER, ACTOR_SIGNATURE_VERSION);
+        }
+
+        if let Some(principal) = self.node_principal.as_ref() {
+            let authorization = principal.authorization().map_err(|error| {
+                RemoteP2pAdminError::LocalError(format!(
+                    "authenticating remote admin request: {error:#}"
+                ))
+            })?;
+            if let Some(authorization) = authorization {
+                request = request.header(reqwest::header::AUTHORIZATION, authorization);
+            }
         }
 
         if let Some(body) = body {

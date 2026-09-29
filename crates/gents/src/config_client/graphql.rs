@@ -4,25 +4,24 @@ use anyhow::{Context, Result};
 use gents_protocol::graphql::{execute_graphql_async, GraphqlRequestOptions};
 use serde_json::Value;
 
-use super::graphql_api_base;
 use super::retry;
 use super::write_telemetry::ConflictSource;
+use super::{graphql_api_base, GraphqlEndpoint};
 
 const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(HTTP_TIMEOUT)
-        .build()
+fn http_client(endpoint: &GraphqlEndpoint) -> Result<reqwest::Client> {
+    endpoint
+        .http_client(Some(HTTP_TIMEOUT))
         .context("building DefraDB transaction HTTP client")
 }
 
 /// Submit an auto-commit mutation exactly once. DefraDB's HTTP handler owns
 /// conflict retry inside this request; replay after an ambiguous transport
 /// result could apply a mutation twice.
-pub(super) async fn auto_commit(endpoint: &str, mutation: &str) -> Result<Value> {
-    let response = http_client()?
-        .post(endpoint)
+pub(super) async fn auto_commit(endpoint: &GraphqlEndpoint, mutation: &str) -> Result<Value> {
+    let response = http_client(endpoint)?
+        .post(endpoint.url())
         .json(&serde_json::json!({"query": mutation}))
         .send()
         .await
@@ -41,18 +40,19 @@ pub(super) async fn auto_commit(endpoint: &str, mutation: &str) -> Result<Value>
 }
 
 pub(super) async fn query_with_options(
-    endpoint: &str,
+    endpoint: &GraphqlEndpoint,
     query: &str,
     options: GraphqlRequestOptions,
 ) -> Result<Value> {
     ensure_query_document(query)?;
-    execute_graphql_async(endpoint, query, options).await
+    let authorization = endpoint.authorization()?;
+    execute_graphql_async(endpoint.url(), authorization.as_deref(), query, options).await
 }
 
-pub(super) async fn txn_begin(endpoint: &str) -> Result<(reqwest::Client, String)> {
-    let client = http_client()?;
+pub(super) async fn txn_begin(endpoint: &GraphqlEndpoint) -> Result<(reqwest::Client, String)> {
+    let client = http_client(endpoint)?;
     let response = client
-        .post(format!("{}/tx", graphql_api_base(endpoint)?))
+        .post(format!("{}/tx", graphql_api_base(endpoint.url())?))
         .send()
         .await
         .with_context(|| format!("posting tx begin to {endpoint}"))?;
@@ -246,7 +246,7 @@ mod tests {
         let result = txn_execute(
             &endpoint,
             "same-transaction",
-            &http_client().unwrap(),
+            &http_client(&GraphqlEndpoint::anonymous(endpoint.clone())).unwrap(),
             "mutation($input: JSON) { test(input: $input) { _docID } }",
             &expected,
         )

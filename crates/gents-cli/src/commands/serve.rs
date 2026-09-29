@@ -132,7 +132,10 @@ async fn wait_for_live_behavior_readiness(
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let last_observation =
-            match crate::commands::status::load_live_behavior_readiness(graphql_url, agent_did)
+            match crate::commands::status::load_live_behavior_readiness(
+                &gents::config_client::GraphqlEndpoint::anonymous(graphql_url),
+                agent_did,
+            )
                 .await
             {
                 Ok(row) => match project_behavior_readiness_summary(row.as_ref(), agent_did, chrono::Utc::now()) {
@@ -737,7 +740,12 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
     let mut node_builder = crate::persistent_node_builder(&data_dir)?
         .with_http(defra_node::HttpConfig::with_addr(http_addr).with_extra_routes(extra_routes));
     if let Some(node_identity_did) = server_identity.node_identity_did.as_ref() {
-        node_builder = node_builder.with_node_identity_did(node_identity_did.clone());
+        // The served home's principal owns node access control, so its HTTP
+        // API admits writes, schema changes and P2P administration only from
+        // requests that principal signs.
+        node_builder = node_builder
+            .with_node_identity_did(node_identity_did.clone())
+            .with_node_acp_enabled();
     }
     if let Some(config) = p2p_config {
         node_builder = node_builder.with_p2p(config);
@@ -841,8 +849,11 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
             }
         }
 
-        let p2p_status =
-            load_local_server_p2p_status(node.as_ref(), args.p2p_transport, p2p_admission).await?;
+        let p2p_status = gents::identity::as_node_identity(
+            node.as_ref(),
+            load_local_server_p2p_status(node.as_ref(), args.p2p_transport, p2p_admission),
+        )
+        .await?;
         if let Some(p2p) = node.p2p_arc() {
             *enrollment_offer_issuer.write().await =
                 Some(crate::http::enrollment::EnrollmentOfferIssuer::new(

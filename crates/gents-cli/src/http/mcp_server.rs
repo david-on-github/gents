@@ -64,7 +64,10 @@ impl DefraQueryMcp {
             fields: args.fields,
             limit: args.limit,
         };
-        let value = run_defra_query(&self.graphql, &params, &self.scope)
+        // An unauthenticated read surface: it reads as anonymous, never as the
+        // served principal.
+        let graphql = gents::config_client::GraphqlEndpoint::anonymous(self.graphql.clone());
+        let value = run_defra_query(&graphql, &params, &self.scope)
             .await
             .map_err(|error| ErrorData::internal_error(error.to_string(), None))?;
         serde_json::to_string_pretty(&value)
