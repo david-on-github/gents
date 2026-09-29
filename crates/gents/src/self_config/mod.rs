@@ -2068,13 +2068,12 @@ impl Tool for RunGraphTool {
                 )
                 .into());
             }
-            let selected_entry = match args.entry.as_deref() {
-                Some(name) => plan.entries.iter().find(|entry| entry.name == name),
-                None => match plan.entries.as_slice() {
-                    [entry] => Some(entry),
-                    _ => None,
-                },
-            };
+            // The same selection `prepare_entry_run` makes below, so the
+            // ceiling decision can never disagree with which entry actually
+            // runs (a mismatch here would let a model-invoked run reach a
+            // `git_diff` host step with no ceiling at all).
+            let selected_entry =
+                crate::graph_package::select_entry(&plan, args.entry.as_deref()).ok();
             let requires_git_diff_ceiling = selected_entry
                 .and_then(|entry| entry.prepare.as_ref())
                 .is_some_and(|prepare| {

@@ -8,6 +8,7 @@ pub(crate) use catalog::{
     digest_assets, load_archive_graph_package_with_environment,
     load_resolved_graph_package_with_environment,
 };
+pub(crate) use entry::select_entry;
 pub(crate) use install::{install_loaded_graph_package, prepare_loaded_graph_package_install};
 
 pub use catalog::{

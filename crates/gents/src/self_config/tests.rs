@@ -592,10 +592,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
         list["graphs"][0]["active_plan"]["digest"],
         output["install"]["revision_digest"]
     );
-    // No run has been attempted here. The host-ceiling authority gate is
-    // exercised where it actually applies now: an entry whose `prepare`
-    // declares a `git_diff` host step (`entry::tests::prepare_entry_run_*`
-    // and, once `code_review` itself declares `prepare`, here again).
+    // No run has been attempted here.
     let runs = node
         .execute(&format!(
             r#"{{ GraphRun(filter: {{owner_did: {{_eq: "{}"}}}}) {{run_id}} }}"#,
@@ -803,6 +800,149 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
     assert_eq!(cancelled["cancellation_requested_by"], agent_did);
     assert_eq!(cancelled["cancellation_reason"], "test cleanup");
     assert_ne!(cancelled["status"], "succeeded");
+}
+
+/// `RunGraphTool`'s host-ceiling gate for an entry whose `prepare` declares a
+/// `git_diff` host step: refused when the current behavior has no effective
+/// read authority, and refused again once it does but the named repository
+/// escapes the effective root. Both refusals happen before any plugin runs,
+/// so the fixture's prepare plugin never needs to actually resolve, and both
+/// go through the same entry selection the run itself uses (#RunGraphTool
+/// ceiling gate).
+#[tokio::test]
+async fn run_graph_refuses_a_git_diff_prepare_without_ceiling_authority() {
+    let node = build_persona_node().await;
+    let identity = persona_identity("prepare-ceiling");
+    let agent_did = identity.did().to_string();
+    crate::test_support::install_test_behavior(&node, &agent_did, "setup").await;
+
+    let options = crate::graph_package::GraphPackageInstallBindings {
+        agent_did: agent_did.clone(),
+        inference_slots: BTreeMap::from([
+            ("coordinator".to_owned(), "setup:inference".to_owned()),
+            ("worker".to_owned(), "setup:inference".to_owned()),
+            ("verifier".to_owned(), "setup:inference".to_owned()),
+        ]),
+    };
+    let mut package = crate::test_support::load_test_graph_package("review_graph", &options);
+    package.config.graph_intents[0].entries[0].prepare =
+        Some(crate::graph_pipeline::EntryPrepare {
+            host: vec![crate::graph_pipeline::HostInput::GitDiff {
+                repository_field: "repository".to_owned(),
+                base_field: "base".to_owned(),
+                head_field: "head".to_owned(),
+                unified_context_lines: 12,
+                rename_similarity_percent: 50,
+            }],
+            plugin: "review-evidence".to_owned(),
+            digest: Some(format!("sha256:{}", "0".repeat(64))),
+            writes: vec!["CodeReviewEvidenceManifest".to_owned()],
+        });
+    let access = graph_access(&node);
+    let receipt = crate::graph_package::install_loaded_graph_package(
+        &access,
+        &agent_did,
+        &package,
+        &options,
+        None,
+        &crate::graph_package::GraphInstallRecord::default(),
+    )
+    .await
+    .expect("mutated fixture installs");
+    crate::graph_pipeline::activate_graph_revision_with_access(
+        &access,
+        &agent_did,
+        &receipt.graph_id,
+        &receipt.revision_digest,
+        None,
+    )
+    .await
+    .expect("fixture revision activates");
+
+    let mut tool_config = config(&["tools"]);
+    tool_config.behavior_id = "setup".to_owned();
+    tool_config.enable_graph_tools = true;
+
+    // No process ceiling has been granted at all: `process_ceiling` defaults
+    // to `file_mode: Off`, so effective authority is `Off` regardless of
+    // anything the behavior itself requests.
+    let tools = build_self_config_tools(
+        node.clone(),
+        agent_did.clone(),
+        Some(identity.clone()),
+        &tool_config,
+        test_plugins(),
+    );
+    let off = tools
+        .iter()
+        .find(|tool| tool.name() == RUN_GRAPH_TOOL_NAME)
+        .expect("run_graph registered")
+        .call(json!({"package": "review_graph", "input": {}}).to_string())
+        .await
+        .expect_err("a git_diff prepare step requires effective read authority");
+    assert!(
+        off.to_string()
+            .contains("requires effective read authority"),
+        "{off:#}"
+    );
+
+    // Grant a read-only process ceiling rooted at a directory that does not
+    // contain the repository the operator is about to name, and request
+    // that same root on the behavior itself (the effective root is the meet
+    // of the two).
+    let allowed_root = tempfile::tempdir().expect("allowed root");
+    let outside = tempfile::tempdir().expect("outside directory");
+    tool_config.process_ceiling = crate::tool_surface::SelfConfigProcessCeiling {
+        file_mode: crate::tool_surface::FileToolMode::ReadOnly,
+        bash_mode: crate::tool_surface::BashMode::Off,
+        root: Some(allowed_root.path().to_owned()),
+    };
+    let tools = build_self_config_tools(
+        node,
+        agent_did,
+        Some(identity),
+        &tool_config,
+        test_plugins(),
+    );
+    let call = |name: &str, args: Value| {
+        tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .unwrap_or_else(|| panic!("missing tool {name}"))
+            .call(args.to_string())
+    };
+    call(
+        CONFIG_TOOL_NAME,
+        json!({"argv": [
+            "tools", "edit", "--set",
+            format!("host={}", json!({
+                "root": allowed_root.path().to_string_lossy(),
+                "files": {"mode": "ReadOnly"}
+            }))
+        ]}),
+    )
+    .await
+    .expect("current behavior receives effective read authority");
+
+    let outside_of_ceiling = call(
+        RUN_GRAPH_TOOL_NAME,
+        json!({
+            "package": "review_graph",
+            "input": {
+                "repository": outside.path().to_string_lossy(),
+                "base": "HEAD",
+                "head": "HEAD",
+            },
+        }),
+    )
+    .await
+    .expect_err("a repository outside the effective root is refused");
+    assert!(
+        outside_of_ceiling
+            .to_string()
+            .contains("escapes operator tool root"),
+        "{outside_of_ceiling:#}"
+    );
 }
 
 #[tokio::test]
