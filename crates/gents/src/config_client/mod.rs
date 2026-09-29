@@ -179,6 +179,42 @@ impl ConfigAccess {
         }))
     }
 
+    /// The names of every collection the node has registered, sorted.
+    pub async fn collection_names(&self) -> Result<BTreeSet<String>> {
+        match self {
+            Self::Local(node) => Ok(node.list_collections()?.into_iter().collect()),
+            Self::Graphql(graphql) => {
+                let api_base = graphql_api_base(graphql)?;
+                let url = format!("{api_base}/collections/versions");
+                let versions: Value = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()?
+                    .get(&url)
+                    .send()
+                    .await
+                    .with_context(|| format!("fetching collection versions from {url}"))?
+                    .error_for_status()
+                    .with_context(|| format!("fetching collection versions from {url}"))?
+                    .json()
+                    .await
+                    .with_context(|| format!("decoding collection versions from {url}"))?;
+                Ok(versions
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|version| {
+                        version
+                            .get("IsActive")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true)
+                    })
+                    .filter_map(|version| version.get("Name").and_then(Value::as_str))
+                    .map(ToOwned::to_owned)
+                    .collect())
+            }
+        }
+    }
+
     /// Return the active DefraDB collection version so callers that own a
     /// schema contract can compare field kinds, directives, and indexes—not
     /// merely the set of field names.

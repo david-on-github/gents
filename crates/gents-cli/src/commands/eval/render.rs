@@ -4,9 +4,13 @@
 use std::io::{self, Write};
 
 use gents::eval::report::{
-    CaseView, CheckDiff, Comparison, EvalReport, SideTrial, SlotCounts, SlotScore, StageDiff,
+    CaseView, CheckDiff, Comparison, EvalReport, SideTrial, SlotClass, SlotCounts, SlotReport,
+    SlotScore, StageDiff,
 };
-use gents::eval::runner::{is_fresh, Progress, STALE_WINDOW};
+use gents::eval::runner::{
+    is_fresh, EvidenceRecord, GoalEntry, LiveSnapshot, Progress, RunView, ToolTally, SCHEMAS_GOAL,
+    STALE_WINDOW,
+};
 use gents::eval::TrialUsage;
 use gents::optimization::Decision;
 use serde::Serialize;
@@ -253,7 +257,7 @@ pub(crate) fn trial_text(view: &TrialView, out: &mut dyn Write) -> io::Result<()
     for verdict in &view.verdicts {
         writeln!(
             out,
-            "verdict {} {} {} score {} reason {}{}",
+            "verdict {} {} {} score {} reason {}{}{}",
             verdict.check,
             wire(&verdict.tier),
             verdict.kind.as_str(),
@@ -261,6 +265,10 @@ pub(crate) fn trial_text(view: &TrialView, out: &mut dyn Write) -> io::Result<()
                 .score_bp
                 .map_or_else(|| "-".to_owned(), |score| score.to_string()),
             verdict.reason_code.as_deref().unwrap_or("-"),
+            verdict
+                .detail
+                .as_ref()
+                .map_or_else(String::new, |detail| format!(": {detail}")),
             verdict
                 .regrade_of
                 .as_ref()
@@ -546,19 +554,22 @@ pub(crate) fn in_flight(
     if progress.slots.is_empty() {
         return writeln!(out, "in flight: none");
     }
-    writeln!(out, "in flight:")?;
+    writeln!(out, "in flight: {}", progress.slots.len())?;
     for (trial_id, slot) in &progress.slots {
-        let elapsed = age(&slot.started_at, now)
-            .map_or_else(|| "?".to_owned(), |seconds| format!("{seconds}s"));
+        let elapsed = age(&slot.started_at, now).map_or_else(
+            || "?".to_owned(),
+            |seconds| duration(seconds.unsigned_abs()),
+        );
         writeln!(
             out,
-            "  {} {} #{} attempt {} stage {} for {} ({trial_id}){}",
+            "  {} {} #{} attempt {} stage {} for {} ({}){}",
             slot.cell_id,
             slot.case_id,
             slot.trial_index,
             slot.attempt,
             slot.stage_id.as_deref().unwrap_or("-"),
             elapsed,
+            short_id(trial_id),
             staleness(
                 is_fresh(slot, STALE_WINDOW),
                 slot.pid,
@@ -566,8 +577,239 @@ pub(crate) fn in_flight(
                 now
             )
         )?;
+        match &slot.live {
+            Some(live) => snapshot_lines(live, &slot.goal, out)?,
+            None if !slot.goal.is_empty() => {
+                wrapped(out, "    goal", goal_items(&slot.goal, None))?;
+            }
+            None => {}
+        }
     }
     Ok(())
+}
+
+/// The finished slots of `view`, latest first, each with the snapshot its
+/// trial ended on and the detail of every verdict that counts for it.
+pub(crate) fn finished(view: &RunView, limit: usize, out: &mut dyn Write) -> io::Result<()> {
+    let mut rows: Vec<(&str, &SlotReport, Option<&EvidenceRecord>)> = view
+        .report
+        .cells
+        .iter()
+        .flat_map(|cell| {
+            cell.slots
+                .iter()
+                .map(move |slot| (cell.cell_id.as_str(), slot))
+        })
+        .filter(|(_, slot)| {
+            !matches!(slot.class, SlotClass::Planned | SlotClass::Abandoned)
+                && slot.latest.is_some()
+        })
+        .map(|(cell_id, slot)| {
+            let record = slot
+                .latest
+                .as_ref()
+                .and_then(|latest| view.trials.get(&latest.trial_id));
+            (cell_id, slot, record)
+        })
+        .collect();
+    if rows.is_empty() {
+        return writeln!(out, "finished: none");
+    }
+    rows.sort_by(|left, right| {
+        let ended =
+            |record: Option<&EvidenceRecord>| record.and_then(|record| record.ended_at.clone());
+        ended(right.2).cmp(&ended(left.2))
+    });
+    let total = rows.len();
+    if total > limit {
+        writeln!(out, "finished: {total} (latest {limit} shown)")?;
+    } else {
+        writeln!(out, "finished: {total}")?;
+    }
+    for (cell_id, slot, record) in rows.into_iter().take(limit) {
+        let latest = slot
+            .latest
+            .as_ref()
+            .expect("filtered to slots with an attempt");
+        let ended = record
+            .and_then(|record| record.ended_at.as_deref())
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map_or_else(String::new, |at| {
+                format!(" ended {}", at.format("%H:%M:%S"))
+            });
+        writeln!(
+            out,
+            "  {cell_id} {} #{} attempt {} {} {}{ended} ({})",
+            slot.case_id,
+            slot.trial_index,
+            latest.attempt,
+            wire(&slot.class),
+            percent(slot.score_bp),
+            short_id(&latest.trial_id)
+        )?;
+        match record.and_then(|record| record.live.as_ref()) {
+            Some(live) => snapshot_lines(live, &record.map_or(&[][..], |r| &r.goal), out)?,
+            None => writeln!(out, "    tokens {}", tokens(&latest.usage))?,
+        }
+        for verdict in &slot.verdicts {
+            writeln!(
+                out,
+                "    {}/{} {}: {}({})",
+                verdict.stage_id,
+                verdict.check,
+                verdict.kind.as_str(),
+                verdict
+                    .detail
+                    .as_ref()
+                    .map_or_else(String::new, |detail| format!("{detail} ")),
+                verdict.reason_code.as_deref().unwrap_or("-"),
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// How many of a snapshot's tools are named.
+const TOP_TOOLS: usize = 5;
+
+/// The width the watch wraps its lists to.
+const WIDTH: usize = 118;
+
+/// A snapshot's usage, its tool calls and its documents against `goal`.
+fn snapshot_lines(live: &LiveSnapshot, goal: &[GoalEntry], out: &mut dyn Write) -> io::Result<()> {
+    writeln!(
+        out,
+        "    {} tokens {}/{} requests {} turns {} tools {} ok {} failed",
+        duration(live.elapsed_secs),
+        compact(live.input_tokens),
+        compact(live.output_tokens),
+        live.requests,
+        live.model_turns,
+        live.tool_calls.saturating_sub(live.failed_tool_calls),
+        live.failed_tool_calls
+    )?;
+    let mut tools: Vec<(&String, &ToolTally)> = live.tools.iter().collect();
+    tools.sort_by(|left, right| right.1.calls.cmp(&left.1.calls).then(left.0.cmp(right.0)));
+    if !tools.is_empty() {
+        let mut items: Vec<String> = tools
+            .iter()
+            .take(TOP_TOOLS)
+            .map(|(name, tally)| match tally.failed {
+                0 => format!("{name} {}", tally.calls),
+                failed => format!("{name} {} ({failed} failed)", tally.calls),
+            })
+            .collect();
+        if tools.len() > TOP_TOOLS {
+            items.push(format!("+{} more", tools.len() - TOP_TOOLS));
+        }
+        wrapped(out, "    top tools", items)?;
+    }
+    if let Some(last) = &live.last_tool {
+        let state = if last.failed() {
+            "failed"
+        } else {
+            last.state.as_deref().unwrap_or("-")
+        };
+        let line = format!(
+            "    last tool {} {state}: {}",
+            last.tool_name,
+            last.result.as_deref().unwrap_or("")
+        );
+        let line = match line.char_indices().nth(WIDTH) {
+            Some((at, _)) => format!("{}…", &line[..at]),
+            None => line,
+        };
+        writeln!(out, "{line}")?;
+    }
+    if !goal.is_empty() {
+        wrapped(out, "    goal", goal_items(goal, Some(live)))?;
+    }
+    let in_goal = |collection: &str| goal.iter().any(|entry| entry.collection == collection);
+    let others: Vec<String> = live
+        .documents
+        .iter()
+        .filter(|(collection, _)| !in_goal(collection))
+        .map(|(collection, rows)| format!("{collection} {rows}"))
+        .chain(
+            (!goal.iter().any(|entry| entry.collection == SCHEMAS_GOAL))
+                .then(|| format!("{SCHEMAS_GOAL} {}", live.schemas.len())),
+        )
+        .collect();
+    wrapped(out, "    docs", others)
+}
+
+/// `Collection observed/expected` for each goal entry; a met entry is
+/// marked, and a capture that counts a filtered subset names itself.
+fn goal_items(goal: &[GoalEntry], live: Option<&LiveSnapshot>) -> Vec<String> {
+    goal.iter()
+        .map(|entry| {
+            let observed = live.and_then(|live| entry.observed(live));
+            let name = match &entry.capture {
+                Some(capture)
+                    if goal
+                        .iter()
+                        .filter(|other| other.collection == entry.collection)
+                        .count()
+                        > 1 =>
+                {
+                    format!("{}[{capture}]", entry.collection)
+                }
+                _ => entry.collection.clone(),
+            };
+            let met = observed.is_some_and(|observed| entry.met(observed));
+            format!(
+                "{name} {}{}",
+                entry.label(observed),
+                if met { " ✓" } else { "" }
+            )
+        })
+        .collect()
+}
+
+/// `label item  item  item`, wrapped under the label at [`WIDTH`] columns.
+fn wrapped(out: &mut dyn Write, label: &str, items: Vec<String>) -> io::Result<()> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let indent = " ".repeat(label.chars().count());
+    let mut line = label.to_owned();
+    let mut first = true;
+    for item in items {
+        let separator = if first { " " } else { "  " };
+        if !first && line.chars().count() + separator.len() + item.chars().count() > WIDTH {
+            writeln!(out, "{line}")?;
+            line = format!("{indent} {item}");
+        } else {
+            line.push_str(separator);
+            line.push_str(&item);
+        }
+        first = false;
+    }
+    writeln!(out, "{line}")
+}
+
+/// `9999`, `812.3k`, `1.24M`, or `-` when unknown.
+fn compact(value: Option<u64>) -> String {
+    match value {
+        None => "-".to_owned(),
+        Some(value @ 0..=9_999) => value.to_string(),
+        Some(value @ 10_000..=999_999) => format!("{:.1}k", value as f64 / 1_000.0),
+        Some(value) => format!("{:.2}M", value as f64 / 1_000_000.0),
+    }
+}
+
+/// `95s`, `4m12s`, `1h03m`.
+fn duration(seconds: u64) -> String {
+    match seconds {
+        0..=99 => format!("{seconds}s"),
+        100..=3599 => format!("{}m{:02}s", seconds / 60, seconds % 60),
+        _ => format!("{}h{:02}m", seconds / 3600, seconds % 3600 / 60),
+    }
+}
+
+/// Enough of a trial id to tell slots apart on one line.
+fn short_id(trial_id: &str) -> &str {
+    trial_id.get(..12).unwrap_or(trial_id)
 }
 
 #[cfg(test)]

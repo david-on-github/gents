@@ -135,6 +135,7 @@ pub(crate) async fn execute(
             watch::watch(
                 &ctx.runs_dir(),
                 &args,
+                None,
                 || async { Ok(watch::Documents::Open(ctx)) },
                 out,
             )
@@ -163,38 +164,68 @@ async fn cancel_without_context(args: &crate::cli::EvalRunIdArgs) -> Result<()> 
 }
 
 /// `gents eval watch` from argv. The process hosting the run may hold the
-/// home's embedded node; then the watch reads `progress.json` alone and
-/// tries the node again at each render. Only the store's lock degrades it:
-/// any other failure to open the home fails the command.
+/// home's embedded node; then the watch reads the files the runner leaves
+/// and tries the node again only once no live process holds the run. Only
+/// the store's lock degrades it: any other failure to open the home fails
+/// the command.
+///
+/// On a terminal, and without `--once` or `--json`, each frame is redrawn in
+/// place with the cursor hidden; the cursor is restored however the watch
+/// ends, Ctrl-C included.
 async fn watch_while_held(args: &crate::cli::EvalWatchArgs) -> Result<()> {
+    use std::io::IsTerminal;
+
     let stdout = std::io::stdout();
+    let screen = (stdout.is_terminal() && !args.once && !args.json).then(watch::frame_screen);
     let mut out = stdout.lock();
-    match EvalContext::resolve(&args.scope).await {
-        Ok(ctx) => {
-            watch::watch(
-                &ctx.runs_dir(),
-                args,
-                || async { Ok(watch::Documents::Open(&ctx)) },
-                &mut out,
-            )
-            .await
-        }
-        Err(error) if watch::store_locked(&error) => {
-            tracing::warn!(
-                error = %format!("{error:#}"),
-                "the home's node is held by another process; eval watch shows in-flight slots until it can read the report"
-            );
-            let home_dir = crate::home_state::resolve_home_dir(args.scope.home.as_deref());
-            watch::watch(
-                &runs_dir(&home_dir),
-                args,
-                || watch::reopen(|| EvalContext::resolve(&args.scope)),
-                &mut out,
-            )
-            .await
-        }
-        Err(error) => Err(error),
+    if screen.is_some() {
+        write!(out, "{}\x1b[2J", frame::HIDE_CURSOR)?;
     }
+    let watched = async {
+        match EvalContext::resolve(&args.scope).await {
+            Ok(ctx) => {
+                watch::watch(
+                    &ctx.runs_dir(),
+                    args,
+                    screen,
+                    || async { Ok(watch::Documents::Open(&ctx)) },
+                    &mut out,
+                )
+                .await
+            }
+            Err(error) if watch::store_locked(&error) => {
+                // Expected while a run is live: its runner holds the node,
+                // and the watch reads the files it leaves instead.
+                tracing::debug!(
+                    error = %format!("{error:#}"),
+                    "node held, reading runner files"
+                );
+                let home_dir = crate::home_state::resolve_home_dir(args.scope.home.as_deref());
+                watch::watch(
+                    &runs_dir(&home_dir),
+                    args,
+                    screen,
+                    || watch::reopen(|| EvalContext::resolve(&args.scope)),
+                    &mut out,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        }
+    };
+    let result = if screen.is_some() {
+        tokio::select! {
+            result = watched => result,
+            _ = tokio::signal::ctrl_c() => Ok(()),
+        }
+    } else {
+        watched.await
+    };
+    if screen.is_some() {
+        write!(out, "{}", frame::SHOW_CURSOR)?;
+        out.flush()?;
+    }
+    result
 }
 
 /// A token Ctrl-C cancels. The loop then stops launching, leaves in-flight
@@ -337,6 +368,7 @@ pub(crate) fn load_policy(arg: &crate::cli::PolicyArg) -> Result<gents::optimiza
 
 mod checks;
 mod compare;
+mod frame;
 pub(crate) mod init;
 mod inspect;
 pub(crate) mod manage;

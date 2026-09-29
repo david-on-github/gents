@@ -10,11 +10,13 @@
 pub mod embedded;
 pub mod executor;
 pub mod freeze;
+pub mod goal;
 pub mod grade;
 pub mod plan;
 pub mod progress;
 pub mod record;
 pub mod scripted;
+pub mod view;
 
 pub use executor::{
     Capture, CaptureResult, FileRef, FixtureDocument, FixtureFile, InferenceBinding, Isolation,
@@ -24,16 +26,22 @@ pub use freeze::{
     freeze, freeze_refused, read_frozen_definition, CellRequest, CellSource, FreezeRefused,
     FrozenCell, FrozenRun, RunRequest, DEFINITION_FILE,
 };
+pub use goal::{case_goal, GoalEntry, SCHEMAS_GOAL};
 pub use grade::{grade, VerdictRow};
 pub use plan::{
     abandonment_bounded_slots, completion_is_not_evidence, not_evidence_slots, plan, trial_id_for,
     PlannedTrial, MAX_ABANDONED_ATTEMPTS,
 };
 pub use progress::{
-    host_alive, is_fresh, read_progress, Holder, InFlight, Progress, StageProgress, PROGRESS_FILE,
+    host_alive, is_fresh, read_progress, Holder, InFlight, LastToolCall, LiveSnapshot, Progress,
+    StageProgress, ToolTally, PROGRESS_FILE,
 };
 pub use record::{DocumentRecorder, Recorder};
 pub use scripted::{ScriptKey, ScriptedExecutor};
+pub use view::{
+    read_evidence_record, read_run_view, run_view, EvidenceRecord, RunView, EVIDENCE_FILE,
+    REPORT_FILE,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -51,7 +59,7 @@ use crate::eval::checks::CheckRegistry;
 use crate::eval::runner::freeze::thaw;
 use crate::eval::runner::progress::ProgressWriter;
 use crate::eval::{
-    Anchor, OutcomeKind, RunRecord, StageCompletion, TrialCompletion, TrialIdentity, TrialRecord,
+    OutcomeKind, RunRecord, StageCompletion, TrialCompletion, TrialIdentity, TrialRecord,
     VerdictDraft,
 };
 
@@ -353,6 +361,8 @@ pub(crate) async fn execute_frozen(
     // The file is rewritten at most this often, however fast the marker
     // timer runs.
     let heartbeat_gap = marker_poll(options).max(Duration::from_millis(250));
+    let views = ViewWriter::default();
+    views.refresh(frozen, recorder).await;
 
     loop {
         progress.heartbeat(heartbeat_gap);
@@ -375,7 +385,7 @@ pub(crate) async fn execute_frozen(
         {
             let mut running = futures::stream::iter(planned.iter().map(|slot| {
                 execute_trial(
-                    frozen, slot, recorder, executor, registry, &cancel, &stop, &progress,
+                    frozen, slot, recorder, executor, registry, &cancel, &stop, &progress, &views,
                 )
             }))
             .buffer_unordered(concurrency);
@@ -519,6 +529,7 @@ pub(crate) async fn execute_frozen(
             outcome.cancelled = true;
         }
     }
+    views.refresh(frozen, recorder).await;
     tracing::info!(
         run_id,
         completed = outcome.completed,
@@ -561,6 +572,7 @@ async fn execute_trial(
     cancel: &CancellationToken,
     stop: &AtomicBool,
     progress: &Arc<ProgressWriter>,
+    views: &ViewWriter,
 ) -> Result<Slot> {
     if stop.load(Ordering::Relaxed) || cancel_requested(&frozen.run_dir, cancel) {
         return Ok(Slot::Skipped);
@@ -579,6 +591,7 @@ async fn execute_trial(
         .find(|cell| cell.spec.cell_id == planned.cell_id)
         .with_context(|| format!("run {run_id} froze no cell {:?}", planned.cell_id))?;
     let mut spec = trial_spec(frozen, planned, case, cell, executor.wants_script_key())?;
+    let goal = case_goal(case, &frozen.captures);
 
     let locator = executor.provision(&spec).await;
     let identity = TrialIdentity {
@@ -612,7 +625,19 @@ async fn execute_trial(
             // Stamped by `slot_started`.
             pid: 0,
             written_at: String::new(),
+            live: None,
+            goal: goal.clone(),
         },
+    );
+    tracing::info!(
+        run_id,
+        trial_id = %planned.trial_id,
+        cell = %planned.cell_id,
+        case = %planned.case_id,
+        trial_index = planned.trial_index,
+        attempt = planned.attempt,
+        agent_did = %locator.trial_agent_did,
+        "trial started"
     );
     // Removes the entry however this trial leaves: completed, abandoned, or
     // an error writing its rows.
@@ -655,7 +680,17 @@ async fn execute_trial(
     recorder
         .complete_trial(owner, &planned.trial_id, &completion)
         .await?;
-    write_evidence_sidecar(&spec.trial_dir, &evidence);
+    write_evidence_sidecar(
+        &spec.trial_dir,
+        EvidenceRecord {
+            evidence_digest: evidence.evidence_digest.clone(),
+            anchor: evidence.anchor.clone(),
+            ended_at: Some(completion.ended_at.clone()),
+            live: progress.live_of(&planned.trial_id),
+            goal,
+        },
+    );
+    views.refresh(frozen, recorder).await;
     Ok(Slot::Completed {
         attempt: planned.attempt,
         not_evidence,
@@ -674,41 +709,61 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
-/// `<run dir>/trials/<trial_id>/evidence.json`: the trial's evidence digest
-/// and the anchor it covers.
+/// Record the trial's [`EvidenceRecord`] beside its retained home.
 ///
-/// `TrialCompletion` has no field for the digest, and widening it is an M1
-/// amendment this milestone does not make, so the runner keeps it beside the
-/// retained home instead — the same directory the trial's own home lives in.
-/// It is a record, not an input: nothing the loop decides reads it back, so a
-/// write that fails is reported and the trial still counts. A spec with no
-/// home directory (the scripted executor's) has nowhere to put it.
-fn write_evidence_sidecar(trial_dir: &Path, evidence: &TrialEvidence) {
-    #[derive(serde::Serialize)]
-    struct EvidenceSidecar<'a> {
-        evidence_digest: &'a str,
-        anchor: &'a Anchor,
-    }
-
+/// It is a record, not an input: nothing the loop decides reads it back, so
+/// a write that fails is reported and the trial still counts. A spec with no
+/// home directory has nowhere to put it.
+fn write_evidence_sidecar(trial_dir: &Path, record: EvidenceRecord) {
     if trial_dir.as_os_str().is_empty() {
         return;
     }
-    let path = trial_dir.join("evidence.json");
-    let written = serde_json::to_vec_pretty(&EvidenceSidecar {
-        evidence_digest: &evidence.evidence_digest,
-        anchor: &evidence.anchor,
-    })
-    .context("encoding the trial evidence record")
-    .and_then(|bytes| {
-        std::fs::create_dir_all(trial_dir)
-            .and_then(|()| std::fs::write(&path, bytes))
-            .with_context(|| format!("writing {}", path.display()))
-    });
-    if let Err(error) = written {
+    if let Err(error) = view::write_evidence_record(trial_dir, &record) {
         tracing::warn!(
             error = %format!("{error:#}"),
             "eval trial evidence digest was not recorded beside its home"
         );
+    }
+}
+
+/// Rewrites `<run dir>/report.json` for watchers, one refresh at a time, so
+/// a trial that finishes later never has its view replaced by an older one.
+#[derive(Default)]
+struct ViewWriter(tokio::sync::Mutex<()>);
+
+impl ViewWriter {
+    /// Derive the run's report through the recorder and write the
+    /// [`RunView`]. Advisory: a report that cannot be built, or a write that
+    /// fails, is logged and the run goes on.
+    async fn refresh(&self, frozen: &FrozenRun, recorder: &dyn Recorder) {
+        let _one = self.0.lock().await;
+        let run_id = frozen.record.run_id.as_str();
+        // `run_dir` is `<runs dir>/<run id>`.
+        let runs_dir = frozen.run_dir.parent().unwrap_or(&frozen.run_dir);
+        let report = match recorder
+            .report(&frozen.record.owner, runs_dir, run_id)
+            .await
+        {
+            Ok(Some(report)) => report,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::debug!(
+                    run_id,
+                    error = %format!("{error:#}"),
+                    "eval run report was not derived for watchers"
+                );
+                return;
+            }
+        };
+        if let Err(error) =
+            view::write_run_view(&frozen.run_dir, &run_view(report, &frozen.run_dir))
+        {
+            tracing::warn!(
+                run_id,
+                error = %format!("{error:#}"),
+                "eval run report was not written for watchers"
+            );
+        }
     }
 }
 
@@ -2887,6 +2942,144 @@ mod tests {
         }
     }
 
+    /// Reports one snapshot, reads it back out of `progress.json` while the
+    /// trial is still in flight, then reports the snapshot it ends on.
+    struct ReportsLive {
+        run_dir: PathBuf,
+        seen: Mutex<Option<InFlight>>,
+    }
+
+    fn snapshot(requests: u64) -> LiveSnapshot {
+        LiveSnapshot {
+            observed_at: "2026-09-29T00:00:00Z".into(),
+            elapsed_secs: requests * 10,
+            requests,
+            model_turns: 4 * requests,
+            input_tokens: Some(1_200 * requests),
+            output_tokens: Some(300 * requests),
+            tool_calls: 3,
+            failed_tool_calls: 1,
+            tools: std::collections::BTreeMap::from([(
+                "config".to_owned(),
+                ToolTally {
+                    calls: 3,
+                    failed: 1,
+                },
+            )]),
+            documents: std::collections::BTreeMap::from([("Finding".to_owned(), requests)]),
+            captures: std::collections::BTreeMap::from([("findings".to_owned(), requests)]),
+            schemas: vec!["Finding".into()],
+            last_tool: None,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TrialExecutor for ReportsLive {
+        fn isolation(&self) -> Isolation {
+            Isolation::Embedded
+        }
+
+        async fn provision(&self, _spec: &TrialSpec) -> TrialLocator {
+            TrialLocator {
+                trial_agent_did: "did:key:trial".into(),
+                session_id: "session".into(),
+                home_hint: None,
+            }
+        }
+
+        async fn execute(&self, spec: &TrialSpec, _cancel: CancellationToken) -> TrialEvidence {
+            assert!(spec.progress.attached(), "the loop watches every trial");
+            spec.progress.live(snapshot(1));
+            *self.seen.lock().unwrap() = read_progress(&self.run_dir)
+                .and_then(|progress| progress.slots.values().next().cloned());
+            spec.progress.live(snapshot(2));
+            passed()
+        }
+
+        async fn recollect(
+            &self,
+            _at: &TrialLocator,
+            _captures: &[Capture],
+        ) -> Option<TrialEvidence> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn a_slots_live_snapshot_is_in_progress_and_its_last_is_kept_with_its_evidence() {
+        let (launching, pack) = launching("captured_rows_count").await;
+        let mut request = request(&launching, &pack, "run-live");
+        one_slot(&mut request);
+        request.captures = vec![Capture::Documents {
+            name: "findings".into(),
+            collection: "Finding".into(),
+            filter: json!({}),
+            fields: Vec::new(),
+        }];
+        let run_dir = launching.runs_dir().join("run-live");
+        let executor = ReportsLive {
+            run_dir: run_dir.clone(),
+            seen: Mutex::new(None),
+        };
+        run(
+            &launching.access,
+            &request,
+            &executor,
+            &CheckRegistry::builtin(),
+            CancellationToken::new(),
+            &options(),
+        )
+        .await
+        .unwrap();
+
+        let goal = vec![GoalEntry {
+            collection: "Finding".into(),
+            capture: Some("findings".into()),
+            min: 1,
+            max: None,
+        }];
+        let in_flight = executor.seen.lock().unwrap().clone().expect("in flight");
+        assert_eq!(in_flight.live, Some(snapshot(1)));
+        assert_eq!(
+            in_flight.goal, goal,
+            "derived from the case's row-count check"
+        );
+
+        let trials = load_trials(&launching.access, OWNER, "run-live")
+            .await
+            .unwrap();
+        let trial_id = &trials[0].identity.trial_id;
+        let record = read_evidence_record(&run_dir.join("trials").join(trial_id))
+            .expect("an evidence record");
+        assert_eq!(record.live, Some(snapshot(2)), "the last snapshot reported");
+        assert_eq!(record.goal, goal);
+        assert!(record.ended_at.is_some());
+
+        // The run's view for watchers: the report the documents derive, with
+        // each slot's evidence record and each verdict's detail.
+        let view = read_run_view(&run_dir).expect("report.json");
+        assert_eq!(view.pid, std::process::id());
+        assert_eq!(view.trials.get(trial_id), Some(&record));
+        let slot = &view.report.cells[0].slots[0];
+        assert_eq!(slot.class, crate::eval::report::SlotClass::Pass);
+        assert_eq!(
+            slot.verdicts[0].detail.as_deref(),
+            Some("findings observed 1 expected ≥1")
+        );
+        assert_eq!(
+            view.report,
+            crate::eval::report::load_report(
+                &launching.access,
+                OWNER,
+                &launching.runs_dir(),
+                "run-live"
+            )
+            .await
+            .unwrap(),
+            "the file is the report the node derives"
+        );
+    }
+
     /// Signals when the loop begins a backoff between passes: the event the
     /// loop logs as it starts the wait carries a `backoff` field.
     struct BackoffBegan(Arc<tokio::sync::Notify>);
@@ -3058,6 +3251,8 @@ mod tests {
                 started_at: String::new(),
                 pid: 0,
                 written_at: String::new(),
+                live: None,
+                goal: Vec::new(),
             },
         );
         assert!(running_elsewhere(&frozen.run_dir));

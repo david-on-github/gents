@@ -236,6 +236,7 @@ mod tests {
                         .collect(),
                 })
                 .collect(),
+            goal: Default::default(),
         }
     }
 

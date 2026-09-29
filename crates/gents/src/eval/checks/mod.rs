@@ -119,6 +119,42 @@ impl Default for CheckRegistry {
     }
 }
 
+/// A verdict's observed and expected values in one line, read from its
+/// `raw`: `items observed 7 expected ≥9` for a counted verdict,
+/// `2 of 3 requirements met` for a graded one, else the check's own
+/// `detail`, cut short. `None` when `raw` carries none of them.
+pub fn verdict_detail(raw: &Value) -> Option<String> {
+    let number = |key: &str| raw.get(key).and_then(Value::as_u64);
+    if let (Some(observed), Some(expected)) = (number("observed"), raw.get("expected")) {
+        let min = expected.get("min").and_then(Value::as_u64).unwrap_or(0);
+        let max = expected.get("max").and_then(Value::as_u64);
+        let subject = raw
+            .get("capture")
+            .and_then(Value::as_str)
+            .map_or_else(String::new, |capture| format!("{capture} "));
+        return Some(format!(
+            "{subject}observed {observed} expected {}",
+            range_label(min, max)
+        ));
+    }
+    if let (Some(satisfied), Some(total)) = (number("satisfied"), number("total")) {
+        return Some(format!("{satisfied} of {total} requirements met"));
+    }
+    raw.get("detail")
+        .and_then(Value::as_str)
+        .map(|detail| excerpt(detail, EXCERPT_CHARS))
+}
+
+/// A row range for a person: `≥9`, `3`, `≤4` or `2..5`.
+pub fn range_label(min: u64, max: Option<u64>) -> String {
+    match max {
+        None => format!("≥{min}"),
+        Some(max) if max == min => max.to_string(),
+        Some(max) if min == 0 => format!("≤{max}"),
+        Some(max) => format!("{min}..{max}"),
+    }
+}
+
 /// The longest excerpt of evidence a check quotes, in chars.
 const EXCERPT_CHARS: usize = 120;
 
@@ -248,6 +284,38 @@ mod tests {
             ("captured_rows_count", "2")
         );
         assert!(registry.get("no_such_check").is_none());
+    }
+
+    #[test]
+    fn a_verdict_detail_names_what_was_observed_against_what_was_expected() {
+        let counted = json!({
+            "reason_code": "below_min", "capture": "behaviors", "observed": 7,
+            "expected": {"min": 9, "max": null}, "count": 7
+        });
+        assert_eq!(
+            verdict_detail(&counted).as_deref(),
+            Some("behaviors observed 7 expected ≥9")
+        );
+        let graded = json!({"reason_code": "unmet", "satisfied": 2, "total": 3});
+        assert_eq!(
+            verdict_detail(&graded).as_deref(),
+            Some("2 of 3 requirements met")
+        );
+        let older = json!({"reason_code": "below_min", "detail": "items holds 1 rows"});
+        assert_eq!(
+            verdict_detail(&older).as_deref(),
+            Some("items holds 1 rows")
+        );
+        assert_eq!(verdict_detail(&json!({"reason_code": "met"})), None);
+        assert_eq!(
+            [
+                range_label(9, None),
+                range_label(3, Some(3)),
+                range_label(0, Some(4)),
+                range_label(2, Some(5))
+            ],
+            ["≥9", "3", "≤4", "2..5"]
+        );
     }
 
     #[test]
