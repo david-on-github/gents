@@ -95,7 +95,13 @@ theorem admitHooks_unique_ids {hs admitted : List TaskHook}
 
 /-- Result of one external command attempt. `interrupted` means the attempt
 was cancelled or its outcome is unknown (e.g. after a crash); it is terminal
-and is reported, never retried or blindly replayed. -/
+and is reported, never retried or blindly replayed. An ordinary-phase command
+cancelled because its execution lost request ownership (a revocation such as
+LatestOnly supersession) is `interrupted` too: the owner that revoked it has
+written the terminal, which stands, and cleanup still runs. A command refused
+before launch for a reason that cannot change (an unrepresentable timeout) is
+`launchFailed` and counts as attempted, so recovery never selects it again;
+only a command shutdown kept from launching stays unattempted. -/
 inductive CommandResult where | exited (code : Int) | launchFailed | timedOut | interrupted
   deriving DecidableEq, Repr
 /-- Conservative mapping onto observed managed-process states, only where the
