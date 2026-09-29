@@ -103,6 +103,10 @@ def admissionCases : List AdmissionCase :=
     , hooks := [{ before "prepare" with command := [] }], expectedAdmitted := false }
   , { name := "zero_timeout_rejected"
     , hooks := [before "prepare" (some 0)], expectedAdmitted := false }
+  , { name := "maximum_timeout_admitted"
+    , hooks := [before "prepare" (some 86400)], expectedAdmitted := true }
+  , { name := "timeout_above_maximum_rejected"
+    , hooks := [before "prepare" (some 86401)], expectedAdmitted := false }
   , { name := "negative_timeout_rejected"
     , hooks := [before "prepare" (some (-1))], expectedAdmitted := false }
   , { name := "duplicate_id_same_phase_rejected"

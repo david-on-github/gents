@@ -7,7 +7,8 @@ namespace TaskHooks
 /-! # Task hook-phase semantics (spec PR #1430)
 Executable model: phases `before`, `afterSuccess`, `afterFailure`, `finally`
 around one agent execution. Literal argv hooks, optional positive timeout
-(default 120); nonpositive/negative timeouts (`Option Int`) are rejected at
+(default 120, at most `maxHookTimeoutSecs`); nonpositive, negative and
+over-maximum timeouts (`Option Int`) are rejected at
 admission, as are empty argv and duplicate occurrence IDs, before any hook or
 agent step. Ordinary phases stop at their first error; `runFinally` attempts every cleanup hook and records each attempt, so
 cleanup errors are secondary while the primary error (hook id, agent, or
@@ -30,27 +31,47 @@ structure TaskHook where
   timeoutSecs : Option Int := none
   deriving DecidableEq, Repr
 def defaultHookTimeoutSecs : Nat := 120
+/-- Largest admitted explicit timeout (one day). Admission bounds the timeout
+from above so every admitted hook has a deadline the host can represent; the
+executor then never refuses a hook at launch for its timeout. -/
+def maxHookTimeoutSecs : Nat := 86400
 /-- Effective timeout: configured value, else the 120s executor default. -/
 def TaskHook.effectiveTimeout (h : TaskHook) : Nat :=
   match h.timeoutSecs with | none => defaultHookTimeoutSecs | some t => t.toNat
-/-- A command must contain an executable and its explicit timeout must be positive. -/
+/-- A command must contain an executable and its explicit timeout must be
+positive and at most `maxHookTimeoutSecs`. -/
 def hookAdmitted (h : TaskHook) : Bool :=
   !h.command.isEmpty &&
-    (ConfigDefaults.resolveNat defaultHookTimeoutSecs 1 h.timeoutSecs).isSome
+    (ConfigDefaults.resolveNat defaultHookTimeoutSecs 1 h.timeoutSecs).isSome &&
+    h.timeoutSecs.all (fun (t : Int) => decide (t ≤ (maxHookTimeoutSecs : Int)))
 theorem default_timeout_admitted (h : TaskHook) (hnone : h.timeoutSecs = none)
     (hc : h.command ≠ []) : hookAdmitted h = true := by
   simp [hookAdmitted, ConfigDefaults.resolveNat_positive, hnone, hc]
 theorem explicit_timeout_valid (h : TaskHook) (t : Int)
-    (hsome : h.timeoutSecs = some t) (ht : 0 < t) (hc : h.command ≠ []) :
-    hookAdmitted h = true := by
-  simp [hookAdmitted, ConfigDefaults.resolveNat_positive, hsome, hc, ht]
+    (hsome : h.timeoutSecs = some t) (ht : 0 < t) (hmax : t ≤ maxHookTimeoutSecs)
+    (hc : h.command ≠ []) : hookAdmitted h = true := by
+  simp [hookAdmitted, ConfigDefaults.resolveNat_positive, hsome, hc, ht, hmax]
+theorem explicit_timeout_above_maximum_rejected (h : TaskHook) (t : Int)
+    (hsome : h.timeoutSecs = some t) (ht : (maxHookTimeoutSecs : Int) < t) :
+    hookAdmitted h = false := by
+  simp [hookAdmitted, hsome, show ¬ (t ≤ maxHookTimeoutSecs) by omega]
+theorem admitted_timeout_bounded (h : TaskHook) (ha : hookAdmitted h = true) :
+    h.effectiveTimeout ≤ maxHookTimeoutSecs := by
+  cases ht : h.timeoutSecs with
+  | none => simp [TaskHook.effectiveTimeout, ht, defaultHookTimeoutSecs, maxHookTimeoutSecs]
+  | some t =>
+    have hle : t ≤ maxHookTimeoutSecs := by
+      simp only [hookAdmitted, ht, Option.all, Bool.and_eq_true, decide_eq_true_eq] at ha
+      exact ha.2
+    simp only [TaskHook.effectiveTimeout, ht]
+    omega
 theorem explicit_timeout_nonpositive_rejected (h : TaskHook) (t : Int)
     (hsome : h.timeoutSecs = some t) (ht : t ≤ 0) : hookAdmitted h = false := by
   simp [hookAdmitted, ConfigDefaults.resolveNat_positive, hsome, show ¬ (0 < t) by omega]
 theorem admitted_command_nonempty (h : TaskHook) (ha : hookAdmitted h = true) :
     h.command ≠ [] := by
   simp only [hookAdmitted, ConfigDefaults.resolveNat_positive, Bool.and_eq_true] at ha
-  simpa using ha.1
+  simpa using ha.1.1
 
 theorem admitted_timeout_positive (h : TaskHook) (ha : hookAdmitted h = true) :
     0 < h.effectiveTimeout := by
@@ -99,7 +120,8 @@ and is reported, never retried or blindly replayed. An ordinary-phase command
 cancelled because its execution lost request ownership (a revocation such as
 LatestOnly supersession) is `interrupted` too: the owner that revoked it has
 written the terminal, which stands, and cleanup still runs. A command refused
-before launch for a reason that cannot change (an unrepresentable timeout) is
+before launch for a reason that cannot change (recovery found its root no
+longer admitted) is
 `launchFailed` and counts as attempted, so recovery never selects it again;
 only a command shutdown kept from launching stays unattempted. -/
 inductive CommandResult where | exited (code : Int) | launchFailed | timedOut | interrupted
