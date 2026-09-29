@@ -498,7 +498,10 @@ def runContentStream (surface : Surface) (events : List StreamEvent) :
 /-- Anthropic assistant continuation must replay each reconstructed signed or
 redacted reasoning part unchanged and in order. These are native payload bytes,
 not display text. Generic encrypted/summary parts are not Anthropic signatures
-and cannot be relabeled as such. A missing signature is not synthesized. -/
+and cannot be relabeled as such. A missing signature is not synthesized.
+External premise: Anthropic rejects a tool-use continuation whose thinking
+blocks are reordered, altered, or dropped, so they keep their stream position
+before the `tool_use` blocks they precede. -/
 inductive ReplayBlock where
   | text (payload : List UInt8)
   | signedThinking (payload : List UInt8) (signature : String)

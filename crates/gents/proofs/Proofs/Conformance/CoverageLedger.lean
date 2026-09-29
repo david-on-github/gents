@@ -1580,6 +1580,12 @@ def caseCoverage : List CoverageEntry :=
       "prompt-assembly" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "prompt_assembly_cases"
+      "PromptAssemblyClaudeReplayCases"
+      "agent::loop_stream::tests::claude_messages_redacted_and_signed_tool_round_trip_through_owned_loop"
+      "Drives only the ordered-signed-redacted-tool case through the owned loop: its replay blocks become turn-1 SSE (thinking and signature as deltas, redacted data at block start) and the turn-2 capture must equal the modeled replay. The persisted canonical grouping of streamed reasoning is not modeled, so it is not compared to the case's blocks. Other replay cases and the thinking-stream family remain unbound through the owned loop.")
+      "prompt-assembly" [Surface.runtimeInternal]
+  , tagged (consumerWithFollowUp
+      "prompt_assembly_cases"
       "PromptAssemblyReasoningSuffixCases"
       "conformance::prompt_assembly::generated_reasoning_suffix_cases_bind_native_selection"
       "Binds native two-phase selection (provenance suffix, stage assembly, turn location and capture-derived admissible suffix) over the model's row cases and every step of the replay scenarios (compaction, repair, strip-and-retry, tool and issuer changes, interruption, restart, Claude signatures and redaction, Responses ciphertext). Native flattening of real provider bodies is bound by gents-loop replay_frontier tests, not by these cases.")
