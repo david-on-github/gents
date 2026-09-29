@@ -157,6 +157,9 @@ describe("mailbox question", () => {
       option_ids: ["claude"],
       free_text: null,
     });
+    // a sent answer may wait behind the asking turn; it cannot be sent twice
+    expect(await screen.findByText("Answer sent to the agent.")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "Claude" })).toBeNull();
   });
 
   it("toggles several choices and sends them with an Other note", () => {

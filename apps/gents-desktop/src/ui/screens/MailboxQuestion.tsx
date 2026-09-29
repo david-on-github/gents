@@ -86,10 +86,14 @@ export function QuestionAnswer({
   const [selected, setSelected] = useState<string[]>([]);
   const [other, setOther] = useState("");
   const [sending, setSending] = useState(false);
+  /* a sent answer may wait behind the asking turn while the item stays
+     open; only a failed send offers the controls again */
+  const [sent, setSent] = useState(false);
   const send = async (answer: MailboxQuestionAnswer) => {
     setSending(true);
     try {
       await onAnswer(answer);
+      setSent(true);
     } catch (error) {
       toast(`Couldn't send the answer: ${String(error)}`);
     } finally {
@@ -113,6 +117,14 @@ export function QuestionAnswer({
     );
   };
   const canSend = selected.length > 0 || note !== null;
+  if (sent) {
+    return (
+      <div className="mt-3 max-w-prose" data-testid="mailbox-question">
+        <p className="text-sm text-foreground">{question.prompt}</p>
+        <p className="mt-2 text-xs text-muted-foreground">Answer sent to the agent.</p>
+      </div>
+    );
+  }
   return (
     <div className="mt-3 max-w-prose" data-testid="mailbox-question">
       <p className="text-sm text-foreground">{question.prompt}</p>
