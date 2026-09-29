@@ -51,12 +51,22 @@ pub async fn send_chat_message(
         .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     let store = core.store().snapshot();
+    let mut input = gents_protocol::request_input::RequestInput::default();
     if let Some(turn_state) = store.derive_turn_for_agent(&session_id, &agent_did) {
         if !turn_state.is_terminal() {
-            bail!(
-                "cannot send while current turn is {}",
-                turn_state_label(turn_state)
-            );
+            // An answer never waits for the asking turn: like a queued user
+            // turn, it is ordered behind the active request, which the
+            // runtime claims first; the reply claim then consumes the item.
+            let active = store
+                .latest_request_id_for_session_for_agent(&session_id, &agent_did)
+                .filter(|_| request.answer.is_some());
+            let Some(active) = active else {
+                bail!(
+                    "cannot send while current turn is {}",
+                    turn_state_label(turn_state)
+                );
+            };
+            input.queue = Some(queued_user_turn(active));
         }
     }
 
@@ -68,6 +78,7 @@ pub async fn send_chat_message(
             behavior_id.as_deref(),
             SubmitRequestOptions {
                 caused_by_source_doc_id: request.caused_by_source_doc_id,
+                input,
                 ..SubmitRequestOptions::default()
             },
         )
@@ -79,6 +90,18 @@ pub async fn send_chat_message(
         agent_did: submitted.agent_did,
         behavior_id: submitted.behavior_id,
     })
+}
+
+fn queued_user_turn(active_request_id: String) -> gents_protocol::request_input::RequestQueue {
+    use gents_protocol::request_input::{QueuePolicy, QueueSource, RequestQueue};
+    RequestQueue {
+        source: QueueSource::User,
+        policy: QueuePolicy::Append,
+        key: None,
+        queued_after_request_id: Some(active_request_id),
+        interrupted_request_id: None,
+        background_completion_wake_version: None,
+    }
 }
 
 pub async fn rename_session(core: &ClientCore, request: SessionRenameRequest) -> Result<()> {
