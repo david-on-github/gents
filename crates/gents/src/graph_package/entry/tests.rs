@@ -350,6 +350,72 @@ async fn prepare_entry_run_refuses_a_document_outside_declared_writes() {
     );
 }
 
+/// The batched aliased-mutation path (D4 step 7): more than
+/// [`PREPARE_DOCUMENTS_BATCH_LIMIT`] documents forces the count-based split
+/// into multiple batches, and one oversized document forces a byte-based
+/// split mid-batch (and must still land, alone, in its own batch rather than
+/// being silently dropped). Every document must survive with its exact
+/// fields, and none may be dropped, duplicated, or truncated.
+#[tokio::test]
+async fn persist_prepared_documents_batches_and_never_drops_a_document() {
+    let node = defra_node::EmbeddedNode::builder().build().await.unwrap();
+    node.add_schema("type FixtureEvidence { note: String }")
+        .await
+        .unwrap();
+    let access = ConfigAccess::Local(std::sync::Arc::new(node));
+
+    let mut documents: Vec<PreparePluginDocument> = (0..70)
+        .map(|i| PreparePluginDocument {
+            collection: "FixtureEvidence".to_owned(),
+            fields: json!({"note": format!("doc-{i:03}")}),
+        })
+        .collect();
+    let oversized_note = "z".repeat(PREPARE_DOCUMENTS_BATCH_BYTES + 1);
+    // Inserted mid-list (not first in its would-be batch), so this document
+    // alone tripping the byte budget forces an early batch break rather than
+    // only ever being exercised as a batch's first, always-admitted alias.
+    documents.insert(
+        40,
+        PreparePluginDocument {
+            collection: "FixtureEvidence".to_owned(),
+            fields: json!({"note": oversized_note.clone()}),
+        },
+    );
+    assert!(
+        documents.len() > 2 * PREPARE_DOCUMENTS_BATCH_LIMIT,
+        "the count-based split must be exercised more than once"
+    );
+
+    persist_prepared_documents(&access, &documents)
+        .await
+        .unwrap();
+
+    let response = access
+        .execute("{ FixtureEvidence { note } }")
+        .await
+        .unwrap();
+    let mut notes: Vec<String> = response["data"]["FixtureEvidence"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["note"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        notes.len(),
+        documents.len(),
+        "every document must persist exactly once"
+    );
+    assert!(
+        notes.contains(&oversized_note),
+        "the oversized document must not be dropped or truncated"
+    );
+    notes.retain(|note| note != &oversized_note);
+    let mut expected: Vec<String> = (0..70).map(|i| format!("doc-{i:03}")).collect();
+    notes.sort();
+    expected.sort();
+    assert_eq!(notes, expected, "every small document must survive intact");
+}
+
 /// Fixed facts the golden generator and the legacy/plugin equivalence
 /// test both pin, so the recorded fixtures are reproducible and the two
 /// implementations are compared over identical inputs.
@@ -389,14 +455,46 @@ fn golden_cases() -> Vec<GoldenCase> {
         });
     }
 
-    // 2. a multibyte UTF-8 sequence straddling chunk boundaries.
+    // 2. a multibyte UTF-8 character positioned so its encoding straddles
+    // byte 1800 of the assembled evidence packet (summary + patch, at the
+    // golden settings unified=12/renames=50): the exact prefix length before
+    // the patch content depends on git's own diff-header formatting, so this
+    // searches for the ASCII padding that lands the straddle there instead
+    // of hand-computing it, and fails loud if none of the tried paddings do.
     {
         let directory = init_repo();
         let repo = directory.path();
-        std::fs::write(repo.join("multibyte.txt"), "é日".repeat(50)).unwrap();
+        std::fs::write(repo.join("multibyte.txt"), "seed\n").unwrap();
         let base = commit(repo, "base");
-        std::fs::write(repo.join("multibyte.txt"), "é日".repeat(500)).unwrap();
-        let head = commit(repo, "head");
+        let mut head = String::new();
+        let mut straddles = false;
+        for pad in 0..64 {
+            let content = format!(
+                "{}{}{}",
+                "a".repeat(200 + pad),
+                "日".repeat(3),
+                "é日".repeat(500)
+            );
+            std::fs::write(repo.join("multibyte.txt"), &content).unwrap();
+            git_output(repo, &["add", "-A"]).unwrap();
+            if pad == 0 {
+                git_output(repo, &["commit", "--quiet", "-m", "head"]).unwrap();
+            } else {
+                git_output(repo, &["commit", "--amend", "--quiet", "-m", "head"]).unwrap();
+            }
+            head = git_output(repo, &["rev-parse", "HEAD"]).unwrap();
+            let facts = collect_git_diff(repo, &base, &head, 12, 50, None).unwrap();
+            let evidence = code_review_evidence(repo, &facts.base_sha, &facts.head_sha).unwrap();
+            let packet: String = evidence.chunks.concat();
+            if packet.len() > 1800 && !packet.is_char_boundary(1800) {
+                straddles = true;
+                break;
+            }
+        }
+        assert!(
+            straddles,
+            "could not construct an evidence packet whose byte 1800 straddles a multibyte character"
+        );
         cases.push(GoldenCase {
             name: "multibyte-boundary",
             repo: directory,
@@ -486,6 +584,20 @@ fn legacy_evidence_goldens() {
         let repo = case.repo.path();
         let facts = collect_git_diff(repo, &case.base, &case.head, 12, 50, None).unwrap();
         let evidence = code_review_evidence(repo, &facts.base_sha, &facts.head_sha).unwrap();
+        if case.name == "multibyte-boundary" {
+            // The case construction already searched for this property;
+            // re-check it here so the golden generator itself, not only the
+            // search that built the repo, would fail loud if it regressed.
+            let packet: String = evidence.chunks.concat();
+            assert!(
+                !packet.is_char_boundary(1800),
+                "golden case 2 must straddle byte 1800 of the evidence packet"
+            );
+            assert!(
+                evidence.chunks[0].len() < EVIDENCE_CHUNK_MAX_BYTES,
+                "chunk_0 must back off before the multibyte boundary"
+            );
+        }
         let manifest = json!({
             "evidence_id": GOLDEN_NONCE,
             "format_version": "1",
@@ -500,35 +612,33 @@ fn legacy_evidence_goldens() {
             evidence.byte_count,
             &evidence.chunks,
         );
-        let mut documents = vec![manifest];
-        documents.extend(pages);
+        let mut documents = vec![PreparePluginDocument {
+            collection: "CodeReviewEvidenceManifest".to_owned(),
+            fields: manifest,
+        }];
+        documents.extend(pages.into_iter().map(|fields| PreparePluginDocument {
+            collection: "CodeReviewEvidencePage".to_owned(),
+            fields,
+        }));
 
-        let plugin_input = json!({
-            "input": {
+        let plugin_input = prepare_stdin(
+            json!({
                 "repository": facts.repository.to_string_lossy(),
                 "base": facts.base_sha,
                 "head": facts.head_sha,
                 "focus": GOLDEN_FOCUS,
-            },
-            "nonce": GOLDEN_NONCE,
-            "host": {
-                "git_diff": {
-                    "repository": facts.repository.to_string_lossy(),
-                    "base_sha": facts.base_sha,
-                    "head_sha": facts.head_sha,
-                    "name_status": facts.name_status,
-                    "stat": facts.stat,
-                    "patch": facts.patch,
-                },
-                "workspace": {
-                    "workspace_id": GOLDEN_WORKSPACE_ID,
-                    "owner_agent_did": GOLDEN_WORKSPACE_OWNER,
-                    "authority": "readOnly",
-                },
-            },
-        });
-        let expect = json!({
-            "input": {
+            }),
+            GOLDEN_NONCE,
+            json!({
+                "git_diff": git_diff_host_json(&facts),
+                "workspace": read_only_workspace_host_json(
+                    GOLDEN_WORKSPACE_ID,
+                    GOLDEN_WORKSPACE_OWNER,
+                ),
+            }),
+        );
+        let expect = PreparePluginOutput {
+            input: json!({
                 "repository_path": ".",
                 "base_ref": facts.base_sha,
                 "head_ref": facts.head_sha,
@@ -543,8 +653,17 @@ fn legacy_evidence_goldens() {
                 "evidence_summary": evidence.summary,
                 "evidence_chunk_count": evidence.chunks.len().to_string(),
                 "focus": GOLDEN_FOCUS,
-            },
-            "documents": documents,
+            }),
+            documents,
+        };
+        let expect = serde_json::to_value(&expect).unwrap();
+        // The runtime contract, proven directly: a golden a real plugin can
+        // satisfy also parses as what `prepare_entry_run` deserializes.
+        serde_json::from_value::<PreparePluginOutput>(expect.clone()).unwrap_or_else(|error| {
+            panic!(
+                "{}: golden expect must parse as PreparePluginOutput: {error}",
+                case.name
+            )
         });
         let golden = json!({"input": plugin_input, "expect": expect});
         let path = out_dir.join(format!("{:02}-{}.json", index + 1, case.name));
