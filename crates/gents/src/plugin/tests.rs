@@ -242,10 +242,10 @@ fn a_non_zero_exit_is_a_failure_even_with_json_stdout() {
     );
 }
 
-/// Rule 5: a plugin that loops forever is bounded by fuel, and the
-/// exhaustion is its own verdict, not a generic failure.
+/// Rule 5: a plugin that loops forever is bounded by an explicit fuel
+/// ceiling, and the exhaustion is its own verdict, not a generic failure.
 #[test]
-fn an_infinite_loop_exhausts_its_fuel_budget() {
+fn an_infinite_loop_exhausts_an_explicit_fuel_ceiling() {
     let wat_source = r#"
           (module
             (func (export "_start")
@@ -256,7 +256,7 @@ fn an_infinite_loop_exhausts_its_fuel_budget() {
     let runner = PluginRunner::compile(&afb, &plugin).expect("compiles");
 
     let budget = PluginBudget {
-        fuel: 10_000,
+        fuel: Some(10_000),
         ..PluginBudget::default()
     };
     let outcome = runner
@@ -265,7 +265,62 @@ fn an_infinite_loop_exhausts_its_fuel_budget() {
     assert_eq!(outcome.verdict, PluginVerdict::OutOfFuel);
     assert_eq!(
         outcome.fuel_used, 10_000,
-        "exhaustion means the whole budget was spent"
+        "exhaustion means the whole ceiling was spent"
+    );
+    assert!(
+        outcome.diagnostics.contains("fuel budget"),
+        "a ceiling the caller set is a budget it exhausted: {}",
+        outcome.diagnostics
+    );
+}
+
+/// The default budget sets no fuel ceiling at all: a guest that burns far
+/// more than Afterburner's own 100-million-instruction family default
+/// still completes, bounded only by the wall clock. This is the regression
+/// that matters: a real plugin (a source-scanning pre-pass) measured at
+/// roughly 166 fuel per byte plus a 25 million fixed cost needs on the
+/// order of 6.5 billion fuel for a 39 MB input, which the old fixed
+/// default failed well under a megabyte in.
+#[test]
+fn the_default_budget_has_no_fuel_ceiling_so_a_guest_over_100_million_instructions_still_runs() {
+    let wat_source = r#"
+          (module
+            (import "wasi_snapshot_preview1" "fd_write"
+              (func $fd_write (param i32 i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 0) "{}")
+            (func (export "_start")
+              (local $i i32)
+              (local.set $i (i32.const 100000000))
+              (loop $spin
+                (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+                (br_if $spin (i32.gt_s (local.get $i) (i32.const 0))))
+              i32.const 16  i32.const 0  i32.store
+              i32.const 20  i32.const 2  i32.store
+              i32.const 1
+              i32.const 16
+              i32.const 1
+              i32.const 24
+              call $fd_write
+              drop))
+        "#;
+    let (plugin, afb) = build_plugin_pack("unlimited_fuel_pack", wat_source, None);
+    let runner = PluginRunner::compile(&afb, &plugin).expect("compiles");
+
+    assert_eq!(
+        PluginBudget::default().fuel,
+        None,
+        "the default has no ceiling"
+    );
+    let outcome = runner
+        .call(&serde_json::json!({}), &PluginBudget::default())
+        .expect("call succeeds");
+    assert_eq!(outcome.verdict, PluginVerdict::Success, "{outcome:?}");
+    assert_eq!(outcome.output, serde_json::json!({}));
+    assert!(
+        outcome.fuel_used > 100_000_000,
+        "the loop alone spends more than the old fixed default: {}",
+        outcome.fuel_used
     );
 }
 
@@ -287,10 +342,38 @@ fn a_slow_plugin_is_stopped_by_its_wall_clock_budget() {
     let runner = PluginRunner::compile(&afb, &plugin).expect("compiles");
 
     let budget = PluginBudget {
-        fuel: 5_000_000_000,
+        fuel: Some(5_000_000_000),
         memory_bytes: PluginBudget::default().memory_bytes,
         wall_clock: std::time::Duration::from_millis(30),
     };
+    let outcome = runner
+        .call(&serde_json::json!({}), &budget)
+        .expect("call reports a timeout, not a hard error");
+    assert_eq!(outcome.verdict, PluginVerdict::Timeout);
+}
+
+/// The same bound, with no fuel ceiling at all: the wall clock is the only
+/// backstop an unlimited-fuel budget has against a guest that never
+/// returns, and it must still fire.
+#[test]
+fn a_slow_plugin_is_stopped_by_its_wall_clock_budget_even_with_unlimited_fuel() {
+    let wat_source = r#"
+          (module
+            (func (export "_start")
+              (loop $forever
+                br $forever)))
+        "#;
+    let (plugin, afb) = build_plugin_pack("timeout_unlimited_fuel_pack", wat_source, None);
+    let runner = PluginRunner::compile(&afb, &plugin).expect("compiles");
+
+    let budget = PluginBudget {
+        wall_clock: std::time::Duration::from_millis(30),
+        ..PluginBudget::default()
+    };
+    assert_eq!(
+        budget.fuel, None,
+        "no ceiling: only the wall clock bounds this call"
+    );
     let outcome = runner
         .call(&serde_json::json!({}), &budget)
         .expect("call reports a timeout, not a hard error");
@@ -457,11 +540,10 @@ fn a_ruby_source_plugin_is_refused_at_admission_not_silently_run() {
 ///
 /// This is the other half of admitting Python. Admission says the bounds
 /// are enforceable; this says the default ones are survivable. Handing a
-/// Pyodide-backed plugin `PluginBudget::default()` fails twice over before
-/// its first line: CPython's linear memory will not instantiate under 64
-/// MiB, and booting it costs orders of magnitude more than 100 million
-/// instructions. Both were observed against a real compiled bundle, in
-/// that order, as a trap and then as an exhausted fuel budget.
+/// Pyodide-backed plugin `PluginBudget::default()` used to fail before its
+/// first line: CPython's linear memory will not instantiate under 64 MiB.
+/// The default no longer carries a fuel ceiling at all, so only the memory
+/// floor and the wall clock need raising.
 #[test]
 fn a_default_budget_is_raised_to_what_the_artifact_needs_to_start() {
     let wasi = source_only_afb("rs_plugin", "rust", "source/main.rs", b"fn main() {}");
@@ -482,11 +564,9 @@ fn a_default_budget_is_raised_to_what_the_artifact_needs_to_start() {
         budget.memory_bytes,
         floor.memory_bytes
     );
-    assert!(
-        budget.fuel > floor.fuel,
-        "the plugin needs fuel of its own after the runtime has booted: {} <= {}",
-        budget.fuel,
-        floor.fuel
+    assert_eq!(
+        budget.fuel, None,
+        "the default has no ceiling, so python's startup cost never needs raising against one"
     );
     assert!(
         budget.wall_clock > PluginBudget::default().wall_clock,
