@@ -229,6 +229,31 @@ impl PackStore {
         }
     }
 
+    /// Removes the stored archive for `digest` and its unpacked copy, if
+    /// either is present. Idempotent: releasing a digest already gone, or
+    /// never stored, is not an error. Returns whether anything was removed.
+    pub fn release(&self, digest: &str) -> Result<bool> {
+        let hex = digest_hex(digest)?;
+        let archive = self.path(digest)?;
+        let unpacked = self.unpacked_root().join(hex);
+        let mut released = false;
+        match std::fs::remove_file(&archive) {
+            Ok(()) => released = true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("removing {}", archive.display()))
+            }
+        }
+        match std::fs::remove_dir_all(&unpacked) {
+            Ok(()) => released = true,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("removing {}", unpacked.display()))
+            }
+        }
+        Ok(released)
+    }
+
     /// Verifies the stored pack `digest` without holding its assets.
     pub fn verify(&self, digest: &str) -> Result<PackHeader> {
         let path = self.path(digest)?;

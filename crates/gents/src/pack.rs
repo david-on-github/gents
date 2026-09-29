@@ -4,19 +4,24 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod home_install;
 mod inference;
 mod installation;
 pub mod interpolate;
 mod loader;
 mod provenance;
+pub use home_install::{
+    forget_home_install, list_home_installs, read_home_install, write_home_install, HomePackInstall,
+};
 pub use inference::{
     bind_pack_install_config, inspect_pack_inference_bindings, install_pack_documents,
     preview_pack_inference_bindings, PackInferenceBindingPreview, PackInferenceProfileOption,
 };
 pub use installation::{
-    list_installed_packs, remove_pack, DriftPolicy, InstallReport, InstalledPack,
-    InstalledPackPlugin, PackIdentity,
+    installed_packs, list_installed_packs, referenced_pack_digests, remove_pack, DriftPolicy,
+    InstallReport, InstalledPack, InstalledPackPlugin, PackIdentity, RemoveReport, Retained,
 };
+pub(crate) use installation::{observe_graph_install_in_txn, record_graph_install_in_txn};
 pub use loader::{decode_pack_config, load_pack_config};
 pub(crate) use provenance::{pack_artifact_document_digest, prepare_pack_plan_in_txn};
 pub use provenance::{pack_document_digests, pack_origin_from_tags, pack_origin_tag};

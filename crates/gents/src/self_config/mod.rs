@@ -1479,8 +1479,42 @@ impl PackInstaller {
             "inference": inference,
             "installed": installed,
             "installable": installable,
-            "supported_operations": installable.then_some(["preview install", "install", "preview update", "update"]),
-            "unsupported": {"remove": "installation records do not distinguish created artifacts from reused matching documents; provenance tags and ACL are not deletion authority"},
+            "supported_operations": installable.then_some(["preview install", "install", "preview update", "update", "remove"]),
+        }))?)
+    }
+
+    /// Removes an installed graph package's `PackInstallation` record and
+    /// everything it lists: its `GraphDefinition`, every revision it
+    /// produced and their derived triggers, and the package's own
+    /// documents. Refused while any of its graphs has a run that has not
+    /// reached a terminal status. This tool has no filesystem home, so it
+    /// releases no plugin bytes or archive; use `gents pack remove` for that.
+    async fn remove(&self, package: &str) -> anyhow::Result<String> {
+        let args = PackInstallParams {
+            package: package.to_owned(),
+            variables: BTreeMap::new(),
+            inference_slots: BTreeMap::new(),
+            expected_digest: None,
+        };
+        self.validate(&args)?;
+        let distribution = self.resolve(&args).await?;
+        let coordinate = format!(
+            "{}/{}",
+            distribution.manifest().metadata.namespace,
+            distribution.manifest().name
+        );
+        let access = crate::config_client::ConfigAccess::Local(self.node.clone());
+        let report = crate::pack::remove_pack(
+            &access,
+            self.core.agent_did(),
+            &coordinate,
+            crate::pack::DriftPolicy::Refuse,
+        )
+        .await?;
+        Ok(serde_json::to_string_pretty(&json!({
+            "pack": coordinate,
+            "removed": report,
+            "effect": "The package's graph and documents were removed. Package SDL schemas and run history stay.",
         }))?)
     }
 
@@ -1647,6 +1681,10 @@ impl PackInstaller {
             &package,
             &bindings,
             None,
+            &crate::graph_package::GraphInstallRecord {
+                plugins: Vec::new(),
+                explicit: operation == "install",
+            },
         )
         .await?;
         let activation = crate::graph_pipeline::activate_graph_revision_with_access(

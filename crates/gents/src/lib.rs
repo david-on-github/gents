@@ -241,9 +241,32 @@ pub(crate) mod test_support {
         name: &str,
         options: &crate::graph_package::GraphPackageInstallBindings,
     ) -> anyhow::Result<crate::graph_package::GraphPackageInstallReceipt> {
+        install_test_graph_package_explicit(access, actor, name, options, true).await
+    }
+
+    /// [`install_test_graph_package`] with control over whether the record
+    /// this writes reads as an explicit install; a dependency-install test
+    /// wants `false`.
+    pub(crate) async fn install_test_graph_package_explicit(
+        access: &crate::ConfigAccess,
+        actor: &str,
+        name: &str,
+        options: &crate::graph_package::GraphPackageInstallBindings,
+        explicit: bool,
+    ) -> anyhow::Result<crate::graph_package::GraphPackageInstallReceipt> {
         let package = load_test_graph_package(name, options);
-        crate::graph_package::install_loaded_graph_package(access, actor, &package, options, None)
-            .await
+        crate::graph_package::install_loaded_graph_package(
+            access,
+            actor,
+            &package,
+            options,
+            None,
+            &crate::graph_package::GraphInstallRecord {
+                plugins: Vec::new(),
+                explicit,
+            },
+        )
+        .await
     }
 
     /// `OneOrMany::first_ref` stand-in for native `Vec` content: non-empty by

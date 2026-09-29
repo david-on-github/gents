@@ -454,10 +454,16 @@ async fn a_revision_activated_after_prepare_but_before_commit_is_refused() {
     let mut concurrent = load_test_graph_package("code_review", &options);
     concurrent.manifest.version.push_str("-concurrent");
     concurrent.package_digest = digest_bytes(b"concurrent distribution");
-    let concurrent_receipt =
-        install_loaded_graph_package(&access, &options.agent_did, &concurrent, &options, None)
-            .await
-            .unwrap();
+    let concurrent_receipt = install_loaded_graph_package(
+        &access,
+        &options.agent_did,
+        &concurrent,
+        &options,
+        None,
+        &Default::default(),
+    )
+    .await
+    .unwrap();
     activate_graph_revision(
         &node,
         None,
@@ -469,10 +475,15 @@ async fn a_revision_activated_after_prepare_but_before_commit_is_refused() {
     .await
     .unwrap();
 
-    let error =
-        commit_prepared_graph_package_install(&access, &options.agent_did, &successor, &prepared)
-            .await
-            .unwrap_err();
+    let error = commit_prepared_graph_package_install(
+        &access,
+        &options.agent_did,
+        &successor,
+        &prepared,
+        &Default::default(),
+    )
+    .await
+    .unwrap_err();
     let stale = crate::config_client::stale_expectation(&error).expect("StaleExpectation");
     assert_eq!(stale.drifted.len(), 1);
     assert_eq!(stale.drifted[0].collection, Collection::GraphDefinition);

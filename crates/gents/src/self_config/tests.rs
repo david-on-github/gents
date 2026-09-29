@@ -597,6 +597,33 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
         .as_array()
         .unwrap()
         .is_empty());
+
+    // `pack remove` is a real operation now, not a stale refusal: it deletes
+    // the installed graph and its record.
+    let removed = tool
+        .call(json!({"argv": ["pack", "remove", "code_review"]}).to_string())
+        .await
+        .expect("an installed graph package removes");
+    let removed: Value = serde_json::from_str(&removed).unwrap();
+    assert_eq!(removed["pack"], "gents/code_review");
+
+    let response = node
+        .execute(&format!(
+            "{{ GraphDefinition(filter: {{agent_did: {{_eq: \"{}\"}}}}) {{graph_id}} PackInstallation(filter: {{agent_did: {{_eq: \"{}\"}}}}) {{_docID}} }}",
+            crate::graphql::escape_graphql_string(&agent_did),
+            crate::graphql::escape_graphql_string(&agent_did)
+        ))
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let data = response.data.unwrap();
+    assert!(data["GraphDefinition"].as_array().unwrap().is_empty());
+    assert!(data["PackInstallation"].as_array().unwrap().is_empty());
+
+    let again = tool
+        .call(json!({"argv": ["pack", "remove", "code_review"]}).to_string())
+        .await
+        .expect_err("a second remove finds no record");
+    assert!(again.to_string().contains("is not installed"), "{again:#}");
 }
 
 #[tokio::test]

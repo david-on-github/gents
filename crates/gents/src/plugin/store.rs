@@ -11,16 +11,19 @@
 //! - `gents plugin run <name>` and `gents plugin list` still have exactly
 //!   one place to look up "which version is this name today";
 //! - removing a name never has to reason about whether some other
-//!   installed name still needs the same bytes - it is left in the store,
-//!   exactly the way the pack asset cache leaves a superseded digest until
-//!   an explicit prune.
+//!   installed name still needs the same bytes - it is left in the store
+//!   until `gents pack remove` finds no remaining record references it
+//!   ([`release_unreferenced_bytes`]), the same way the pack asset cache
+//!   leaves a superseded digest until an explicit prune.
 //!
 //! Layout, under `<home>/plugins/`:
 //! ```text
 //! store/<sha256-hex>.afb              content-addressed plugin bytes
 //! installed/<namespace>/<name>.json   the installed record for one name
+//! .store.lock                         guards store_bytes+write_record against release
 //! ```
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -200,6 +203,64 @@ pub fn read_bytes(home: &Path, digest_hex: &str) -> Result<Vec<u8>> {
     let path = store_path(home, digest_hex)?;
     std::fs::read(&path)
         .with_context(|| format!("reading the installed plugin bytes at {}", path.display()))
+}
+
+/// Takes the plugin byte store's lock: shared while an install writes bytes
+/// and its record, exclusive while [`release_unreferenced_bytes`] scans and
+/// deletes. Without this, a concurrent install's `store_bytes` (bytes
+/// written) racing `release_unreferenced_bytes`'s scan (bytes still
+/// unreferenced) then `write_record` (record now pointing at them) could end
+/// with a record pointing at bytes release just deleted.
+pub fn lock_store(home: &Path, exclusive: bool) -> Result<crate::file_lock::FileLock> {
+    let path = plugins_root(home).join(".store.lock");
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    if exclusive {
+        crate::file_lock::FileLock::exclusive(file)
+    } else {
+        crate::file_lock::FileLock::shared(file)
+    }
+    .with_context(|| format!("locking {}", path.display()))
+}
+
+/// Removes every store byte named in `digests` that no installed-plugin
+/// record in `home` references any more, returning what was released.
+/// Takes the exclusive store lock (see [`lock_store`]) around the whole scan
+/// and delete.
+pub fn release_unreferenced_bytes(home: &Path, digests: &BTreeSet<String>) -> Result<Vec<String>> {
+    let _lock = lock_store(home, true)?;
+    let referenced: BTreeSet<String> = list_records(home)?
+        .into_iter()
+        .map(|record| record.digest)
+        .collect();
+    let mut released = Vec::new();
+    for digest in digests {
+        if referenced.contains(digest) {
+            continue;
+        }
+        let hex = digest
+            .strip_prefix("sha256:")
+            .with_context(|| format!("plugin byte digest {digest:?} has no sha256: prefix"))?;
+        let path = store_path(home, hex)?;
+        match std::fs::remove_file(&path) {
+            Ok(()) => released.push(digest.clone()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("removing {}", path.display()))
+            }
+        }
+    }
+    released.sort();
+    Ok(released)
 }
 
 /// Points `namespace/name` at `record`, replacing whatever it pointed to
@@ -424,5 +485,50 @@ mod tests {
             "acme/widget",
             &legacy_digest
         ));
+    }
+
+    /// `gents pack remove` releases bytes no remaining record references,
+    /// and keeps bytes another record still points at.
+    #[test]
+    fn release_keeps_bytes_another_record_references_and_frees_the_rest() {
+        let home = tempfile::tempdir().unwrap();
+        let shared_digest = format!("sha256:{}", "a".repeat(64));
+        let orphaned_digest = format!("sha256:{}", "b".repeat(64));
+        store_bytes(home.path(), &"a".repeat(64), b"shared bytes").unwrap();
+        store_bytes(home.path(), &"b".repeat(64), b"orphaned bytes").unwrap();
+
+        // Two names still point at the shared digest; the record for the
+        // orphaned one is gone (as if `gents pack remove` already removed it).
+        write_record(
+            home.path(),
+            &InstalledPlugin {
+                digest: shared_digest.clone(),
+                ..sample_record("acme", "kept-one", Some("acme/widget"))
+            },
+        )
+        .unwrap();
+        write_record(
+            home.path(),
+            &InstalledPlugin {
+                digest: shared_digest.clone(),
+                ..sample_record("zeta", "kept-two", Some("zeta/widget"))
+            },
+        )
+        .unwrap();
+
+        let mut candidates = BTreeSet::new();
+        candidates.insert(shared_digest.clone());
+        candidates.insert(orphaned_digest.clone());
+        let released = release_unreferenced_bytes(home.path(), &candidates).unwrap();
+
+        assert_eq!(released, vec![orphaned_digest]);
+        assert!(
+            read_bytes(home.path(), &"a".repeat(64)).is_ok(),
+            "shared bytes stay"
+        );
+        assert!(
+            read_bytes(home.path(), &"b".repeat(64)).is_err(),
+            "orphaned bytes are released"
+        );
     }
 }

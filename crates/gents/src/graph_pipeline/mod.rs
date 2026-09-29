@@ -6,6 +6,7 @@
 
 mod compiler;
 mod live;
+mod routes;
 mod run;
 mod runtime;
 mod tools;
@@ -16,10 +17,12 @@ pub use compiler::{
     GraphCompileError,
 };
 pub(crate) use live::{is_live_for, live_run_correlations};
+pub(crate) use routes::revision_artifact_ids;
 #[cfg(test)]
 pub(crate) use run::derive_graph_workspace;
 pub(crate) use run::{
     graph_binding_for_request_in_txn, resolve_graph_workspace, run_graph_run_reconciler,
+    GRAPH_RUN_TERMINAL_STATUSES,
 };
 pub use run::{
     load_graph_run_result_view_with_access, load_graph_run_view, load_graph_run_view_with_access,

@@ -1,9 +1,11 @@
 //! `gents pack outdated` and `gents pack update`: installed packs against the
 //! registry's latest versions.
 //!
-//! What is installed comes from the node's installation records; an update
-//! is an ordinary install of the latest version, so the drift rules and
-//! `--overwrite` / `--keep` apply exactly as they do to any install.
+//! What is installed comes from the node's installation records plus the
+//! home's file-recorded assets/plugins installs
+//! ([`gents::pack::installed_packs`]); an update is an ordinary install of
+//! the latest version, so the drift rules and `--overwrite` / `--keep` apply
+//! exactly as they do to any install.
 
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -20,10 +22,21 @@ async fn outdated_packs(
     scope: &crate::cli::GraphScopeArgs,
     registry: Option<&str>,
 ) -> Result<Vec<Value>> {
-    let (access, owner) = super::resolve_scope_owner(scope).await?;
+    let home = crate::home_state::resolve_home_dir(scope.home.as_deref());
+    let node = if scope.graphql.is_some() || gents::home::init_config_path(&home).is_file() {
+        Some(super::resolve_scope_owner(scope).await?)
+    } else {
+        None
+    };
+    let installed = gents::pack::installed_packs(
+        scope.graphql.is_none().then_some(home.as_path()),
+        node.as_ref()
+            .map(|(access, owner)| (&**access, owner.as_str())),
+    )
+    .await?;
     let client = RegistryClient::new(resolve_registry_url(registry));
     let mut report = Vec::new();
-    for pack in gents::pack::list_installed_packs(&access, &owner).await? {
+    for pack in installed {
         let (namespace, name) = super::split_namespace(&pack.coordinate);
         let (latest, outdated, error) = match client.package(namespace, name).await {
             Err(error) => (None, None, Some(format!("{error:#}"))),
@@ -132,6 +145,9 @@ pub(crate) async fn update(args: PackUpdateArgs) -> Result<()> {
             registry: args.registry.clone(),
             drift: args.drift,
             grant_authority: false,
+            // An update never turns a dependency-only install into an
+            // explicit one; it only ever reinstalls what is already there.
+            explicit: false,
         };
         match crate::request_helpers::capture_report(super::install(install_args)).await {
             Ok(_) => updated.push(coordinate),
@@ -288,6 +304,7 @@ mod tests {
             registry: Some(registry_a),
             drift: crate::cli::PackDriftArgs::default(),
             grant_authority: false,
+            explicit: true,
         }))
         .await
         .expect("installing the old version");
@@ -313,6 +330,59 @@ mod tests {
         assert_eq!(
             report,
             json!({ "updated": ["gents/demo_pack"], "failed": [], "current": [] })
+        );
+    }
+
+    /// An assets pack installs a file record, never a `PackInstallation`; a
+    /// bare `gents pack outdated` against that same home must still list it,
+    /// without ever initializing or opening a node.
+    #[tokio::test]
+    async fn outdated_lists_home_recorded_installs_without_opening_a_node() {
+        let home = tempfile::tempdir().unwrap();
+        let scope = crate::cli::GraphScopeArgs {
+            home: Some(home.path().to_path_buf()),
+            graphql: None,
+            agent_did: None,
+        };
+        crate::request_helpers::capture_report(super::super::install(PackInstallArgs {
+            package: "mailbox".to_owned(),
+            bindings: None,
+            inference_slots: Vec::new(),
+            preview: false,
+            scope: scope.clone(),
+            output: OutputFormat::Json,
+            force_rebind_concrete_did: false,
+            registry: None,
+            drift: crate::cli::PackDriftArgs::default(),
+            grant_authority: false,
+            explicit: true,
+        }))
+        .await
+        .expect("installing an assets pack needs no node");
+        assert!(
+            !gents::home::init_config_path(home.path()).is_file(),
+            "an assets install never initializes the home"
+        );
+
+        let (registry, _state) = crate::commands::pack::registry::tests::serve_fake_pack(
+            "mailbox",
+            "1.0.0",
+            Vec::new(),
+            format!("sha256:{}", "a".repeat(64)),
+        )
+        .await;
+        let report = crate::request_helpers::capture_report(outdated(PackOutdatedArgs {
+            scope,
+            registry: Some(registry),
+        }))
+        .await
+        .expect("outdated must list the file-recorded install");
+        let packs = report["packs"].as_array().unwrap();
+        assert_eq!(packs.len(), 1, "{packs:?}");
+        assert_eq!(packs[0]["pack"], "gents/mailbox");
+        assert!(
+            !home.path().join("data").exists(),
+            "outdated never opened a node either"
         );
     }
 }

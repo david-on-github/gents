@@ -9,8 +9,8 @@ gents pack list
 gents pack show code_review
 gents pack install code_review --home <initialized-home>
 gents graph run code_review --repo . --base origin/main --head HEAD
-gents pack install mailbox --home <initialized-home>
-gents pack remove mailbox --home <initialized-home>
+gents pack install mailbox --home <home>
+gents pack remove mailbox --home <home>
 gents pack prune mailbox
 gents pack scenario run pipeline --http-port 19191 --keep-home
 ```
@@ -75,7 +75,11 @@ dispatch every one of those shapes.
 Today a plugin is called directly, by name (`gents plugin run`). Offering the
 same admitted plugin to a graph stage and to a model as an ordinary tool is
 the reason it is one definition rather than two, and neither of those call
-paths is wired yet. A plugin declares:
+paths is wired yet. Its bytes sit in a content-addressed store separate from
+the per-name record, so installing a second version never disturbs the
+first; `gents pack remove` releases a digest's bytes once no installed record
+anywhere in the home references it any more, and keeps them otherwise. A
+plugin declares:
 
 - `artifact`, the compiled `.afb` inside the pack, under `plugins/`. It must
   also appear in `assets`, so the pack's own digest covers it and nothing can
@@ -168,7 +172,29 @@ not an atomic multi-package transaction. Failures remain visible and installs
 can be retried through the existing owners.
 Only document packs currently declare package dependencies, and those must be
 graph packs. Graph/asset dependency lists are rejected; recursive installation
-is not silently implied.
+is not silently implied. Installing a document pack adds its coordinate to
+each dependency's `required_by`; an install that is already a dependency and
+is now also requested directly marks it explicit.
+
+`pack remove` works for every kind. Assets and plugins packs write a file
+record at `<home>/pack-installs/<namespace>/<name>.json` on install; remove
+checks for that record before ever resolving an owner or opening a node, and
+needs only `--home`. Removal releases the cache version (a version carrying
+`runs/`, or one this pack never marked, is kept and reported under
+`retained`), the plugin records this coordinate still owns, and plugin bytes
+and imported archives nothing else references. A graph pack is recorded in
+the same `PackInstallation` a document pack uses and removed in one
+transaction: every revision the package has ever produced (including a
+retired one) and its derived triggers are deleted along with the package's
+own documents; removal is refused while any of the package's graphs has a
+run that has not reached a terminal status, naming the graph and the run.
+Package SDL schemas cannot be dropped by DefraDB and are reported under
+`retained`, never silently kept without saying so; `GraphRun` history stays,
+though its result view needs the graph reinstalled to show again. Removing a
+document pack releases the last non-explicit claim on each of its
+dependencies; removing a pack directly while another installed pack still
+depends on it is refused, naming the dependents. `pack outdated` and `pack
+update` list both node-recorded and file-recorded installs.
 
 Graph and document packs declare named inference slots in `manifest.json`.
 Inspect them with `pack show`, then use `pack install --preview` to see the

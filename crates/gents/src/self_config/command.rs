@@ -467,7 +467,8 @@ Cleanup is exact-ID, same-principal, and reference-aware. Preview performs the s
   get PACKAGE
   preview install|update PACKAGE [--inference-slot NAME=PROFILE_ID] [--var NAME=VALUE]
   install|update PACKAGE --digest SHA256 [--inference-slot NAME=PROFILE_ID] [--var NAME=VALUE]
-Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-selected registry. Preview is read-only and returns the exact canonical content digest required by install/update; registry receipts also expose the verified archive digest. Repeat --inference-slot for every declared slot; values are existing principal-owned profile IDs. Non-inference variables remain explicit --var NAME=VALUE. Pack removal remains unavailable because current installation records do not distinguish created documents from matching documents reused at install. Installation activates configuration but does not run a graph."#
+  remove PACKAGE
+Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-selected registry. Preview is read-only and returns the exact canonical content digest required by install/update; registry receipts also expose the verified archive digest. Repeat --inference-slot for every declared slot; values are existing principal-owned profile IDs. Non-inference variables remain explicit --var NAME=VALUE. Remove deletes the package's graph and documents (refused while a run has not finished); it releases no plugin bytes or archive, since this tool has no filesystem home. Installation activates configuration but does not run a graph."#
             }
             Some(other) => bail!(
                 "unknown config help resource {other:?}; enabled resources: {}",
@@ -1212,7 +1213,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                     .context("pack preview requires install or update")?;
                 anyhow::ensure!(
                     matches!(operation.as_str(), "install" | "update"),
-                    "pack preview supports install and update; remove is unavailable because installation records do not distinguish created documents from reused matching documents"
+                    "pack preview supports install and update"
                 );
                 installer
                     .preview(operation, parse_pack_change(&argv[2..])?)
@@ -1223,9 +1224,11 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 self.execution.enter_mutation();
                 installer.apply(verb, change).await
             }
-            "remove" => bail!(
-                "pack remove is unavailable: installation records do not distinguish created documents from reused matching documents, and provenance tags or DefraDB ACL cannot supply that semantic ownership"
-            ),
+            "remove" => {
+                anyhow::ensure!(argv.len() == 2, "pack remove requires exactly one PACKAGE");
+                self.execution.enter_mutation();
+                installer.remove(&argv[1]).await
+            }
             other => bail!("unknown pack command {other:?}; run config help pack"),
         }
     }

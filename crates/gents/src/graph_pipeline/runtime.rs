@@ -528,28 +528,10 @@ fn materialization_receipt(plan: &GraphPlan) -> Result<MaterializedRevision> {
         .iter()
         .filter_map(|node| node.target.task_id().map(str::to_owned))
         .collect::<Vec<_>>();
-    let mut trigger_ids = plan
-        .entries
-        .iter()
-        .map(|entry| {
-            graph_trigger_id(
-                &plan.digest,
-                &format!(
-                    "entry:{}:{}:{}",
-                    entry.name, entry.to.node_id, entry.to.port
-                ),
-            )
-        })
-        .chain(plan.edges.iter().enumerate().map(|(index, edge)| {
-            graph_trigger_id(
-                &plan.digest,
-                &format!(
-                    "edge:{index}:{}:{}:{}:{}",
-                    edge.from.node_id, edge.from.port, edge.to.node_id, edge.to.port,
-                ),
-            )
-        }))
-        .collect::<Result<Vec<_>>>()?;
+    let mut trigger_ids = super::routes::planned_routes(plan)?
+        .into_iter()
+        .map(|route| route.id)
+        .collect::<Vec<_>>();
     task_ids.sort();
     trigger_ids.sort();
     Ok(MaterializedRevision {
@@ -588,47 +570,24 @@ pub fn prospective_graph_artifact_identities(
             ]),
         },
     ];
-    for entry in &plan.entries {
-        let route = format!(
-            "entry:{}:{}:{}",
-            entry.name, entry.to.node_id, entry.to.port
-        );
-        let id = graph_trigger_id(&plan.digest, &route)?;
-        documents.extend([
-            ProspectiveGraphArtifactIdentity {
-                collection: "EventSource".to_owned(),
-                identity_scope: GraphArtifactIdentityScope::Principal,
-                principal_did: Some(owner_did.to_owned()),
-                identity_keys: BTreeMap::from([("event_source_id".to_owned(), id.clone())]),
-            },
-            ProspectiveGraphArtifactIdentity {
-                collection: "Trigger".to_owned(),
-                identity_scope: GraphArtifactIdentityScope::Principal,
-                principal_did: Some(owner_did.to_owned()),
-                identity_keys: BTreeMap::from([("trigger_id".to_owned(), id)]),
-            },
-        ]);
-    }
-    for (index, edge) in plan.edges.iter().enumerate() {
-        let route = format!(
-            "edge:{index}:{}:{}:{}:{}",
-            edge.from.node_id, edge.from.port, edge.to.node_id, edge.to.port,
-        );
-        let id = graph_trigger_id(&plan.digest, &route)?;
-        documents.extend([
-            ProspectiveGraphArtifactIdentity {
-                collection: "EventSource".to_owned(),
-                identity_scope: GraphArtifactIdentityScope::Principal,
-                principal_did: Some(owner_did.to_owned()),
-                identity_keys: BTreeMap::from([("event_source_id".to_owned(), id.clone())]),
-            },
-            ProspectiveGraphArtifactIdentity {
-                collection: "Trigger".to_owned(),
-                identity_scope: GraphArtifactIdentityScope::Principal,
-                principal_did: Some(owner_did.to_owned()),
-                identity_keys: BTreeMap::from([("trigger_id".to_owned(), id)]),
-            },
-        ]);
+    // Shares its route id and target-to-collection mapping with the
+    // materializer (`super::routes`), so a plugin-target route is predicted
+    // here exactly as `Callback`/`CallbackBinding`, the same shape
+    // `planned_route_documents` actually writes, never as a `Trigger`.
+    for (collection, id) in super::routes::revision_artifact_ids(plan)? {
+        let field = match collection {
+            crate::Collection::EventSource => "event_source_id",
+            crate::Collection::Trigger => "trigger_id",
+            crate::Collection::Callback => "callback_id",
+            crate::Collection::CallbackBinding => "binding_id",
+            other => anyhow::bail!("unexpected route artifact collection {other:?}"),
+        };
+        documents.push(ProspectiveGraphArtifactIdentity {
+            collection: collection.graphql_type().to_owned(),
+            identity_scope: GraphArtifactIdentityScope::Principal,
+            principal_did: Some(owner_did.to_owned()),
+            identity_keys: BTreeMap::from([(field.to_owned(), id)]),
+        });
     }
     documents.sort();
     documents.dedup();
@@ -905,19 +864,19 @@ async fn materialize_in_txn(
         anyhow::bail!("approved task {missing:?} is missing or disabled");
     }
 
+    // The route ids come from the one shared `planned_routes` list a preview
+    // and the installation record also iterate: computing them independently
+    // here let the three diverge on what a plan actually materializes (#10).
+    let routes = super::routes::planned_routes(plan)?;
+    let (entry_routes, edge_routes) = routes.split_at(plan.entries.len());
     let mut trigger_documents = Vec::new();
-    for entry in &plan.entries {
-        let route = format!(
-            "entry:{}:{}:{}",
-            entry.name, entry.to.node_id, entry.to.port
-        );
-        let id = graph_trigger_id(&plan.digest, &route)?;
+    for (route, entry) in entry_routes.iter().zip(&plan.entries) {
         trigger_documents.extend(
             planned_route_documents(
                 txn,
                 plan,
                 owner_did,
-                &id,
+                &route.id,
                 &entry.to.node_id,
                 &entry.target,
                 &entry.collection,
@@ -931,18 +890,13 @@ async fn materialize_in_txn(
             .await?,
         );
     }
-    for (index, edge) in plan.edges.iter().enumerate() {
-        let route = format!(
-            "edge:{index}:{}:{}:{}:{}",
-            edge.from.node_id, edge.from.port, edge.to.node_id, edge.to.port,
-        );
-        let id = graph_trigger_id(&plan.digest, &route)?;
+    for (route, edge) in edge_routes.iter().zip(&plan.edges) {
         trigger_documents.extend(
             planned_route_documents(
                 txn,
                 plan,
                 owner_did,
-                &id,
+                &route.id,
                 &edge.to.node_id,
                 &edge.target,
                 &edge.source_collection,

@@ -424,3 +424,217 @@ fn offline_pack_install_with_a_graph_dependency_holds_one_store_claim() -> Resul
     );
     Ok(())
 }
+
+/// An assets pack installs and removes with no `gents init` ever run: no
+/// node is opened for either operation.
+#[test]
+fn an_assets_pack_removes_completely_from_an_uninitialized_home() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let home = temp.path().join("assets-home");
+    let home_arg = home.to_str().context("path")?;
+
+    let install = run_cli_json(
+        temp.path(),
+        &["pack", "install", "mailbox", "--home", home_arg],
+    )?;
+    let installed_assets = std::path::Path::new(required_str(&install, &["installed_assets"])?);
+    anyhow::ensure!(installed_assets.is_dir(), "{install}");
+    anyhow::ensure!(
+        !home.join("data").exists(),
+        "an assets-only install never opens a node"
+    );
+
+    let removed = run_cli_json(
+        temp.path(),
+        &["pack", "remove", "mailbox", "--home", home_arg],
+    )?;
+    anyhow::ensure!(
+        removed["removed"]["assets"]
+            .as_array()
+            .context("assets")?
+            .len()
+            == 1,
+        "{removed}"
+    );
+    anyhow::ensure!(!installed_assets.exists(), "the cache version was removed");
+    anyhow::ensure!(
+        !home.join("data").exists(),
+        "removal never opened a node either"
+    );
+
+    let again = run_cli_failure_stderr(
+        temp.path(),
+        &["pack", "remove", "mailbox", "--home", home_arg],
+    )?;
+    anyhow::ensure!(again.contains("is not installed"), "{again}");
+    Ok(())
+}
+
+/// A graph pack removes completely (its `GraphDefinition`/`GraphRevision`
+/// and derived triggers are gone) and reinstalls cleanly afterward.
+#[test]
+fn a_graph_pack_removes_completely_and_reinstalls() -> Result<()> {
+    let tempdir = tempfile::tempdir().context("creating graph remove tempdir")?;
+    let home = tempdir.path().join("agent-home");
+    let home_arg = home.to_str().context("path")?;
+    let initialized = run_init_json(
+        tempdir.path(),
+        &["--agent-name", "graph-remover", "--home", home_arg],
+    )?;
+    let owner_did = agent_did_from_init(&initialized)?;
+    let profile = format!("{owner_did}:default-profile");
+    let install_args = [
+        "pack",
+        "install",
+        "code_review",
+        "--home",
+        home_arg,
+        "--inference-slot",
+        &format!("coordinator={profile}"),
+        "--inference-slot",
+        &format!("worker={profile}"),
+        "--inference-slot",
+        &format!("verifier={profile}"),
+    ];
+    run_cli_json(tempdir.path(), &install_args)?;
+
+    let removed = run_cli_json(
+        tempdir.path(),
+        &["pack", "remove", "code_review", "--home", home_arg],
+    )?;
+    let retained = removed["removed"]["retained"]
+        .as_array()
+        .context("retained")?;
+    anyhow::ensure!(
+        retained.iter().any(|entry| entry["item"]
+            .as_str()
+            .unwrap_or_default()
+            .starts_with("schema ")),
+        "the package's SDL schema must be reported retained, not silently dropped: {removed}"
+    );
+
+    let denial = run_cli_failure_stderr(
+        tempdir.path(),
+        &[
+            "graph",
+            "enable",
+            "code_review",
+            "--home",
+            home_arg,
+            "--agent-did",
+            &owner_did,
+        ],
+    )?;
+    anyhow::ensure!(
+        denial.contains("package graph is not installed"),
+        "{denial}"
+    );
+
+    run_cli_json(tempdir.path(), &install_args)?;
+    Ok(())
+}
+
+/// A documents pack's graph dependency is tracked: removing the dependency
+/// directly is refused while its dependent is installed; removing the
+/// dependent releases it; an explicit install of the same coordinate
+/// survives removing the dependent that also names it.
+#[test]
+fn a_graph_dependency_is_released_with_its_dependent() -> Result<()> {
+    let tempdir = tempfile::tempdir().context("creating dependency remove tempdir")?;
+    let home = tempdir.path().join("agent-home");
+    let home_arg = home.to_str().context("path")?;
+    let initialized = run_init_json(
+        tempdir.path(),
+        &["--agent-name", "dep-remover", "--home", home_arg],
+    )?;
+    let owner_did = agent_did_from_init(&initialized)?;
+    let profile = format!("{owner_did}:default-profile");
+    let slots: Vec<String> = ["coordinator", "worker", "verifier", "reviewer"]
+        .iter()
+        .map(|slot| format!("{slot}={profile}"))
+        .collect();
+    let mut install_args = vec![
+        "pack".to_owned(),
+        "install".to_owned(),
+        "grok_tui_port".to_owned(),
+        "--home".to_owned(),
+        home_arg.to_owned(),
+    ];
+    for slot in &slots {
+        install_args.push("--inference-slot".to_owned());
+        install_args.push(slot.clone());
+    }
+    let install_args_ref: Vec<&str> = install_args.iter().map(String::as_str).collect();
+    run_cli_json(tempdir.path(), &install_args_ref)?;
+
+    let denial = run_cli_failure_stderr(
+        tempdir.path(),
+        &["pack", "remove", "code_review", "--home", home_arg],
+    )?;
+    anyhow::ensure!(denial.contains("gents/grok_tui_port"), "{denial}");
+
+    let removed = run_cli_json(
+        tempdir.path(),
+        &["pack", "remove", "grok_tui_port", "--home", home_arg],
+    )?;
+    anyhow::ensure!(
+        removed["removed"]["dependencies"][0]["pack"] == "gents/code_review",
+        "{removed}"
+    );
+
+    let denial = run_cli_failure_stderr(
+        tempdir.path(),
+        &[
+            "graph",
+            "enable",
+            "code_review",
+            "--home",
+            home_arg,
+            "--agent-did",
+            &owner_did,
+        ],
+    )?;
+    anyhow::ensure!(
+        denial.contains("package graph is not installed"),
+        "{denial}"
+    );
+
+    // An explicit install of the (now-removed) dependency survives a later
+    // removal of the dependent that names it again.
+    let explicit_code_review = [
+        "pack",
+        "install",
+        "code_review",
+        "--home",
+        home_arg,
+        "--inference-slot",
+        &format!("coordinator={profile}"),
+        "--inference-slot",
+        &format!("worker={profile}"),
+        "--inference-slot",
+        &format!("verifier={profile}"),
+    ];
+    run_cli_json(tempdir.path(), &explicit_code_review)?;
+    run_cli_json(tempdir.path(), &install_args_ref)?;
+    run_cli_json(
+        tempdir.path(),
+        &["pack", "remove", "grok_tui_port", "--home", home_arg],
+    )?;
+    let enabled = run_cli_json(
+        tempdir.path(),
+        &[
+            "graph",
+            "enable",
+            "code_review",
+            "--home",
+            home_arg,
+            "--agent-did",
+            &owner_did,
+        ],
+    )?;
+    anyhow::ensure!(
+        enabled.get("enabled") == Some(&Value::Bool(true)),
+        "an explicit install of the dependency must survive removing its dependent: {enabled}"
+    );
+    Ok(())
+}

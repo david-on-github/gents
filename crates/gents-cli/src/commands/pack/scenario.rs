@@ -361,7 +361,11 @@ fn read_distribution_manifest(root: &Path) -> Result<gents::pack::PackManifest> 
 /// The returned file is a shared cache lease and must live for the operation.
 fn resolve_scenario_dir(
     target: &str,
-) -> Result<(PathBuf, Option<std::fs::File>, gents::pack::PackManifest)> {
+) -> Result<(
+    PathBuf,
+    Option<gents::file_lock::FileLock>,
+    gents::pack::PackManifest,
+)> {
     let direct = PathBuf::from(target);
     if direct.join("experiment.json").is_file() {
         validate_source_pack_path(&direct)?;

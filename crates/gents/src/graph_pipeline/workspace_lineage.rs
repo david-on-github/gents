@@ -145,7 +145,7 @@ pub(crate) async fn derive_graph_workspace(
         .iter()
         .find(|entry| run.get("entry_name").and_then(Value::as_str) == Some(entry.name.as_str()))
         .context("graph run selected entry is absent from its pinned plan")?;
-    let entry_route = graph_trigger_id(
+    let entry_route = super::super::runtime::graph_trigger_id(
         &digest,
         &format!(
             "entry:{}:{}:{}",

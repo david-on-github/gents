@@ -64,6 +64,11 @@ pub(crate) fn install_from_pack(
     gents::plugin::PluginRunner::compile(artifact_bytes, plugin)
         .with_context(|| format!("admitting pack plugin {}", plugin.name))?;
     let digest_hex = format!("{:x}", Sha256::digest(artifact_bytes));
+    // Shared against `release_unreferenced_bytes`'s exclusive lock: bytes and
+    // the record that points at them are written before a concurrent
+    // `gents pack remove` can decide those bytes are unreferenced (store.rs's
+    // own doc).
+    let _lock = store::lock_store(home, false)?;
     store::store_bytes(home, &digest_hex, artifact_bytes)?;
     let record = store::InstalledPlugin {
         namespace: pack_namespace.to_owned(),

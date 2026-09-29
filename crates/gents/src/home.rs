@@ -69,6 +69,9 @@ pub const REGISTRY_DIR_NAME: &str = "registry";
 pub const CODEX_UI_DIR_NAME: &str = "codex-ui";
 /// Frozen eval runs and optimization job directories (`gents eval`).
 pub const EVAL_DIR_NAME: &str = "eval";
+/// File-recorded installs of assets and plugins packs, which write no
+/// database record: `<namespace>/<name>.json` per pack.
+pub const PACK_INSTALLS_DIR_NAME: &str = "pack-installs";
 
 /// Every top-level entry a gents runtime writes in its home. Writers name
 /// these entries through this module, and retiring a home (after an upgrade
@@ -88,6 +91,7 @@ pub const RUNTIME_HOME_ENTRIES: &[&str] = &[
     REGISTRY_DIR_NAME,
     CODEX_UI_DIR_NAME,
     EVAL_DIR_NAME,
+    PACK_INSTALLS_DIR_NAME,
 ];
 
 /// The default DefraDB data directory under a gents home.
