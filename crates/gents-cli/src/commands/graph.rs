@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use gents::config_client::ConfigAccess;
 use gents::graph_package::{
     default_bundled_graph_package_install_bindings, install_bundled_graph_package,
-    load_bundled_graph_package, load_installed_package_plan, prepare_code_review_run,
+    load_bundled_graph_package, load_installed_package_plan, prepare_entry_run, EntryRunRequest,
     GraphInstallRecord, GraphPackageInstallBindings,
 };
 use gents::graph_pipeline::{
@@ -15,6 +15,7 @@ use gents::graph_pipeline::{
     request_graph_run_cancellation_with_access, set_graph_enabled_with_access,
     start_graph_run_with_access, GraphRunView,
 };
+use gents::plugin::executor::PluginExecutor;
 use gents::run_timeline::{RunActivityRows, TimelineInferenceCallRow, TimelineToolCallRow};
 use gents::run_timeline_fetch::load_run_activity_rows;
 use serde::Serialize;
@@ -206,6 +207,38 @@ async fn access_and_actor(scope: &GraphScopeArgs) -> Result<(crate::CommandAcces
     Ok((access, actor))
 }
 
+/// `--input`: a JSON object, or `@FILE` naming a file that holds one; absent
+/// is an empty object, so an entry with every field defaulted needs neither.
+fn parse_input_arg(raw: Option<&str>) -> Result<Value> {
+    let Some(raw) = raw else {
+        return Ok(json!({}));
+    };
+    let text = match raw.strip_prefix('@') {
+        Some(path) => {
+            std::fs::read_to_string(path).with_context(|| format!("reading --input file {path}"))?
+        }
+        None => raw.to_owned(),
+    };
+    let value: Value = serde_json::from_str(&text).context("parsing --input as JSON")?;
+    anyhow::ensure!(value.is_object(), "--input must be a JSON object");
+    Ok(value)
+}
+
+/// `--field NAME=VALUE`: sets one string field on the input, overriding
+/// whatever `--input` gave it.
+fn apply_input_fields(mut input: Value, fields: &[String]) -> Result<Value> {
+    let object = input
+        .as_object_mut()
+        .context("--input must be a JSON object")?;
+    for field in fields {
+        let (name, value) = field
+            .split_once('=')
+            .with_context(|| format!("--field {field:?} must be NAME=VALUE"))?;
+        object.insert(name.to_owned(), Value::String(value.to_owned()));
+    }
+    Ok(input)
+}
+
 async fn run(args: GraphRunArgs) -> Result<()> {
     let (access, actor) = access_and_actor(&args.scope).await?;
     let ConfigAccess::Graphql(_) = &*access else {
@@ -241,41 +274,31 @@ async fn run(args: GraphRunArgs) -> Result<()> {
         );
     }
     let digest = plan.digest.clone();
-    let (entry, input) = match args.package.as_str() {
-        "code_review" => {
-            let prepared = prepare_code_review_run(
-                &access, &actor, &args.repo, &args.base, &args.head, args.focus, None,
-            )
-            .await?;
-            (prepared.entry_name, prepared.input)
-        }
-        "web_deep_research" => {
-            if !(2..=8).contains(&args.investigator_count) {
-                anyhow::bail!("--investigator-count must be between 2 and 8");
-            }
-            let question = args
-                .question
-                .as_deref()
-                .map(str::trim)
-                .filter(|question| !question.is_empty())
-                .context("web-deep-research requires --question")?;
-            (
-                "research".to_owned(),
-                json!({
-                    "question": question,
-                    "scope": args.research_scope,
-                    "freshness": args.freshness,
-                    "audience": args.audience,
-                    "output_requirements": args.output_requirements,
-                    "investigator_count": args.investigator_count.to_string(),
-                }),
-            )
-        }
-        package => anyhow::bail!("graph run has no entry adapter for package {package:?}"),
-    };
-    let receipt =
-        start_graph_run_with_access(&access, &actor, &graph_id, Some(&digest), &entry, input)
-            .await?;
+    let input = apply_input_fields(parse_input_arg(args.input.as_deref())?, &args.field)?;
+    let plugin_home = crate::home_state::resolve_home_dir(args.scope.home.as_deref());
+    let plugins = PluginExecutor::new(Some(plugin_home));
+    let prepared = prepare_entry_run(
+        &access,
+        &actor,
+        EntryRunRequest {
+            plan: &plan,
+            entry: args.entry.as_deref(),
+            input,
+            host_root: None,
+            plugins: &plugins,
+        },
+    )
+    .await?;
+    let receipt = start_graph_run_with_access(
+        &access,
+        &actor,
+        &graph_id,
+        Some(&digest),
+        &prepared.entry_name,
+        prepared.input,
+        prepared.origin,
+    )
+    .await?;
     if args.watch {
         watch_run(
             &access,

@@ -973,35 +973,22 @@ pub(crate) struct PackRemoveArgs {
 #[derive(clap::Args)]
 pub(crate) struct GraphRunArgs {
     pub(crate) package: String,
-    #[arg(long, default_value = ".")]
-    pub(crate) repo: PathBuf,
-    #[arg(long, default_value = "origin/main")]
-    pub(crate) base: String,
-    #[arg(long, default_value = "HEAD")]
-    pub(crate) head: String,
-    #[arg(long)]
-    pub(crate) focus: Option<String>,
-    #[arg(long, help = "Research question (required by web_deep_research)")]
-    pub(crate) question: Option<String>,
-    #[arg(
-        long = "research-scope",
-        default_value = "Answer the question directly; include material context, counterevidence, and uncertainty."
-    )]
-    pub(crate) research_scope: String,
     #[arg(
         long,
-        default_value = "Prefer current sources and record publication dates; retain older primary sources when historically necessary."
+        help = "The entry to start; required when the installed plan has more than one"
     )]
-    pub(crate) freshness: String,
-    #[arg(long, default_value = "A technically literate reader")]
-    pub(crate) audience: String,
+    pub(crate) entry: Option<String>,
     #[arg(
         long,
-        default_value = "A concise Markdown report with claim-local links, counterevidence, a source ledger, and explicit limitations."
+        help = "The entry's operator input, as a JSON object or @FILE naming one; default {}"
     )]
-    pub(crate) output_requirements: String,
-    #[arg(long, default_value_t = 4)]
-    pub(crate) investigator_count: u8,
+    pub(crate) input: Option<String>,
+    #[arg(
+        long = "field",
+        value_name = "NAME=VALUE",
+        help = "Set one string field on the input, overriding --input; repeatable"
+    )]
+    pub(crate) field: Vec<String>,
     #[arg(long, default_value_t = false)]
     pub(crate) watch: bool,
     #[arg(long, value_enum, default_value_t = OutputFormat::Text)]

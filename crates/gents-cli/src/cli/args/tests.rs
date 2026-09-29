@@ -642,12 +642,12 @@ fn pack_catalog_and_install_parse() {
 }
 
 #[test]
-fn graph_run_defaults_to_current_checkout() {
+fn graph_run_defaults_to_no_entry_and_empty_input() {
     match parse_graph(&["run", "code_review"]) {
         GraphCommand::Run(args) => {
-            assert_eq!(args.repo, std::path::PathBuf::from("."));
-            assert_eq!(args.base, "origin/main");
-            assert_eq!(args.head, "HEAD");
+            assert!(args.entry.is_none());
+            assert!(args.input.is_none());
+            assert!(args.field.is_empty());
         }
         _ => panic!("expected graph run"),
     }
@@ -658,19 +658,19 @@ fn graph_run_watch_result_cancel_and_toggle_parse() {
     match parse_graph(&[
         "run",
         "code_review",
-        "--repo",
-        "/tmp/repo",
-        "--base",
-        "origin/main",
-        "--head",
-        "HEAD",
+        "--entry",
+        "review",
+        "--input",
+        r#"{"base":"origin/main"}"#,
+        "--field",
+        "head=HEAD",
         "--watch",
     ]) {
         GraphCommand::Run(args) => {
             assert_eq!(args.package, "code_review");
-            assert_eq!(args.repo, std::path::PathBuf::from("/tmp/repo"));
-            assert_eq!(args.base, "origin/main");
-            assert_eq!(args.head, "HEAD");
+            assert_eq!(args.entry.as_deref(), Some("review"));
+            assert_eq!(args.input.as_deref(), Some(r#"{"base":"origin/main"}"#));
+            assert_eq!(args.field, vec!["head=HEAD".to_owned()]);
             assert!(args.watch);
         }
         _ => panic!("expected graph run"),
