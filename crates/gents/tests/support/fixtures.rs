@@ -7,6 +7,34 @@ use gents::{
     RuntimePrincipal,
 };
 
+/// Every pack fixture directory under `tests/fixtures/packs` whose manifest
+/// declares no plugins, sorted by name. Shared by every test that must cover
+/// "every fixture pack" so a new fixture is picked up by all of them without
+/// each keeping its own copy of the list; a fixture with plugins is excluded
+/// because it needs a compiled Afterburner artifact to build.
+pub fn fixture_pack_names_without_plugins() -> Vec<String> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/packs");
+    let mut names: Vec<String> = std::fs::read_dir(&root)
+        .expect("fixtures/packs dir")
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path.join("manifest.json")).ok()?).ok()?;
+            let has_plugins = manifest
+                .get("plugins")
+                .and_then(|value| value.as_array())
+                .is_some_and(|plugins| !plugins.is_empty());
+            if has_plugins {
+                return None;
+            }
+            path.file_name()?.to_str().map(str::to_owned)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 pub fn test_identity(name: &str) -> KeyIdentity {
     let path = std::env::temp_dir().join(format!("{name}-{}.key", uuid::Uuid::new_v4()));
     KeyIdentity::load_or_create(path, None).unwrap()

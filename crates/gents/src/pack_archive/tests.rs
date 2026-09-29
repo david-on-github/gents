@@ -37,17 +37,6 @@ fn fixture_manifest(name: &str) -> crate::pack::PackManifest {
     .expect("parse manifest")
 }
 
-/// Every fixture usable without a compiled plugin: `prepared_graph` and
-/// `bind_plugin_fixture` need Afterburner machinery this phase does not
-/// build, so they are exercised once G3/G4a land.
-const DIGESTIBLE_FIXTURES: &[&str] = &[
-    "assets_fixture",
-    "review_graph",
-    "documents_fixture",
-    "slot_fixture",
-    "dependent_fixture",
-];
-
 /// A raw `.pack` with exactly these entries, in this order, for building
 /// files the writer would never produce.
 fn raw_pack(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -105,9 +94,9 @@ fn a_packed_pack_reads_back_as_the_same_pack() {
 
 #[test]
 fn every_fixture_pack_keeps_its_digest_through_a_pack_file() {
-    for name in DIGESTIBLE_FIXTURES {
-        let (_guard, root) = fixture_pack_dir(name);
-        let manifest = fixture_manifest(name);
+    for name in crate::support::fixtures::fixture_pack_names_without_plugins() {
+        let (_guard, root) = fixture_pack_dir(&name);
+        let manifest = fixture_manifest(&name);
         let mut assets = std::collections::BTreeMap::new();
         for path in declared_paths(&manifest) {
             assets.insert(
@@ -127,6 +116,22 @@ fn every_fixture_pack_keeps_its_digest_through_a_pack_file() {
             "{name}"
         );
     }
+}
+
+/// [`digest_declared_assets`] and `pack_dir` share one implementation, so the
+/// test above compares a fixture's digest to itself and cannot catch a
+/// regression in the digest format both sides would make the same way. This
+/// pins one literal, independently-computed digest so a real change to the
+/// format (byte order, entry framing, path normalisation) fails loudly here
+/// even if the two call sites stay in lockstep.
+#[test]
+fn assets_fixture_digest_matches_a_pinned_golden_value() {
+    let (_guard, root) = fixture_pack_dir("assets_fixture");
+    let (_, header) = pack_dir(&root).expect("packing");
+    assert_eq!(
+        header.digest,
+        "sha256:bbae56b63ca05445bc0cd5ea9fdbf3331d8dea6fbe181913e5fb3d69fd13c5f6"
+    );
 }
 
 #[test]

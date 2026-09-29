@@ -215,20 +215,25 @@ fn graph_fixture_loads_slot_authoring_and_literal_prompt_assets() {
     }
 }
 
-/// Every fixture pack that ships a config loads it cleanly, so a later phase
-/// that installs `documents_fixture`, `slot_fixture` or `dependent_fixture`
-/// starts from a fixture already known to parse and validate.
+/// Every fixture pack that ships a config loads it cleanly, matching the
+/// pack loader's own installation path. Enumerated from the fixtures
+/// directory (shared with [`crate::pack_archive::tests`]'s digest test) so a
+/// new fixture is covered without either test keeping its own hand-written
+/// name list.
 #[test]
-fn every_documents_style_fixture_pack_loads_its_config() {
-    for name in ["documents_fixture", "slot_fixture", "dependent_fixture"] {
+fn every_fixture_pack_that_ships_a_config_loads_it_cleanly() {
+    for name in crate::support::fixtures::fixture_pack_names_without_plugins() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/packs")
-            .join(name);
+            .join(&name);
         let manifest: PackManifest =
             serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap())
                 .unwrap_or_else(|error| panic!("{name} manifest: {error}"));
         crate::pack::validate_manifest(&manifest.name, &manifest)
             .unwrap_or_else(|error| panic!("{name} manifest: {error:#}"));
+        if manifest.config.is_none() {
+            continue; // an assets-kind pack ships no config to load
+        }
         load_pack_config(
             &manifest,
             &PackInstallOptions {
