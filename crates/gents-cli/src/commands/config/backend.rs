@@ -6,7 +6,7 @@ use gents::config_client::{
     apply_desired_state_plan, read_desired_state_record_in_txn, DesiredStateApplyDocument,
     DesiredStateApplyPlan,
 };
-use gents::document_config::{BackendAuth, BackendModelCatalog, InferenceBackend};
+use gents::document_config::{BackendAuth, InferenceBackend};
 use gents::{discover_backend_models, BackendProviderKind, Collection};
 use serde_json::json;
 
@@ -53,10 +53,6 @@ pub(super) async fn backend_set(args: BackendSetArgs) -> Result<()> {
 }
 
 pub(super) async fn backend_discover_models(args: BackendDiscoverModelsArgs) -> Result<()> {
-    anyhow::ensure!(
-        !args.write || args.backend_id.is_some(),
-        "--write requires --backend-id"
-    );
     let (stored, target) = resolve_backend_discovery_target(&args).await?;
     let timeout = std::time::Duration::from_secs(
         stored
@@ -129,35 +125,21 @@ pub(super) async fn backend_discover_models(args: BackendDiscoverModelsArgs) -> 
         Err(error) => return Err(error),
     };
 
-    let models_written = if args.write {
-        let backend = stored
-            .as_ref()
-            .context("catalog publication needs a stored backend")?;
-        let catalog = BackendModelCatalog {
-            agent_did: matches!(backend.auth, BackendAuth::PrincipalOAuth)
-                .then(|| backend.agent_did.clone()),
-            observed_at: chrono::Utc::now().to_rfc3339(),
-            models: discovered_models.clone(),
-        };
+    // Discovery of a stored backend always publishes its credential-free
+    // catalog; an explicit connection probe has no backend to publish onto.
+    let catalog_written = if let Some(backend) = stored.as_ref() {
         let (access, _) =
             crate::resolve_config_access(args.home.as_deref(), args.graphql.as_deref()).await?;
-        access
-            .transact("cli.backend.discovery", |txn| {
-                let catalog = catalog.clone();
-                Box::pin(
-                    async move { gents::record_model_catalog_in_txn(txn, backend, catalog).await },
-                )
-            })
-            .await?;
-        discovered_models.len()
+        gents::record_discovered_catalog_on(&access, backend, discovered_models.clone()).await?;
+        true
     } else {
-        0
+        false
     };
     crate::print_json(&json!({
         "backend_id":args.backend_id,"backend_preset":args.backend_preset.map(BackendPresetArg::as_str),
         "provider_kind":target.provider_kind.as_str(),"endpoint":target.endpoint,
         "api_key":target.api_key.as_ref().map(|_|"<redacted>"),"api_key_env_var":target.api_key_env_var,
-        "discovered_models":discovered_models,"models_written":models_written,"catalog_written":args.write,
+        "discovered_models":discovered_models,"catalog_written":catalog_written,
     }))
 }
 

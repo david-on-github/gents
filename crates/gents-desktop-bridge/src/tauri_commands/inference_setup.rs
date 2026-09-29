@@ -413,6 +413,10 @@ pub async fn discover_inference_models_for_core(
     )
     .await;
 
+    if let (Ok(models), Some(core)) = (&discovered, core) {
+        publish_discovered_catalog(core, &request, &spec, api_key, models.clone()).await;
+    }
+
     let (reachable, models, failure, manual_entry_allowed) = match discovered {
         Ok(models) if models.is_empty() => (
             true,
@@ -465,6 +469,50 @@ pub async fn discover_inference_models_for_core(
         manual_entry_allowed,
         failure,
     })
+}
+
+/// Operator discovery is published as the credential-free catalog of every
+/// persisted backend already using this exact connection, so self-config can
+/// read it. Setup runs discovery again after persisting to publish it. A
+/// failed publication never fails discovery; the previous catalog is kept.
+async fn publish_discovered_catalog(
+    core: &gents_desktop_core::client::ClientCore,
+    request: &InferenceDiscoveryRequest,
+    spec: &gents::inference_setup::InferenceConnectionSpec,
+    api_key: Option<&str>,
+    models: Vec<gents::document_config::AdvertisedModel>,
+) {
+    use gents::document_config::BackendAuth;
+    let agent_did = request.agent_did.trim();
+    let auth = match (spec.oauth_provider, api_key) {
+        (Some(_), _) => BackendAuth::PrincipalOAuth,
+        (None, Some(key)) => BackendAuth::ApiKey {
+            key: key.to_string(),
+        },
+        (None, None) => BackendAuth::Unauthenticated,
+    };
+    let result = match core.operator_access(agent_did) {
+        Ok(access) => {
+            gents::backend_registry::record_connection_catalog_on(
+                &access,
+                agent_did,
+                spec.provider_kind,
+                &spec.endpoint,
+                &auth,
+                models,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = result {
+        tracing::warn!(
+            target: LOG_TARGET,
+            agent_did,
+            error = %format!("{error:#}"),
+            "publishing the discovered model catalog failed; the previous catalog is kept"
+        );
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, ts_rs::TS)]

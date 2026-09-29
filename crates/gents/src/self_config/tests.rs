@@ -2350,7 +2350,7 @@ async fn config_creates_and_discovers_an_unauthenticated_local_backend() {
     assert_eq!(discovered["endpoint"], endpoint);
     assert_eq!(discovered["observation"]["probe_status"], "healthy");
     assert_eq!(
-        discovered["observation"]["catalogs"][0]["models"][0]["model_name"],
+        discovered["observation"]["catalog"]["models"][0]["model_name"],
         "fixture-local-model"
     );
     assert!(discovered["note"]
@@ -4315,4 +4315,101 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
         ]),
     )
     .await);
+}
+
+#[tokio::test]
+async fn backend_reads_expose_operator_catalogs_without_credentials_or_provider_calls() {
+    const SECRET: &str = "operator-api-key-never-exposed";
+    let node = build_persona_node().await;
+    let identity = persona_identity("backend-catalog-read");
+    let owner = identity.did().to_string();
+    crate::test_support::install_test_behavior(&node, &owner, "setup").await;
+    let access = crate::config_client::ConfigAccess::Local(node.clone());
+    let backend = |id: &str, kind: &str, auth: Value| -> crate::document_config::InferenceBackend {
+        serde_json::from_value(json!({
+            "agent_did": owner, "backend_id": id, "name": id, "provider_kind": kind,
+            "endpoint": "http://127.0.0.1:1/v1", "auth": auth,
+        }))
+        .unwrap()
+    };
+    let claude = backend(
+        "claude",
+        "ClaudeCliSubscription",
+        json!({"kind": "principal_oauth"}),
+    );
+    let keyed = backend(
+        "keyed",
+        "OpenAiCompatible",
+        json!({"kind": "api_key", "key": SECRET}),
+    );
+    let models: Vec<crate::document_config::AdvertisedModel> = serde_json::from_value(json!([{
+        "model_name": "claude-opus-5-5", "display_name": "Claude Opus 5.5",
+        "context_window": 1_000_000, "max_context_window": null, "max_output_tokens": 128_000,
+        "reasoning_efforts": ["low", "high"],
+    }]))
+    .unwrap();
+    for document in [&claude, &keyed] {
+        crate::config_client::write_inference_backend_document(&access, document)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        crate::backend_registry::record_connection_catalog_on(
+            &access,
+            &owner,
+            claude.provider_kind,
+            &claude.endpoint,
+            &claude.auth,
+            models.clone(),
+        )
+        .await
+        .unwrap(),
+        1
+    );
+    crate::backend_registry::record_discovered_catalog_on(&access, &keyed, models)
+        .await
+        .unwrap();
+
+    let mut tool_config = config(&["backend"]);
+    tool_config.behavior_id = "setup".into();
+    tool_config.preview = true;
+    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config);
+    let call = |argv: &[&str]| {
+        let argv = std::iter::once("backend")
+            .chain(argv.iter().copied())
+            .map(String::from)
+            .collect::<Vec<_>>();
+        let tools = &tools;
+        async move {
+            let output = call_config_tool(tools, argv).await.unwrap();
+            assert!(!output.contains(SECRET), "credential exposed: {output}");
+            serde_json::from_str::<Value>(&output).unwrap()
+        }
+    };
+
+    let list = call(&["list"]).await;
+    let items = list["items"].as_array().unwrap();
+    for id in ["claude", "keyed"] {
+        let item = items.iter().find(|item| item["backend_id"] == id).unwrap();
+        assert_eq!(
+            item["catalog"]["models"][0]["model_name"],
+            "claude-opus-5-5"
+        );
+        assert!(item.get("catalogs").is_none() && item.get("auth").is_none());
+    }
+    for id in ["claude", "keyed"] {
+        let get = call(&["get", id]).await;
+        let model = &get["observation"]["catalog"]["models"][0];
+        assert_eq!(model["context_window"], 1_000_000);
+        assert_eq!(model["reasoning_efforts"], json!(["low", "high"]));
+        // The endpoint is unreachable: a provider call would fail discover.
+        let discover = call(&["discover", id]).await;
+        assert_eq!(discover["refreshed"], false);
+        assert_eq!(
+            discover["observation"]["catalog"]["models"][0]["model_name"],
+            "claude-opus-5-5"
+        );
+    }
+    let bound = call(&["get"]).await;
+    assert!(bound["observation"].get("catalog").is_some(), "{bound}");
 }

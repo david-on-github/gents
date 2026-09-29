@@ -859,6 +859,20 @@ export function SetupScreen({
     await shell.applyConfig((configApi) =>
       configApi.applyConfigComponents({ document: plan.document }),
     );
+    // Discovery ran before the backend existed. Running it again publishes the
+    // advertised catalog onto the persisted backend; setup does not depend on it.
+    try {
+      await api.discoverInferenceModels({
+        requestKey: `${currentDiscoveryKey.current}:publish`,
+        agentDid: deployment.agentDid,
+        provider,
+        authMethod: connection.authMethod,
+        endpoint: connection.endpoint,
+        apiKey: connection.apiKey.trim() || null,
+      });
+    } catch {
+      // The runtime prober publishes the catalog later for subscription backends.
+    }
     return plan;
   };
 

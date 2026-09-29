@@ -30,6 +30,7 @@ async fn config_backend_discover_models_supports_explicit_probe() -> Result<()> 
         .unwrap()
         .iter()
         .any(|item| item["model_name"] == model));
+    assert_eq!(output["catalog_written"], false);
     Ok(())
 }
 
@@ -91,17 +92,7 @@ async fn config_backend_set_accepts_canonical_document_and_supports_discovery() 
         .unwrap()
         .iter()
         .any(|item| item["model_name"] == model));
+    assert_eq!(discovered["catalog_written"], true);
     drop(server);
-    Ok(())
-}
-
-#[test]
-fn config_backend_discover_models_write_requires_backend_id() -> Result<()> {
-    let tempdir = tempfile::tempdir()?;
-    let stderr = run_cli_failure_stderr(
-        tempdir.path(),
-        &["config", "backend", "discover-models", "--write"],
-    )?;
-    assert!(stderr.contains("--write requires --backend-id"), "{stderr}");
     Ok(())
 }

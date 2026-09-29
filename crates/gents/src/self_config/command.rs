@@ -460,7 +460,7 @@ The profile selects backend/model/effort. Creation requires an unused exact ID p
   get [BACKEND_ID] [--behavior BEHAVIOR_ID]
   preview [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
   edit [--behavior BEHAVIOR_ID] [--set FIELD=JSON] [--clear FIELD]
-Create is deliberately limited to an enabled, unauthenticated OpenAI-compatible server and never accepts a credential. Discover contacts only that exact persisted backend through the canonical provider/catalog owner, records its advertised model catalog, and does not create a profile or select a model. Preview creation before applying it. Without BACKEND_ID, get/edit targets the backend referenced by the selected behavior's profile. Raw credentials cannot be read or changed; OAuth and API-key setup remain operator-owned."#
+Create is deliberately limited to an enabled, unauthenticated OpenAI-compatible server and never accepts a credential. List, get and discover include the backend's last credential-free catalog observation (model IDs, context windows, supported reasoning efforts). For an unauthenticated OpenAI-compatible backend, discover contacts only that exact persisted backend through the canonical provider/catalog owner and records its advertised catalog; for a credentialed or subscription backend it returns the catalog last published by operator discovery or the runtime prober without contacting the provider. Discover never creates a profile or selects a model. Preview creation before applying it. Without BACKEND_ID, get/edit targets the backend referenced by the selected behavior's profile. Raw credentials cannot be read or changed; OAuth and API-key setup remain operator-owned."#
             }
             Some("mcp-service") => {
                 r#"mcp-service commands:
@@ -874,17 +874,35 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 "no unique enabled backend with ID {backend_id:?}; inspect config backend list"
             );
             let backend = &matches[0];
-            anyhow::ensure!(
-                backend.provider_kind == crate::BackendProviderKind::OpenAiCompatible
-                    && matches!(
-                        backend.auth,
-                        crate::document_config::BackendAuth::Unauthenticated
-                    ),
-                "backend discover is limited to unauthenticated OpenAI-compatible servers; credentials and OAuth remain operator-owned"
-            );
+            if backend.provider_kind != crate::BackendProviderKind::OpenAiCompatible
+                || !matches!(
+                    backend.auth,
+                    crate::document_config::BackendAuth::Unauthenticated
+                )
+            {
+                // Credentialed discovery stays with the operator paths and the
+                // runtime prober; the agent reads what they last published.
+                let observation = self
+                    .backend_observation_view(backend_id, backend.provider_kind)
+                    .await?;
+                return Ok(serde_json::to_string_pretty(&json!({
+                    "resource": "InferenceBackend",
+                    "backend_id": backend_id,
+                    "endpoint": backend.endpoint,
+                    "provider_kind": backend.provider_kind,
+                    "observation": observation,
+                    "refreshed": false,
+                    "note": "This backend is credentialed, so self-config did not contact the provider. The catalog is the last credential-free observation published by operator discovery (desktop setup, gents config backend discover-models --backend-id) or the runtime prober; null means none has been recorded yet."
+                }))?);
+            }
             self.execution.enter_mutation();
             let observation =
                 crate::backend_registry::discover_shared_backend(&self.node, backend).await?;
+            let observation = crate::backend_registry::scoped_observation_view(
+                Some(&observation),
+                &self.agent_did,
+                backend.provider_kind,
+            )?;
             return Ok(serde_json::to_string_pretty(&json!({
                 "resource": "InferenceBackend",
                 "backend_id": backend_id,
@@ -1429,10 +1447,68 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 core.behavior_id()
             )
         })?;
+        if target == SelfConfigTarget::InferenceBackend {
+            let observation = self.backend_document_observation(value).await?;
+            return Ok(serde_json::to_string_pretty(&json!({
+                "resource": target.collection_name(),
+                "document": value,
+                "observation": observation,
+            }))?);
+        }
         Ok(serde_json::to_string_pretty(&json!({
             "resource": target.collection_name(),
             "document": value,
         }))?)
+    }
+
+    /// Credential-free observation of one owned backend in its own
+    /// authentication scope, read under the invoking principal's identity.
+    async fn backend_observation_view(
+        &self,
+        backend_id: &str,
+        provider_kind: crate::BackendProviderKind,
+    ) -> Result<Value> {
+        let owner = self.agent_did.clone();
+        let backend_id = backend_id.to_owned();
+        let observation = crate::config_client::ConfigAccess::transact_local(
+            &self.node,
+            Some(self.core.identity()?),
+            "self_config.backend_observation",
+            |txn| {
+                let owner = owner.clone();
+                let backend_id = backend_id.clone();
+                Box::pin(async move {
+                    crate::backend_registry::lookup_backend_observation_in_txn(
+                        txn,
+                        &owner,
+                        &backend_id,
+                    )
+                    .await
+                })
+            },
+        )
+        .await?;
+        crate::backend_registry::scoped_observation_view(
+            observation.as_ref(),
+            &self.agent_did,
+            provider_kind,
+        )
+    }
+
+    async fn backend_document_observation(&self, document: &Value) -> Result<Value> {
+        let backend_id = document
+            .get("backend_id")
+            .and_then(Value::as_str)
+            .context("backend document has no backend_id")?;
+        let provider_kind = serde_json::from_value(
+            document
+                .get("provider_kind")
+                .cloned()
+                .context("backend document has no provider_kind")?,
+        )
+        .context("decoding backend provider_kind")?;
+        self.backend_observation_view(backend_id, provider_kind)
+            .await
     }
 
     async fn exact_read(&self, target: SelfConfigTarget, id: &str) -> Result<String> {
@@ -1458,6 +1534,13 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 "auth".into(),
                 json!({"redacted": true, "owner": "operator credential/login flow"}),
             );
+            let document = Value::Object(document);
+            let observation = self.backend_document_observation(&document).await?;
+            return Ok(serde_json::to_string_pretty(&json!({
+                "resource": target.collection_name(),
+                "document": document,
+                "observation": observation,
+            }))?);
         }
         Ok(serde_json::to_string_pretty(&json!({
             "resource": target.collection_name(),
@@ -1513,7 +1596,7 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             SelfConfigTarget::InferenceBackend => (
                 "InferenceBackend",
                 "backend_id",
-                "backend_id name provider_kind openai_wire_api endpoint connect_timeout_secs discovery_timeout_secs max_concurrent max_queue_depth enabled probe_status last_probe",
+                "backend_id name provider_kind openai_wire_api endpoint connect_timeout_secs discovery_timeout_secs max_concurrent max_queue_depth enabled catalogs probe_status last_probe",
             ),
             SelfConfigTarget::SubagentTarget | SelfConfigTarget::InferenceExecution => (
                 target.collection_name(),
@@ -1547,6 +1630,28 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
             .and_then(Value::as_array)
             .context("inventory query returned no rows array")?
             .clone();
+        if target == SelfConfigTarget::InferenceBackend {
+            for row in &mut rows {
+                let observation: crate::document_config::InferenceBackendObservation =
+                    serde_json::from_value(row.clone()).context("decoding backend observation")?;
+                let provider_kind = serde_json::from_value(
+                    row.get("provider_kind")
+                        .cloned()
+                        .context("backend row has no provider_kind")?,
+                )
+                .context("decoding backend provider_kind")?;
+                let view = crate::backend_registry::scoped_observation_view(
+                    Some(&observation),
+                    &self.agent_did,
+                    provider_kind,
+                )?;
+                let object = row
+                    .as_object_mut()
+                    .context("backend row must be an object")?;
+                object.remove("catalogs");
+                object.insert("catalog".into(), view["catalog"].clone());
+            }
+        }
         rows.sort_by(|left, right| {
             left.get(id_field)
                 .and_then(Value::as_str)

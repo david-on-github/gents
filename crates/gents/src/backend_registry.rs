@@ -3,7 +3,9 @@
 
 use crate::backend_provider::BackendProviderKind;
 pub use crate::document_config::InferenceBackend;
-use crate::document_config::{BackendAuth, BackendModelCatalog, InferenceBackendObservation};
+use crate::document_config::{
+    AdvertisedModel, BackendAuth, BackendModelCatalog, InferenceBackendObservation,
+};
 use crate::graphql::escape_graphql_string;
 use crate::openai_wire::OpenAiWireApi;
 use anyhow::{Context, Result};
@@ -118,6 +120,12 @@ impl InferenceBackend {
         let violations = self.validation_violations();
         anyhow::ensure!(violations.is_empty(), "{}", violations.join("; "));
         Ok(())
+    }
+
+    /// Catalog authentication scope of this connection: `None` for shared
+    /// credentials, the owning principal for principal OAuth.
+    pub fn catalog_scope(&self) -> Option<&str> {
+        matches!(self.auth, BackendAuth::PrincipalOAuth).then_some(self.agent_did.as_str())
     }
 }
 
@@ -439,10 +447,8 @@ pub async fn record_model_catalog_in_txn(
     backend: &InferenceBackend,
     catalog: BackendModelCatalog,
 ) -> Result<()> {
-    let expected_scope =
-        matches!(backend.auth, BackendAuth::PrincipalOAuth).then_some(backend.agent_did.as_str());
     anyhow::ensure!(
-        catalog.agent_did.as_deref() == expected_scope,
+        catalog.agent_did.as_deref() == backend.catalog_scope(),
         "catalog credential scope does not match backend authentication"
     );
     let observed_at = chrono::DateTime::parse_from_rfc3339(&catalog.observed_at)
@@ -522,6 +528,101 @@ pub async fn record_model_catalog_in_txn(
     )
     .await?;
     Ok(())
+}
+
+/// Publish an operator-side discovery (desktop setup, CLI) of a persisted
+/// backend through the same observation owner as the runtime prober. The
+/// stored value is the typed advertisement only; the credential that
+/// authorized the request has no representation in `BackendModelCatalog`.
+pub async fn record_discovered_catalog_on(
+    access: &crate::config_client::ConfigAccess,
+    backend: &InferenceBackend,
+    models: Vec<AdvertisedModel>,
+) -> Result<BackendModelCatalog> {
+    let catalog = BackendModelCatalog {
+        agent_did: backend.catalog_scope().map(str::to_owned),
+        observed_at: chrono::Utc::now().to_rfc3339(),
+        models,
+    };
+    access
+        .transact("backend_registry.record_operator_catalog", |txn| {
+            let catalog = catalog.clone();
+            Box::pin(async move { record_model_catalog_in_txn(txn, backend, catalog).await })
+        })
+        .await?;
+    Ok(catalog)
+}
+
+/// Publish an operator discovery made for a connection rather than a stored
+/// backend (desktop setup discovers before it persists). Only same-principal
+/// backends using exactly this provider, endpoint and authentication selection
+/// receive it; returns how many backends were updated.
+pub async fn record_connection_catalog_on(
+    access: &crate::config_client::ConfigAccess,
+    owner: &str,
+    provider_kind: BackendProviderKind,
+    endpoint: &str,
+    auth: &BackendAuth,
+    models: Vec<AdvertisedModel>,
+) -> Result<usize> {
+    anyhow::ensure!(!owner.trim().is_empty(), "backend owner must be nonempty");
+    let query = format!(
+        r#"{{ InferenceBackend(filter: {{ agent_did: {{ _eq: "{}" }}, provider_kind: {{ _eq: "{}" }} }}) {{ {BACKEND_CONFIG_FIELDS} }} }}"#,
+        escape_graphql_string(owner),
+        escape_graphql_string(provider_kind.as_str()),
+    );
+    let observed_at = chrono::Utc::now().to_rfc3339();
+    access
+        .transact("backend_registry.record_connection_catalog", |txn| {
+            let (query, models, observed_at) = (&query, &models, &observed_at);
+            Box::pin(async move {
+                let response = txn.execute(query).await?;
+                let rows = response
+                    .get("data")
+                    .and_then(|data| data.get("InferenceBackend"))
+                    .and_then(serde_json::Value::as_array)
+                    .context("backend connection query returned no rows")?;
+                let mut recorded = 0;
+                for row in rows {
+                    let backend = InferenceBackend::from_value(row)?;
+                    if backend.endpoint != endpoint || &backend.auth != auth {
+                        continue;
+                    }
+                    let catalog = BackendModelCatalog {
+                        agent_did: backend.catalog_scope().map(str::to_owned),
+                        observed_at: observed_at.clone(),
+                        models: models.clone(),
+                    };
+                    record_model_catalog_in_txn(txn, &backend, catalog).await?;
+                    recorded += 1;
+                }
+                Ok(recorded)
+            })
+        })
+        .await
+}
+
+/// Read-only projection of a backend's observation for its own
+/// authentication scope. Other scopes' advertisements are never exposed as
+/// this backend's entitlement.
+pub fn scoped_observation_view(
+    observation: Option<&InferenceBackendObservation>,
+    owner: &str,
+    provider_kind: BackendProviderKind,
+) -> Result<serde_json::Value> {
+    let scope = provider_kind.is_agent_scoped_oauth().then_some(owner);
+    let catalog = observation
+        .map(|observation| observation.catalog_for(scope))
+        .transpose()?
+        .flatten();
+    Ok(serde_json::json!({
+        "catalog": catalog.map(|catalog| serde_json::json!({
+            "observed_at": catalog.observed_at,
+            "models": catalog.models,
+        })),
+        "probe_status": observation.and_then(|observation| observation.probe_status.as_deref()),
+        "last_probe": observation.and_then(|observation| observation.last_probe.as_deref()),
+    }))
 }
 
 pub async fn probe_and_promote_enabled_backends(node: &EmbeddedNode) {
