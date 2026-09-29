@@ -132,6 +132,22 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Added
 
+- `gents eval watch` shows each trial live while its runner holds the home
+  (#2089). Every few seconds the embedded executor reads the trial's home and
+  writes a snapshot into its `progress.json` entry: tokens, requests, model
+  turns, tool calls ok and failed with the top five tools, and rows per
+  configuration collection and registered schema against the case's goal.
+  The goal comes from each `captured_rows_count` check, and a case's optional
+  `goal` map (collection to count, `schemas` for registered collections)
+  replaces it per collection. The final snapshot is kept in the trial's
+  `evidence.json`, and the runner rewrites `<run dir>/report.json` (the report
+  plus each slot's evidence record) whenever a trial finishes, so the watch
+  renders the summary, the in-flight trials and the finished trials without
+  opening the node. Verdicts carry what they observed against what they
+  expected (`behaviors observed 7 expected ≥9`) in `eval show --json`, `eval
+  trial` and the watch. `eval watch --json` prints one object per render.
+  Live fields appear only for runs started by a runner with this change.
+
 - `gents pack remove` works for every pack kind, not only documents packs
   (#2067). Assets and plugins packs record their install at
   `<home>/pack-installs/<namespace>/<name>.json` and remove locally, with no

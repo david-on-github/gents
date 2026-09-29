@@ -138,6 +138,34 @@ async fn the_canary_runs_two_cases_end_to_end_on_an_embedded_home_with_a_scripte
         "nothing in the trial's workspace pointed out of it: {outside_workspace:?}"
     );
 
+    // Each trial's home was read live while it ran, and the snapshot it
+    // ended on is kept with its evidence record; the run's view for
+    // watchers carries both trials.
+    for (case_id, record) in evidence_records(&canary.runs_dir(), &request.run_id, &trials) {
+        let live = &record["live"];
+        let stages = if case_id == "two-stage" { 2 } else { 1 };
+        assert_eq!(live["requests"], stages, "{case_id}: {record:#}");
+        assert!(
+            live["model_turns"].as_u64() >= Some(stages),
+            "{case_id}: {record:#}"
+        );
+        assert!(live["output_tokens"].is_u64(), "{case_id}: {record:#}");
+        assert!(
+            live["documents"]["AgentBehavior"].as_u64() >= Some(1),
+            "the pack's own behavior: {record:#}"
+        );
+        assert_eq!(live["captures"]["items"], 1, "{case_id}: {record:#}");
+        assert_eq!(
+            record["goal"],
+            json!([{"collection": "CanaryItem", "capture": "items", "min": 1}]),
+            "one entry however many stages count the capture: {record:#}"
+        );
+    }
+    let view = gents::eval::runner::read_run_view(&canary.runs_dir().join(&request.run_id))
+        .expect("the loop leaves its view beside the run");
+    assert_eq!(view.trials.len(), 2);
+    assert_eq!(view.report.cells[0].counts.pass, 2);
+
     // An identical second run in a fresh launching home anchors the same way.
     let (again, repeat) = canary_request(backend.endpoint(), "run-canary").await;
     let repeat_executor =

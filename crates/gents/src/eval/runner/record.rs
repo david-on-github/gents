@@ -1,4 +1,4 @@
-//! The recorder seam: the four document operations the loop performs.
+//! The recorder seam: the document operations the loop performs.
 //!
 //! The loop writes one trial row, its verdicts and its completion, and reads
 //! back what a run has already written so a resumed run plans only what it
@@ -10,10 +10,13 @@
 //! unchanged rather than inventing an outcome for a trial that may well have
 //! succeeded.
 
+use std::path::Path;
+
 use anyhow::Result;
 
 use crate::config_client::ConfigAccess;
 use crate::document_config::EvalSplit;
+use crate::eval::report::{load_report, EvalReport};
 use crate::eval::{
     append_verdict, complete_trial, create_trial, load_trials, TrialCompletion, TrialIdentity,
     TrialRecord, VerdictDraft,
@@ -38,6 +41,18 @@ pub trait Recorder: Send + Sync {
     ) -> Result<()>;
 
     async fn load_trials(&self, owner: &str, run_id: &str) -> Result<Vec<TrialRecord>>;
+
+    /// The run's report as the documents written so far derive it, for the
+    /// loop's `report.json`; `None` from a recorder with no documents to
+    /// derive it from.
+    async fn report(
+        &self,
+        _owner: &str,
+        _runs_dir: &Path,
+        _run_id: &str,
+    ) -> Result<Option<EvalReport>> {
+        Ok(None)
+    }
 }
 
 /// The recorder every real run uses: the eval documents themselves.
@@ -69,5 +84,14 @@ impl Recorder for DocumentRecorder<'_> {
 
     async fn load_trials(&self, owner: &str, run_id: &str) -> Result<Vec<TrialRecord>> {
         load_trials(self.0, owner, run_id).await
+    }
+
+    async fn report(
+        &self,
+        owner: &str,
+        runs_dir: &Path,
+        run_id: &str,
+    ) -> Result<Option<EvalReport>> {
+        load_report(self.0, owner, runs_dir, run_id).await.map(Some)
     }
 }

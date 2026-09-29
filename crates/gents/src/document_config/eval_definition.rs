@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{ensure, Result};
 use serde::{Deserialize, Serialize};
@@ -250,6 +250,20 @@ pub struct EvalCase {
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
     pub fixtures: Option<EvalFixtures>,
     pub stages: Vec<EvalStage>,
+    /// How many rows each collection should hold when the case is done,
+    /// for a watcher to measure a trial's progress against; `schemas` counts
+    /// the collections the subject registers. Never graded: an entry replaces
+    /// the goal a `captured_rows_count` check of that collection implies.
+    #[serde(
+        default,
+        deserialize_with = "super::serde_helpers::deserialize_default_on_null",
+        skip_serializing_if = "BTreeMap::is_empty"
+    )]
+    #[cfg_attr(
+        feature = "typescript",
+        ts(as = "Option<BTreeMap<String, u64>>", optional = nullable)
+    )]
+    pub goal: BTreeMap<String, u64>,
 }
 
 /// A pack-carried eval definition. Identity is `(definition_id,
@@ -321,6 +335,12 @@ impl EvalDefinition {
             ensure!(
                 !case.stages.is_empty(),
                 "eval definition {id} case {case_id} requires at least one stage"
+            );
+            ensure!(
+                case.goal
+                    .keys()
+                    .all(|collection| !collection.trim().is_empty()),
+                "eval definition {id} case {case_id} has a goal with an empty collection name"
             );
             let mut stage_ids = BTreeSet::new();
             let mut acceptance = 0usize;

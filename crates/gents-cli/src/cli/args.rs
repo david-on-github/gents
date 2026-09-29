@@ -4006,6 +4006,10 @@ pub(crate) struct EvalWatchArgs {
     /// Render once and return.
     #[arg(long)]
     pub(crate) once: bool,
+    /// One JSON object per render: the progress file, the run's view and
+    /// where it was read from.
+    #[arg(long)]
+    pub(crate) json: bool,
     #[command(flatten)]
     pub(crate) scope: EvalScopeArgs,
 }

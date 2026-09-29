@@ -30,9 +30,10 @@ use crate::config_client::{
 use crate::defra_node::EmbeddedNode;
 use crate::document_config::{InferenceSampling, PackConfig};
 use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome, RUNTIME_READY_TIMEOUT};
+use crate::eval::runner::embedded::live::LiveObserver;
 use crate::eval::runner::embedded::observe::{
-    await_terminal, classify_request_outcome, collect_request_evidence, RequestEvidence,
-    TerminalObservation,
+    await_terminal, classify_request_outcome, collect_request_evidence, InferenceCallEvidence,
+    RequestEvidence, TerminalObservation,
 };
 use crate::eval::runner::executor::{
     Capture, CaptureResult, FileRef, FixtureDocument, InferenceBinding, Isolation, StageEvidence,
@@ -60,6 +61,9 @@ const GRACE: Duration = Duration::from_secs(30);
 
 /// How often a pending request's row is read while a stage runs.
 const POLL: Duration = Duration::from_millis(250);
+
+/// How often a running trial's home is read for its live snapshot.
+const LIVE_EVERY: Duration = Duration::from_secs(5);
 
 /// Runs each trial in its own embedded home under `runs_dir`.
 pub struct EmbeddedExecutor {
@@ -186,7 +190,13 @@ impl EmbeddedExecutor {
             }
         };
 
-        let stages = run_stages(spec, &cancel, &home, &locator, &workspace, &ready).await;
+        let stages = observed_live(
+            spec,
+            &home,
+            &locator,
+            run_stages(spec, &cancel, &home, &locator, &workspace, &ready),
+        )
+        .await;
 
         if let Err(error) = runtime.shutdown().await {
             tracing::warn!(
@@ -222,6 +232,46 @@ fn trial_tool_ceiling(workspace: &Path, host_bash: bool) -> ToolCeiling {
         policy.bash.execution_mode = CommandExecutionMode::WorkspaceWrite;
     }
     ToolCeiling::readwrite(workspace).with_policy(policy)
+}
+
+/// Run `stages` while reporting the home's [`LiveObserver`] snapshot every
+/// [`LIVE_EVERY`], then once more when they end, which is the snapshot the
+/// loop keeps with the trial's evidence record. Nothing is read when nothing
+/// watches the trial.
+async fn observed_live<Stages>(
+    spec: &TrialSpec,
+    home: &EmbeddedHome,
+    locator: &TrialLocator,
+    stages: Stages,
+) -> Vec<StageEvidence>
+where
+    Stages: std::future::Future<Output = Vec<StageEvidence>>,
+{
+    if !spec.progress.attached() {
+        return stages.await;
+    }
+    let observer = LiveObserver::new(&home.node, &locator.trial_agent_did, &spec.stages).await;
+    let report = || async {
+        match observer.snapshot().await {
+            Ok(snapshot) => spec.progress.live(snapshot),
+            Err(error) => tracing::debug!(
+                error = %format!("{error:#}"),
+                trial_id = %spec.trial_id,
+                "eval trial live snapshot was not read"
+            ),
+        }
+    };
+    tokio::pin!(stages);
+    let mut every = tokio::time::interval(LIVE_EVERY);
+    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let stages = loop {
+        tokio::select! {
+            stages = &mut stages => break stages,
+            _ = every.tick() => report().await,
+        }
+    };
+    report().await;
+    stages
 }
 
 /// The first reconcile of the trial runtime's event sources, once there is one.
@@ -1445,7 +1495,7 @@ async fn capture_documents(
 /// on. GraphQL has no "every field" selection, so a capture has to say what it
 /// wants; a filter's own keys are included because a row captured by a field
 /// should carry it.
-fn documents_capture_query(
+pub(super) fn documents_capture_query(
     collection: &str,
     filter: &Value,
     fields: &[String],
@@ -1644,9 +1694,16 @@ async fn session_requests(node: &EmbeddedNode, session_id: &str) -> Result<Vec<S
 /// `None`, never zero: one call that never reported its tokens makes the sum
 /// unknown.
 fn usage(stages: &[StageEvidence]) -> TrialUsage {
+    usage_of(stages.iter().flat_map(|stage| &stage.inference_calls))
+}
+
+/// The totals over `calls`, by [`usage`]'s rule.
+pub(super) fn usage_of<'a>(
+    calls: impl IntoIterator<Item = &'a InferenceCallEvidence>,
+) -> TrialUsage {
     let mut input_tokens = Some(0u64);
     let mut output_tokens = Some(0u64);
-    for call in stages.iter().flat_map(|stage| &stage.inference_calls) {
+    for call in calls {
         input_tokens = input_tokens
             .zip(call.prompt_tokens)
             .map(|(total, tokens)| total.saturating_add(tokens));
