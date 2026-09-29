@@ -305,5 +305,4 @@ and there is no GitHub source.
 | [mailbox](mailbox/README.md) | Explicit human-attention tool surface |
 | [pipeline](pipeline/README.md) | Minimal document-trigger pipeline |
 | [repo_maintenance](repo_maintenance/README.md) | Repository work through reviewed PR |
-| [security_scan](security_scan/README.md) | Whole-codebase discovery and verification |
 | [web_deep_research](web_deep_research/README.md) | Reusable research graph |

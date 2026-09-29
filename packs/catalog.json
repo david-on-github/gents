@@ -12,7 +12,6 @@
     "pipeline",
     "prompt_proposer",
     "repo_maintenance",
-    "security_scan",
     "web_deep_research"
   ]
 }
