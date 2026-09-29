@@ -92,4 +92,21 @@ def keepsControl (decode : Doc → Option Control) (stored candidate : Doc) : Bo
         && retained old.toolsAuthority new.toolsAuthority
   | _, _ => false
 
+/-- The invoker's reachability, projected from its own behavior document:
+`enabled` (absent is true) and whether its tags carry the Setup tag. -/
+structure Reach where
+  enabled : Bool
+  setupTag : Bool
+  deriving DecidableEq, Repr
+
+/-- The behavior half of no lockout: the invoker stays enabled and keeps the
+Setup tag it had. The tag is how the desktop reaches the Engineer and how
+persona requests refuse editing or disabling it
+(`PersonaRequest.protected_edit_or_disable_rejected`); dropping it first would
+make self-disable a two-step edit. Other tags and fields stay editable. -/
+def keepsReach (decode : Doc → Option Reach) (stored candidate : Doc) : Bool :=
+  match decode stored, decode candidate with
+  | some old, some new => new.enabled && retained old.setupTag new.setupTag
+  | _, _ => false
+
 end SelfConfig

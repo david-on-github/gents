@@ -15,8 +15,8 @@ mod read;
 mod tests;
 
 pub use ops::{
-    apply_tool_grant_selection, guard_tools_keep_control, validate_tool_network_selection,
-    PatchOutcome, SelfConfigCore, EFFECT_TIMING_NOTE,
+    apply_tool_grant_selection, guard_behavior_keeps_reach, guard_tools_keep_control,
+    validate_tool_network_selection, PatchOutcome, SelfConfigCore, EFFECT_TIMING_NOTE,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -108,13 +108,7 @@ fn behavior_request(core: &SelfConfigCore, patch: SelfConfigPatch) -> ApplyReque
     let id = core.behavior_id().to_owned();
     let mut request = ApplyRequest::new(SelfConfigTarget::AgentBehavior, patch);
     request.resolve_unique = Box::new(move |_| Ok(id.clone()));
-    request.guard = Box::new(|_, _, merged| {
-        anyhow::ensure!(
-            merged.get("enabled").and_then(Value::as_bool) != Some(false),
-            "no-lockout guard: behavior must remain enabled"
-        );
-        Ok(())
-    });
+    request.guard = Box::new(|_, stored, merged| guard_behavior_keeps_reach(stored, merged));
     request
 }
 

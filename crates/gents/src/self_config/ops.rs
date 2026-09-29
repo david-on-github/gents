@@ -592,6 +592,33 @@ pub(crate) fn decode_merged<T: serde::de::DeserializeOwned>(
         .map_err(|error| anyhow!("merged {collection} document is not valid: {error}"))
 }
 
+/// Lean `SelfConfig.keepsReach`: the invoking behavior stays enabled and keeps
+/// the Setup tag it had, which routes persona-request protection and desktop
+/// reachability to the Engineer.
+pub fn guard_behavior_keeps_reach(
+    stored: &Map<String, Value>,
+    candidate: &Map<String, Value>,
+) -> Result<()> {
+    let setup_tag = |doc: &Map<String, Value>| {
+        doc.get("tags")
+            .and_then(Value::as_array)
+            .is_some_and(|tags| {
+                tags.iter().any(|tag| {
+                    tag.as_str() == Some(crate::agent::persona_ops::SETUP_STEWARD_BEHAVIOR_TAG)
+                })
+            })
+    };
+    anyhow::ensure!(
+        candidate.get("enabled").and_then(Value::as_bool) != Some(false),
+        "no-lockout guard: behavior must remain enabled"
+    );
+    anyhow::ensure!(
+        !setup_tag(stored) || setup_tag(candidate),
+        "no-lockout guard: the Setup tag must remain on the configurator"
+    );
+    Ok(())
+}
+
 /// Lean `SelfConfig.keepsControl`: the invoker's candidate Tools keep its
 /// self-config tool on and keep the agents group, the no-lockout guard and the
 /// `tools` category it already had. This is the only self-protection on its

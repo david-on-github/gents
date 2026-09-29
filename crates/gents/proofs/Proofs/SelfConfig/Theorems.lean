@@ -188,6 +188,22 @@ theorem tools_authority_removal_refused (decode : Doc → Option Control)
     keepsControl decode stored candidate = false := by
   simp [keepsControl, retained, ho, hn, had, removed]
 
+/-- Disabling the invoking behavior is a lockout. -/
+theorem self_disable_refused (decode : Doc → Option Reach)
+    (stored candidate : Doc) (old new : Reach)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (hoff : new.enabled = false) :
+    keepsReach decode stored candidate = false := by
+  simp [keepsReach, ho, hn, hoff]
+
+/-- Dropping the Setup tag is the first step of a two-step self-disable. -/
+theorem setup_tag_removal_refused (decode : Doc → Option Reach)
+    (stored candidate : Doc) (old new : Reach)
+    (ho : decode stored = some old) (hn : decode candidate = some new)
+    (had : old.setupTag = true) (removed : new.setupTag = false) :
+    keepsReach decode stored candidate = false := by
+  simp [keepsReach, retained, ho, hn, had, removed]
+
 /-- Everything else on the invoker's own Tools is allowed. -/
 theorem retained_control_allowed (decode : Doc → Option Control)
     (stored candidate : Doc) (old new : Control)

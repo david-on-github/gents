@@ -102,18 +102,23 @@ pub(super) fn generated_self_config_cases_fence_patch_merge() {
             );
         }
         if case.guarded && case.admissible && case.validates {
-            assert_eq!(target, SelfConfigTarget::Tools, "{}", case.name);
-            let stored = typed_tools(&case.doc);
+            let stored = typed_doc(target, &case.doc);
             let patch = patch
                 .into_iter()
                 .map(|(field, value)| (field, value.map(parse_nested)))
                 .collect();
+            let candidate = apply_patch(target, &stored, &patch);
+            let verdict = match target {
+                SelfConfigTarget::Tools => {
+                    gents::self_config::guard_tools_keep_control(&stored, &candidate)
+                }
+                SelfConfigTarget::AgentBehavior => {
+                    gents::self_config::guard_behavior_keeps_reach(&stored, &candidate)
+                }
+                other => panic!("{}: no no-lockout guard for {other:?}", case.name),
+            };
             assert_eq!(
-                gents::self_config::guard_tools_keep_control(
-                    &stored,
-                    &apply_patch(target, &stored, &patch)
-                )
-                .is_ok(),
+                verdict.is_ok(),
                 case.accepted,
                 "{}: runtime no-lockout guard",
                 case.name
@@ -128,17 +133,24 @@ fn parse_nested(value: Value) -> Value {
     serde_json::from_str(text).unwrap_or_else(|error| panic!("{text}: {error}"))
 }
 
-fn typed_tools(entries: &[crate::lean_vocab_test::LeanSelfConfigFieldValue]) -> Map<String, Value> {
+fn typed_doc(
+    target: SelfConfigTarget,
+    entries: &[crate::lean_vocab_test::LeanSelfConfigFieldValue],
+) -> Map<String, Value> {
     let mut doc: Map<String, Value> = entries
         .iter()
         .map(|entry| {
-            (
-                entry.field.clone(),
-                parse_nested(Value::String(entry.value.clone())),
-            )
+            let value = Value::String(entry.value.clone());
+            let value = if entry.field == target.unique_field() {
+                value
+            } else {
+                parse_nested(value)
+            };
+            (entry.field.clone(), value)
         })
         .collect();
-    doc.insert("tools_id".into(), Value::String("tools-1".into()));
+    doc.entry(target.unique_field())
+        .or_insert_with(|| Value::String("doc-1".into()));
     doc.insert("agent_did".into(), Value::String("did:key:agent-a".into()));
     doc
 }

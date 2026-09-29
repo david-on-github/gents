@@ -4101,6 +4101,84 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     .await
     .unwrap_err();
     assert!(disable.contains("no-lockout"), "{disable}");
+    // Two-step self-disable: the Setup tag and the persona disable path.
+    let untag = call_config_tool(
+        &tools,
+        command(&[
+            "behavior",
+            "edit",
+            "setup",
+            "--set",
+            "tags=[\"ui:engineer\"]",
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert!(untag.contains("Setup tag must remain"), "{untag}");
+    ok(call_config_tool(
+        &tools,
+        command(&[
+            "behavior",
+            "edit",
+            "setup",
+            "--set",
+            &format!(
+                "tags={}",
+                json!([
+                    crate::agent::persona_ops::SETUP_STEWARD_BEHAVIOR_TAG,
+                    "ui:engineer"
+                ])
+            ),
+        ]),
+    )
+    .await);
+    let persona_disable =
+        call_config_tool(&tools, command(&["behavior", "disable", "--id", "setup"]))
+            .await
+            .unwrap_err();
+    assert!(persona_disable.contains("no-lockout"), "{persona_disable}");
+    // A selected target the runtime could not resolve is refused at publication.
+    for name in ["\"\"", "\"   \""] {
+        let blank = call_config_tool(
+            &tools,
+            command(&[
+                "subagent-target",
+                "edit",
+                "gatekeeper",
+                "--set",
+                &format!("name={name}"),
+            ]),
+        )
+        .await
+        .unwrap_err();
+        assert!(blank.contains("invalid SubagentTarget"), "{blank}");
+    }
+    ok(call_config_tool(
+        &tools,
+        command(
+            &[
+                &["subagent-target", "create", "gatekeeper-twin"][..],
+                &target_patch,
+            ]
+            .concat(),
+        ),
+    )
+    .await);
+    let duplicate = call_config_tool(
+        &tools,
+        command(&[
+            "tools",
+            "edit",
+            "--set",
+            r#"subagents={"enabled":true,"target_ids":["gatekeeper","gatekeeper-twin"]}"#,
+        ]),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        duplicate.contains("duplicate subagent target name"),
+        "{duplicate}"
+    );
 
     // #2059: create an execution, bind it, then edit its limits normally.
     for verb in [

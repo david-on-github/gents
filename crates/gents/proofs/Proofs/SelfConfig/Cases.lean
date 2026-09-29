@@ -44,8 +44,26 @@ def decodeControl (doc : Doc) : Option Control := do
     | _ => none
   pure { selfConfig, agents, noLockout, toolsAuthority }
 
+/-- Fixture decoder for the behavior values used below. -/
+def decodeReach (doc : Doc) : Option Reach := do
+  let enabled ← match doc "enabled" with
+    | some "true" | none => some true
+    | some "false" => some false
+    | _ => none
+  let setupTag ← match doc "tags" with
+    | some "[\"gents:setup-steward\"]" => some true
+    | some "[\"gents:setup-steward\",\"ui:engineer\"]" => some true
+    | some "[]" | some "[\"ui:engineer\"]" | none => some false
+    | _ => none
+  pure { enabled, setupTag }
+
+/-- The invoker-only no-lockout slice for the guarded target. -/
+def lockoutGuard (t : Target) (stored : Doc) : Doc → Bool :=
+  if t = .agentBehavior then keepsReach decodeReach stored
+  else keepsControl decodeControl stored
+
 def caseGuard (r : CaseRow) (stored : Doc) : Doc → Bool :=
-  if r.guarded then keepsControl decodeControl stored else fun _ => true
+  if r.guarded then lockoutGuard r.target stored else fun _ => true
 
 def project (t : Target) (doc : Doc) : List (FieldKey × FieldValue) :=
   (allFields t).filterMap (fun k => (doc k).map (fun v => (k, v)))
@@ -81,7 +99,7 @@ def buildWitness (r : CaseRow) : CaseWitness :=
   , unchangedOnReject :=
       outcome.isSome || decide (project r.target result = project r.target stored)
   , controlKeptAfterAccept :=
-      !(r.guarded && outcome.isSome) || keepsControl decodeControl stored result
+      !(r.guarded && outcome.isSome) || lockoutGuard r.target stored result
   }
 
 /-- Values are decoded group values abstracted as strings; nested validation
@@ -178,6 +196,18 @@ def scenarios : List CaseRow := examplesToRows ++
     , doc := [("self_config", "{\"enable_self_config\":true,\"self_config_no_lockout\":true}")]
     , patch := [("self_config",
         some "{\"enable_self_config\":true,\"self_config_no_lockout\":true,\"self_config_categories\":[\"tools\"]}")] }
+  , { name := "behavior_guarded_self_disable_rejected"
+    , target := .agentBehavior, guarded := true, validates := true
+    , doc := [("behavior_id", "default"), ("tags", "[\"gents:setup-steward\"]")]
+    , patch := [("enabled", some "false")] }
+  , { name := "behavior_guarded_setup_tag_removal_rejected"
+    , target := .agentBehavior, guarded := true, validates := true
+    , doc := [("behavior_id", "default"), ("tags", "[\"gents:setup-steward\"]")]
+    , patch := [("tags", some "[\"ui:engineer\"]")] }
+  , { name := "behavior_guarded_tag_addition_accepted"
+    , target := .agentBehavior, guarded := true, validates := true
+    , doc := [("behavior_id", "default"), ("tags", "[\"gents:setup-steward\"]")]
+    , patch := [("tags", some "[\"gents:setup-steward\",\"ui:engineer\"]")] }
   , { name := "task_targeting_invoker_unguarded_accepted"
     , target := .task, guarded := false, validates := true
     , doc := [("task_id", "engineer-inbox"), ("behavior_id", "default")]

@@ -664,6 +664,12 @@ Bundled names resolve locally; NAMESPACE/NAME resolves through the operator-sele
                 let params = behavior_params(verb, None, &argv[1..])?;
                 self.ensure_behavior_operation(verb, params.behavior_id.as_deref())?;
                 self.ensure_default_selection(&params)?;
+                anyhow::ensure!(
+                    !(self.no_lockout
+                        && verb == "disable"
+                        && params.behavior_id.as_deref() == Some(self.core.behavior_id())),
+                    "no-lockout guard: behavior must remain enabled"
+                );
                 self.execution.enter_mutation();
                 persona_mutate(
                     &self.node,
