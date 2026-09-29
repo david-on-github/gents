@@ -65,15 +65,9 @@ pub async fn desktop_session_snapshot(
             );
         }
     }
-    let principal_scope = if let Some(agent_did) = agent_did.as_deref() {
-        core.peer_records()
-            .await
-            .iter()
-            .any(|peer| peer.agent_did == agent_did && peer.is_enrollment())
-            .then(|| core.principal().did().to_string())
-    } else {
-        None
-    };
+    let principal_scope = agent_did
+        .as_deref()
+        .and_then(|agent_did| core.transcript_principal_scope(agent_did));
     let operator_access = agent_did
         .as_deref()
         .and_then(|agent_did| core.operator_graphql(agent_did))

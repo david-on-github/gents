@@ -455,10 +455,15 @@ pub struct SessionLiveDeltaView {
 pub struct SessionHydrationView {
     pub session_id: String,
     pub agent_did: String,
+    /// idle | requested | serving | complete | failed | unreadable
     pub phase: String,
     pub merged_count: usize,
     pub covered_count: usize,
     pub served_count: Option<usize>,
+    /// The signed rejection detail, or why this client cannot read the session.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[ts(optional = nullable)]
+    pub detail: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

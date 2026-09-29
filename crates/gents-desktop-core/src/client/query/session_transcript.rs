@@ -392,6 +392,36 @@ pub fn session_transcript_requester_scope(
     principal_scope.map(str::to_owned)
 }
 
+/// Why this client cannot read a session, or `None` when it can.
+///
+/// Transcript rows carry their session's requester, so a session is readable
+/// exactly when the scope [`session_transcript_requester_scope`] reads under
+/// is the session's own requester. Anything else reads as empty here and a
+/// hydration request for it is refused by the server's ownership check
+/// (`SessionHydration.canStart`), so it is presented instead of requested.
+pub fn session_unreadable_reason(
+    session: &AgentSession,
+    principal_scope: Option<&str>,
+    operator: bool,
+) -> Option<&'static str> {
+    let scope = session_transcript_requester_scope(
+        Some(session),
+        Some(&session.agent_did),
+        principal_scope,
+        operator,
+    );
+    if scope.as_deref() == session.requester_did.as_deref() {
+        return None;
+    }
+    Some(match session.requester_did.as_deref() {
+        Some(requester) if requester == session.agent_did => {
+            "Started by the agent itself and owned by its node, so this client cannot read it."
+        }
+        Some(_) => "Started by another requester, so this client cannot read it.",
+        None => "This session has no requester this client can read under.",
+    })
+}
+
 /// Query a bounded transcript window directly from DefraDB. The cursor is a
 /// bridge item key, but is resolved to the durable sequence space before the
 /// page query so inserts at the tip cannot shift an older page. Messages and

@@ -210,12 +210,25 @@ export function projectSessionLoadingStatus({
     selectedSessionId,
     selectedAgentDid,
   );
+  if (hydration?.phase === "unreadable") {
+    return {
+      layer: "sessionSync",
+      phase: "blocked",
+      title: "Not readable from this client",
+      detail:
+        hydration.detail ??
+        "This session belongs to another requester, so this client cannot read it.",
+      action: null,
+    };
+  }
   if (hydration?.phase === "failed") {
     return {
       layer: "sessionSync",
       phase: "failed",
       title: "Session sync failed",
-      detail: "The agent could not finish sending the requested session history.",
+      detail: hydration.detail
+        ? `The agent refused the session history: ${hydration.detail}.`
+        : "The agent could not finish sending the requested session history.",
       action: "retryHydration",
     };
   }

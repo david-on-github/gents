@@ -19,6 +19,10 @@ pub const HYDRATION_COLLECTIONS: &[SessionHydrationCollection] = &[
     SessionHydrationCollection::CompactionEntry,
 ];
 
+/// Signed rejection detail for a request whose session another requester
+/// owns. Receivers present it as an unreadable session rather than a retry.
+pub const SESSION_OWNERSHIP_MISMATCH: &str = "session ownership does not match request";
+
 pub fn hydration_collection_name(collection: SessionHydrationCollection) -> &'static str {
     match collection {
         SessionHydrationCollection::AgentRequest => "AgentRequest",
@@ -214,7 +218,7 @@ pub fn decide_hydration(
         agent_did: request.agent_did.clone(),
     };
     if !catalog.sessions.contains(&owner) {
-        return HydrationVerdict::Reject("session ownership does not match request");
+        return HydrationVerdict::Reject(SESSION_OWNERSHIP_MISMATCH);
     }
 
     HydrationVerdict::Admit(

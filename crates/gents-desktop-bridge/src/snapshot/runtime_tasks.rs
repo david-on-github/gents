@@ -165,6 +165,7 @@ pub(super) fn session_summaries(
                     .map(str::to_owned),
                 message_count: None,
                 tool_call_count: None,
+                unreadable_reason: None,
             }
         })
         .collect::<Vec<_>>();

@@ -350,6 +350,10 @@ pub struct SessionSummary {
     /// aggregates. Never inferred from resident transcript rows.
     pub message_count: Option<usize>,
     pub tool_call_count: Option<usize>,
+    /// Why this client cannot read the session, when it cannot.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    #[ts(optional = nullable)]
+    pub unreadable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

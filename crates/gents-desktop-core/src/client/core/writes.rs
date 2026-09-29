@@ -1540,6 +1540,12 @@ impl ClientCore {
     ) -> Result<()> {
         let session_id = normalize_required("session_id", session_id)?;
         let agent_did = normalize_required("agent_did", agent_did)?;
+        if self
+            .session_unreadable_reason(&session_id, &agent_did)
+            .is_some()
+        {
+            return Ok(());
+        }
         let _transition = self.hydration_transition.lock().await;
         let progress = self
             .session_hydration_progress(&session_id, &agent_did)
@@ -1561,15 +1567,58 @@ impl ClientCore {
             .await
     }
 
+    /// The requester scope this client reads an agent's transcripts under:
+    /// its own principal for an enrolled agent, none otherwise.
+    pub fn transcript_principal_scope(&self, agent_did: &str) -> Option<String> {
+        self.sync_state
+            .records()
+            .iter()
+            .any(|peer| peer.agent_did == agent_did && peer.is_enrollment())
+            .then(|| self.principal.did().to_string())
+    }
+
+    /// Why this client cannot read a locally known session, from its
+    /// replicated header alone. `None` when it can, or when no header is
+    /// known yet.
+    pub fn session_unreadable_reason(
+        &self,
+        session_id: &str,
+        agent_did: &str,
+    ) -> Option<&'static str> {
+        let store = self.store.snapshot();
+        let session = store
+            .sessions
+            .iter()
+            .find(|row| row.session_id == session_id && row.agent_did == agent_did)?;
+        super::super::query::session_unreadable_reason(
+            session,
+            self.transcript_principal_scope(agent_did).as_deref(),
+            self.operator_graphql(agent_did).is_some(),
+        )
+    }
+
     /// Derive receiver progress from durable rows for one exact target.
     pub async fn session_hydration_progress(
         &self,
         session_id: &str,
         agent_did: &str,
     ) -> Result<gents::agent::p2p_reconcile::session_hydration::ClientHydrationProgress> {
+        Ok(self.session_hydration_status(session_id, agent_did).await?.0)
+    }
+
+    /// Receiver progress plus the signed rejection detail of a refused
+    /// request, so a refusal is presented with its reason.
+    pub async fn session_hydration_status(
+        &self,
+        session_id: &str,
+        agent_did: &str,
+    ) -> Result<(
+        gents::agent::p2p_reconcile::session_hydration::ClientHydrationProgress,
+        Option<String>,
+    )> {
         let session_id = normalize_required("session_id", session_id)?;
         let agent_did = normalize_required("agent_did", agent_did)?;
-        self.load_hydration_progress(&session_id, &agent_did).await
+        self.load_hydration_status(&session_id, &agent_did).await
     }
 
     /// Explicitly restart a failed hydration attempt for one session.
@@ -1577,9 +1626,10 @@ impl ClientCore {
         let session_id = normalize_required("session_id", session_id)?;
         let agent_did = normalize_required("agent_did", agent_did)?;
         let _transition = self.hydration_transition.lock().await;
-        let progress = self
-            .load_hydration_progress(&session_id, &agent_did)
-            .await?;
+        if let Some(reason) = self.session_unreadable_reason(&session_id, &agent_did) {
+            bail!("{reason}");
+        }
+        let (progress, _) = self.load_hydration_status(&session_id, &agent_did).await?;
         if !gents::agent::p2p_reconcile::session_hydration::can_retry_hydration(
             &progress,
             &session_id,
@@ -1621,6 +1671,7 @@ impl ClientCore {
                         served_doc_count: 0
                     }},
                     update: {{
+                        created_at: "{now}",
                         status: "pending",
                         status_detail: "",
                         served_doc_count: 0,
@@ -1641,11 +1692,14 @@ impl ClientCore {
         Ok(())
     }
 
-    async fn load_hydration_progress(
+    async fn load_hydration_status(
         &self,
         session_id: &str,
         agent_did: &str,
-    ) -> Result<gents::agent::p2p_reconcile::session_hydration::ClientHydrationProgress> {
+    ) -> Result<(
+        gents::agent::p2p_reconcile::session_hydration::ClientHydrationProgress,
+        Option<String>,
+    )> {
         let merged = load_local_hydration_documents(
             self.node.as_ref(),
             self.principal.did(),
@@ -1653,7 +1707,7 @@ impl ClientCore {
             agent_did,
         )
         .await?;
-        let request = load_hydration_server_state(
+        let (request, detail) = load_hydration_server_state(
             self.node.as_ref(),
             self.local_peer_id(),
             self.principal.did(),
@@ -1662,11 +1716,12 @@ impl ClientCore {
             &self.principal,
         )
         .await?;
-        Ok(
+        Ok((
             gents::agent::p2p_reconcile::session_hydration::project_durable_hydration_progress(
                 session_id, agent_did, merged, request,
             ),
-        )
+            detail,
+        ))
     }
 
     pub(super) fn clear_mutation_error(&self) {
@@ -1830,7 +1885,10 @@ async fn load_hydration_server_state(
     session_id: &str,
     agent_did: &str,
     principal: &super::super::principal_identity::PrincipalIdentity,
-) -> Result<gents::agent::p2p_reconcile::session_hydration::ClientHydrationRequestState> {
+) -> Result<(
+    gents::agent::p2p_reconcile::session_hydration::ClientHydrationRequestState,
+    Option<String>,
+)> {
     use gents::agent::p2p_reconcile::session_hydration::ClientHydrationRequestState;
     let expected_request_key = format!("{peer_id}:{session_id}");
     let request_key = gents::graphql::escape_graphql_string(&expected_request_key);
@@ -1848,7 +1906,7 @@ async fn load_hydration_server_state(
     )
     .await?;
     let Some(data) = response.data else {
-        return Ok(ClientHydrationRequestState::Missing);
+        return Ok((ClientHydrationRequestState::Missing, None));
     };
     let rows = data
         .get("SessionHydrationRequest")
@@ -1859,7 +1917,7 @@ async fn load_hydration_server_state(
         bail!("session hydration request key resolved to multiple rows");
     }
     let Some(row) = rows.first() else {
-        return Ok(ClientHydrationRequestState::Missing);
+        return Ok((ClientHydrationRequestState::Missing, None));
     };
     for (field, expected) in [
         ("request_key", expected_request_key.as_str()),
@@ -1876,7 +1934,7 @@ async fn load_hydration_server_state(
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     if status == "pending" {
-        return Ok(ClientHydrationRequestState::Pending);
+        return Ok((ClientHydrationRequestState::Pending, None));
     }
     if !matches!(status, "served" | "rejected") {
         bail!("unknown session hydration request status {status:?}");
@@ -1936,8 +1994,11 @@ async fn load_hydration_server_state(
     }
     let documents = receipt.served_manifest.into_iter().collect::<BTreeSet<_>>();
     match status {
-        "served" => Ok(ClientHydrationRequestState::Served(documents)),
-        "rejected" => Ok(ClientHydrationRequestState::Rejected(Some(documents))),
+        "served" => Ok((ClientHydrationRequestState::Served(documents), None)),
+        "rejected" => {
+            let detail = Some(receipt.status_detail).filter(|detail| !detail.is_empty());
+            Ok((ClientHydrationRequestState::Rejected(Some(documents)), detail))
+        }
         _ => unreachable!(),
     }
 }

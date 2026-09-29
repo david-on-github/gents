@@ -59,7 +59,11 @@ trait HydrationDelivery: Send + Sync {
 #[async_trait]
 trait HydrationRequestStore: Send + Sync {
     async fn load_pending_requests(&self) -> Result<Vec<HydrationRequestRow>>;
-    async fn load_catalog(&self, request: &HydrationRequest) -> Result<LoadedHydrationCatalog>;
+    /// Pairing, membership and session-owner facts only. Admission never
+    /// depends on the transcript closure, so a refused request is decided
+    /// without reading it.
+    async fn load_admission(&self, request: &HydrationRequest) -> Result<LoadedHydrationAdmission>;
+    async fn load_selection(&self, request: &HydrationRequest) -> Result<HydrationSelection>;
     async fn authorization_is_current(
         &self,
         request: &HydrationRequest,
@@ -74,9 +78,25 @@ trait HydrationRequestStore: Send + Sync {
 }
 
 #[derive(Debug, Clone)]
-struct LoadedHydrationCatalog {
+struct LoadedHydrationAdmission {
+    /// Admission facts; `documents` and the reference closure are empty.
     catalog: HydrationCatalog,
-    authorization: EnrollmentAuthorizationFence,
+    /// Absent when the requester has no active authenticated enrollment, in
+    /// which case the catalog holds no verified membership and admission
+    /// rejects.
+    authorization: Option<EnrollmentAuthorizationFence>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct HydrationSelection {
+    documents: BTreeSet<HydrationDocument>,
+    authorized_reference_closure: BTreeSet<SessionHydrationDocumentKey>,
+}
+
+struct AdmittedHydration {
+    row: HydrationRequestRow,
+    request: HydrationRequest,
+    admission: LoadedHydrationAdmission,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,18 +118,30 @@ async fn reconcile_hydration_tick(
 
     let mut outcome = HydrationTickOutcome::default();
     let mut first_error: Option<anyhow::Error> = None;
+    let mut record_error = |request_key: &str, error: anyhow::Error| {
+        tracing::warn!(
+            request_key = %request_key,
+            error = %error,
+            "session hydration reconcile failed; continuing sweep"
+        );
+        if first_error.is_none() {
+            first_error = Some(error.context(format!("reconcile session hydration {request_key}")));
+        }
+    };
+    // Every refusal commits before any delivery starts: a slow or
+    // unreachable peer must not hold another requester's terminal outcome.
+    let mut admitted = Vec::new();
     for row in pending {
-        let request_key = row.request_key.clone();
-        if let Err(error) = process_one_request(store, delivery, &row, &mut outcome).await {
-            tracing::warn!(
-                request_key = %request_key,
-                error = %error,
-                "session hydration reconcile failed; continuing sweep"
-            );
-            if first_error.is_none() {
-                first_error =
-                    Some(error.context(format!("reconcile session hydration {request_key}")));
-            }
+        match admit_or_reject(store, row.clone(), &mut outcome).await {
+            Ok(Some(request)) => admitted.push(request),
+            Ok(None) => {}
+            Err(error) => record_error(&row.request_key, error),
+        }
+    }
+    for request in admitted {
+        let request_key = request.row.request_key.clone();
+        if let Err(error) = serve_admitted_request(store, delivery, request, &mut outcome).await {
+            record_error(&request_key, error);
         }
     }
     if let Some(error) = first_error {
@@ -118,12 +150,13 @@ async fn reconcile_hydration_tick(
     Ok(outcome)
 }
 
-async fn process_one_request(
+/// Decide admission from pairing, membership and ownership facts alone and
+/// commit a refusal immediately. Returns the admitted request for delivery.
+async fn admit_or_reject(
     store: &dyn HydrationRequestStore,
-    delivery: &dyn HydrationDelivery,
-    row: &HydrationRequestRow,
+    row: HydrationRequestRow,
     outcome: &mut HydrationTickOutcome,
-) -> Result<()> {
+) -> Result<Option<AdmittedHydration>> {
     let request = match HydrationRequest::from_row(
         row.request_key.clone(),
         row.requester_did.clone(),
@@ -132,108 +165,143 @@ async fn process_one_request(
     ) {
         Ok(request) => request,
         Err(detail) => {
-            store.mark_rejected(row, detail).await?;
+            store.mark_rejected(&row, detail).await?;
             outcome.rejected.insert(row.request_key.clone());
-            return Ok(());
+            return Ok(None);
         }
     };
-
-    let loaded = store
-        .load_catalog(&request)
+    let admission = store
+        .load_admission(&request)
         .await
-        .context("load hydration catalog")?;
-
-    let (verdict, delivery_result) = match decide_hydration(&request, &loaded.catalog) {
-        HydrationVerdict::Admit(documents) => {
-            if !store
-                .authorization_is_current(&request, &loaded.authorization)
-                .await
-                .context("revalidate hydration authorization generation")?
-            {
-                let detail =
-                    "authenticated enrollment authorization changed before hydration delivery";
-                store.mark_rejected(row, detail).await?;
-                outcome.rejected.insert(request.request_key);
-                return Ok(());
-            }
-            let delivery_result = deliver_with_bounded_retry(delivery, &request, &documents).await;
-            if delivery_result == HydrationDeliveryResult::Confirmed {
-                if !store
-                    .authorization_is_current(&request, &loaded.authorization)
-                    .await
-                    .context("revalidate hydration authorization at terminal commit")?
-                {
-                    let detail =
-                        "authenticated enrollment authorization changed before hydration commit";
-                    store.mark_rejected(row, detail).await?;
-                    outcome.rejected.insert(request.request_key);
-                    return Ok(());
-                }
-            }
-            (HydrationVerdict::Admit(documents), delivery_result)
-        }
-        HydrationVerdict::Reject(detail) => (
-            HydrationVerdict::Reject(detail),
-            HydrationDeliveryResult::Confirmed,
-        ),
-    };
-
-    match (verdict, delivery_result) {
-        (HydrationVerdict::Admit(documents), HydrationDeliveryResult::Indeterminate) => {
-            let modeled = apply_hydration_delivery(
-                HydrationVerdict::Admit(documents),
-                HydrationDeliveryResult::Indeterminate,
-                HydrationTerminalWriteResult::NotAttempted,
+        .context("load hydration admission")?;
+    match decide_hydration(&request, &admission.catalog) {
+        HydrationVerdict::Admit(_) => Ok(Some(AdmittedHydration {
+            row,
+            request,
+            admission,
+        })),
+        HydrationVerdict::Reject(detail) => {
+            commit_rejection(store, &row, detail, HydrationDeliveryResult::Confirmed).await?;
+            tracing::info!(
+                request_key = %row.request_key,
+                session_id = %row.session_id,
+                requester_did = %row.requester_did,
+                detail,
+                "session hydration request rejected at admission"
             );
-            debug_assert!(matches!(
-                modeled,
-                HydrationApplyOutcome::PendingAfterIndeterminateDelivery { .. }
-            ));
-        }
-        (HydrationVerdict::Admit(documents), HydrationDeliveryResult::Confirmed) => {
-            let terminal_write = store.mark_served(row, &documents).await;
-            let modeled = apply_hydration_delivery(
-                HydrationVerdict::Admit(documents),
-                HydrationDeliveryResult::Confirmed,
-                if terminal_write.is_ok() {
-                    HydrationTerminalWriteResult::Committed
-                } else {
-                    HydrationTerminalWriteResult::Failed
-                },
-            );
-            match (terminal_write, modeled) {
-                (Ok(()), HydrationApplyOutcome::Served(_)) => {
-                    outcome.served.insert(request.request_key);
-                }
-                (Err(error), HydrationApplyOutcome::PendingAfterTerminalWriteFailure { .. }) => {
-                    return Err(error).context("mark session hydration served");
-                }
-                _ => unreachable!("hydration model diverged from served receipt commit"),
-            }
-        }
-        (HydrationVerdict::Reject(detail), delivery_result) => {
-            let terminal_write = store.mark_rejected(row, detail).await;
-            let modeled = apply_hydration_delivery(
-                HydrationVerdict::Reject(detail),
-                delivery_result,
-                if terminal_write.is_ok() {
-                    HydrationTerminalWriteResult::Committed
-                } else {
-                    HydrationTerminalWriteResult::Failed
-                },
-            );
-            match (terminal_write, modeled) {
-                (Ok(()), HydrationApplyOutcome::Rejected { .. }) => {
-                    outcome.rejected.insert(request.request_key);
-                }
-                (Err(error), HydrationApplyOutcome::PendingAfterTerminalWriteFailure { .. }) => {
-                    return Err(error).context("mark session hydration rejected");
-                }
-                _ => unreachable!("hydration model diverged from rejected receipt commit"),
-            }
+            outcome.rejected.insert(row.request_key);
+            Ok(None)
         }
     }
-    Ok(())
+}
+
+async fn commit_rejection(
+    store: &dyn HydrationRequestStore,
+    row: &HydrationRequestRow,
+    detail: &'static str,
+    delivery_result: HydrationDeliveryResult,
+) -> Result<()> {
+    let terminal_write = store.mark_rejected(row, detail).await;
+    let modeled = apply_hydration_delivery(
+        HydrationVerdict::Reject(detail),
+        delivery_result,
+        if terminal_write.is_ok() {
+            HydrationTerminalWriteResult::Committed
+        } else {
+            HydrationTerminalWriteResult::Failed
+        },
+    );
+    match (terminal_write, modeled) {
+        (Ok(()), HydrationApplyOutcome::Rejected { .. }) => Ok(()),
+        (Err(error), HydrationApplyOutcome::PendingAfterTerminalWriteFailure { .. }) => {
+            Err(error).context("mark session hydration rejected")
+        }
+        _ => unreachable!("hydration model diverged from rejected receipt commit"),
+    }
+}
+
+async fn serve_admitted_request(
+    store: &dyn HydrationRequestStore,
+    delivery: &dyn HydrationDelivery,
+    admitted: AdmittedHydration,
+    outcome: &mut HydrationTickOutcome,
+) -> Result<()> {
+    let AdmittedHydration {
+        row,
+        request,
+        admission,
+    } = admitted;
+    let authorization = admission
+        .authorization
+        .context("admitted hydration request has no authenticated enrollment fence")?;
+    let selection = store
+        .load_selection(&request)
+        .await
+        .context("load hydration selection")?;
+    let catalog = HydrationCatalog {
+        documents: selection.documents,
+        authorized_reference_closure: selection.authorized_reference_closure,
+        ..admission.catalog
+    };
+    let documents = match decide_hydration(&request, &catalog) {
+        HydrationVerdict::Admit(documents) => documents,
+        HydrationVerdict::Reject(_) => {
+            unreachable!("hydration admission does not depend on the selected documents")
+        }
+    };
+    if !store
+        .authorization_is_current(&request, &authorization)
+        .await
+        .context("revalidate hydration authorization generation")?
+    {
+        let detail = "authenticated enrollment authorization changed before hydration delivery";
+        store.mark_rejected(&row, detail).await?;
+        outcome.rejected.insert(request.request_key);
+        return Ok(());
+    }
+    let delivery_result = deliver_with_bounded_retry(delivery, &request, &documents).await;
+    if delivery_result == HydrationDeliveryResult::Indeterminate {
+        let modeled = apply_hydration_delivery(
+            HydrationVerdict::Admit(documents),
+            HydrationDeliveryResult::Indeterminate,
+            HydrationTerminalWriteResult::NotAttempted,
+        );
+        debug_assert!(matches!(
+            modeled,
+            HydrationApplyOutcome::PendingAfterIndeterminateDelivery { .. }
+        ));
+        return Ok(());
+    }
+    if !store
+        .authorization_is_current(&request, &authorization)
+        .await
+        .context("revalidate hydration authorization at terminal commit")?
+    {
+        let detail = "authenticated enrollment authorization changed before hydration commit";
+        store.mark_rejected(&row, detail).await?;
+        outcome.rejected.insert(request.request_key);
+        return Ok(());
+    }
+    let terminal_write = store.mark_served(&row, &documents).await;
+    let modeled = apply_hydration_delivery(
+        HydrationVerdict::Admit(documents),
+        HydrationDeliveryResult::Confirmed,
+        if terminal_write.is_ok() {
+            HydrationTerminalWriteResult::Committed
+        } else {
+            HydrationTerminalWriteResult::Failed
+        },
+    );
+    match (terminal_write, modeled) {
+        (Ok(()), HydrationApplyOutcome::Served(_)) => {
+            outcome.served.insert(request.request_key);
+            Ok(())
+        }
+        (Err(error), HydrationApplyOutcome::PendingAfterTerminalWriteFailure { .. }) => {
+            Err(error).context("mark session hydration served")
+        }
+        _ => unreachable!("hydration model diverged from served receipt commit"),
+    }
 }
 
 async fn deliver_with_bounded_retry(
@@ -447,21 +515,17 @@ impl HydrationRequestStore for GraphqlHydrationStore {
             .collect())
     }
 
-    async fn load_catalog(&self, request: &HydrationRequest) -> Result<LoadedHydrationCatalog> {
+    async fn load_admission(&self, request: &HydrationRequest) -> Result<LoadedHydrationAdmission> {
         let authorization = self
             .enrollment
             .fresh_authorization(&request.requester_did, &request.peer_id)
             .await
-            .context("load fresh authenticated enrollment authority for hydration")?
-            .context("requester has no active authenticated enrollment")?;
-        let network_id = authorization.network_id.clone();
+            .context("load fresh authenticated enrollment authority for hydration")?;
         let session_id = escape_graphql_string(&request.session_id);
         let peer_id = escape_graphql_string(&request.peer_id);
-        let agent_did = escape_graphql_string(&request.agent_did);
-        let requester_did = escape_graphql_string(&request.requester_did);
-        let query = hydration_catalog_query(&session_id, &peer_id, &agent_did, &requester_did);
+        let query = hydration_admission_query(&session_id, &peer_id);
         let response =
-            graphql_with_transaction_retry(&self.node, &query, "query session hydration catalog")
+            graphql_with_transaction_retry(&self.node, &query, "query session hydration admission")
                 .await?;
 
         let desired_agents = rows::<DesiredPairingRow>(&response, "PeerPairingDesired")?
@@ -487,6 +551,36 @@ impl HydrationRequestStore for GraphqlHydrationStore {
                 })
             })
             .collect();
+        let (selected_network_id, verified_active_memberships) = match authorization.as_ref() {
+            Some(authorization) => (
+                authorization.network_id.clone(),
+                BTreeSet::from([VerifiedActiveMembership {
+                    network_id: authorization.network_id.clone(),
+                    member_did: authorization.member_did.clone(),
+                }]),
+            ),
+            None => (String::new(), BTreeSet::new()),
+        };
+        Ok(LoadedHydrationAdmission {
+            catalog: HydrationCatalog {
+                applied_pairing_routes,
+                selected_network_id,
+                verified_active_memberships,
+                sessions,
+                ..HydrationCatalog::default()
+            },
+            authorization,
+        })
+    }
+
+    async fn load_selection(&self, request: &HydrationRequest) -> Result<HydrationSelection> {
+        let session_id = escape_graphql_string(&request.session_id);
+        let agent_did = escape_graphql_string(&request.agent_did);
+        let requester_did = escape_graphql_string(&request.requester_did);
+        let query = hydration_selection_query(&session_id, &agent_did, &requester_did);
+        let response =
+            graphql_with_transaction_retry(&self.node, &query, "query session hydration selection")
+                .await?;
 
         let mut root_headers = rows::<serde_json::Value>(&response, "AgentMessage")?
             .iter()
@@ -642,19 +736,9 @@ impl HydrationRequestStore for GraphqlHydrationStore {
             })
             .collect();
 
-        Ok(LoadedHydrationCatalog {
-            catalog: HydrationCatalog {
-                applied_pairing_routes,
-                selected_network_id: network_id.clone(),
-                verified_active_memberships: BTreeSet::from([VerifiedActiveMembership {
-                    network_id,
-                    member_did: authorization.member_did.clone(),
-                }]),
-                sessions,
-                documents,
-                authorized_reference_closure,
-            },
-            authorization,
+        Ok(HydrationSelection {
+            documents,
+            authorized_reference_closure,
         })
     }
 
@@ -908,12 +992,7 @@ impl GraphqlHydrationStore {
     }
 }
 
-fn hydration_catalog_query(
-    session_id: &str,
-    peer_id: &str,
-    agent_did: &str,
-    requester_did: &str,
-) -> String {
+fn hydration_admission_query(session_id: &str, peer_id: &str) -> String {
     format!(
         r#"{{
             PeerPairingDesired(filter: {{ peer_id: {{ _eq: "{peer_id}" }}, source: {{ _eq: "enrollment" }} }}) {{
@@ -925,6 +1004,13 @@ fn hydration_catalog_query(
             AgentSession(filter: {{ session_id: {{ _eq: "{session_id}" }} }}) {{
                 session_id requester_did agent_did
             }}
+        }}"#
+    )
+}
+
+fn hydration_selection_query(session_id: &str, agent_did: &str, requester_did: &str) -> String {
+    format!(
+        r#"{{
             AgentRequest(filter: {{ session_id: {{ _eq: "{session_id}" }}, agent_did: {{ _eq: "{agent_did}" }}, requester_did: {{ _eq: "{requester_did}" }} }}) {{
                 _docID request_id requester_did agent_did session_id lifecycle_state terminal_output
             }}
@@ -1015,6 +1101,7 @@ mod tests {
         authorization_current: std::sync::atomic::AtomicBool,
         authorization_check: Option<Arc<AuthorizationCheckBarrier>>,
         terminal_write_failures_remaining: std::sync::atomic::AtomicUsize,
+        selection_loads: std::sync::atomic::AtomicUsize,
         served: std::sync::Mutex<Vec<(String, usize)>>,
         rejected: std::sync::Mutex<Vec<(String, String)>>,
     }
@@ -1048,13 +1135,26 @@ mod tests {
         async fn load_pending_requests(&self) -> Result<Vec<HydrationRequestRow>> {
             Ok(self.pending.clone())
         }
-        async fn load_catalog(
+        async fn load_admission(
             &self,
             _request: &HydrationRequest,
-        ) -> Result<LoadedHydrationCatalog> {
-            Ok(LoadedHydrationCatalog {
-                catalog: self.catalog.clone(),
-                authorization: test_authorization_fence(),
+        ) -> Result<LoadedHydrationAdmission> {
+            let enrolled = !self.catalog.verified_active_memberships.is_empty();
+            Ok(LoadedHydrationAdmission {
+                catalog: HydrationCatalog {
+                    documents: BTreeSet::new(),
+                    authorized_reference_closure: BTreeSet::new(),
+                    ..self.catalog.clone()
+                },
+                authorization: enrolled.then(test_authorization_fence),
+            })
+        }
+        async fn load_selection(&self, _request: &HydrationRequest) -> Result<HydrationSelection> {
+            self.selection_loads
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(HydrationSelection {
+                documents: self.catalog.documents.clone(),
+                authorized_reference_closure: self.catalog.authorized_reference_closure.clone(),
             })
         }
         async fn authorization_is_current(
@@ -1221,6 +1321,7 @@ mod tests {
             authorization_current: std::sync::atomic::AtomicBool::new(true),
             authorization_check: None,
             terminal_write_failures_remaining: std::sync::atomic::AtomicUsize::new(0),
+            selection_loads: std::sync::atomic::AtomicUsize::new(0),
             served: std::sync::Mutex::new(Vec::new()),
             rejected: std::sync::Mutex::new(Vec::new()),
         }
@@ -1385,14 +1486,13 @@ mod tests {
     async fn hydration_catalog_filter_is_accepted_by_real_schema() {
         let node = defra_node::EmbeddedNode::builder().build().await.unwrap();
         crate::ensure_runtime_schemas(&node).await.unwrap();
-        let query = hydration_catalog_query(
-            "session-1",
-            "peer-1",
-            "did:key:agent-1",
-            "did:key:requester-1",
-        );
+        let admission = hydration_admission_query("session-1", "peer-1");
+        let response = node.execute(&admission).await;
+        ensure_no_errors(&response, "real hydration admission query").unwrap();
+        let query =
+            hydration_selection_query("session-1", "did:key:agent-1", "did:key:requester-1");
         let response = node.execute(&query).await;
-        ensure_no_errors(&response, "real hydration catalog query").unwrap();
+        ensure_no_errors(&response, "real hydration selection query").unwrap();
         assert!(query.contains("AgentOutputSegment"));
         assert!(!query.contains("AgentResponse"));
         assert!(!query.contains("AgentToolResult"));
@@ -1466,6 +1566,7 @@ mod tests {
             authorization_current: std::sync::atomic::AtomicBool::new(true),
             authorization_check: None,
             terminal_write_failures_remaining: std::sync::atomic::AtomicUsize::new(0),
+            selection_loads: std::sync::atomic::AtomicUsize::new(0),
             served: std::sync::Mutex::new(Vec::new()),
             rejected: std::sync::Mutex::new(Vec::new()),
         };
@@ -1481,5 +1582,88 @@ mod tests {
             BTreeSet::from(["peer-1:session-1".into()])
         );
         assert!(delivery.pushed.lock().expect("pushed lock").is_empty());
+    }
+
+    fn foreign_session_row() -> HydrationRequestRow {
+        HydrationRequestRow {
+            request_key: "peer-1:session-2".into(),
+            requester_did: "did:key:requester-1".into(),
+            agent_did: "did:key:agent-1".into(),
+            session_id: "session-2".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn ownership_mismatch_is_rejected_without_reading_the_transcript() {
+        let mut store = admitted_store();
+        store.pending = vec![foreign_session_row()];
+        let delivery = RecordingDelivery {
+            pushed: std::sync::Mutex::new(Vec::new()),
+        };
+        let outcome = reconcile_hydration_tick(&store, &delivery)
+            .await
+            .expect("tick");
+        assert_eq!(
+            outcome.rejected,
+            BTreeSet::from(["peer-1:session-2".to_string()])
+        );
+        assert_eq!(
+            *store.rejected.lock().unwrap(),
+            vec![(
+                "peer-1:session-2".to_string(),
+                "session ownership does not match request".to_string()
+            )]
+        );
+        assert_eq!(
+            store
+                .selection_loads
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+        assert!(delivery.pushed.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejection_commits_before_another_requests_delivery_finishes() {
+        let mut store = admitted_store();
+        store.pending.push(foreign_session_row());
+        let delivery = BlockingDelivery {
+            started: tokio::sync::Notify::new(),
+        };
+        let tick = reconcile_hydration_tick(&store, &delivery);
+        tokio::pin!(tick);
+        tokio::select! {
+            result = &mut tick => panic!("blocked delivery unexpectedly completed: {result:?}"),
+            _ = delivery.started.notified() => {}
+        }
+        assert_eq!(
+            *store.rejected.lock().unwrap(),
+            vec![(
+                "peer-1:session-2".to_string(),
+                "session ownership does not match request".to_string()
+            )],
+            "the refused request is terminal while the admitted delivery is still in flight"
+        );
+    }
+
+    #[tokio::test]
+    async fn requester_without_active_enrollment_is_rejected_not_left_pending() {
+        let mut store = admitted_store();
+        store.catalog.verified_active_memberships.clear();
+        let delivery = RecordingDelivery {
+            pushed: std::sync::Mutex::new(Vec::new()),
+        };
+        let outcome = reconcile_hydration_tick(&store, &delivery)
+            .await
+            .expect("missing enrollment is a verdict, not a sweep error");
+        assert_eq!(
+            outcome.rejected,
+            BTreeSet::from(["peer-1:session-1".to_string()])
+        );
+        assert_eq!(
+            store.rejected.lock().unwrap()[0].1,
+            "requester membership is not verified active in the selected network"
+        );
+        assert!(delivery.pushed.lock().unwrap().is_empty());
     }
 }
