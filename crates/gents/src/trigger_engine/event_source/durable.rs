@@ -27,13 +27,29 @@ const MAX_RETRY_BACKOFF_INTERVALS: u32 = 64;
 /// (#2094). A parked trigger is therefore re-driven only when the runtime
 /// snapshot generation changes or, for a transient failure, after a capped
 /// exponential backoff. A refusal (`FireResult::Rejected`) is decided by the
-/// configuration and source document, so it waits for a configuration change
-/// or a restart; other triggers keep delivering meanwhile.
+/// configuration and source document, so it waits for a configuration change,
+/// an update of that source document, or a restart; other triggers keep
+/// delivering meanwhile. Updates of `Trigger` documents never release a park:
+/// the fire's own runtime-field write is one.
 pub(super) struct ParkedArrival {
     position: String,
+    collection: String,
+    source_doc_id: String,
     generation: u64,
     retry_at: Option<Instant>,
     attempts: u32,
+}
+
+impl EventSource {
+    /// Release parks held by an updated source document, so a repaired
+    /// document is retried under the same configuration.
+    pub(super) fn release_parked_document(&mut self, collection: &str, doc_id: &str) {
+        if collection == crate::Collection::Trigger.graphql_type() {
+            return;
+        }
+        self.parked_arrivals
+            .retain(|_, parked| parked.collection != collection || parked.source_doc_id != doc_id);
+    }
 }
 
 impl ParkedArrival {
@@ -141,6 +157,8 @@ impl EventSource {
             pending.trigger_id.clone(),
             ParkedArrival {
                 position: pending.position.clone(),
+                collection: pending.collection.clone(),
+                source_doc_id: pending.source_doc_id.clone(),
                 generation: pending.generation,
                 retry_at,
                 attempts,

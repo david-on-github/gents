@@ -2032,6 +2032,7 @@ impl TriggerSource for EventSource {
                 if !self.desired_collections.contains(&collection_name) {
                     continue;
                 }
+                self.release_parked_document(&collection_name, &doc_id);
                 if self
                     .subscription_seed_failures
                     .contains_key(&collection_name)

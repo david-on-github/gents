@@ -35,11 +35,13 @@ fn ping_snapshot(generation: u64, emit_outcome: bool) -> Arc<ActiveRuntimeSnapsh
 /// One `OutcomePing` without `handoff_id`, created after the trigger's cursor
 /// is seeded, delivered once through the durable arrival path.
 async fn first_delivery(emit_outcome: bool) -> (Delivery, FireIntent) {
+    first_delivery_on("type OutcomePing { message: String }", emit_outcome).await
+}
+
+async fn first_delivery_on(schema: &str, emit_outcome: bool) -> (Delivery, FireIntent) {
     let node = Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
     ensure_runtime_schemas(node.as_ref()).await.unwrap();
-    node.add_schema("type OutcomePing { message: String }")
-        .await
-        .unwrap();
+    node.add_schema(schema).await.unwrap();
     let snapshot = ping_snapshot(1, emit_outcome);
     persist_event_bindings(&node, snapshot.as_ref()).await;
     let (snapshot_tx, rx) = watch::channel(snapshot.clone());
@@ -256,4 +258,42 @@ async fn transient_fire_failure_retries_on_a_bounded_backoff() {
         delivery.pending_documents().await,
         vec![delivery.doc_id.clone()]
     );
+}
+
+/// A refusal decided by the source document is retried when that document is
+/// repaired, without a configuration change, and delivered exactly once.
+#[tokio::test]
+async fn refused_fire_is_retried_once_when_its_source_document_is_repaired() {
+    let (mut delivery, intent) = first_delivery_on(
+        "type OutcomePing { message: String handoff_id: String }",
+        true,
+    )
+    .await;
+    assert!(matches!(
+        delivery.engine.dispatch(intent).await,
+        FireResult::Rejected { .. }
+    ));
+    assert_eq!(delivery.drain(Duration::from_secs(1), |_| None).await, 0);
+    delivery.trigger_error().await;
+
+    crate::config_client::ConfigAccess::Local(delivery.node.clone())
+        .write(
+            "test.repair_outcome_ping",
+            &format!(
+                r#"mutation {{ update_OutcomePing(docID: "{}", input: {{handoff_id: "handoff-1"}}) {{ _docID }} }}"#,
+                escape_graphql_string(&delivery.doc_id)
+            ),
+        )
+        .await
+        .unwrap();
+    let node = delivery.node.clone();
+    let intent = tokio::time::timeout(Duration::from_secs(5), delivery.source.next_fire())
+        .await
+        .expect("the repaired document was not retried")
+        .expect("source closed");
+    assert_eq!(intent.doc_vars.as_ref().unwrap()["handoff_id"], "handoff-1");
+    let result = admit_observed_event(&node, &intent).await;
+    (intent.on_result)(result);
+    assert_eq!(delivery.drain(Duration::from_secs(1), |_| None).await, 0);
+    assert!(delivery.pending_documents().await.is_empty());
 }

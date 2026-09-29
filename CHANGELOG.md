@@ -237,7 +237,8 @@ source consistency checks, not a separate runtime compatibility version.
   Task delivered a document without `handoff_id` or a template that fails to
   render, is recorded once on the Trigger (`last_status: error`,
   `last_error`), and the document stays pending until the configuration
-  changes or the runtime restarts; it is never skipped. Transient admission
+  changes, the document is updated or the runtime restarts; it is never
+  skipped. Transient admission
   failures retry on a capped backoff. Publication now refuses a Trigger that
   delivers a collection without a `String` `handoff_id` field to an
   `emit_outcome` Task.
