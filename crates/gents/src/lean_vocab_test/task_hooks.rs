@@ -51,6 +51,14 @@ pub(crate) enum LeanTaskOutcome {
     Interrupted,
 }
 
+/// `Conformance.TaskHooksContracts.HookInvocation`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum LeanHookInvocation {
+    Hook { hook_id: String },
+    Work,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LeanTaskHookAdmissionCase {
@@ -71,6 +79,9 @@ pub(crate) struct LeanTaskHookRunCase {
     pub(crate) after_success_attempted: Vec<LeanHookAttempt>,
     pub(crate) after_failure_attempted: Vec<LeanHookAttempt>,
     pub(crate) finally_attempted: Vec<LeanHookAttempt>,
+    /// `invocationTrace` of the modeled run, compared whole so cross-phase
+    /// order is fenced rather than per-phase slices.
+    pub(crate) invocation_trace: Vec<LeanHookInvocation>,
     pub(crate) cleanup_errors: Vec<String>,
     pub(crate) expected_outcome: LeanTaskOutcome,
     pub(crate) expected_final_outcome: LeanTaskOutcome,
@@ -81,6 +92,7 @@ pub(crate) struct LeanTaskHookRunCase {
 #[serde(deny_unknown_fields)]
 pub(crate) struct LeanTaskHookRecoveryCase {
     pub(crate) name: String,
+    pub(crate) interrupt_requested: bool,
     pub(crate) started: bool,
     pub(crate) hooks: Vec<LeanTaskHook>,
     pub(crate) observed: Vec<LeanHookAttempt>,

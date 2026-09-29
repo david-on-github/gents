@@ -39,6 +39,31 @@ private def outcomeJson : TaskOutcome → String
   | .failure error => "{\"kind\":\"failure\",\"error\":" ++ primaryErrorJson error ++ "}"
   | .interrupted => "{\"kind\":\"interrupted\"}"
 
+/-- One thing `runTask` asked an external owner to do: attempt a configured
+occurrence, or run the owned work. -/
+inductive HookInvocation where | hook (hookId : String) | work
+  deriving DecidableEq, Repr
+
+/-- The sequence in which `runTask` asked for those observations, read off the
+run result it produced. Which occurrences were attempted, and which after-phase
+was chosen, are the owner's own recorded traces, so this projection cannot
+disagree with `runTask` about either; it only linearizes them in `runTask`'s
+order: preparation, the owned work once preparation admitted it, the selected
+after-phase, then every cleanup occurrence. Concatenating both after-phases is
+unambiguous because at most one is ever non-empty (`runCases_one_after_phase`).
+A pure `HookExec` cannot observe invocation order, so this is the contract a
+host executor's actual invocations are compared against. -/
+def invocationTrace (r : RunResult) : List HookInvocation :=
+  r.beforeAttempted.map (fun a => HookInvocation.hook a.hookId)
+    ++ (if r.agentResult.isSome then [HookInvocation.work] else [])
+    ++ r.afterSuccessAttempted.map (fun a => HookInvocation.hook a.hookId)
+    ++ r.afterFailureAttempted.map (fun a => HookInvocation.hook a.hookId)
+    ++ r.finallyAttempted.map (fun a => HookInvocation.hook a.hookId)
+
+private def invocationJson : HookInvocation → String
+  | .hook hookId => "{\"kind\":\"hook\",\"hook_id\":" ++ jsonString hookId ++ "}"
+  | .work => "{\"kind\":\"work\"}"
+
 private def agentResultString : AgentResult → String
   | .success => "success"
   | .failure => "failure"
@@ -140,7 +165,9 @@ def runCases : List RunCase :=
     , expectedFinalOutcome := .failure (.hook "verify")
     , expectedAgentRan := true }
   , { name := "after_success_timeout_blocks_successful_completion"
-    , hooks := fullTask, script := [⟨"verify", .timedOut⟩], agent := .success
+    , hooks := [before "prepare", { afterSuccess "verify" with timeoutSecs := some 3 },
+                afterFailure "report", cleanup "sweep"]
+    , script := [⟨"verify", .timedOut⟩], agent := .success
     , expectedOutcome := .failure (.hook "verify")
     , expectedFinalOutcome := .failure (.hook "verify")
     , expectedAgentRan := true }
@@ -149,6 +176,16 @@ def runCases : List RunCase :=
     , expectedOutcome := .failure (.hook "verify")
     , expectedFinalOutcome := .failure (.hook "verify")
     , expectedAgentRan := true }
+  , { name := "after_success_exit_127_is_a_command_failure"
+    , hooks := fullTask, script := [⟨"verify", .exited 127⟩], agent := .success
+    , expectedOutcome := .failure (.hook "verify")
+    , expectedFinalOutcome := .failure (.hook "verify")
+    , expectedAgentRan := true }
+  , { name := "before_launch_failure_prevents_agent_and_selects_after_failure"
+    , hooks := fullTask, script := [⟨"prepare", .launchFailed⟩], agent := .success
+    , expectedOutcome := .failure (.hook "prepare")
+    , expectedFinalOutcome := .failure (.hook "prepare")
+    , expectedAgentRan := false }
   , { name := "before_failure_prevents_agent_and_selects_after_failure"
     , hooks := fullTask, script := [failed "prepare"], agent := .success
     , expectedOutcome := .failure (.hook "prepare")
@@ -222,6 +259,18 @@ theorem runCases_replay : ∀ c ∈ runCases,
       (runOf c).finalOutcome = c.expectedFinalOutcome ∧
       (runOf c).agentResult.isSome = c.expectedAgentRan := by decide
 
+/-- One ordinary after-phase at most, so the emitted trace's order between them
+is not a choice this projection makes. -/
+theorem runCases_one_after_phase : ∀ c ∈ runCases,
+    (runOf c).afterSuccessAttempted = [] ∨ (runOf c).afterFailureAttempted = [] := by decide
+
+/-- The emitted trace carries the owned work exactly when preparation admitted
+it, so a case's `expectedAgentRan` cannot drift from the trace consumers read. -/
+theorem runCases_trace_records_the_agent_attempt : ∀ c ∈ runCases,
+    ((invocationTrace (runOf c)).filter
+        (fun i => match i with | HookInvocation.work => true | HookInvocation.hook _ => false)).length
+      = (if c.expectedAgentRan then 1 else 0) := by decide
+
 private def runCaseJson (c : RunCase) : String :=
   let result := runOf c
   "{\"name\":" ++ jsonString c.name ++
@@ -237,6 +286,7 @@ private def runCaseJson (c : RunCase) : String :=
     ",\"after_failure_attempted\":" ++
       jsonArray (result.afterFailureAttempted.map attemptJson) ++
     ",\"finally_attempted\":" ++ jsonArray (result.finallyAttempted.map attemptJson) ++
+    ",\"invocation_trace\":" ++ jsonArray ((invocationTrace result).map invocationJson) ++
     ",\"cleanup_errors\":" ++ jsonStringArray result.cleanupErrors ++
     ",\"expected_outcome\":" ++ outcomeJson c.expectedOutcome ++
     ",\"expected_final_outcome\":" ++ outcomeJson c.expectedFinalOutcome ++
@@ -247,6 +297,8 @@ def runCasesJson : String := jsonArray (runCases.map runCaseJson)
 
 structure RecoveryCase where
   name : String
+  /-- The latch request recovery read when it terminalized the request. -/
+  interruptRequested : Bool := false
   started : Bool
   hooks : List TaskHook
   observed : List HookAttempt
@@ -255,7 +307,7 @@ structure RecoveryCase where
   deriving Repr
 
 private def recoveryOf (c : RecoveryCase) : RequestState × List HookAttempt :=
-  recoverInterrupted c.started c.hooks c.observed (scriptedExec c.script)
+  recoverInterrupted c.interruptRequested c.started c.hooks c.observed (scriptedExec c.script)
 
 def recoveryCases : List RecoveryCase :=
   [ { name := "before_start_runs_no_cleanup"
@@ -277,18 +329,24 @@ def recoveryCases : List RecoveryCase :=
                                  afterFailure "report", cleanup "sweep"]
     , observed := [⟨"prepare", .exited 0⟩], script := []
     , expectedRemaining := ["sweep"] }
+  , { name := "interrupt_requested_recovery_reports_interruption"
+    , interruptRequested := true
+    , started := true, hooks := [cleanup "first", cleanup "second"]
+    , observed := [⟨"first", .interrupted⟩], script := []
+    , expectedRemaining := ["second"] }
   , { name := "remaining_cleanup_errors_do_not_stop_recovery"
     , started := true, hooks := [cleanup "first", cleanup "second"]
     , observed := [], script := [failed "first"]
     , expectedRemaining := ["first", "second"] } ]
 
 theorem recoveryCases_replay : ∀ c ∈ recoveryCases,
-    (recoveryOf c).1 = RequestState.interrupted ∧
+    (recoveryOf c).1 = Recovery.recoveredRequestState c.interruptRequested ∧
       (recoveryOf c).2.map HookAttempt.hookId = c.expectedRemaining := by decide
 
 private def recoveryCaseJson (c : RecoveryCase) : String :=
   let result := recoveryOf c
   "{\"name\":" ++ jsonString c.name ++
+    ",\"interrupt_requested\":" ++ boolJson c.interruptRequested ++
     ",\"started\":" ++ boolJson c.started ++
     ",\"hooks\":" ++ jsonArray (c.hooks.map hookJson) ++
     ",\"observed\":" ++ jsonArray (c.observed.map attemptJson) ++
