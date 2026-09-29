@@ -50,6 +50,17 @@ def callbackRetryCasesJson : String :=
       ++ ",\"max_attempts\":" ++ toString c.maxAttempts
       ++ ",\"allowed\":" ++ boolString c.allowed ++ "}")
 
+def callbackRecoveryCasesJson : String :=
+  jsonArray (Callback.Conformance.recoveryCases.map fun c =>
+    "{\"name\":" ++ jsonString c.name
+      ++ ",\"journal\":" ++ jsonStringArray (c.journal.map ActionJournalState.toDefraDB)
+      ++ ",\"attempts\":" ++ toString c.attempts
+      ++ ",\"max_attempts\":" ++ toString c.maxAttempts
+      ++ ",\"post_state\":" ++ jsonString c.post.state.toDefraDB
+      ++ ",\"post_journal\":"
+        ++ jsonStringArray (c.post.journal.map fun e => e.state.toDefraDB)
+      ++ ",\"retry_allowed_after\":" ++ boolString c.retryAllowedAfter ++ "}")
+
 def callbackTransitionCaseCount : Nat := Callback.Conformance.transitionCases.length
 
 end Conformance.Contracts

@@ -55,9 +55,10 @@ pub fn action_journal_prefix_legal(entries: &[ActionJournalEntry]) -> bool {
     true
 }
 
-/// Whether a failed invocation may run again: it has attempts left, and no
-/// action observed its effect, wrote results or was interrupted, so running it
-/// again cannot repeat anything.
+/// Whether a failed invocation may run again: it has attempts left and no
+/// action observed its effect or wrote results. An interrupted action is
+/// refused too: its outcome is unknown, so running it again could repeat an
+/// effect the runtime never saw.
 pub fn retry_allowed(
     state: &str,
     journal: &[ActionJournalEntry],
@@ -76,13 +77,25 @@ pub fn retry_allowed(
         })
 }
 
-/// Marks every action recovery found still executing as interrupted.
-pub(crate) fn interrupt(journal: &mut [ActionJournalEntry]) {
-    for entry in journal {
-        if entry.state == ActionJournalState::Executing {
-            entry.state = ActionJournalState::Interrupted;
-        }
+/// Recovery of an invocation found running with `journal`. `Some` is the
+/// journal it fails with: the attempt was cut off, so every action still
+/// executing is marked interrupted and no retry repeats its unknown effect.
+/// `None` means nothing ran and the attempt carries on.
+pub fn recover_running(journal: &[ActionJournalEntry]) -> Option<Vec<ActionJournalEntry>> {
+    if journal.is_empty() {
+        return None;
     }
+    Some(
+        journal
+            .iter()
+            .map(|entry| match entry.state {
+                ActionJournalState::Executing => {
+                    ActionJournalEntry::new(entry.index, ActionJournalState::Interrupted)
+                }
+                _ => entry.clone(),
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn current_state(

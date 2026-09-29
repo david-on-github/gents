@@ -55,7 +55,8 @@ pub use instructions::{
     InstructionFile, InstructionManifest, DEFAULT_INSTRUCTION_PATHS,
 };
 pub use journal::{
-    action_journal_prefix_legal, retry_allowed, ActionJournalEntry, ActionJournalState,
+    action_journal_prefix_legal, recover_running, retry_allowed, ActionJournalEntry,
+    ActionJournalState,
 };
 pub use path_capability::WorkspacePathCapability;
 pub use quickstart::provision_read_only_workspace;

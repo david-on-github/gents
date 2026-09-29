@@ -29,10 +29,14 @@ inductive Transition : CallbackInvocation → CallbackInvocation → Prop where
       pre.journal.all (fun e => decide (e.state = .resultDocsWritten)) = true →
       post = { pre with state := .succeeded, resultEmitted := true } →
       Transition pre post
+  /-- The attempt observed its own failure, so an action it leaves `executing`
+  returned without an effect the runtime could see. Recovery never takes this
+  step: it cannot observe the attempt it found, and fails it only by `recover`. -/
   | fail {pre post : CallbackInvocation} :
       pre.state = .running →
       post = { pre with state := .failed, resultEmitted := false } →
       Transition pre post
+  /-- Recovery's failure of an attempt it found cut off; see `recover`. -/
   | interrupt {pre post : CallbackInvocation} :
       pre.state = .running →
       post = { pre with
@@ -52,5 +56,15 @@ inductive Transition : CallbackInvocation → CallbackInvocation → Prop where
       retryAllowed pre maxAttempts = true →
       post = { pre with state := .pending, journal := [], resultEmitted := false } →
       Transition pre post
+
+/-- What recovery does with an invocation it finds. A running invocation whose
+journal is non-empty was cut off mid-attempt: recovery cannot observe what its
+actions did, so it fails it with executing actions marked interrupted and
+never with a plain `fail`. A running invocation with an empty journal did
+nothing and its attempt carries on; other states are left to their owners. -/
+def recover (inv : CallbackInvocation) : CallbackInvocation :=
+  if inv.state = .running ∧ inv.journal ≠ [] then
+    { inv with state := .failed, journal := interruptJournal inv.journal, resultEmitted := false }
+  else inv
 
 end CallbackInvocation

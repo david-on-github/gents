@@ -105,9 +105,10 @@ def laterThanValidated : ActionJournalState → Bool
 /-- The action's effect happened, its results were written, or it was
 interrupted with an unknown outcome. Running the invocation again could repeat
 that effect. An interrupted action counts because an external side effect it
-may have caused is unobservable to the runtime and must not be repeated; an
-action that is still `executing` in a failed invocation returned a failure the
-runtime observed, so running it again is allowed. -/
+may have caused is unobservable to the runtime and must not be repeated. An
+`executing` action does not count: a failed invocation keeps one only when its
+own attempt observed the failure (`Transition.fail`), and recovery, which
+cannot observe it, replaces it with `interrupted` (`CallbackInvocation.recover`). -/
 def effectful : ActionJournalState → Bool
   | .effectObserved | .resultDocsWritten | .interrupted => true
   | .validated | .executing => false

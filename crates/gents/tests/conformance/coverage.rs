@@ -1449,6 +1449,12 @@ fn lean_contract_coverage_ledger_accounts_for_every_emitted_domain() {
             "CallbackRetryCases".to_string(),
         ));
     }
+    if !snapshot.callback_recovery_cases.is_empty() {
+        emitted.insert((
+            "callback_recovery_cases".to_string(),
+            "CallbackRecoveryCases".to_string(),
+        ));
+    }
     if !snapshot.callback_cases.is_empty() {
         emitted.insert(("callback_cases".to_string(), "CallbackCases".to_string()));
     }
