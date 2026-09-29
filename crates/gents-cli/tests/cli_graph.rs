@@ -638,3 +638,329 @@ fn a_graph_dependency_is_released_with_its_dependent() -> Result<()> {
     );
     Ok(())
 }
+
+/// `GENTS_CODE_REVIEW_PACK_DIR` must name a checkout of the packs-repo
+/// `code_review` pack (gents-ai/packs, `packs/gents/code_review`) built with
+/// its `review_evidence` plugin's `.afb` present. This is K1's artifact; the
+/// legacy code this test compares against is deleted in G4b.
+fn code_review_pack_dir() -> std::path::PathBuf {
+    std::path::PathBuf::from(
+        std::env::var("GENTS_CODE_REVIEW_PACK_DIR").unwrap_or_else(|_| {
+            panic!(
+                "GENTS_CODE_REVIEW_PACK_DIR must name a checkout of the code_review pack \
+             (gents-ai/packs, packs/gents/code_review), built with its review_evidence plugin"
+            )
+        }),
+    )
+}
+
+mod evidence_equivalence {
+    use std::path::Path;
+
+    fn init_repo() -> tempfile::TempDir {
+        let directory = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(directory.path())
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet"]);
+        git(&["config", "user.email", "equivalence@example.com"]);
+        git(&["config", "user.name", "Equivalence"]);
+        directory
+    }
+
+    fn commit(repo: &Path, message: &str) -> String {
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(output.status.success(), "git {args:?} failed");
+            output
+        };
+        git(&["add", "-A"]);
+        git(&["commit", "--quiet", "-m", message]);
+        String::from_utf8(git(&["rev-parse", "HEAD"]).stdout)
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    /// Six repos exercising the same shapes the packs-repo golden generator
+    /// covers: an ASCII edit, a multibyte boundary, a rename plus a binary
+    /// file, an empty diff, a large edit, and a non-ASCII filename.
+    pub(super) fn cases() -> Vec<(&'static str, tempfile::TempDir, String, String)> {
+        let mut cases = Vec::new();
+        {
+            let directory = init_repo();
+            let repo = directory.path();
+            std::fs::write(repo.join("hello.txt"), "line one\n").unwrap();
+            let base = commit(repo, "base");
+            std::fs::write(repo.join("hello.txt"), "line one changed\n").unwrap();
+            let head = commit(repo, "head");
+            cases.push(("ascii-edit", directory, base, head));
+        }
+        {
+            let directory = init_repo();
+            let repo = directory.path();
+            std::fs::write(repo.join("multibyte.txt"), "é日".repeat(50)).unwrap();
+            let base = commit(repo, "base");
+            std::fs::write(repo.join("multibyte.txt"), "é日".repeat(500)).unwrap();
+            let head = commit(repo, "head");
+            cases.push(("multibyte-boundary", directory, base, head));
+        }
+        {
+            let directory = init_repo();
+            let repo = directory.path();
+            std::fs::write(repo.join("old_name.txt"), "a".repeat(200)).unwrap();
+            let base = commit(repo, "base");
+            std::fs::rename(repo.join("old_name.txt"), repo.join("new_name.txt")).unwrap();
+            std::fs::write(repo.join("blob.bin"), [0u8, 159, 146, 150, 0, 255, 1, 2]).unwrap();
+            let head = commit(repo, "head");
+            cases.push(("rename-and-binary", directory, base, head));
+        }
+        {
+            let directory = init_repo();
+            let repo = directory.path();
+            std::fs::write(repo.join("unchanged.txt"), "steady\n").unwrap();
+            let base = commit(repo, "base");
+            cases.push(("empty-diff", directory, base.clone(), base));
+        }
+        {
+            let directory = init_repo();
+            let repo = directory.path();
+            std::fs::write(repo.join("large.txt"), "a\n".repeat(30_000)).unwrap();
+            let base = commit(repo, "base");
+            std::fs::write(repo.join("large.txt"), "b\n".repeat(60_000)).unwrap();
+            let head = commit(repo, "head");
+            cases.push(("large-edit", directory, base, head));
+        }
+        {
+            let directory = init_repo();
+            let repo = directory.path();
+            std::fs::write(repo.join("日本語.txt"), "one\n").unwrap();
+            let base = commit(repo, "base");
+            std::fs::write(repo.join("日本語.txt"), "two\n").unwrap();
+            let head = commit(repo, "head");
+            cases.push(("non-ascii-filename", directory, base, head));
+        }
+        cases
+    }
+}
+
+/// Proves the pack plugin reproduces the legacy Rust adapter's evidence
+/// byte-for-byte: the same manifest and pages (every field, sorted by
+/// `page_key`) and the same entry input, aside from the workspace facts each
+/// independent `provision_read_only_workspace` call mints its own identity
+/// for. `#[ignore]`d and env-gated on `GENTS_CODE_REVIEW_PACK_DIR`; deleted
+/// in G4b along with the legacy adapter it compares against.
+#[tokio::test]
+#[ignore]
+async fn graph_prepare_matches_legacy_code_review_evidence() {
+    let pack_dir = code_review_pack_dir();
+    let (bytes, _header) = gents::pack_archive::pack_dir(&pack_dir).expect("packing pack dir");
+    let archive = gents::pack_archive::PackArchive::from_bytes(&bytes).expect("reading pack");
+    let plugin_bytes = archive
+        .plugin_artifact("review_evidence")
+        .expect("review_evidence artifact")
+        .to_vec();
+    let digest = format!(
+        "sha256:{:x}",
+        <sha2::Sha256 as sha2::Digest>::digest(&plugin_bytes)
+    );
+
+    let home = tempfile::tempdir().unwrap();
+    gents::plugin::store::store_bytes(
+        home.path(),
+        digest.strip_prefix("sha256:").unwrap(),
+        &plugin_bytes,
+    )
+    .unwrap();
+    let declaration = archive.plugin("review_evidence").expect("declared").clone();
+    let record = gents::plugin::store::InstalledPlugin {
+        namespace: "gents".into(),
+        name: "review_evidence".into(),
+        version: archive.manifest().version.clone(),
+        digest: digest.clone(),
+        language: declaration.language.clone(),
+        declaration,
+        granted: None,
+        instructions: None,
+        owner_pack_coordinate: None,
+        owner_pack_digest: None,
+    };
+    gents::plugin::store::write_record(home.path(), &record).unwrap();
+    let plugins = gents::plugin::executor::PluginExecutor::new(Some(home.path().to_owned()));
+
+    let entry = gents::graph_pipeline::PlannedEntry {
+        name: "review".to_owned(),
+        collection: "CodeReviewJob".to_owned(),
+        schema: "CodeReviewJob/v1".to_owned(),
+        input_contract: None,
+        to: gents::graph_pipeline::PortRef {
+            node_id: "recon".to_owned(),
+            port: "job".to_owned(),
+        },
+        target: gents::graph_pipeline::StageTarget::Task {
+            task_id: "review-recon-task".to_owned(),
+        },
+        correlation_field: "run_id".to_owned(),
+        input_schema: None,
+        prepare: Some(gents::graph_pipeline::EntryPrepare {
+            host: vec![
+                gents::graph_pipeline::HostInput::GitDiff {
+                    repository_field: "repository".to_owned(),
+                    base_field: "base".to_owned(),
+                    head_field: "head".to_owned(),
+                    unified_context_lines: 12,
+                    rename_similarity_percent: 50,
+                },
+                gents::graph_pipeline::HostInput::ReadOnlyWorkspace,
+            ],
+            plugin: "gents/review_evidence".to_owned(),
+            digest: Some(digest),
+            writes: vec![
+                "CodeReviewEvidenceManifest".to_owned(),
+                "CodeReviewEvidencePage".to_owned(),
+            ],
+        }),
+    };
+    let plan = gents::graph_pipeline::GraphPlan {
+        compiler_version: gents::graph_pipeline::COMPILER_VERSION.to_owned(),
+        graph_id: "code-review".to_owned(),
+        digest: format!("sha256:{}", "0".repeat(64)),
+        nodes: Vec::new(),
+        edges: Vec::new(),
+        entries: vec![entry],
+        results: Vec::new(),
+        capability_manifest: Vec::new(),
+        limits: gents::graph_pipeline::GraphLimits {
+            max_nodes: 1,
+            max_edges: 1,
+            max_depth: 1,
+            max_fan_out: 1,
+            max_total_invocations: 1,
+            max_runtime_secs: 60,
+        },
+        package: None,
+    };
+
+    for (name, repo, base, head) in evidence_equivalence::cases() {
+        let owner = "did:key:zEvidenceEquivalence";
+
+        let manifest_schema =
+            std::fs::read_to_string(pack_dir.join("schemas/evidence_manifest.graphql"))
+                .expect("pack ships schemas/evidence_manifest.graphql");
+        let page_schema = std::fs::read_to_string(pack_dir.join("schemas/evidence_page.graphql"))
+            .expect("pack ships schemas/evidence_page.graphql");
+
+        // Node A: the legacy Rust adapter.
+        let node_a = defra_node::EmbeddedNode::builder().build().await.unwrap();
+        gents::document_config::ensure_agent_principal(&node_a, owner)
+            .await
+            .unwrap();
+        node_a.add_schema(&manifest_schema).await.unwrap();
+        node_a.add_schema(&page_schema).await.unwrap();
+        let access_a = gents::config_client::ConfigAccess::Local(std::sync::Arc::new(node_a));
+        let legacy = gents::graph_package::prepare_code_review_run(
+            &access_a,
+            owner,
+            repo.path(),
+            &base,
+            &head,
+            None,
+            Some(repo.path()),
+            None,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{name}: legacy prepare failed: {error:#}"));
+
+        // Node B: the generic host step plus the pack's own plugin.
+        let node_b = defra_node::EmbeddedNode::builder().build().await.unwrap();
+        gents::document_config::ensure_agent_principal(&node_b, owner)
+            .await
+            .unwrap();
+        node_b.add_schema(&manifest_schema).await.unwrap();
+        node_b.add_schema(&page_schema).await.unwrap();
+        let access_b = gents::config_client::ConfigAccess::Local(std::sync::Arc::new(node_b));
+        let prepared = gents::graph_package::prepare_entry_run(
+            &access_b,
+            owner,
+            gents::graph_package::EntryRunRequest {
+                plan: &plan,
+                entry: None,
+                input: serde_json::json!({
+                    "repository": repo.path().to_string_lossy(),
+                    "base": base,
+                    "head": head,
+                }),
+                host_root: Some(repo.path()),
+                plugins: &plugins,
+            },
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{name}: generic prepare failed: {error:#}"));
+
+        let mut legacy_input = legacy.input.clone();
+        let mut generic_input = prepared.input.clone();
+        for stripped in ["workspace_id", "workspace_owner_agent_did", "evidence_id"] {
+            // The evidence_id (nonce) and the workspace identity are minted
+            // fresh per call by design; every other field must match exactly.
+            legacy_input.as_object_mut().unwrap().remove(stripped);
+            generic_input.as_object_mut().unwrap().remove(stripped);
+        }
+        assert_eq!(legacy_input, generic_input, "{name}: entry input");
+
+        let manifests_a = access_a
+            .execute("{ CodeReviewEvidenceManifest { format_version page_count evidence_chunk_count evidence_byte_count evidence_sha256 } }")
+            .await
+            .unwrap();
+        let manifests_b = access_b
+            .execute("{ CodeReviewEvidenceManifest { format_version page_count evidence_chunk_count evidence_byte_count evidence_sha256 } }")
+            .await
+            .unwrap();
+        assert_eq!(
+            manifests_a["data"]["CodeReviewEvidenceManifest"],
+            manifests_b["data"]["CodeReviewEvidenceManifest"],
+            "{name}: manifest"
+        );
+
+        // `page_key` and `evidence_id` embed the nonce, which each side
+        // mints independently; every other field, including all sixteen
+        // chunk slots, is the byte-identity proof and must match exactly.
+        let chunk_fields: String = (0..16)
+            .map(|slot| format!("evidence_chunk_{slot} "))
+            .collect();
+        let page_query = format!(
+            "{{ CodeReviewEvidencePage {{ page_index page_count evidence_chunk_count \
+             evidence_byte_count evidence_sha256 {chunk_fields}}} }}"
+        );
+        let mut pages_a = access_a.execute(&page_query).await.unwrap()["data"]
+            ["CodeReviewEvidencePage"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let mut pages_b = access_b.execute(&page_query).await.unwrap()["data"]
+            ["CodeReviewEvidencePage"]
+            .as_array()
+            .unwrap()
+            .clone();
+        let by_page_index = |value: &Value| {
+            value["page_index"]
+                .as_str()
+                .unwrap()
+                .parse::<u32>()
+                .unwrap()
+        };
+        pages_a.sort_by_key(by_page_index);
+        pages_b.sort_by_key(by_page_index);
+        assert_eq!(pages_a, pages_b, "{name}: pages");
+    }
+}
