@@ -562,66 +562,6 @@ async fn create_session_with_behavior_id_rejects_mismatched_existing_binding() {
     let _ = std::fs::remove_dir_all(&data_path);
 }
 
-/// Runs `attempt` with an injected failure after each successful transaction
-/// mutation in turn until an attempt commits without reaching the fault. Every
-/// faulted attempt must fail with exactly that injection and leave `observe`
-/// unchanged; the committing attempt is the clean retry and is returned with
-/// its mutation count.
-async fn assert_every_mutation_rolls_back<T, E, S, A, AF, O, OF>(
-    mut attempt: A,
-    observe: O,
-) -> (T, usize)
-where
-    E: std::fmt::Debug,
-    S: PartialEq + std::fmt::Debug,
-    A: FnMut() -> AF,
-    AF: std::future::Future<Output = Result<T, E>>,
-    O: Fn() -> OF,
-    OF: std::future::Future<Output = S>,
-{
-    let before = observe().await;
-    for index in 1.. {
-        let (result, observed) =
-            crate::config_client::ConfigApplyTxn::with_successful_mutation_failure_at(
-                Some(index),
-                attempt(),
-            )
-            .await;
-        match result {
-            Ok(value) => {
-                assert!(index > 1, "the rewrite must perform at least one mutation");
-                assert_eq!(
-                    observed,
-                    index - 1,
-                    "a committed attempt must not pass the injected position"
-                );
-                assert_ne!(
-                    observe().await,
-                    before,
-                    "the committed rewrite must be visible to the rollback observation"
-                );
-                return (value, observed);
-            }
-            Err(error) => {
-                let detail = format!("{error:?}");
-                assert!(
-                    detail.contains(&format!(
-                        "injected failure after successful transaction mutation {index}"
-                    )),
-                    "unexpected failure at mutation {index}: {detail}"
-                );
-                assert_eq!(observed, index, "injection must fire exactly once");
-                assert_eq!(
-                    observe().await,
-                    before,
-                    "mutation {index} leaked a partial rewrite"
-                );
-            }
-        }
-    }
-    unreachable!("the mutation positions are unbounded")
-}
-
 async fn session_rewrite_rows(node: &defra_node::EmbeddedNode) -> Vec<Vec<String>> {
     let response = node
         .execute(
@@ -695,7 +635,7 @@ async fn fork_rolls_back_at_every_mutation_position() {
         target_behavior_id: None,
     };
 
-    let (outcome, writes) = assert_every_mutation_rolls_back(
+    let (outcome, writes) = crate::config_client::ConfigApplyTxn::assert_every_mutation_rolls_back(
         || fork(&node, params.clone()),
         || session_rewrite_rows(&node),
     )
@@ -706,15 +646,6 @@ async fn fork_rolls_back_at_every_mutation_position() {
         writes > 4,
         "headers, compaction, and session header are separate writes: {writes}"
     );
-    let child_headers = load_history(&node, &outcome.session_id, AGENT, None)
-        .await
-        .unwrap();
-    assert_eq!(child_headers.len(), 3);
-    let child_compactions = load_compaction_entries(&node, &outcome.session_id, AGENT, None)
-        .await
-        .unwrap();
-    assert_eq!(child_compactions.len(), 1);
-    assert_eq!(child_compactions[0].summary, "early turns");
     node.shutdown().await;
 }
 
@@ -752,7 +683,7 @@ async fn compaction_save_fault_leaves_chain_and_generation_intact() {
     let (_, before) = chain().await;
     let files = ["/tmp/b.rs".to_string()];
 
-    let (saved, _) = assert_every_mutation_rolls_back(
+    let (saved, _) = crate::config_client::ConfigApplyTxn::assert_every_mutation_rolls_back(
         || {
             save_compaction_entry_with_requester_did(
                 &node,

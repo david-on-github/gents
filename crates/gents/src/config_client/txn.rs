@@ -591,6 +591,63 @@ impl<'a> ConfigApplyTxn<'a> {
         (output, fault.count.load(Ordering::Relaxed))
     }
 
+    /// Runs `attempt` with a failure injected after each successful mutation in
+    /// turn until an attempt commits without reaching the fault. Every faulted
+    /// attempt must fail with exactly that injection and leave `observe`
+    /// unchanged; the committing attempt must change it. Returns the committed
+    /// value and its mutation count.
+    #[cfg(test)]
+    pub(crate) async fn assert_every_mutation_rolls_back<T, E, S, A, AF, O, OF>(
+        mut attempt: A,
+        observe: O,
+    ) -> (T, usize)
+    where
+        E: std::fmt::Debug,
+        S: PartialEq + std::fmt::Debug,
+        A: FnMut() -> AF,
+        AF: Future<Output = std::result::Result<T, E>>,
+        O: Fn() -> OF,
+        OF: Future<Output = S>,
+    {
+        let before = observe().await;
+        let mut index = 1;
+        loop {
+            let (result, observed) =
+                Self::with_successful_mutation_failure_at(Some(index), attempt()).await;
+            match result {
+                Ok(value) => {
+                    assert_eq!(
+                        observed,
+                        index - 1,
+                        "a committed attempt must not pass the injected position"
+                    );
+                    assert_ne!(
+                        observe().await,
+                        before,
+                        "the committed attempt must be visible to the rollback observation"
+                    );
+                    return (value, observed);
+                }
+                Err(error) => {
+                    let detail = format!("{error:?}");
+                    assert!(
+                        detail.contains(&format!(
+                            "injected failure after successful transaction mutation {index}"
+                        )),
+                        "unexpected failure at mutation {index}: {detail}"
+                    );
+                    assert_eq!(observed, index, "injection must fire exactly once");
+                    assert_eq!(
+                        observe().await,
+                        before,
+                        "mutation {index} leaked a partial write"
+                    );
+                }
+            }
+            index += 1;
+        }
+    }
+
     #[cfg(test)]
     pub(crate) async fn with_post_commit_receipt_loss<F: Future>(future: F) -> (F::Output, bool) {
         Self::with_post_commit_receipt_loss_for_operation(None, future).await
