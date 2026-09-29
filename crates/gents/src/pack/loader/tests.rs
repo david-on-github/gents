@@ -162,8 +162,9 @@ fn sidecar_cannot_escape_or_read_undeclared_assets() {
 }
 
 #[test]
-fn bundled_review_loads_slot_authoring_and_literal_prompt_assets() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/code_review");
+fn graph_fixture_loads_slot_authoring_and_literal_prompt_assets() {
+    let root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/packs/review_graph");
     let manifest: PackManifest =
         serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap()).unwrap();
     let config = load_pack_config(
@@ -211,6 +212,32 @@ fn bundled_review_loads_slot_authoring_and_literal_prompt_assets() {
                 .unwrap();
             assert_eq!(prompt, std::fs::read_to_string(root.join(path)).unwrap());
         }
+    }
+}
+
+/// Every fixture pack that ships a config loads it cleanly, so a later phase
+/// that installs `documents_fixture`, `slot_fixture` or `dependent_fixture`
+/// starts from a fixture already known to parse and validate.
+#[test]
+fn every_documents_style_fixture_pack_loads_its_config() {
+    for name in ["documents_fixture", "slot_fixture", "dependent_fixture"] {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/packs")
+            .join(name);
+        let manifest: PackManifest =
+            serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap())
+                .unwrap_or_else(|error| panic!("{name} manifest: {error}"));
+        crate::pack::validate_manifest(&manifest.name, &manifest)
+            .unwrap_or_else(|error| panic!("{name} manifest: {error:#}"));
+        load_pack_config(
+            &manifest,
+            &PackInstallOptions {
+                agent_did: "did:key:fixture-owner".into(),
+            },
+            &|path| Ok(std::fs::read(root.join(path))?),
+            &|_| None,
+        )
+        .unwrap_or_else(|error| panic!("{name} config: {error:#}"));
     }
 }
 
