@@ -94,6 +94,18 @@ def agentRequestAdmissionCases : List AgentRequestAdmissionCase :=
       { requestAdmissionBase .runtimeInternal with
           runtimeEvidencePresent := true, targetRuntimeAttestationValid := true
           sourceBindingCurrent := true, sourceDocumentBindingCurrent := true }
+  , requestAdmissionCase "runtime-local-control-adopts-paired-session-requester"
+      { requestAdmissionBase .runtimeInternal with
+          runtimeEvidencePresent := true, targetRuntimeAttestationValid := true
+          sourceBindingCurrent := true, sourceDocumentBindingCurrent := true
+          signerMatchesRequester := false, requesterMatchesTarget := false }
+  , requestAdmissionCase "runtime-trigger-adopts-paired-session-requester"
+      { requestAdmissionBase .runtimeInternal with
+          runtimeSourceKind := .automatedTrigger
+          runtimeEvidencePresent := true, targetRuntimeAttestationValid := true
+          sourceBindingCurrent := true, triggerConfigDocumentBindingCurrent := true
+          targetPolicyAllows := true
+          signerMatchesRequester := false, requesterMatchesTarget := false }
   , requestAdmissionCase "runtime-local-control-cannot-choose-foreign-requester"
       { requestAdmissionBase .runtimeInternal with
           runtimeEvidencePresent := true, targetRuntimeAttestationValid := true
