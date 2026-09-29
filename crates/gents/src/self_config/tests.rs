@@ -3852,6 +3852,74 @@ async fn backend_self_config_protects_raw_keys_in_writes_reads_and_diffs() {
         .contains("operator-secret"));
 }
 
+/// A self-config write merges onto the raw stored document, so an unrelated
+/// backend field edit must keep an environment credential as its reference
+/// and never resolve the variable into storage, previews, or reads.
+#[tokio::test]
+async fn unrelated_backend_patch_keeps_environment_reference_unresolved() {
+    const VARIABLE: &str = "GENTS_TEST_UNRELATED_PATCH_ENV_REFERENCE";
+    const SENTINEL: &str = "sentinel-env-secret-never-stored";
+    let node = build_persona_node().await;
+    let identity = persona_identity("self-config-env-reference");
+    let owner = identity.did().to_string();
+    crate::test_support::install_test_behavior(&node, &owner, "envref").await;
+    let core = SelfConfigCore::new(node.clone(), owner.clone(), "envref".into()).unwrap();
+    let reference = json!({"kind":"environment","variable":VARIABLE});
+    core.apply(backend_request(vec![(
+        "auth".into(),
+        Some(reference.clone()),
+    )]))
+    .await
+    .unwrap();
+    let _variable = crate::test_support::EnvVarGuard::set(VARIABLE, SENTINEL);
+
+    let stored_backend = || {
+        let node = node.clone();
+        let owner = escape_graphql_string(&owner);
+        async move {
+            let response = node
+                .execute(&format!(
+                    r#"{{ InferenceBackend(filter: {{agent_did: {{_eq: "{owner}"}}, backend_id: {{_eq: "envref:backend"}}}}) {{ name connect_timeout_secs auth }} }}"#
+                ))
+                .await;
+            assert!(!response.has_errors(), "{:?}", response.errors);
+            response.data.expect("backend data")["InferenceBackend"][0].clone()
+        }
+    };
+
+    for patch in [
+        vec![("name".into(), Some(json!("Renamed inference")))],
+        vec![("connect_timeout_secs".into(), Some(json!(17)))],
+    ] {
+        let preview = core.preview(backend_request(patch.clone())).await.unwrap();
+        let applied = core.apply(backend_request(patch)).await.unwrap();
+        for outcome in [&preview, &applied] {
+            let rendered = serde_json::to_string(outcome).unwrap();
+            assert!(!rendered.contains(SENTINEL), "{rendered}");
+            assert!(
+                !rendered.contains("\"auth\""),
+                "an unrelated patch must not report an auth delta: {rendered}"
+            );
+        }
+    }
+
+    let stored = stored_backend().await;
+    assert_eq!(stored["name"], "Renamed inference");
+    assert_eq!(stored["connect_timeout_secs"], 17);
+    let auth = match &stored["auth"] {
+        Value::String(encoded) => serde_json::from_str::<Value>(encoded).unwrap(),
+        other => other.clone(),
+    };
+    assert_eq!(auth, reference, "stored auth must remain the reference");
+    assert!(!stored.to_string().contains(SENTINEL));
+    let read = core
+        .read_effective_config(&BTreeSet::new(), false, true)
+        .await
+        .unwrap();
+    assert!(!read.to_string().contains(SENTINEL));
+    assert!(read.to_string().contains(VARIABLE));
+}
+
 #[tokio::test]
 async fn explicit_tools_grant_preserves_lsp_settings_guard_for_preview_and_apply() {
     let node = build_persona_node().await;
