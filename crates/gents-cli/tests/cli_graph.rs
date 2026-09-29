@@ -890,72 +890,27 @@ async fn graph_prepare_matches_legacy_code_review_evidence() {
     gents::plugin::store::write_record(home.path(), &record).unwrap();
     let plugins = gents::plugin::executor::PluginExecutor::new(Some(home.path().to_owned()));
 
-    let entry = gents::graph_pipeline::PlannedEntry {
-        name: "review".to_owned(),
-        collection: "CodeReviewJob".to_owned(),
-        schema: "CodeReviewJob/v1".to_owned(),
-        input_contract: None,
-        to: gents::graph_pipeline::PortRef {
-            node_id: "recon".to_owned(),
-            port: "job".to_owned(),
-        },
-        target: gents::graph_pipeline::StageTarget::Task {
-            task_id: "review-recon-task".to_owned(),
-        },
-        correlation_field: "run_id".to_owned(),
-        // Mirrors the real code_review entry's input_schema (pack_config.json)
-        // so `admit_operator_input` defaults `focus` the same way production
-        // does; the legacy side defaults it inside `prepare_code_review_run`
-        // itself, and the two must agree for this equivalence proof to mean
-        // anything.
-        input_schema: Some(serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "properties": {
-                "repository": {"type": "string", "default": "."},
-                "base": {"type": "string", "default": "origin/main"},
-                "head": {"type": "string", "default": "HEAD"},
-                "focus": {"type": "string", "default": "Review the diff for material correctness, safety, durability, and maintainability defects."},
-            },
-        })),
-        prepare: Some(gents::graph_pipeline::EntryPrepare {
-            host: vec![
-                gents::graph_pipeline::HostInput::GitDiff {
-                    repository_field: "repository".to_owned(),
-                    base_field: "base".to_owned(),
-                    head_field: "head".to_owned(),
-                    unified_context_lines: 12,
-                    rename_similarity_percent: 50,
-                },
-                gents::graph_pipeline::HostInput::ReadOnlyWorkspace,
-            ],
-            plugin: "gents/review_evidence".to_owned(),
-            digest: Some(digest),
-            writes: vec![
-                "CodeReviewEvidenceManifest".to_owned(),
-                "CodeReviewEvidencePage".to_owned(),
-            ],
-        }),
-    };
-    let plan = gents::graph_pipeline::GraphPlan {
-        compiler_version: gents::graph_pipeline::COMPILER_VERSION.to_owned(),
-        graph_id: "code-review".to_owned(),
-        digest: format!("sha256:{}", "0".repeat(64)),
-        nodes: Vec::new(),
-        edges: Vec::new(),
-        entries: vec![entry],
-        results: Vec::new(),
-        capability_manifest: Vec::new(),
-        limits: gents::graph_pipeline::GraphLimits {
-            max_nodes: 1,
-            max_edges: 1,
-            max_depth: 1,
-            max_fan_out: 1,
-            max_total_invocations: 1,
-            max_runtime_secs: 60,
-        },
-        package: None,
-    };
+    // The pack's own compiled plan, not a hand-built stand-in: it already
+    // carries the pinned `review_evidence` digest and the entry's real
+    // `input_schema`/`prepare` (unified_context_lines, rename_similarity_percent,
+    // the focus default), so a change to `pack_config.json` that this proof
+    // must catch actually flows through it, rather than two copies of that
+    // shape that could silently drift apart.
+    let plan: gents::graph_pipeline::GraphPlan = serde_json::from_slice(
+        archive
+            .asset(&gents::graph_package::graph_plan_path("code-review"))
+            .expect("pack ships graphs/code_review.plan.json"),
+    )
+    .expect("shipped plan parses");
+    let pinned_digest = plan.entries[0]
+        .prepare
+        .as_ref()
+        .and_then(|prepare| prepare.digest.as_deref());
+    assert_eq!(
+        pinned_digest,
+        Some(digest.as_str()),
+        "the shipped plan's pinned review_evidence digest must match the artifact this pack ships"
+    );
 
     for (name, repo, base, head) in evidence_equivalence::cases() {
         let owner = "did:key:zEvidenceEquivalence";
