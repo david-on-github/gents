@@ -15,10 +15,12 @@
 #   GENTS_EVAL_HOME     eval home (default ~/gents-eval-homes/ladder-<short sha>)
 #   GENTS_EVAL_PORT     port the eval home is served on (default 9493)
 #   GENTS_EVAL_PER_TRIAL  inference calls one trial may have in flight (default 1)
+#   GENTS_EVAL_REASONING / GENTS_EVAL_TEMPERATURE / GENTS_EVAL_TOP_P
+#                       Engineer sampling (default high / 1.0 / 0.95)
 #   GENTS_BIN           use this gents binary instead of building one
 set -euo pipefail
 
-usage() { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 [ $# -ge 1 ] || usage
 
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
@@ -31,6 +33,9 @@ TARGET=${GENTS_EVAL_TARGET:-workstation-1}
 SPLITS=${GENTS_EVAL_SPLITS:-train validation}
 EVAL_HOME=${GENTS_EVAL_HOME:-$HOME/gents-eval-homes/ladder-$SHA}
 PORT=${GENTS_EVAL_PORT:-9493}
+REASONING=${GENTS_EVAL_REASONING:-high}
+TEMPERATURE=${GENTS_EVAL_TEMPERATURE:-1.0}
+TOP_P=${GENTS_EVAL_TOP_P:-0.95}
 TARGET_FILE="$ROOT/scripts/evals/targets/$TARGET.json"
 
 LEVELS=(l1-inference l2-agent l3-datastore l4-automation l5-agents-tools l6-graph)
@@ -83,20 +88,29 @@ fi
 # no execution_id: `gents eval run` does not copy the InferenceExecution a
 # profile names into the trial (#2095), so a bound one fails every trial.
 PROFILE_ID="$DID:ladder-$TARGET"
-python3 - "$TARGET_FILE" "$DID" "$PER_TRIAL" "$EVAL_HOME/backend.json" "$EVAL_HOME/profile.json" <<'PY'
-import json, sys
-target, did, per_trial, backend_out, profile_out = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4], sys.argv[5]
+INFERENCE="$EVAL_HOME/inference-$TARGET"
+python3 - "$TARGET_FILE" "$DID" "$PER_TRIAL" "$INFERENCE" "$REASONING" "$TEMPERATURE" "$TOP_P" <<'PY'
+import json, os, sys
+target, did, per_trial, root, reasoning, temperature, top_p = sys.argv[1:8]
 t = json.load(open(target))
-name = target.rsplit("/", 1)[-1][:-5]
+name = os.path.basename(target)[:-5]
 backend = dict(t["inference_backends"][0])
-backend.update(backend_id=f"{did}:ladder-{name}", agent_did=did, max_concurrent=per_trial)
+backend.update(backend_id=f"{did}:ladder-{name}", agent_did=did, max_concurrent=int(per_trial))
+sampling = {"sampling_id": f"{did}:ladder-{name}-sampling", "agent_did": did,
+            "display_name": f"Ladder {name}", "temperature": float(temperature), "top_p": float(top_p)}
 profile = {"profile_id": f"{did}:ladder-{name}", "agent_did": did, "display_name": f"Ladder {name}",
-           "backend_id": backend["backend_id"], "model_name": t["inference_profiles"][0]["model_name"]}
-json.dump(backend, open(backend_out, "w"))
-json.dump(profile, open(profile_out, "w"))
+           "backend_id": backend["backend_id"], "model_name": t["inference_profiles"][0]["model_name"],
+           "reasoning_effort": reasoning, "sampling_id": sampling["sampling_id"]}
+os.makedirs(root, exist_ok=True)
+json.dump({"manifest_version": 1, "name": "ladder_inference", "version": "0.1.0",
+           "description": "The ladder's trial inference binding", "authors": ["gents-ai contributors"],
+           "tags": ["eval"], "kind": "documents", "assets": ["pack_config.json"], "config": "pack_config.json"},
+          open(f"{root}/manifest.json", "w"))
+json.dump({"agent_principal": {}, "inference_backends": [backend], "inference_sampling": [sampling],
+           "inference_profiles": [profile]}, open(f"{root}/pack_config.json", "w"), indent=2)
 PY
-"$GENTS" config backend set --file "$EVAL_HOME/backend.json" --home "$EVAL_HOME" >/dev/null
-"$GENTS" config profile set --file "$EVAL_HOME/profile.json" --home "$EVAL_HOME" >/dev/null
+"$GENTS" config apply --root "$INFERENCE" --bind-agent-did home --home "$EVAL_HOME" >/dev/null
+echo "profile $PROFILE_ID: $MODEL, reasoning $REASONING, temperature $TEMPERATURE, top_p $TOP_P, $PER_TRIAL call(s) per trial" >&2
 
 # The subject is the Engineer this checkout seeds: its Setup prompt and grant,
 # copied over the pack's so the cell never drifts from gents_protocol.
