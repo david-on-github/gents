@@ -70,6 +70,8 @@ impl TrialSpec {
                 profile: Value::Null,
                 backend: Value::Null,
                 sampling: None,
+                execution: None,
+                retry_policy: None,
                 seed: 0,
             },
             fixtures: TrialFixtures::default(),
@@ -89,6 +91,10 @@ pub struct InferenceBinding {
     pub profile: Value,
     pub backend: Value,
     pub sampling: Option<Value>,
+    /// The InferenceExecution the profile's `execution_id` names, if any.
+    pub execution: Option<Value>,
+    /// The InferenceRetryPolicy that execution's `retry_policy_id` names, if any.
+    pub retry_policy: Option<Value>,
     pub seed: i64,
 }
 

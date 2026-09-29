@@ -137,6 +137,47 @@ pub struct GraphqlEnrollmentStore {
     node: Arc<EmbeddedNode>,
     identity: Arc<dyn AgentIdentity>,
     decision_lock: Arc<Mutex<()>>,
+    fail_closed: Arc<FailClosedLog>,
+}
+
+/// Why the last projection failed closed, if it did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FailClosed {
+    /// A standalone node has no AgentNetwork; that is its normal state.
+    NoNetwork,
+    RootRows(String),
+    Authority(String),
+}
+
+/// The enrollment sweep reprojects on every database update, so the same
+/// fail-closed reason recurs for as long as the state lasts. Only a change of
+/// state is logged; the fail-closed projection itself is unaffected.
+#[derive(Debug, Default)]
+struct FailClosedLog(StdMutex<Option<FailClosed>>);
+
+impl FailClosedLog {
+    fn record(&self, state: Option<FailClosed>) {
+        let mut last = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *last == state {
+            return;
+        }
+        match &state {
+            None => tracing::info!("enrollment authority projection recovered"),
+            Some(FailClosed::NoNetwork) => {
+                tracing::debug!("enrollment authority fail closed: no AgentNetwork configured")
+            }
+            Some(FailClosed::RootRows(error)) => {
+                tracing::warn!(error = %error, "enrollment root authority projected fail closed")
+            }
+            Some(FailClosed::Authority(error)) => {
+                tracing::warn!(error = %error, "enrollment authority projected fail closed")
+            }
+        }
+        *last = state;
+    }
 }
 
 fn enrollment_decision_gate(node: &EmbeddedNode) -> Arc<Mutex<()>> {
@@ -162,6 +203,7 @@ impl GraphqlEnrollmentStore {
             node,
             identity,
             decision_lock,
+            fail_closed: Arc::default(),
         }
     }
 
@@ -742,14 +784,22 @@ impl GraphqlEnrollmentStore {
         let network_rows = match network_rows {
             Ok(rows) => rows,
             Err(error) => {
-                tracing::warn!(error = %error, "enrollment root authority projected fail closed");
+                self.fail_closed
+                    .record(Some(FailClosed::RootRows(error.to_string())));
                 return Ok(EnrollmentProjection::conflicted(network_id, error));
             }
         };
         match self.project_response(&response, &network_rows, now).await {
-            Ok(projection) => Ok(projection),
+            Ok(projection) => {
+                self.fail_closed.record(None);
+                Ok(projection)
+            }
             Err(error) => {
-                tracing::warn!(error = %error, "enrollment authority projected fail closed");
+                self.fail_closed.record(Some(if network_rows.is_empty() {
+                    FailClosed::NoNetwork
+                } else {
+                    FailClosed::Authority(format!("{error:#}"))
+                }));
                 Ok(EnrollmentProjection::conflicted(network_id, error))
             }
         }
@@ -2238,6 +2288,69 @@ fn decode_signature(field: &str, value: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct CapturedLog(Arc<StdMutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn logged_lines(states: Vec<Option<FailClosed>>) -> Vec<String> {
+        let output = CapturedLog::default();
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let log = FailClosedLog::default();
+        tracing::subscriber::with_default(subscriber, || {
+            for state in states {
+                log.record(state);
+            }
+        });
+        let bytes = output.0.lock().unwrap().clone();
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn a_steady_fail_closed_state_is_logged_once_per_transition() {
+        let conflict = || {
+            Some(FailClosed::Authority(
+                "AgentNetwork signature is invalid".into(),
+            ))
+        };
+        let mut states = vec![None; 3];
+        states.extend(std::iter::repeat_with(|| Some(FailClosed::NoNetwork)).take(1_000));
+        states.extend(std::iter::repeat_with(conflict).take(1_000));
+        states.extend([None, None]);
+        let lines = logged_lines(states);
+        assert_eq!(lines.len(), 3, "{lines:#?}");
+        assert!(
+            lines[0].contains("DEBUG") && lines[0].contains("no AgentNetwork configured"),
+            "{lines:#?}"
+        );
+        assert!(
+            lines[1].contains("WARN") && lines[1].contains("signature is invalid"),
+            "{lines:#?}"
+        );
+        assert!(
+            lines[2].contains("INFO") && lines[2].contains("recovered"),
+            "{lines:#?}"
+        );
+    }
 
     fn pending_request(request_id: &str) -> PendingEnrollment {
         PendingEnrollment {

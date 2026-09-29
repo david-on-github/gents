@@ -576,8 +576,9 @@ fn read_pack(pack_dir: &Path) -> Result<(PackManifest, BTreeMap<String, Vec<u8>>
     Ok((manifest, assets))
 }
 
-/// The backend and profile the run froze, copied verbatim into this home, and
-/// the sampling document that carries the trial's seed. Ownership is rewritten
+/// The backend and profile the run froze, and the execution and retry policy
+/// the profile names, copied verbatim into this home, and the sampling
+/// document that carries the trial's seed. Ownership is rewritten
 /// to the trial's own DID: the documents describe what to call, not who calls.
 fn inference_plan(
     binding: &InferenceBinding,
@@ -607,11 +608,23 @@ fn inference_plan(
     own(&mut profile, "InferenceProfile", agent_did)?;
     object(&mut profile, "InferenceProfile")?.insert("sampling_id".to_string(), json!(sampling_id));
 
-    DesiredStateApplyPlan::new(vec![
+    let mut documents = Vec::new();
+    for (collection, value) in [
+        (Collection::InferenceRetryPolicy, &binding.retry_policy),
+        (Collection::InferenceExecution, &binding.execution),
+    ] {
+        if let Some(value) = value {
+            let mut value = value.clone();
+            own(&mut value, collection.graphql_type(), agent_did)?;
+            documents.push(desired(collection, value));
+        }
+    }
+    documents.extend([
         desired(Collection::InferenceBackend, backend),
         desired(Collection::InferenceSampling, sampling),
         desired(Collection::InferenceProfile, profile),
-    ])
+    ]);
+    DesiredStateApplyPlan::new(documents)
 }
 
 fn desired(collection: Collection, value: Value) -> DesiredStateApplyDocument {
@@ -1734,6 +1747,8 @@ mod tests {
                 "auth": {"kind": "unauthenticated"},
             }),
             sampling: None,
+            execution: None,
+            retry_policy: None,
             seed: 7,
         }
     }

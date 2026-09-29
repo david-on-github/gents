@@ -189,6 +189,68 @@ async fn the_canary_runs_two_cases_end_to_end_on_an_embedded_home_with_a_scripte
 /// A seed stage writes a document instead of a prompt: the pack's own
 /// EventTrigger fires its task, and the stage observes that request, which is
 /// the pack's real trigger chain under evaluation rather than a prompt to it.
+/// `gents init` binds its default profile to an InferenceExecution, so a
+/// subject profile from init names one. The trial home must receive that
+/// execution and the retry policy it names, or the profile points at nothing.
+#[tokio::test]
+async fn a_subject_profile_bound_to_an_execution_and_retry_policy_starts_its_trial() {
+    let backend = MockStreamingBackend::start_with_plans(MODEL, answering_plans()).unwrap();
+    let (canary, request) = canary_request(backend.endpoint(), "run-init-profile").await;
+    let owner = canary.owner.clone();
+    let mut profile = profile_document(&owner, "canary", "canary-backend", MODEL);
+    profile["execution_id"] = json!("canary-execution");
+    canary
+        .install(vec![
+            (
+                Collection::InferenceRetryPolicy,
+                json!({
+                    "agent_did": owner,
+                    "retry_policy_id": "canary-retry",
+                    "max_transport_retries": 1,
+                }),
+            ),
+            (
+                Collection::InferenceExecution,
+                json!({
+                    "agent_did": owner,
+                    "execution_id": "canary-execution",
+                    "display_name": "Default",
+                    "retry_policy_id": "canary-retry",
+                }),
+            ),
+            (Collection::InferenceProfile, profile),
+        ])
+        .await;
+    let executor = EmbeddedExecutor::new(DocumentRuntimeOptions::default(), canary.runs_dir());
+
+    let outcome = run(
+        &canary.access,
+        &request,
+        &executor,
+        &CheckRegistry::builtin(),
+        CancellationToken::new(),
+        &RunOptions::default(),
+    )
+    .await
+    .unwrap();
+
+    let trials = load_trials(&canary.access, &request.owner, &request.run_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        (outcome.completed, outcome.not_evidence),
+        (2, 0),
+        "{trials:#?}"
+    );
+    assert!(
+        trials.iter().all(|trial| trial
+            .completion
+            .as_ref()
+            .is_some_and(|completion| completion.anchor.requests > 0)),
+        "{trials:#?}"
+    );
+}
+
 #[tokio::test]
 async fn a_seed_stage_fires_the_pack_trigger_and_observes_the_task_request() {
     let backend = MockStreamingBackend::start_with_plans(
