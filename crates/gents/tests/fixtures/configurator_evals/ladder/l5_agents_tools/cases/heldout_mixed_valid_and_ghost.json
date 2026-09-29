@@ -31,10 +31,6 @@
                 "equals": "ho-valid"
               },
               {
-                "field": "target_agent_did",
-                "equals": "$trial"
-              },
-              {
                 "field": "behavior_id",
                 "matches": ":beh\\-ho\\-01$"
               }
@@ -66,6 +62,9 @@
             },
             "target_id": {
               "_eq": "tgt-ho-a"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
             }
           },
           "fields": [
@@ -218,6 +217,9 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
+            },
+            "tools_id": {
+              "_eq": "engineer-tools"
             }
           },
           "fields": [

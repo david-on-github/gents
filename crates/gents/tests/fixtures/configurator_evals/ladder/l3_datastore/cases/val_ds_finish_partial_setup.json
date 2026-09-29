@@ -155,6 +155,9 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
+            },
+            "tools_id": {
+              "_eq": "engineer-tools"
             }
           },
           "fields": [

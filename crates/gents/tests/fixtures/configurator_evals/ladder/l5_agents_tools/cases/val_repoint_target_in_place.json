@@ -31,10 +31,6 @@
                 "equals": "fix-target"
               },
               {
-                "field": "target_agent_did",
-                "equals": "$trial"
-              },
-              {
                 "field": "behavior_id",
                 "matches": "."
               }
@@ -56,6 +52,9 @@
             },
             "target_id": {
               "_eq": "tgt-fix-01"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
             }
           },
           "fields": [
@@ -91,10 +90,6 @@
               {
                 "field": "behavior_id",
                 "matches": ":beh\\-repoint\\-01$"
-              },
-              {
-                "field": "target_agent_did",
-                "equals": "$trial"
               }
             ],
             "max_rows": 1
@@ -132,6 +127,9 @@
             },
             "target_id": {
               "_eq": "tgt-fix-01"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
             }
           },
           "fields": [

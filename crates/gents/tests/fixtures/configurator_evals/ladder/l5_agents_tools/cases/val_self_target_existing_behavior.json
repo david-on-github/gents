@@ -31,10 +31,6 @@
                 "equals": "self-target"
               },
               {
-                "field": "target_agent_did",
-                "equals": "$trial"
-              },
-              {
                 "field": "behavior_id",
                 "matches": "."
               }
@@ -56,6 +52,9 @@
             },
             "target_id": {
               "_eq": "tgt-self-01"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
             }
           },
           "fields": [

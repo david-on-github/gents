@@ -41,10 +41,6 @@
                 "equals": "alpha-target"
               },
               {
-                "field": "target_agent_did",
-                "equals": "$trial"
-              },
-              {
                 "field": "behavior_id",
                 "matches": ":beh\\-alpha\\-01$"
               }
@@ -81,6 +77,9 @@
             },
             "target_id": {
               "_eq": "tgt-alpha-01"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
             }
           },
           "fields": [
@@ -125,6 +124,9 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
+            },
+            "tools_id": {
+              "_eq": "engineer-tools"
             }
           },
           "fields": [
