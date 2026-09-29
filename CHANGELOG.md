@@ -15,6 +15,11 @@ source consistency checks, not a separate runtime compatibility version.
   every paired runtime together, and start from a fresh home. DefraDB no longer
   serves the browser `/sync` endpoint; browsers sync as Iroh peers. BLS
   identities (now `bls_aug_v1`) are still refused as runtime identities.
+  The pin is `02d252f8`, defradb.rs main with #1856: an indexed String field
+  holding RFC3339 text is found by `_eq` and range filters again, so failed
+  plugin callbacks are retried (#1963). It also brings strict ACP checks on
+  replicated protected updates (#1827) and a fix for a lost document-change
+  wake during concurrent draining.
 
 - Durable trigger delivery (#2041) adds non-branchable `TriggerFire`,
   `EventSourceCursor`, and `FireOutcome` collections and updates the canonical
