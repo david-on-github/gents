@@ -56,25 +56,40 @@ def runStep (validate guard : Doc → Bool) (t : Target) (s : Store)
   | some merged => (fun t' => if t' = t then merged else s t', true)
   | none => (s, false)
 
-/-- The invoker's retained control over itself, projected from its candidate
-Tools by the canonical typed decoder: `self_config.enable_self_config` and
-`subagents.enabled` (absent is false). Decode errors must fail the shared
+/-- The invoker's control over itself, projected from its Tools by the
+canonical typed decoder (absent flags are false; absent categories select the
+default set, which includes `tools`). Decode errors must fail the shared
 validator; this model does not parse or duplicate the nested schema. -/
 structure Control where
+  /-- `self_config.enable_self_config`: the `config` tool exists. -/
   selfConfig : Bool
+  /-- `subagents.enabled`: the agents tool group. -/
   agents : Bool
+  /-- `self_config.self_config_no_lockout`: this guard applies to later writes. -/
+  noLockout : Bool
+  /-- The effective self-config categories grant `tools`, the one category that
+  can restore every Tools group, categories and grants included. -/
+  toolsAuthority : Bool
   deriving DecidableEq, Repr
+
+/-- A capability the invoker had must remain. -/
+def retained (old new : Bool) : Bool := !old || new
 
 /-- No lockout (#1796) is the only self-protection. The Engineer is a full
 self-writing agent: it may edit its own Tools and target itself with
 automation, and every such write is checked the normal way (preview, ACP, typed
-validation). It is refused only a candidate that turns off its self-config tool
-or removes an agents tool group it already had. Behavior and backend
-enablement are the same invariant on the other reference-chain documents and
-remain their existing typed guards. -/
+validation). It is refused only a candidate that turns off its self-config tool,
+or drops the agents group, the no-lockout guard, or the `tools` authority it
+needs to restore any of them. Dropping the guard or that authority first would
+make the lockout a two-step edit, so both are retained like the tools they
+protect. Behavior and backend enablement are the same invariant on the other
+reference-chain documents and remain their existing typed guards. -/
 def keepsControl (decode : Doc → Option Control) (stored candidate : Doc) : Bool :=
   match decode stored, decode candidate with
-  | some old, some new => new.selfConfig && (!old.agents || new.agents)
+  | some old, some new =>
+      new.selfConfig && retained old.agents new.agents
+        && retained old.noLockout new.noLockout
+        && retained old.toolsAuthority new.toolsAuthority
   | _, _ => false
 
 end SelfConfig

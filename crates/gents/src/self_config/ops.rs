@@ -593,26 +593,32 @@ pub(crate) fn decode_merged<T: serde::de::DeserializeOwned>(
 }
 
 /// Lean `SelfConfig.keepsControl`: the invoker's candidate Tools keep its
-/// self-config tool on and keep an agents tool group it already had. This is
-/// the only self-protection on its own Tools (#1796).
+/// self-config tool on and keep the agents group, the no-lockout guard and the
+/// `tools` category it already had. This is the only self-protection on its
+/// own Tools (#1796).
 pub fn guard_tools_keep_control(
     stored: &Map<String, Value>,
     candidate: &Map<String, Value>,
 ) -> Result<()> {
     let control = |tools: Tools| {
-        (
-            tools
-                .self_config
-                .and_then(|config| config.enable_self_config)
-                .unwrap_or(false),
+        let config = tools.self_config.unwrap_or_default();
+        [
+            config.enable_self_config.unwrap_or(false),
             tools
                 .subagents
                 .and_then(|agents| agents.enabled)
                 .unwrap_or(false),
-        )
+            config.self_config_no_lockout.unwrap_or(false),
+            config
+                .self_config_categories
+                .as_ref()
+                .is_none_or(|categories| {
+                    categories.iter().any(|category| category.trim() == "tools")
+                }),
+        ]
     };
-    let (_, had_agents) = control(decode_merged("Tools", stored)?);
-    let (self_config, agents) = control(decode_merged("Tools", candidate)?);
+    let [_, had_agents, had_guard, had_tools] = control(decode_merged("Tools", stored)?);
+    let [self_config, agents, guard, tools] = control(decode_merged("Tools", candidate)?);
     anyhow::ensure!(
         self_config,
         "no-lockout guard: self-config must remain enabled"
@@ -620,6 +626,14 @@ pub fn guard_tools_keep_control(
     anyhow::ensure!(
         !had_agents || agents,
         "no-lockout guard: the agents tools must remain enabled"
+    );
+    anyhow::ensure!(
+        !had_guard || guard,
+        "no-lockout guard: self_config_no_lockout must remain enabled"
+    );
+    anyhow::ensure!(
+        !had_tools || tools,
+        "no-lockout guard: self-config must keep the tools category"
     );
     Ok(())
 }

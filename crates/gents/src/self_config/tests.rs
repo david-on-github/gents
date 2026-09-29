@@ -3972,7 +3972,7 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
             vec![
                 (
                     "self_config".into(),
-                    Some(json!({"enable_self_config": true})),
+                    Some(json!({"enable_self_config": true, "self_config_no_lockout": true})),
                 ),
                 ("subagents".into(), Some(json!({"enabled": true}))),
             ],
@@ -4077,6 +4077,14 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
         (
             r#"self_config={"enable_self_config":false}"#,
             "self-config must remain enabled",
+        ),
+        (
+            r#"self_config={"enable_self_config":true,"self_config_no_lockout":false}"#,
+            "self_config_no_lockout must remain enabled",
+        ),
+        (
+            r#"self_config={"enable_self_config":true,"self_config_no_lockout":true,"self_config_categories":["profile"]}"#,
+            "must keep the tools category",
         ),
     ] {
         for verb in ["preview", "edit"] {

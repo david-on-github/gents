@@ -24,17 +24,25 @@ def rowPatch (r : CaseRow) : Patch :=
 decode as disabled. Production uses the shared typed decoder, not this finite
 fixture table. -/
 def decodeControl (doc : Doc) : Option Control := do
-  let selfConfig ← match doc "self_config" with
-    | some "{\"enable_self_config\":true}" => some true
-    | some "{\"enable_self_config\":false}" => some false
-    | none => some false
+  let (selfConfig, noLockout, toolsAuthority) ← match doc "self_config" with
+    | some "{\"enable_self_config\":true}" => some (true, false, true)
+    | some "{\"enable_self_config\":false}" => some (false, false, true)
+    | some "{\"enable_self_config\":true,\"self_config_no_lockout\":true}" =>
+        some (true, true, true)
+    | some "{\"enable_self_config\":true,\"self_config_no_lockout\":false}" =>
+        some (true, false, true)
+    | some "{\"enable_self_config\":true,\"self_config_no_lockout\":true,\"self_config_categories\":[\"profile\"]}" =>
+        some (true, true, false)
+    | some "{\"enable_self_config\":true,\"self_config_no_lockout\":true,\"self_config_categories\":[\"tools\"]}" =>
+        some (true, true, true)
+    | none => some (false, false, true)
     | _ => none
   let agents ← match doc "subagents" with
     | some "{\"enabled\":true}" => some true
     | some "{\"enabled\":false}" => some false
     | none => some false
     | _ => none
-  pure { selfConfig, agents }
+  pure { selfConfig, agents, noLockout, toolsAuthority }
 
 def caseGuard (r : CaseRow) (stored : Doc) : Doc → Bool :=
   if r.guarded then keepsControl decodeControl stored else fun _ => true
@@ -155,6 +163,21 @@ def scenarios : List CaseRow := examplesToRows ++
     , target := .tools, guarded := true, validates := true
     , doc := [("self_config", "{\"enable_self_config\":true}")]
     , patch := [("self_config", none)] }
+  , { name := "tools_guarded_no_lockout_removal_rejected"
+    , target := .tools, guarded := true, validates := true
+    , doc := [("self_config", "{\"enable_self_config\":true,\"self_config_no_lockout\":true}")]
+    , patch := [("self_config",
+        some "{\"enable_self_config\":true,\"self_config_no_lockout\":false}")] }
+  , { name := "tools_guarded_tools_authority_removal_rejected"
+    , target := .tools, guarded := true, validates := true
+    , doc := [("self_config", "{\"enable_self_config\":true,\"self_config_no_lockout\":true}")]
+    , patch := [("self_config",
+        some "{\"enable_self_config\":true,\"self_config_no_lockout\":true,\"self_config_categories\":[\"profile\"]}")] }
+  , { name := "tools_guarded_category_narrowing_keeping_tools_accepted"
+    , target := .tools, guarded := true, validates := true
+    , doc := [("self_config", "{\"enable_self_config\":true,\"self_config_no_lockout\":true}")]
+    , patch := [("self_config",
+        some "{\"enable_self_config\":true,\"self_config_no_lockout\":true,\"self_config_categories\":[\"tools\"]}")] }
   , { name := "task_targeting_invoker_unguarded_accepted"
     , target := .task, guarded := false, validates := true
     , doc := [("task_id", "engineer-inbox"), ("behavior_id", "default")]
