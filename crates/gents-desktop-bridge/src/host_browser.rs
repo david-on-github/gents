@@ -71,6 +71,13 @@ impl std::error::Error for OpenError {}
 /// that a window appeared: an opener can exit 0 having done nothing, so the
 /// caller keeps offering the URL either way.
 pub fn open_url(url: &str) -> Result<(), OpenError> {
+    // macOS and Windows have none of the openers below; their launch service
+    // opens the page in-process, so no package environment reaches a child.
+    if cfg!(any(target_os = "macos", windows)) {
+        return webbrowser::open(url).map_err(|error| OpenError {
+            attempted: vec![format!("the system launch service ({error})")],
+        });
+    }
     let mut candidates = browser_env_openers();
     candidates.extend(
         OPENERS

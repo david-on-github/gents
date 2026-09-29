@@ -633,14 +633,20 @@ pub(crate) async fn desktop_codex_login<R: Runtime>(
     require_reachable_configuration(core.operator_access(&agent_did), &agent_did, &provider)
         .await?;
 
-    let server = run_login_server(LoginOptions::default())
-        .map_err(|error| BridgeError::untyped(format!("starting ChatGPT login server: {error}")))?;
+    let server = run_login_server(LoginOptions {
+        open_browser: false,
+        ..LoginOptions::default()
+    })
+    .map_err(|error| BridgeError::untyped(format!("starting ChatGPT login server: {error}")))?;
     let _ = app.emit(
         "desktop://codex-login-url",
         CodexLoginUrl {
             url: server.auth_url.clone(),
         },
     );
+    if let Err(error) = crate::host_browser::open_url(&server.auth_url) {
+        tracing::warn!(%error, "could not open the ChatGPT sign-in page; the page link stands in");
+    }
 
     let cancel = server.cancel_handle();
     {
