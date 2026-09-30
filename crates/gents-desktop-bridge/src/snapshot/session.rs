@@ -102,6 +102,7 @@ pub fn build_session_snapshot_from_store_for_agent(
         false,
         true,
         true,
+        true,
         agent_did,
         session_id,
         preferred_request_id,
@@ -198,6 +199,7 @@ pub async fn build_session_snapshot_for_agent_with_transcript(
         canonical_dependencies,
         transcript_store.is_some(),
         context_totals_exact,
+        context_store.is_some() || context_totals_exact,
         include_live_tail,
         agent_did,
         session_id,
@@ -317,3 +319,75 @@ mod request_context_tests;
 #[cfg(test)]
 #[path = "session/tests/retry_eligibility.rs"]
 mod retry_eligibility_tests;
+
+#[cfg(test)]
+mod paging_coverage_tests {
+    use super::*;
+    use gents_desktop_core::client::ClientStoreRows;
+
+    #[test]
+    fn paged_pending_prompt_uses_lean_read_coverage() {
+        let contract: serde_json::Value = gents_lean_contract::load_contract_snapshot().unwrap();
+        let cases = contract["session_document_cases"]["projection"]
+            .as_array()
+            .unwrap();
+        let mut count = 0;
+        for case in cases
+            .iter()
+            .filter(|case| case["operation"] == "tip_coverage")
+        {
+            count += 1;
+            let mut rows = ClientStoreRows {
+                requests: vec![AgentRequestRow {
+                    doc_id: Some("request-doc".into()),
+                    request_id: "request".into(),
+                    session_id: Some("session".into()),
+                    agent_did: Some("agent".into()),
+                    purpose: Some(gents_protocol::request_admission::RequestPurpose::Normal),
+                    content: Some("hello".into()),
+                    lifecycle_state: Some(RequestLifecycleState::Processing),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            };
+            if case["materialized"].as_bool().unwrap() {
+                rows.transcript_messages.push(TranscriptMessageRow {
+                    doc_id: "prompt-doc".into(),
+                    message: serde_json::from_value(serde_json::json!({
+                        "message_key":"authored:request-doc:prompt", "session_id":"session",
+                        "agent_did":"agent", "request_doc_id":"request-doc", "sequence":0,
+                        "role":"user", "outcome":"complete", "blocks":[],
+                        "publication":{"kind":"request_execution","execution_generation":"generation"},
+                        "created_at":"2026-09-30T00:00:00Z"
+                    })).unwrap(),
+                });
+            }
+            let store = ClientStore::from_rows(rows);
+            let page = ClientStore::default();
+            let snapshot = build_session_snapshot_from_store_for_agent_with_transcript(
+                &store,
+                &page,
+                &store,
+                None,
+                true,
+                case["complete"].as_bool().unwrap(),
+                case["known"].as_bool().unwrap(),
+                true,
+                Some("agent"),
+                "session",
+                Some("request"),
+            )
+            .unwrap();
+            assert_eq!(
+                snapshot.pending_turn.is_some(),
+                case["pending"].as_bool().unwrap(),
+                "{case}"
+            );
+            assert_eq!(
+                snapshot.context.transcript_totals_exact,
+                Some(case["complete"].as_bool().unwrap())
+            );
+        }
+        assert!(count > 0);
+    }
+}

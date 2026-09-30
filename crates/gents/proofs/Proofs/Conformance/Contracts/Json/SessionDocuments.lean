@@ -1,3 +1,4 @@
+import Proofs.ClientShell.Timeline
 import Proofs.Conformance.ContractCases.SessionDocuments
 import Proofs.Conformance.ContractCases.Types
 import Lean
@@ -55,6 +56,12 @@ private def toolActivityJson (name : String) (now : Nat) (published : Bool)
       Json.mkObj [("now", toJson now), ("after", documentJson after)],
       Json.mkObj [("now", toJson (now + 1)),
         ("after", documentJson (AgentSession.toolActivity after rows event (now + 1) published))]])]
+private def tipCoverageJson (complete known materialized : Bool) : Json :=
+  let coverage : ClientShell.Timeline.ReadCoverage := ⟨complete, known⟩
+  Json.mkObj [("operation", toJson "tip_coverage"),
+    ("complete", toJson complete), ("known", toJson known),
+    ("materialized", toJson materialized),
+    ("pending", toJson (ClientShell.Timeline.pendingOwnerAbsent coverage materialized))]
 private def renameBefore : AgentSession.Document :=
   { indexed with title := some ⟨"task title", .task⟩ }
 private def renameJson : Json := Json.mkObj
@@ -141,6 +148,11 @@ def sessionDocumentsJson : String := (Json.mkObj
       retryJson "wrong_physical_parent" [old] 999,
       retryJson "existing_candidate_missing_from_auxiliary_projection" [old, olderExistingCandidate] 101]),
    ("projection", toJson [renameJson, clearTitleJson,
+      tipCoverageJson false false false,
+      tipCoverageJson false true false,
+      tipCoverageJson false true true,
+      tipCoverageJson true true false,
+      tipCoverageJson true true true,
       toolActivityJson "processing_tool_completion" 4 true,
       toolActivityJson "processing_tool_clock_regression" 2 true,
       toolActivityJson "stale_tool_completion" 4 true true,
