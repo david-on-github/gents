@@ -58,6 +58,9 @@ impl Task {
                 .with_context(|| format!("task {} {field} failed to parse", self.task_id))?;
             check_template_vocabulary(template).map_err(|error| {
                 let judgement = match &error {
+                    TemplateError::UnknownName { kind: "variable", .. } => {
+                        "names an unknown variable; variables start at a template root: doc, event, args, session, request, group, node or ctx (e.g. {{ doc.message }})"
+                    }
                     TemplateError::UnknownName { .. } => {
                         "names an unknown filter, test or function"
                     }

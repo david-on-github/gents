@@ -373,6 +373,114 @@ pub(crate) async fn validate_desired_state_plan(
         references.validate()?;
         validate_outcome_source_fields(txn, plan, owner, &references, &mut introspected).await?;
         validate_advertised_profiles(txn, plan, owner, &references).await?;
+        validate_trigger_document_fields(txn, plan, owner, &references, &mut introspected).await?;
+    }
+    Ok(())
+}
+
+/// A fire renders `{{ doc.X }}` against the delivered source document with
+/// strict undefined values, so a field the source collection does not declare
+/// fails every fire (#1970). The source collection's schema is observable here;
+/// one the schema does not have yet cannot refute the template, matching the
+/// other live-field checks. Only triggers whose trigger, task or event source
+/// this plan writes are checked, so an unrelated write never fails on retained
+/// configuration.
+async fn validate_trigger_document_fields(
+    txn: &ConfigApplyTxn<'_>,
+    plan: &DesiredStateApplyPlan,
+    owner: &str,
+    references: &crate::ConfigReferences,
+    introspected: &mut IntrospectedFields,
+) -> Result<()> {
+    let mut written = BTreeSet::new();
+    for document in plan.documents() {
+        let (document_owner, id) = document_identity(document.collection, &document.add)?;
+        if document_owner == owner {
+            written.insert((document.collection, id.to_owned()));
+        }
+    }
+    if written.is_empty() {
+        return Ok(());
+    }
+    let lookup = |collection: Collection, id: &str| {
+        references
+            .documents()
+            .find(|((kind, key), _)| *kind == collection && key == id)
+            .map(|(_, value)| value.clone())
+    };
+    let triggers = references
+        .documents()
+        .filter(|((collection, _), _)| *collection == Collection::Trigger)
+        .map(|(_, value)| serde_json::from_value::<crate::document_config::Trigger>(value.clone()))
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    for trigger in triggers {
+        let crate::document_config::TriggerSource::Event { event_source_id } = &trigger.source
+        else {
+            continue;
+        };
+        if !written.contains(&(Collection::Trigger, trigger.trigger_id.clone()))
+            && !written.contains(&(Collection::Task, trigger.task_id.clone()))
+            && !written.contains(&(Collection::EventSource, event_source_id.clone()))
+        {
+            continue;
+        }
+        let (Some(task), Some(source)) = (
+            lookup(Collection::Task, &trigger.task_id),
+            lookup(Collection::EventSource, event_source_id),
+        ) else {
+            continue;
+        };
+        let task: crate::document_config::Task = serde_json::from_value(task)?;
+        let source: crate::document_config::EventSource = serde_json::from_value(source)?;
+        let Some(fields) = declared_fields(txn, &source.source_collection, introspected).await?
+        else {
+            continue;
+        };
+        let templates = [
+            ("prompt_template", Some(task.prompt_template.as_str())),
+            (
+                "goal_objective_template",
+                task.goal_objective_template.as_deref(),
+            ),
+            (
+                "session_id_template",
+                trigger.session_id_template.as_deref(),
+            ),
+        ];
+        for (field, template) in templates {
+            let Some(template) =
+                template.filter(|template| !crate::template::template_guards_undefined(template))
+            else {
+                continue;
+            };
+            for reference in crate::template::parse_template_for_validation(template)? {
+                let Some(name) = reference
+                    .path
+                    .get(1)
+                    .filter(|_| reference.root() == Some("doc"))
+                else {
+                    continue;
+                };
+                let own_field = |name: &String| {
+                    !name.starts_with('_')
+                        && !crate::defra_query::schema::is_aggregate_pseudo_field(name)
+                };
+                if name.starts_with('_') || fields.contains_key(name) && own_field(name) {
+                    continue;
+                }
+                anyhow::bail!(
+                    "trigger {} {field} references doc.{name}, but {} has no field {name:?}; its fields are {}",
+                    trigger.trigger_id,
+                    source.source_collection,
+                    fields
+                        .keys()
+                        .filter(|name| own_field(name))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+        }
     }
     Ok(())
 }
@@ -619,6 +727,18 @@ async fn declared_fields<'a>(
         }
     }
     Ok(introspected.get(collection).and_then(Option::as_ref))
+}
+
+/// Whether introspection sees `collection` in this transaction.
+pub(crate) async fn collection_is_installed(
+    txn: &ConfigApplyTxn<'_>,
+    collection: &str,
+) -> Result<bool> {
+    Ok(
+        declared_fields(txn, collection, &mut IntrospectedFields::new())
+            .await?
+            .is_some(),
+    )
 }
 
 /// The runtime reads an obligation's expected count from the durable arguments
@@ -1136,11 +1256,13 @@ pub async fn apply_desired_state_plan(
         })
         .collect::<Result<_>>()?;
     owners.extend(plan.removals().iter().map(|(_, owner, _)| owner.as_str()));
+    let mut introspected = IntrospectedFields::new();
     for owner in owners {
         let references = crate::ConfigReferences::load_in_txn(txn, owner).await?;
         references.validate()?;
         validate_outcome_source_fields(txn, plan, owner, &references, &mut introspected).await?;
         validate_advertised_profiles(txn, plan, owner, &references).await?;
+        validate_trigger_document_fields(txn, plan, owner, &references, &mut introspected).await?;
     }
     Ok(counts)
 }

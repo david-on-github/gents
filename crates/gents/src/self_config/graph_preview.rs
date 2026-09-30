@@ -656,7 +656,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preview_tool_is_omitted_when_the_graph_grant_is_off() {
+    async fn preview_tool_requires_graph_tools_and_the_pack_publication_grant() {
         let node = node().await;
         let mut config = SelfConfigToolConfig {
             behavior_id: "working".to_owned(),
@@ -672,6 +672,22 @@ mod tests {
         .any(|tool| tool.name() == PREVIEW_GRAPH_TOOL_NAME));
 
         config.enable_graph_tools = true;
+        assert!(!super::super::build_self_config_tools(
+            node.clone(),
+            OWNER.to_owned(),
+            None,
+            &config,
+        )
+        .iter()
+        .any(|tool| tool.name() == PREVIEW_GRAPH_TOOL_NAME));
+        assert!(!super::super::self_config_tool_names(&config)
+            .iter()
+            .any(|name| name == PREVIEW_GRAPH_TOOL_NAME));
+
+        config.enable_pack_install = true;
+        assert!(super::super::self_config_tool_names(&config)
+            .iter()
+            .any(|name| name == PREVIEW_GRAPH_TOOL_NAME));
         assert!(super::super::build_self_config_tools(
             node.clone(),
             OWNER.to_owned(),

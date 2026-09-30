@@ -122,6 +122,7 @@ enum NameUse {
     Function,
     FilterArgument,
     TestArgument,
+    Variable,
 }
 
 impl NameUse {
@@ -130,6 +131,7 @@ impl NameUse {
             NameUse::Filter | NameUse::FilterArgument => "filter",
             NameUse::Test | NameUse::TestArgument => "test",
             NameUse::Function => "function",
+            NameUse::Variable => "variable",
         }
     }
 }
@@ -203,13 +205,18 @@ pub fn check_template_vocabulary(template: &str) -> Result<(), TemplateError> {
             Instruction::PushLoop(_) => {
                 bound.insert("loop".to_string());
             }
+            // A bare variable resolves through the frames, then the render
+            // context roots, then the environment's globals; strict undefined
+            // fails every fire on anything else (#1970).
+            Instruction::Lookup(name) => {
+                used.push((NameUse::Variable, (*name).to_string()));
+            }
             // Judged by the filter that resolves a name from it, not here.
             Instruction::LoadConst(_) => {}
             // Named exhaustively: a MiniJinja instruction set that grows a new
             // name-carrying instruction, or changes the arity of one above,
             // must fail to compile rather than leave the walk silently partial.
             Instruction::EmitRaw(_)
-            | Instruction::Lookup(_)
             | Instruction::GetAttr(_)
             | Instruction::SetAttr(_)
             | Instruction::GetItem
@@ -268,12 +275,18 @@ pub fn check_template_vocabulary(template: &str) -> Result<(), TemplateError> {
         if !judged.insert((use_site, name.clone())) {
             continue;
         }
+        // A default filter or definedness test renders an absent value, and
+        // which lookup it guards is value flow this walk does not follow, so a
+        // template that uses one anywhere leaves its variables to fire time.
+        if use_site == NameUse::Variable && guards_undefined(&compiled) {
+            continue;
+        }
         let provided = match use_site {
             NameUse::Filter => engine_resolves(&env, &format!("{{{{ 0 | {name} }}}}"), None),
             NameUse::Test => engine_resolves(&env, &format!("{{{{ 0 is {name} }}}}"), None),
             NameUse::FilterArgument => engine_resolves(&env, "{{ [] | map(probe) }}", Some(&name)),
             NameUse::TestArgument => engine_resolves(&env, "{{ [] | select(probe) }}", Some(&name)),
-            NameUse::Function => {
+            NameUse::Function | NameUse::Variable => {
                 bound.contains(&name) || env.globals().any(|(global, _)| global == name)
             }
         };
@@ -285,6 +298,31 @@ pub fn check_template_vocabulary(template: &str) -> Result<(), TemplateError> {
         }
     }
     Ok(())
+}
+
+/// Whether a compiled template uses a filter or test that renders an absent
+/// value (`default`, `d`, `defined`, `undefined`, `none`).
+fn guards_undefined(compiled: &minijinja::Template<'_, '_>) -> bool {
+    let instructions = &machinery::get_compiled_template(compiled).instructions;
+    (0..)
+        .map_while(|index| instructions.get(index))
+        .any(|instruction| match instruction {
+            Instruction::ApplyFilter(name, _, _) => {
+                matches!(engine_name(name).as_str(), "default" | "d")
+            }
+            Instruction::PerformTest(name, _, _) => {
+                matches!(engine_name(name).as_str(), "defined" | "undefined" | "none")
+            }
+            _ => false,
+        })
+}
+
+/// Whether a template renders an absent value somewhere, so configure-time
+/// field checks cannot tell an optional field from a misspelled one.
+pub fn template_guards_undefined(template: &str) -> bool {
+    environment()
+        .template_from_str(template)
+        .is_ok_and(|compiled| guards_undefined(&compiled))
 }
 
 /// `map` resolves a filter, and the `select`/`reject` family a test, from a

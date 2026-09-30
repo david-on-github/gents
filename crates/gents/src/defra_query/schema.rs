@@ -59,10 +59,20 @@ impl CollectionSchema {
         self.fields
             .iter()
             .filter(|f| !is_restricted_field(collection, &f.name))
-            .filter(|f| !f.name.chars().all(|c| c.is_ascii_uppercase()))
+            .filter(|f| !is_aggregate_pseudo_field(&f.name))
             .filter(|f| !f.name.starts_with('_') || f.name == "_docID")
             .collect()
     }
+}
+
+/// DefraDB's aggregate pseudo-fields, which introspection reports beside a
+/// collection's own fields. An application field may itself be uppercase
+/// (`URL`), so these are named rather than inferred from case.
+pub(crate) fn is_aggregate_pseudo_field(name: &str) -> bool {
+    matches!(
+        name,
+        "COUNT" | "SUM" | "AVG" | "MIN" | "MAX" | "GROUP" | "SIMILARITY" | "BM25"
+    )
 }
 
 /// The selection every introspection query asks of a `__type`.

@@ -639,8 +639,11 @@ impl RequestLifecycle {
         let execution_lease_expires_at = now
             .checked_add_signed(chrono::Duration::milliseconds(lease_ms))
             .context("execution lease expiry out of range")?;
-        let synthesized_deadline_at =
-            now + chrono::Duration::seconds(self.deadline_duration_secs as i64);
+        let synthesized_deadline_at = i64::try_from(self.deadline_duration_secs)
+            .ok()
+            .and_then(chrono::Duration::try_seconds)
+            .and_then(|duration| now.checked_add_signed(duration))
+            .context("request deadline duration is not representable")?;
         let deadline_at = self
             .request
             .deadline

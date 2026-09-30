@@ -62,7 +62,9 @@ pub use desired_state::{
     DesiredStateApplyCounts, DesiredStateApplyDocument, DesiredStateApplyPlan,
     DesiredStateExpectation, DriftedDocument, StaleExpectation,
 };
-pub(crate) use desired_state::{read_desired_state_document_in_txn, validate_desired_state_plan};
+pub(crate) use desired_state::{
+    collection_is_installed, read_desired_state_document_in_txn, validate_desired_state_plan,
+};
 pub use inference_backend::{load_inference_backend_in_txn, write_inference_backend_document};
 pub use inference_profile::write_inference_profile_document;
 pub(crate) use schema_contract::collection_schema_contract_digest;

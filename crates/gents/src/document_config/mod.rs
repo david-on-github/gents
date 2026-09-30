@@ -63,7 +63,9 @@ pub use inference_backend::{
     AdvertisedModel, BackendAuth, BackendModelCatalog, InferenceBackend,
     InferenceBackendObservation,
 };
-pub use inference_execution::{InferenceExecution, InferenceRetryPolicy};
+pub use inference_execution::{
+    InferenceExecution, InferenceRetryPolicy, MAX_DEADLINE_DURATION_SECS,
+};
 pub use inference_sampling::InferenceSampling;
 
 #[allow(unused_imports)]

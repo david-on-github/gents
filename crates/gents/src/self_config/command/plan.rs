@@ -20,7 +20,7 @@ impl ConfigCommandTool {
         self.ensure_behavior_catalog("plan", None)?;
         anyhow::ensure!(
             argv.first().is_some_and(|word| word == "preview"),
-            "plan supports preview only; use config plan --help"
+            "plan supports preview only; see [\"help\",\"plan\"]"
         );
         let parsed = ParsedArgs::parse(&argv[1..])?;
         anyhow::ensure!(
@@ -117,10 +117,11 @@ impl ConfigCommandTool {
             },
         )
         .await?;
-        Ok(serde_json::to_string_pretty(&json!({
+        ordered! {
             "committed": false,
             "validation_scope": "canonical document shapes and retained references; schema publication, approval and live readiness remain separate",
             "documents": plan.documents().iter().map(|document| json!({"collection":document.collection.graphql_type(),"document":document.add})).collect::<Vec<_>>(),
-        }))?)
+        }
+        .pretty()
     }
 }
