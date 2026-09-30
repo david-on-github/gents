@@ -30,7 +30,9 @@ use super::store::{ClientStore, ClientStoreRows};
 
 mod agent_scope;
 mod document_patches;
+mod session_tip;
 mod session_transcript;
+pub use session_tip::{load_session_tip_store, load_session_tip_store_on};
 mod snapshot_loaders;
 
 pub use agent_scope::load_agent_scoped_snapshot;

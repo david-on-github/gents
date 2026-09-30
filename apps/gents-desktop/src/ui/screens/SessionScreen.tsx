@@ -54,7 +54,7 @@ import {
   type ToolStepStatus,
 } from "@gents/ui/conversation";
 import type { Shell } from "@/hooks/useShell";
-import { anchor, scrollViewport, useFollowTail } from "@/lib/scroll";
+import { anchor, scrollViewport, useFollowTail, useOlderPages } from "@/lib/scroll";
 import { useResizableWidth } from "@/lib/resizable";
 import { ROOMY_WINDOW, useMediaQuery } from "@/lib/media";
 import { Sheet, SheetContent, SheetTitle } from "@gents/ui/components/sheet";
@@ -715,13 +715,13 @@ export const TranscriptPanel = memo(function TranscriptPanel({
   workerActions: WorkerActions;
   deployment: DeploymentView | null;
 }) {
-  const [loadingOlder, setLoadingOlder] = useState(false);
+  const loadingOlder = useOlderPages(
+    ownerRef,
+    session?.sessionId ?? null,
+    session?.timelinePage?.hasOlder ?? false,
+    () => actionsRef.current.loadOlderSessionTimeline(),
+  );
   const [retrying, setRetrying] = useState(false);
-  const sessionIdRef = useRef(session?.sessionId ?? null);
-  useLayoutEffect(() => {
-    sessionIdRef.current = session?.sessionId ?? null;
-  }, [session?.sessionId]);
-
   const live = session?.timelineItems.find((item) => item.kind === "liveAssistant");
   const status = inFlight
     ? activityStatus(session?.timelineItems ?? [], stopping)
@@ -732,23 +732,6 @@ export const TranscriptPanel = memo(function TranscriptPanel({
       ? "The request failed before a response was available. Check the request trace for details."
       : "";
   const showError = Boolean(responseError) && !wasInterrupted && !inFlight;
-
-  const loadOlder = async () => {
-    const viewport = scrollViewport(ownerRef.current);
-    const heightBefore = viewport?.scrollHeight ?? 0;
-    const sessionId = session?.sessionId ?? null;
-    setLoadingOlder(true);
-    try {
-      if (!(await actionsRef.current.loadOlderSessionTimeline())) return;
-    } finally {
-      setLoadingOlder(false);
-    }
-    requestAnimationFrame(() => {
-      if (viewport && sessionIdRef.current === sessionId) {
-        viewport.scrollTop += viewport.scrollHeight - heightBefore;
-      }
-    });
-  };
 
   const retry = async () => {
     const requestId = session?.latestRequestId;
@@ -775,27 +758,26 @@ export const TranscriptPanel = memo(function TranscriptPanel({
       data-testid="transcript-panel"
     >
       {session?.timelinePage?.hasOlder && (
-        <Button
-          variant="ghost"
-          size="sm"
-          data-testid="transcript-load-older"
-          className="justify-self-center text-muted-foreground"
-          disabled={loadingOlder}
-          onClick={loadOlder}
+        <div
+          role="status"
+          aria-live="polite"
+          className="min-h-5 text-center text-xs text-muted-foreground"
+          data-testid="transcript-older-status"
         >
-          {loadingOlder ? "Loading older messages…" : "Load older messages"}
-        </Button>
+          {loadingOlder ? "Loading older messages…" : null}
+        </div>
       )}
       <DeploymentContext.Provider value={deployment}>
         <WorkersContext.Provider value={workers}>
           <WorkerActionsContext.Provider value={workerActions}>
             <ParentContext.Provider value={parentWork}>
               {session?.timelineItems.map((item) => (
-                <TranscriptItem
-                  key={item.itemKey}
-                  item={item}
-                  status={item.kind === "liveAssistant" ? status : null}
-                />
+                <div key={item.itemKey} data-timeline-key={item.itemKey}>
+                  <TranscriptItem
+                    item={item}
+                    status={item.kind === "liveAssistant" ? status : null}
+                  />
+                </div>
               ))}
             </ParentContext.Provider>
           </WorkerActionsContext.Provider>

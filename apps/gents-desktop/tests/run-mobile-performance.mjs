@@ -231,7 +231,13 @@ async function runSample(browserInstance, sampleIndex) {
       cdp,
       "page_older_transcript_rows",
       async () => {
-        await page.locator('[data-testid="transcript-load-older"]').click();
+        await page.getByTestId("transcript-panel").evaluate((panel) => {
+          const viewport = panel.closest('[data-slot="scroll-area-viewport"]') ?? panel;
+          viewport.scrollTop = 0;
+          viewport.dispatchEvent(
+            new WheelEvent("wheel", { deltaY: -100, bubbles: true }),
+          );
+        });
         await page.getByText("User fixture row 520", { exact: false }).waitFor();
       },
       async () => ({
@@ -266,7 +272,14 @@ async function runSample(browserInstance, sampleIndex) {
         for (let index = 0; index < additionalPages; index += 1) {
           const expectedRows =
             typingStartingRows + (index + 1) * fixture.transcriptPageSize;
-          await page.locator('[data-testid="transcript-load-older"]').click();
+          await page.getByTestId("transcript-panel").evaluate((panel) => {
+            const viewport =
+              panel.closest('[data-slot="scroll-area-viewport"]') ?? panel;
+            viewport.scrollTop = 0;
+            viewport.dispatchEvent(
+              new WheelEvent("wheel", { deltaY: -100, bubbles: true }),
+            );
+          });
           await page.waitForFunction(
             (count) =>
               document.querySelectorAll(

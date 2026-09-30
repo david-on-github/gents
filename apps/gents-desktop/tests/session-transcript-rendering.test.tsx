@@ -169,7 +169,7 @@ describe("SessionScreen transcript render boundary", () => {
         />,
       );
       await act(async () => {
-        fireEvent.click(screen.getByTestId("transcript-load-older"));
+        fireEvent.wheel(viewport, { deltaY: -20 });
       });
 
       expect(loadOlderSessionTimeline).toHaveBeenCalledTimes(1);

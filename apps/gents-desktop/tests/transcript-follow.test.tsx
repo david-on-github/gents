@@ -1,8 +1,8 @@
 import { act, renderHook } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { RefObject } from "react";
 
-import { useFollowTail } from "../src/ui/lib/scroll";
+import { useFollowTail, useOlderPages } from "../src/ui/lib/scroll";
 
 function transcriptFixture() {
   const owner = document.createElement("div");
@@ -61,5 +61,73 @@ describe("transcript streaming follow", () => {
     fixture.growTo(1_500);
     rerender({ signal: "assistant:1010" });
     expect(fixture.viewport.scrollTop).toBe(1_500);
+  });
+});
+
+describe("older transcript pages", () => {
+  it("loads on upward navigation only, deduplicates requests and anchors prepends", async () => {
+    const fixture = transcriptFixture();
+    fixture.viewport.scrollTop = 300;
+    let finish!: (value: boolean) => void;
+    const load = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    const { result, unmount } = renderHook(() =>
+      useOlderPages(fixture.ownerRef, "session-1", true, load),
+    );
+    expect(load).not.toHaveBeenCalled();
+    act(() => {
+      fixture.viewport.scrollTop = 100;
+      fixture.viewport.dispatchEvent(new Event("scroll"));
+      fixture.viewport.dispatchEvent(new WheelEvent("wheel", { deltaY: -20 }));
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result.current).toBe(true);
+    await act(async () => {
+      fixture.growTo(900);
+      finish(true);
+      await Promise.resolve();
+    });
+    act(() => frames.splice(0).forEach((frame) => frame(0)));
+    expect(fixture.viewport.scrollTop).toBe(500);
+    expect(result.current).toBe(false);
+    unmount();
+    vi.unstubAllGlobals();
+  });
+
+  it("ignores late scroll correction after switching sessions and stops at history's start", async () => {
+    const fixture = transcriptFixture();
+    fixture.viewport.scrollTop = 0;
+    let finish!: (value: boolean) => void;
+    const load = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { rerender, unmount } = renderHook(
+      ({ subject, older }) => useOlderPages(fixture.ownerRef, subject, older, load),
+      { initialProps: { subject: "a", older: true } },
+    );
+    act(() => fixture.viewport.dispatchEvent(new WheelEvent("wheel", { deltaY: -20 })));
+    expect(load).toHaveBeenCalledTimes(1);
+    rerender({ subject: "b", older: false });
+    await act(async () => {
+      fixture.growTo(900);
+      finish(true);
+      await Promise.resolve();
+    });
+    expect(fixture.viewport.scrollTop).toBe(0);
+    act(() => fixture.viewport.dispatchEvent(new WheelEvent("wheel", { deltaY: -20 })));
+    expect(load).toHaveBeenCalledTimes(1);
+    unmount();
   });
 });
