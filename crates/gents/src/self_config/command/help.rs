@@ -255,7 +255,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             next: "report what was found; import a skill only when asked.",
         },
         "datastore" => Page {
-            what: "a DatastoreToolSurface: model tools that create or query documents of installed collections (tools grant). SURFACE_ID goes in target_id.",
+            what: "DatastoreToolSurface: collection tools (tools grant). target_id is SURFACE_ID.",
             commands: &[
                 "datastore get",
                 "datastore [preview] create|edit  set: surface fields, or options.mailbox",
@@ -430,7 +430,7 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
             ],
         )],
         "datastore" => vec![(
-            "a handoff collection with model tools; four checks, each proving only itself",
+            "publish, select, and exercise handoff tools",
             vec![
                 (
                     json!({"argv":["schema","preview","install"],"options":{"sdl":"type Handoff { handoff_id: String @index(unique: true) body: String }"}}),
