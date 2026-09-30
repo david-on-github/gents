@@ -1,11 +1,11 @@
 {
   "case_id": "val-two-targets-both-selected",
   "split": "validation",
-  "reducer": "weighted_mean",
+  "reducer": "all",
   "stages": [
     {
       "stage_id": "configure-two",
-      "prompt": "Set up two subagents. Create helper behaviors with id 'beh-alpha-01' (display name 'helper-alpha') and id 'beh-beta-01' (display name 'helper-beta'), both minimal. Create SubagentTarget 'tgt-alpha-01' (name 'alpha-target') pointing at 'beh-alpha-01' and SubagentTarget 'tgt-beta-01' (name 'beta-target') pointing at 'beh-beta-01', both with target_agent_did set to this node's own DID. Select both targets in your own Tools.subagents.",
+      "prompt": "Set up two subagents. Create helper behaviors named 'beh-alpha-01' and 'beh-beta-01', both minimal. Create SubagentTarget 'tgt-alpha-01' (name 'alpha-target') pointing at 'beh-alpha-01' and SubagentTarget 'tgt-beta-01' (name 'beta-target') pointing at 'beh-beta-01', both with target_agent_did set to this node's own DID. Select both targets in your own Tools.subagents.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -139,15 +139,14 @@
     },
     {
       "stage_id": "delegate-to-beta",
-      "prompt": "Delegate a task to subagent target 'tgt-beta-01' specifically: have helper-beta reply with exactly BETA-777 and nothing else. Wait for the result and tell me when it has arrived.",
+      "prompt": "Delegate a task to subagent 'beta-target' specifically: have beh-beta-01 reply with exactly BETA-777 and nothing else. End your turn after dispatch; report the reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
           "check": "tool_calls_expected",
           "params": {
             "required": [
-              "agent_new",
-              "agent_message"
+              "agent_new"
             ],
             "forbidden": [
               "bash"
@@ -171,10 +170,19 @@
             "name": "beta-request",
             "expect": [
               {
-                "field": "input",
+                "field": "content",
                 "contains": "BETA-777"
+              },
+              {
+                "field": "lifecycle_state",
+                "equals": "completed"
+              },
+              {
+                "field": "terminal_output",
+                "contains": "message_doc_id"
               }
-            ]
+            ],
+            "max_rows": 1
           },
           "tier": "acceptance",
           "weight": 2
@@ -215,11 +223,14 @@
             "request_id",
             "behavior_id",
             "session_id",
-            "input",
-            "lifecycle_state"
+            "content",
+            "lifecycle_state",
+            "lifecycle_state",
+            "terminal_output"
           ]
         }
-      ]
+      ],
+      "settle": true
     }
   ]
 }

@@ -137,15 +137,14 @@
     },
     {
       "stage_id": "delegate",
-      "prompt": "Delegate a task to subagent target 'tgt-train-01': have the helper reply with exactly TRAIN-111 and nothing else. Wait for the helper's result and tell me when it has arrived.",
+      "prompt": "Delegate a task to subagent 'train-target': have the helper reply with exactly TRAIN-111 and nothing else. End your turn after dispatch; report the reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
           "check": "tool_calls_expected",
           "params": {
             "required": [
-              "agent_new",
-              "agent_message"
+              "agent_new"
             ],
             "forbidden": [
               "bash"
@@ -169,10 +168,19 @@
             "name": "helper-request",
             "expect": [
               {
-                "field": "input",
+                "field": "content",
                 "contains": "TRAIN-111"
+              },
+              {
+                "field": "lifecycle_state",
+                "equals": "completed"
+              },
+              {
+                "field": "terminal_output",
+                "contains": "message_doc_id"
               }
-            ]
+            ],
+            "max_rows": 1
           },
           "tier": "acceptance",
           "weight": 2
@@ -213,11 +221,113 @@
             "request_id",
             "behavior_id",
             "session_id",
-            "input",
-            "lifecycle_state"
+            "content",
+            "lifecycle_state",
+            "lifecycle_state",
+            "terminal_output"
           ]
         }
-      ]
+      ],
+      "settle": true
+    },
+    {
+      "stage_id": "follow_up",
+      "prompt": "Send a follow-up to the same helper session: reply with exactly FOLLOW-222 and nothing else. Reuse that session; do not start another. End your turn after dispatch; report the reply when it arrives.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "agent_message"
+            ],
+            "forbidden": [
+              "agent_new"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "helper-session",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "helper-request",
+            "expect": [
+              {
+                "field": "content",
+                "contains": "FOLLOW-222"
+              },
+              {
+                "field": "lifecycle_state",
+                "equals": "completed"
+              },
+              {
+                "field": "terminal_output",
+                "contains": "message_doc_id"
+              }
+            ],
+            "max_rows": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "helper-session",
+          "collection": "AgentSession",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-helper-01"
+            }
+          },
+          "fields": [
+            "session_id",
+            "behavior_id",
+            "agent_did"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "helper-request",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-helper-01"
+            },
+            "content": {
+              "_like": "%FOLLOW-222%"
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "session_id",
+            "content",
+            "lifecycle_state",
+            "lifecycle_state",
+            "terminal_output"
+          ]
+        }
+      ],
+      "settle": true
     }
   ]
 }

@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "name": "factory_setup_eval",
   "version": "1.0.0",
-  "description": "Eval definition factory-setup: one Engineer builds and proves the #1786 factory crew on a fresh node, setup only.",
+  "description": "One Engineer configures the #1786 factory crew on a fresh node. No crew execution.",
   "authors": [
     "gents-ai contributors"
   ],

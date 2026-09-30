@@ -18,7 +18,6 @@ default = [
 agent-memory = []
 typescript = ["dep:ts-rs", "gents-loop/typescript"]
 # Gates the optional live-inference collection out of default builds.
-# Configurator regressions are default-built separately in e2e_configurator.
 live-e2e = []
 
 # All other test binaries are auto-discovered; this explicit target overrides

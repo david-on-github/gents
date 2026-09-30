@@ -1,0 +1,105 @@
+{
+  "default": [
+    "l1-inference",
+    "l2-agent",
+    "l3-datastore",
+    "l4-automation",
+    "l5-agents-tools",
+    "factory-setup"
+  ],
+  "suites": [
+    {
+      "id": "l1-inference",
+      "definition_id": "configurator-l1-inference",
+      "path": "ladder/l1_inference",
+      "subject": "ladder/engineer_subject",
+      "coverage": [
+        "limits",
+        "profile binding",
+        "backend reuse",
+        "preserve existing profile"
+      ],
+      "title": "Inference configuration"
+    },
+    {
+      "id": "l2-agent",
+      "definition_id": "configurator-l2-agent",
+      "path": "ladder/l2_agent",
+      "subject": "ladder/engineer_subject",
+      "coverage": [
+        "context and tool selection",
+        "least privilege",
+        "protected Engineer",
+        "in-place edits",
+        "reentry"
+      ],
+      "title": "Behavior configuration"
+    },
+    {
+      "id": "l3-datastore",
+      "definition_id": "configurator-l3-datastore",
+      "path": "ladder/l3_datastore",
+      "subject": "ladder/engineer_subject",
+      "coverage": [
+        "caller fields",
+        "runtime fields",
+        "surface selection",
+        "persistence",
+        "automation output"
+      ],
+      "title": "Datastore use"
+    },
+    {
+      "id": "l4-automation",
+      "definition_id": "configurator-l4-automation",
+      "path": "ladder/l4_automation",
+      "subject": "ladder/engineer_subject",
+      "coverage": [
+        "parallel and serial",
+        "template defaults",
+        "session routing",
+        "outcome settings"
+      ],
+      "title": "Document automation"
+    },
+    {
+      "id": "l5-agents-tools",
+      "definition_id": "configurator-l5-agents-tools",
+      "path": "ladder/l5_agents_tools",
+      "subject": "ladder/engineer_subject",
+      "coverage": [
+        "target selection",
+        "dispatch",
+        "follow-up",
+        "repoint",
+        "missing target refusal"
+      ],
+      "title": "Delegation"
+    },
+    {
+      "id": "factory-setup",
+      "definition_id": "factory-setup",
+      "path": "factory_setup/definition",
+      "subject": "factory_setup/engineer_kspec",
+      "coverage": [
+        "nine crew roles",
+        "profiles and limits",
+        "datastore contracts",
+        "automation wiring",
+        "setup receipt"
+      ],
+      "title": "Complete crew configuration"
+    },
+    {
+      "id": "l6-graph",
+      "definition_id": "configurator-l6-graph",
+      "path": "ladder/l6_graph",
+      "subject": "ladder/engineer_subject",
+      "coverage": [
+        "custom graph authoring"
+      ],
+      "title": "Graph authoring capability probe",
+      "blocked_reason": "The Engineer cannot publish custom graphs; excluded from the onboarding acceptance matrix."
+    }
+  ]
+}

@@ -150,7 +150,7 @@ fn every_subject_is_the_desktop_engineer_on_an_eval_node() {
     }
 }
 
-fn definition() -> EvalDefinition {
+pub(super) fn definition() -> EvalDefinition {
     let (_, config) = load(&root().join("definition"));
     let [definition] = config.eval_definitions.as_slice() else {
         panic!("the definition pack carries one eval definition");
@@ -171,20 +171,11 @@ fn the_definition_validates_and_every_check_accepts_its_params() {
     let [stage] = case.stages.as_slice() else {
         panic!("one stage");
     };
-    assert!(
-        stage.settle,
-        "the crew's handoffs finish after the Engineer's first turn"
-    );
-    // The harness gate is reported, never scored: a Gents defect must not
-    // turn the model's grade into missing evidence.
-    let gate = stage
-        .checks
-        .iter()
-        .find(|check| check.check == "handoff_delivery")
-        .expect("the harness gate");
-    assert_eq!(gate.tier, gents::document_config::EvalTier::Development);
-    // Crew agents build and read git under the trial root, and an Engineer
-    // that stops before its receipt is prodded, a graded count.
+    assert!(stage.settle);
+    assert!(stage.checks.iter().all(|check| matches!(
+        check.check.as_str(),
+        "crew_spec_match" | "tool_calls_expected" | "captured_rows_count"
+    )));
     assert!(definition.subject.host_bash);
     assert_eq!(
         stage.continuation.as_ref().map(|c| c.until.as_str()),
@@ -214,33 +205,6 @@ fn the_definition_validates_and_every_check_accepts_its_params() {
             "{} rejected its params: {}",
             check.check,
             verdict.raw
-        );
-    }
-}
-
-#[test]
-fn the_crew_spec_names_every_id_the_baseline_kickoff_prescribes() {
-    let spec: serde_json::Value = serde_json::from_slice(
-        &std::fs::read(root().join("engineer_v2/factory/crew_spec.json")).unwrap(),
-    )
-    .unwrap();
-    let text = spec.to_string();
-    let kickoff = std::fs::read_to_string(root().join("engineer_v1/factory/kickoff.md")).unwrap();
-    let table = kickoff
-        .split("### IDs to use")
-        .nth(1)
-        .expect("the baseline kickoff lists the IDs it prescribes");
-    let ids: Vec<&str> = table
-        .split('`')
-        .skip(1)
-        .step_by(2)
-        .filter(|id| !id.contains('<') && !id.contains(' '))
-        .collect();
-    assert!(ids.len() > 40, "{ids:?}");
-    for id in ids {
-        assert!(
-            text.contains(&format!("\"{id}\"")),
-            "crew_spec.json lacks the baseline ID {id}"
         );
     }
 }

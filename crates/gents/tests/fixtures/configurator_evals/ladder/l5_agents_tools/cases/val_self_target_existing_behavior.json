@@ -1,7 +1,7 @@
 {
   "case_id": "val-self-target-existing-behavior",
   "split": "validation",
-  "reducer": "weighted_mean",
+  "reducer": "all",
   "stages": [
     {
       "stage_id": "configure",
@@ -69,15 +69,14 @@
     },
     {
       "stage_id": "delegate",
-      "prompt": "Delegate a task to subagent target 'tgt-self-01': have it reply with exactly ECHO-2468 and nothing else. Wait for the result and tell me when it has arrived.",
+      "prompt": "Delegate a task to subagent 'self-target': have it reply with exactly ECHO-2468 and nothing else. End your turn after dispatch; report the reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
           "check": "tool_calls_expected",
           "params": {
             "required": [
-              "agent_new",
-              "agent_message"
+              "agent_new"
             ],
             "forbidden": [
               "bash"
@@ -94,6 +93,25 @@
           },
           "tier": "acceptance",
           "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "helper-request",
+            "max_rows": 1,
+            "expect": [
+              {
+                "field": "lifecycle_state",
+                "equals": "completed"
+              },
+              {
+                "field": "terminal_output",
+                "contains": "message_doc_id"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 3
         }
       ],
       "capture": [
@@ -111,8 +129,30 @@
             "behavior_id",
             "agent_did"
           ]
+        },
+        {
+          "kind": "documents",
+          "name": "helper-request",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "content": {
+              "_like": "%ECHO-2468%"
+            },
+            "subagent_depth": {
+              "_gt": 0
+            }
+          },
+          "fields": [
+            "content",
+            "lifecycle_state",
+            "terminal_output"
+          ]
         }
-      ]
+      ],
+      "settle": true
     }
   ]
 }

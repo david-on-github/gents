@@ -1,7 +1,7 @@
 {
   "case_id": "val-verify-then-delegate-no-dupes",
   "split": "validation",
-  "reducer": "weighted_mean",
+  "reducer": "all",
   "stages": [
     {
       "stage_id": "configure",
@@ -69,7 +69,7 @@
     },
     {
       "stage_id": "verify-and-delegate",
-      "prompt": "First verify the subagent wiring is correct \u2014 fix anything wrong, but do not create additional target documents beyond 'tgt-fix2-01'. Then delegate a task to subagent target 'tgt-fix2-01': have the helper reply with exactly FIX2-888 and nothing else, and keep the selection in your Tools working.",
+      "prompt": "First verify the subagent wiring is correct \u2014 fix anything wrong, but do not create additional target documents beyond 'tgt-fix2-01'. Then delegate a task to subagent 'fix-target-2': have the helper reply with exactly FIX2-888 and nothing else, and keep the selection in your Tools working.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -77,8 +77,7 @@
           "params": {
             "required": [
               "config",
-              "agent_new",
-              "agent_message"
+              "agent_new"
             ],
             "forbidden": [
               "bash"
@@ -149,7 +148,8 @@
             "subagents"
           ]
         }
-      ]
+      ],
+      "settle": true
     },
     {
       "stage_id": "report-delegation",
@@ -162,10 +162,19 @@
             "name": "helper-request",
             "expect": [
               {
-                "field": "input",
+                "field": "content",
                 "contains": "FIX2-888"
+              },
+              {
+                "field": "lifecycle_state",
+                "equals": "completed"
+              },
+              {
+                "field": "terminal_output",
+                "contains": "message_doc_id"
               }
-            ]
+            ],
+            "max_rows": 1
           },
           "tier": "acceptance",
           "weight": 2
@@ -197,8 +206,10 @@
             "request_id",
             "behavior_id",
             "session_id",
-            "input",
-            "lifecycle_state"
+            "content",
+            "lifecycle_state",
+            "lifecycle_state",
+            "terminal_output"
           ]
         },
         {

@@ -3,7 +3,7 @@
   "eval_definitions": [
     {
       "definition_id": "factory-setup",
-      "comparability_version": 5,
+      "comparability_version": 6,
       "title": "Factory crew setup (#1786), one Engineer, setup only",
       "subject": {
         "kind": "behavior",

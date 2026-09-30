@@ -1,7 +1,7 @@
 {
   "case_id": "val-caller-behavior-and-delegate",
   "split": "validation",
-  "reducer": "weighted_mean",
+  "reducer": "all",
   "stages": [
     {
       "stage_id": "helper-and-target",
@@ -82,18 +82,44 @@
           "weight": 2
         },
         {
-          "check": "captured_fields_match",
+          "check": "crew_spec_match",
           "params": {
-            "name": "tools-rows",
-            "expect": [
-              {
-                "field": "subagents",
-                "contains": "tgt-fixer-01"
-              }
-            ]
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "tools": [
+                    {
+                      "field": "subagents.enabled",
+                      "equals": true
+                    },
+                    {
+                      "field": "subagents.target_ids",
+                      "contains": "tgt-fixer-01"
+                    }
+                  ]
+                },
+                {
+                  "behavior_id": "beh-caller-01",
+                  "tools": [
+                    {
+                      "field": "subagents.enabled",
+                      "equals": true
+                    },
+                    {
+                      "field": "subagents.target_ids",
+                      "contains": "tgt-fixer-01"
+                    }
+                  ]
+                }
+              ]
+            }
           },
           "tier": "acceptance",
-          "weight": 1
+          "weight": 3
         }
       ],
       "capture": [
@@ -117,19 +143,43 @@
         },
         {
           "kind": "documents",
-          "name": "tools-rows",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "context_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
           "collection": "Tools",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "tools_id": {
-              "_like": "tools-%"
             }
           },
           "fields": [
             "tools_id",
-            "display_name",
             "subagents"
           ]
         }
@@ -137,15 +187,14 @@
     },
     {
       "stage_id": "delegate",
-      "prompt": "Delegate a task to subagent target 'tgt-fixer-01': have the helper reply with exactly PONG-7391 and nothing else. Wait for the helper's result and tell me when it has arrived.",
+      "prompt": "Delegate a task to subagent 'fixer-target': have the helper reply with exactly PONG-7391 and nothing else. End your turn after dispatch; report the reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
           "check": "tool_calls_expected",
           "params": {
             "required": [
-              "agent_new",
-              "agent_message"
+              "agent_new"
             ],
             "forbidden": [
               "bash"
@@ -169,10 +218,19 @@
             "name": "helper-request",
             "expect": [
               {
-                "field": "input",
+                "field": "content",
                 "contains": "PONG-7391"
+              },
+              {
+                "field": "lifecycle_state",
+                "equals": "completed"
+              },
+              {
+                "field": "terminal_output",
+                "contains": "message_doc_id"
               }
-            ]
+            ],
+            "max_rows": 1
           },
           "tier": "acceptance",
           "weight": 2
@@ -213,11 +271,14 @@
             "request_id",
             "behavior_id",
             "session_id",
-            "input",
-            "lifecycle_state"
+            "content",
+            "lifecycle_state",
+            "lifecycle_state",
+            "terminal_output"
           ]
         }
-      ]
+      ],
+      "settle": true
     }
   ]
 }

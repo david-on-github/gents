@@ -25,6 +25,8 @@ use crate::eval::runner::executor::{CaptureResult, StageEvidence};
 /// - `rows`: `[{capture, key, id, category?, expect: [expectation]}]`: a row
 ///   whose `key` equals `id` exists (one requirement) and holds each
 ///   expectation (one requirement each).
+/// - `links`: `[{capture, key, id, field, target_capture, target_key, expect, category?}]`
+///   follows a stored ID in `field` and tests the selected target row.
 /// - `agents`: `{behaviors, contexts, tools, expect: [{behavior_id, category?,
 ///   behavior: [...], context: [...], tools: [...]}]}`: the behavior exists,
 ///   and each expectation holds on it, on the Context it selects and on the
@@ -52,6 +54,8 @@ struct Params {
     present: Vec<Present>,
     #[serde(default)]
     rows: Vec<RowSpec>,
+    #[serde(default)]
+    links: Vec<LinkSpec>,
     #[serde(default)]
     agents: Option<Agents>,
     #[serde(default)]
@@ -87,6 +91,23 @@ struct RowSpec {
     capture: String,
     key: String,
     id: String,
+    #[serde(default)]
+    category: Option<String>,
+    #[serde(default)]
+    expect: Vec<Expectation>,
+}
+
+/// Follow the reference a source row actually stores; matching an unrelated
+/// target row does not establish that the configured path reaches it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkSpec {
+    capture: String,
+    key: String,
+    id: String,
+    field: String,
+    target_capture: String,
+    target_key: String,
     #[serde(default)]
     category: Option<String>,
     #[serde(default)]
@@ -258,7 +279,7 @@ impl Check for CrewSpecMatch {
     }
 
     fn version(&self) -> &'static str {
-        "1"
+        "2"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -295,6 +316,17 @@ impl Check for CrewSpecMatch {
                             "id": {"type": "string"}, "category": category, "expect": expectations
                         },
                         "required": ["capture", "key", "id"], "additionalProperties": false
+                    }},
+                    "links": {"type": "array", "items": {
+                        "type": "object",
+                        "properties": {
+                            "capture": {"type": "string"}, "key": {"type": "string"},
+                            "id": {"type": "string"}, "field": {"type": "string"},
+                            "target_capture": {"type": "string"}, "target_key": {"type": "string"},
+                            "category": category, "expect": expectations
+                        },
+                        "required": ["capture", "key", "id", "field", "target_capture", "target_key"],
+                        "additionalProperties": false
                     }},
                     "agents": {
                         "type": "object",
@@ -373,6 +405,26 @@ impl Check for CrewSpecMatch {
             let subject = format!("{} {}", spec.capture, spec.id);
             tally.record(category, row.is_some(), || format!("{subject} absent"));
             tally.expectations(category, &subject, row, &tests);
+        }
+        for spec in params.links {
+            let tests = match tests(spec.expect) {
+                Ok(tests) => tests,
+                Err(detail) => return grader("bad_params", detail),
+            };
+            let source = rows(&spec.capture).and_then(|rows| find(rows, &spec.key, &spec.id));
+            let reference = source.map(|row| lookup(row, &spec.field));
+            let target = reference.as_ref().and_then(Value::as_str).and_then(|id| {
+                rows(&spec.target_capture).and_then(|rows| find(rows, &spec.target_key, id))
+            });
+            let subject = format!(
+                "{} {}.{} -> {}",
+                spec.capture, spec.id, spec.field, spec.target_capture
+            );
+            let category = spec.category.as_deref();
+            tally.record(category, target.is_some(), || {
+                format!("{subject}: unresolved reference")
+            });
+            tally.expectations(category, &subject, target, &tests);
         }
         if let Some(agents) = params.agents {
             let behaviors = rows(&agents.behaviors).unwrap_or_default();
@@ -579,6 +631,38 @@ mod tests {
             "templates": [{"capture": "tasks", "key": "task_id", "id": "work-a", "fields": ["prompt_template"], "allowed": ["shard_id"]}],
             "receipt": {"capture": "mailbox", "fields": ["title", "payload"], "ids": ["worker-a", "work-a", "work-b"]}
         })
+    }
+
+    #[test]
+    fn links_check_the_selected_source_and_fail_missing_or_wrong_references() {
+        let params = json!({"links": [{
+            "capture": "triggers", "key": "trigger_id", "id": "dispatch",
+            "field": "source.event_source_id", "target_capture": "sources", "target_key": "event_source_id",
+            "expect": [{"field": "source_collection", "equals": "Assignment"}]
+        }]});
+        let schema = CrewSpecMatch.describe().params_schema;
+        assert!(jsonschema::validator_for(&schema)
+            .unwrap()
+            .is_valid(&params));
+        for (source, expected) in [("wanted", 10000), ("decoy", 5000), ("missing", 0)] {
+            let evidence = stage(&[
+                (
+                    "triggers",
+                    vec![
+                        json!({"trigger_id":"dispatch", "source": json!({"kind":"event", "event_source_id":source}).to_string()}),
+                    ],
+                ),
+                (
+                    "sources",
+                    vec![
+                        json!({"event_source_id":"wanted", "source_collection":"Assignment"}),
+                        json!({"event_source_id":"decoy", "source_collection":"Result"}),
+                    ],
+                ),
+            ]);
+            let verdict = CrewSpecMatch.evaluate(&params, &evidence);
+            assert_eq!(verdict.score_bp, Some(expected), "{}", verdict.raw);
+        }
     }
 
     #[test]

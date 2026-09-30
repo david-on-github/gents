@@ -10,7 +10,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "On this node, set up document automation for me. A schema for a collection LeadNote (string field 'message') is already published. First, read the AgentSession collection for your agent and find the session id of the session you are working in right now (the open session for your agent_did with the latest created_at). Then configure the following with the config tool, never bash: an EventSource with display_name 'LeadNoteWatcher' watching source_collection 'LeadNote' with event_kind 'created'; a Task with display_name 'LeadNoteTask' targeting the engineer behavior with prompt_template 'Handle the lead note: {{ doc.message }}' and emit_outcome true; and a Trigger with display_name 'LeadNoteTrigger' linking that EventSource to that Task with concurrency 'parallel' and session_id_template set to that exact session id as a literal string (not a template expression). Enable all three. Do not write any document into LeadNote.",
+      "prompt": "On this node, set up document automation for me. A schema for a collection LeadNote (string field 'message') is already published. First, read the AgentSession collection for your agent and find the session id of the session you are working in right now (the open session for your agent_did with the latest created_at). Then configure the following with the config tool, never bash: an EventSource with display_name 'LeadNoteWatcher' watching source_collection 'LeadNote' with event_kind 'created'; a Task with display_name 'LeadNoteTask' targeting the engineer behavior with prompt_template 'Handle the lead note: {{ doc.message }}' and emit_outcome true; and a Trigger with display_name 'LeadNoteTrigger' linking that EventSource to that Task with concurrency 'parallel' and session_id_template set to that exact session id as a literal string (not a template expression). Enable the Task and Trigger. Do not write any document into LeadNote.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -255,7 +255,7 @@
     },
     {
       "stage_id": "outcome_readonly",
-      "prompt": "Read the FireOutcome records for the LeadNote automation and report their session ids and states; change nothing.",
+      "prompt": "Report the configured automation and its expected routing. Change nothing.",
       "deadline_secs": 600,
       "checks": [
         {

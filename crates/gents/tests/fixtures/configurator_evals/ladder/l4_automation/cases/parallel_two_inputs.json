@@ -10,7 +10,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "On this node, set up document automation for me. A schema for a collection MultiNote (string field 'message') is already published. Configure the following with the config tool, never bash: an EventSource with display_name 'MultiNoteWatcher' watching source_collection 'MultiNote' with event_kind 'created'; a Task with display_name 'MultiNoteTask' targeting the engineer behavior with prompt_template 'Handle the multi note: {{ doc.message }}' and emit_outcome true; and a Trigger with display_name 'MultiNoteTrigger' linking that EventSource to that Task with concurrency 'parallel'. Enable all three. Do not write any document into MultiNote.",
+      "prompt": "On this node, set up document automation for me. A schema for a collection MultiNote (string field 'message') is already published. Configure the following with the config tool, never bash: an EventSource with display_name 'MultiNoteWatcher' watching source_collection 'MultiNote' with event_kind 'created'; a Task with display_name 'MultiNoteTask' targeting the engineer behavior with prompt_template 'Handle the multi note: {{ doc.message }}' and emit_outcome true; and a Trigger with display_name 'MultiNoteTrigger' linking that EventSource to that Task with concurrency 'parallel'. Enable the Task and Trigger. Do not write any document into MultiNote.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -268,7 +268,7 @@
     },
     {
       "stage_id": "verify_readonly",
-      "prompt": "Read the TriggerFire and AgentRequest records for the MultiNote automation and report how many fires and completed trigger-caused requests exist; change nothing.",
+      "prompt": "Report the configured automation and its expected routing. Change nothing.",
       "deadline_secs": 600,
       "checks": [
         {

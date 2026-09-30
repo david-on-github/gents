@@ -10,7 +10,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "On this node, set up document automation for me. A schema for a collection QuietNote (string field 'message') is already published. Configure the following with the config tool, never bash: an EventSource with display_name 'QuietNoteWatcher' watching source_collection 'QuietNote' with event_kind 'created'; a Task with display_name 'QuietNoteTask' targeting the engineer behavior with prompt_template 'Handle the quiet note: {{ doc.message }}' and emit_outcome false; and a Trigger with display_name 'QuietNoteTrigger' linking that EventSource to that Task with concurrency 'parallel'. Enable all three. Do not write any document into QuietNote.",
+      "prompt": "On this node, set up document automation for me. A schema for a collection QuietNote (string field 'message') is already published. Configure the following with the config tool, never bash: an EventSource with display_name 'QuietNoteWatcher' watching source_collection 'QuietNote' with event_kind 'created'; a Task with display_name 'QuietNoteTask' targeting the engineer behavior with prompt_template 'Handle the quiet note: {{ doc.message }}' and emit_outcome false; and a Trigger with display_name 'QuietNoteTrigger' linking that EventSource to that Task with concurrency 'parallel'. Enable the Task and Trigger. Do not write any document into QuietNote.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -249,7 +249,7 @@
     },
     {
       "stage_id": "verify_readonly",
-      "prompt": "Read the AgentRequest records caused by the QuietNote trigger and report how many reached lifecycle_state completed; change nothing.",
+      "prompt": "Report the configured automation and its expected routing. Change nothing.",
       "deadline_secs": 600,
       "checks": [
         {

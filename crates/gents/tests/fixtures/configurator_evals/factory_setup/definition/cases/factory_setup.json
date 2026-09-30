@@ -8,40 +8,8 @@
     ],
     "files": [
       {
-        "path": "repo/audit/d1/lib.rs",
-        "contents": "let agent_did_0 = principal.agent_did; // node identity\nlet agent_did_1 = principal.agent_did; // node identity\nlet agent_did_2 = principal.agent_did; // node identity\nlet session_id = request.session_id;\n"
-      },
-      {
-        "path": "repo/audit/d2/lib.rs",
-        "contents": "let agent_did_0 = principal.agent_did; // node identity\nlet session_id = request.session_id;\n"
-      },
-      {
-        "path": "repo/audit/d3/lib.rs",
-        "contents": "let session_id = request.session_id;\n"
-      },
-      {
-        "path": "repo/audit/d4/lib.rs",
-        "contents": "let agent_did_0 = principal.agent_did; // node identity\nlet agent_did_1 = principal.agent_did; // node identity\nlet agent_did_2 = principal.agent_did; // node identity\nlet agent_did_3 = principal.agent_did; // node identity\nlet agent_did_4 = principal.agent_did; // node identity\nlet session_id = request.session_id;\n"
-      },
-      {
-        "path": "repo/audit/d5/lib.rs",
-        "contents": "let agent_did_0 = principal.agent_did; // node identity\nlet agent_did_1 = principal.agent_did; // node identity\nlet session_id = request.session_id;\n"
-      },
-      {
-        "path": "repo/audit/d6/lib.rs",
-        "contents": "let agent_did_0 = principal.agent_did; // node identity\nlet agent_did_1 = principal.agent_did; // node identity\nlet agent_did_2 = principal.agent_did; // node identity\nlet agent_did_3 = principal.agent_did; // node identity\nlet session_id = request.session_id;\n"
-      },
-      {
-        "path": "repo/audit/d7/lib.rs",
-        "contents": "let agent_did_0 = principal.agent_did; // node identity\nlet session_id = request.session_id;\n"
-      },
-      {
-        "path": "repo/audit/d8/lib.rs",
-        "contents": "let agent_did_0 = principal.agent_did; // node identity\nlet agent_did_1 = principal.agent_did; // node identity\nlet session_id = request.session_id;\n"
-      },
-      {
-        "path": "repo/README.md",
-        "contents": "Fixture repository for the factory setup eval. The persona vocabulary retired in #1799.\n"
+        "path": "repo/.keep",
+        "contents": ""
       },
       {
         "path": "worktrees/.keep",
@@ -56,36 +24,11 @@
       "deadline_secs": 7200,
       "settle": true,
       "continuation": {
-        "prompt": "Continue until setup is complete and the checks pass.",
+        "prompt": "Continue configuring the crew. File the setup receipt when done. Do not launch work or run acceptance.",
         "max": 5,
         "until": "receipt"
       },
       "checks": [
-        {
-          "check": "handoff_delivery",
-          "params": {
-            "requests": "requests",
-            "fires": "fires",
-            "outcomes": "outcomes",
-            "triggers": "triggers",
-            "sources": [
-              "c_run_start",
-              "c_shard_assignment",
-              "c_shard_result",
-              "c_shard_review",
-              "c_shard_integration",
-              "c_build_request",
-              "c_build_result",
-              "c_gate_request",
-              "c_gate_result",
-              "outcomes"
-            ],
-            "goals": "goals",
-            "runtime": "runtime"
-          },
-          "tier": "development",
-          "weight": 1
-        },
         {
           "check": "crew_spec_match",
           "params": {
@@ -510,6 +453,10 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
                     "equals": null
                   }
@@ -530,8 +477,12 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
-                    "matches": "^\\{\\{\\s*doc\\.target_session_id\\s*\\}\\}$"
+                    "equals": "{{ doc.target_session_id }}"
                   }
                 ]
               },
@@ -548,6 +499,10 @@
                   {
                     "field": "enabled",
                     "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
                   },
                   {
                     "field": "session_id_template",
@@ -570,8 +525,12 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
-                    "matches": "^\\{\\{\\s*doc\\.target_session_id\\s*\\}\\}$"
+                    "equals": "{{ doc.target_session_id }}"
                   }
                 ]
               },
@@ -588,6 +547,10 @@
                   {
                     "field": "enabled",
                     "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
                   },
                   {
                     "field": "session_id_template",
@@ -610,6 +573,10 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
                     "equals": null
                   }
@@ -628,6 +595,10 @@
                   {
                     "field": "enabled",
                     "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
                   },
                   {
                     "field": "session_id_template",
@@ -650,6 +621,10 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
                     "equals": null
                   }
@@ -668,6 +643,10 @@
                   {
                     "field": "enabled",
                     "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
                   },
                   {
                     "field": "session_id_template",
@@ -690,8 +669,12 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
-                    "matches": "^\\{\\{\\s*doc\\.reply_session_id\\s*\\}\\}$"
+                    "equals": "{{ doc.reply_session_id }}"
                   }
                 ]
               },
@@ -710,8 +693,12 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
-                    "matches": "^\\{\\{\\s*doc\\.reply_session_id\\s*\\}\\}$"
+                    "equals": "{{ doc.reply_session_id }}"
                   }
                 ]
               },
@@ -730,8 +717,12 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
-                    "matches": "^\\{\\{\\s*doc\\.reply_session_id\\s*\\}\\}$"
+                    "equals": "{{ doc.reply_session_id }}"
                   }
                 ]
               },
@@ -750,12 +741,12 @@
                     "equals": true
                   },
                   {
-                    "field": "session_id_template",
-                    "equals": null
+                    "field": "concurrency",
+                    "equals": "queued_serial"
                   },
                   {
-                    "field": "concurrency",
-                    "matches": "(?i)queued_?serial"
+                    "field": "session_id_template",
+                    "equals": null
                   }
                 ]
               },
@@ -774,8 +765,12 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
-                    "matches": "^\\{\\{\\s*doc\\.reply_session_id\\s*\\}\\}$"
+                    "equals": "{{ doc.reply_session_id }}"
                   }
                 ]
               },
@@ -794,12 +789,12 @@
                     "equals": true
                   },
                   {
-                    "field": "session_id_template",
-                    "equals": null
+                    "field": "concurrency",
+                    "equals": "queued_serial"
                   },
                   {
-                    "field": "concurrency",
-                    "matches": "(?i)queued_?serial"
+                    "field": "session_id_template",
+                    "equals": null
                   }
                 ]
               },
@@ -818,8 +813,12 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
-                    "matches": "^\\{\\{\\s*doc\\.reply_session_id\\s*\\}\\}$"
+                    "equals": "{{ doc.reply_session_id }}"
                   }
                 ]
               },
@@ -838,8 +837,12 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
-                    "matches": "^\\{\\{\\s*doc\\.reply_session_id\\s*\\}\\}$"
+                    "equals": "{{ doc.reply_session_id }}"
                   }
                 ]
               },
@@ -858,8 +861,12 @@
                     "equals": true
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
                     "field": "session_id_template",
-                    "matches": "^\\{\\{\\s*doc\\.reply_session_id\\s*\\}\\}$"
+                    "equals": "{{ doc.reply_session_id }}"
                   }
                 ]
               },
@@ -878,8 +885,16 @@
                     "equals": false
                   },
                   {
+                    "field": "concurrency",
+                    "equals": "serial"
+                  },
+                  {
                     "field": "session_id_template",
                     "equals": null
+                  },
+                  {
+                    "field": "source.schedule_id",
+                    "equals": "engineer-watch-hourly"
                   }
                 ]
               },
@@ -1349,6 +1364,270 @@
                 "id": "engineer-watch-hourly",
                 "category": "automation",
                 "expect": []
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "result-blocked-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "task_id",
+                    "equals": "inbox-blocked-proofs"
+                  },
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
+                    "field": "session_id_template",
+                    "equals": "{{ doc.reply_session_id }}"
+                  }
+                ]
+              },
+              {
+                "capture": "tasks",
+                "key": "task_id",
+                "id": "inbox-blocked-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "emit_outcome",
+                    "equals": false
+                  },
+                  {
+                    "field": "behavior_id",
+                    "matches": "(^|:)factory\\-proofs\\-lead$"
+                  },
+                  {
+                    "field": "prompt_template",
+                    "matches": ".+"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "result-audit-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "task_id",
+                    "equals": "inbox-audit-proofs"
+                  },
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
+                    "field": "session_id_template",
+                    "equals": "{{ doc.reply_session_id }}"
+                  }
+                ]
+              },
+              {
+                "capture": "tasks",
+                "key": "task_id",
+                "id": "inbox-audit-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "emit_outcome",
+                    "equals": false
+                  },
+                  {
+                    "field": "behavior_id",
+                    "matches": "(^|:)factory\\-proofs\\-lead$"
+                  },
+                  {
+                    "field": "prompt_template",
+                    "matches": ".+"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "review-inbox-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "task_id",
+                    "equals": "inbox-review-proofs"
+                  },
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
+                    "field": "session_id_template",
+                    "equals": "{{ doc.reply_session_id }}"
+                  }
+                ]
+              },
+              {
+                "capture": "tasks",
+                "key": "task_id",
+                "id": "inbox-review-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "emit_outcome",
+                    "equals": false
+                  },
+                  {
+                    "field": "behavior_id",
+                    "matches": "(^|:)factory\\-proofs\\-lead$"
+                  },
+                  {
+                    "field": "prompt_template",
+                    "matches": ".+"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "build-result-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "task_id",
+                    "equals": "inbox-build-proofs"
+                  },
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
+                    "field": "session_id_template",
+                    "equals": "{{ doc.reply_session_id }}"
+                  }
+                ]
+              },
+              {
+                "capture": "tasks",
+                "key": "task_id",
+                "id": "inbox-build-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "emit_outcome",
+                    "equals": false
+                  },
+                  {
+                    "field": "behavior_id",
+                    "matches": "(^|:)factory\\-proofs\\-lead$"
+                  },
+                  {
+                    "field": "prompt_template",
+                    "matches": ".+"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "gate-result-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "task_id",
+                    "equals": "inbox-gate-proofs"
+                  },
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
+                    "field": "session_id_template",
+                    "equals": "{{ doc.reply_session_id }}"
+                  }
+                ]
+              },
+              {
+                "capture": "tasks",
+                "key": "task_id",
+                "id": "inbox-gate-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "emit_outcome",
+                    "equals": false
+                  },
+                  {
+                    "field": "behavior_id",
+                    "matches": "(^|:)factory\\-proofs\\-lead$"
+                  },
+                  {
+                    "field": "prompt_template",
+                    "matches": ".+"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "fire-outcome-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "task_id",
+                    "equals": "inbox-outcome-proofs"
+                  },
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "parallel"
+                  },
+                  {
+                    "field": "session_id_template",
+                    "equals": "{{ doc.reply_session_id }}"
+                  }
+                ]
+              },
+              {
+                "capture": "tasks",
+                "key": "task_id",
+                "id": "inbox-outcome-proofs",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "emit_outcome",
+                    "equals": false
+                  },
+                  {
+                    "field": "behavior_id",
+                    "matches": "(^|:)factory\\-proofs\\-lead$"
+                  },
+                  {
+                    "field": "prompt_template",
+                    "matches": ".+"
+                  }
+                ]
               }
             ],
             "agents": {
@@ -1385,14 +1664,6 @@
                       "equals": "ReadWrite"
                     },
                     {
-                      "field": "host.bash",
-                      "matches": "\"ReadOnly\"|allowed_argv_prefixes"
-                    },
-                    {
-                      "field": "datastore.datastore_tool_surface_ids",
-                      "matches": "\"[^\"]+\""
-                    },
-                    {
                       "field": "subagents.enabled",
                       "equals": true
                     },
@@ -1403,6 +1674,38 @@
                     {
                       "field": "subagents.target_ids",
                       "contains": "factory-gatekeeper"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "equals": "Unrestricted"
+                    },
+                    {
+                      "field": "host.bash.allowed_argv_prefixes",
+                      "equals": [
+                        [
+                          "git"
+                        ],
+                        [
+                          "gh"
+                        ],
+                        [
+                          "make",
+                          "worktree"
+                        ],
+                        [
+                          "rg"
+                        ],
+                        [
+                          "ls"
+                        ],
+                        [
+                          "cat"
+                        ]
+                      ]
+                    },
+                    {
+                      "field": "datastore.datastore_tool_surface_ids",
+                      "contains": "factory-proofs-lead-handoffs"
                     }
                   ]
                 },
@@ -1435,14 +1738,6 @@
                       "equals": "ReadOnly"
                     },
                     {
-                      "field": "host.bash",
-                      "matches": "\"ReadOnly\"|allowed_argv_prefixes"
-                    },
-                    {
-                      "field": "datastore.datastore_tool_surface_ids",
-                      "matches": "\"[^\"]+\""
-                    },
-                    {
                       "field": "subagents.enabled",
                       "equals": true
                     },
@@ -1453,6 +1748,34 @@
                     {
                       "field": "subagents.target_ids",
                       "contains": "factory-gatekeeper"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "equals": "Unrestricted"
+                    },
+                    {
+                      "field": "host.bash.allowed_argv_prefixes",
+                      "equals": [
+                        [
+                          "git"
+                        ],
+                        [
+                          "gh"
+                        ],
+                        [
+                          "rg"
+                        ],
+                        [
+                          "ls"
+                        ],
+                        [
+                          "cat"
+                        ]
+                      ]
+                    },
+                    {
+                      "field": "datastore.datastore_tool_surface_ids",
+                      "contains": "factory-impl-lead-handoffs"
                     }
                   ]
                 },
@@ -1485,16 +1808,36 @@
                       "equals": "ReadOnly"
                     },
                     {
-                      "field": "host.bash",
-                      "matches": "\"ReadOnly\"|allowed_argv_prefixes"
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "equals": "Unrestricted"
+                    },
+                    {
+                      "field": "host.bash.allowed_argv_prefixes",
+                      "equals": [
+                        [
+                          "git",
+                          "diff"
+                        ],
+                        [
+                          "git",
+                          "log"
+                        ],
+                        [
+                          "git",
+                          "status"
+                        ],
+                        [
+                          "rg"
+                        ]
+                      ]
                     },
                     {
                       "field": "datastore.datastore_tool_surface_ids",
-                      "matches": "\"[^\"]+\""
-                    },
-                    {
-                      "field": "subagents.enabled",
-                      "matches": "^(false|null)$"
+                      "contains": "factory-gatekeeper-handoffs"
                     }
                   ]
                 },
@@ -1527,16 +1870,36 @@
                       "equals": "ReadOnly"
                     },
                     {
-                      "field": "host.bash",
-                      "matches": "\"ReadOnly\"|allowed_argv_prefixes"
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "equals": "Unrestricted"
+                    },
+                    {
+                      "field": "host.bash.allowed_argv_prefixes",
+                      "equals": [
+                        [
+                          "git",
+                          "diff"
+                        ],
+                        [
+                          "git",
+                          "log"
+                        ],
+                        [
+                          "git",
+                          "status"
+                        ],
+                        [
+                          "rg"
+                        ]
+                      ]
                     },
                     {
                       "field": "datastore.datastore_tool_surface_ids",
-                      "matches": "\"[^\"]+\""
-                    },
-                    {
-                      "field": "subagents.enabled",
-                      "matches": "^(false|null)$"
+                      "contains": "factory-reviewer-claude-handoffs"
                     }
                   ]
                 },
@@ -1569,16 +1932,36 @@
                       "equals": "ReadOnly"
                     },
                     {
-                      "field": "host.bash",
-                      "matches": "\"ReadOnly\"|allowed_argv_prefixes"
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "equals": "Unrestricted"
+                    },
+                    {
+                      "field": "host.bash.allowed_argv_prefixes",
+                      "equals": [
+                        [
+                          "git",
+                          "diff"
+                        ],
+                        [
+                          "git",
+                          "log"
+                        ],
+                        [
+                          "git",
+                          "status"
+                        ],
+                        [
+                          "rg"
+                        ]
+                      ]
                     },
                     {
                       "field": "datastore.datastore_tool_surface_ids",
-                      "matches": "\"[^\"]+\""
-                    },
-                    {
-                      "field": "subagents.enabled",
-                      "matches": "^(false|null)$"
+                      "contains": "factory-reviewer-astra-handoffs"
                     }
                   ]
                 },
@@ -1611,16 +1994,36 @@
                       "equals": "ReadOnly"
                     },
                     {
-                      "field": "host.bash",
-                      "matches": "\"ReadOnly\"|allowed_argv_prefixes"
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "equals": "Unrestricted"
+                    },
+                    {
+                      "field": "host.bash.allowed_argv_prefixes",
+                      "equals": [
+                        [
+                          "git",
+                          "diff"
+                        ],
+                        [
+                          "git",
+                          "log"
+                        ],
+                        [
+                          "git",
+                          "status"
+                        ],
+                        [
+                          "rg"
+                        ]
+                      ]
                     },
                     {
                       "field": "datastore.datastore_tool_surface_ids",
-                      "matches": "\"[^\"]+\""
-                    },
-                    {
-                      "field": "subagents.enabled",
-                      "matches": "^(false|null)$"
+                      "contains": "factory-reviewer-grok-handoffs"
                     }
                   ]
                 },
@@ -1653,16 +2056,35 @@
                       "equals": "ReadWrite"
                     },
                     {
-                      "field": "host.bash",
-                      "matches": "\"ReadOnly\"|allowed_argv_prefixes"
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "equals": "Unrestricted"
+                    },
+                    {
+                      "field": "host.bash.allowed_argv_prefixes",
+                      "equals": [
+                        [
+                          "rustfmt"
+                        ],
+                        [
+                          "lake",
+                          "env",
+                          "lean"
+                        ],
+                        [
+                          "rg"
+                        ],
+                        [
+                          "sed"
+                        ]
+                      ]
                     },
                     {
                       "field": "datastore.datastore_tool_surface_ids",
-                      "matches": "\"[^\"]+\""
-                    },
-                    {
-                      "field": "subagents.enabled",
-                      "matches": "^(false|null)$"
+                      "contains": "factory-worker-a-handoffs"
                     }
                   ]
                 },
@@ -1695,16 +2117,35 @@
                       "equals": "ReadWrite"
                     },
                     {
-                      "field": "host.bash",
-                      "matches": "\"ReadOnly\"|allowed_argv_prefixes"
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "equals": "Unrestricted"
+                    },
+                    {
+                      "field": "host.bash.allowed_argv_prefixes",
+                      "equals": [
+                        [
+                          "rustfmt"
+                        ],
+                        [
+                          "lake",
+                          "env",
+                          "lean"
+                        ],
+                        [
+                          "rg"
+                        ],
+                        [
+                          "sed"
+                        ]
+                      ]
                     },
                     {
                       "field": "datastore.datastore_tool_surface_ids",
-                      "matches": "\"[^\"]+\""
-                    },
-                    {
-                      "field": "subagents.enabled",
-                      "matches": "^(false|null)$"
+                      "contains": "factory-worker-b-handoffs"
                     }
                   ]
                 },
@@ -1737,16 +2178,34 @@
                       "equals": "ReadOnly"
                     },
                     {
-                      "field": "host.bash",
-                      "matches": "\"ReadOnly\"|allowed_argv_prefixes"
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "equals": "Unrestricted"
+                    },
+                    {
+                      "field": "host.bash.allowed_argv_prefixes",
+                      "equals": [
+                        [
+                          "cargo"
+                        ],
+                        [
+                          "lake"
+                        ],
+                        [
+                          "npm"
+                        ],
+                        [
+                          "git",
+                          "-C"
+                        ]
+                      ]
                     },
                     {
                       "field": "datastore.datastore_tool_surface_ids",
-                      "matches": "\"[^\"]+\""
-                    },
-                    {
-                      "field": "subagents.enabled",
-                      "matches": "^(false|null)$"
+                      "contains": "factory-verifier-handoffs"
                     }
                   ]
                 },
@@ -2238,40 +2697,555 @@
                 "engineer-watch"
               ]
             },
-            "continuation": {
-              "max": 5
-            }
-          },
-          "tier": "acceptance",
-          "weight": 6
-        },
-        {
-          "check": "captured_rows_count",
-          "params": {
-            "name": "audit_results",
-            "min": 8
-          },
-          "tier": "acceptance",
-          "weight": 1
-        },
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "c_shard_review",
-            "min_rows": 2,
-            "expect": [
+            "links": [
               {
-                "field": "verdict",
-                "matches": "^(accepted|rejected)$"
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "run-start-proofs",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "RunStart"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*k\\s*:\\s*\\{\\s*_eq\\s*:\\s*0\\s*\\}\\s*,\\s*lead\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"proofs\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
               },
               {
-                "field": "tags",
-                "contains": "test"
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "run-continue-proofs",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "RunStart"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*k\\s*:\\s*\\{\\s*_gt\\s*:\\s*0\\s*\\}\\s*,\\s*lead\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"proofs\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "run-start-impl",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "RunStart"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*k\\s*:\\s*\\{\\s*_eq\\s*:\\s*0\\s*\\}\\s*,\\s*lead\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"impl\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "run-continue-impl",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "RunStart"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*k\\s*:\\s*\\{\\s*_gt\\s*:\\s*0\\s*\\}\\s*,\\s*lead\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"impl\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "assign-a",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardAssignment"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*workstation\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"a\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "assign-b",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardAssignment"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*workstation\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"b\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "result-review-claude",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*status\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"done\"\\s*\\}\\s*,\\s*phase\\s*:\\s*\\{\\s*_ne\\s*:\\s*\"audit\"\\s*\\}\\s*,\\s*reviewer\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"claude\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "result-review-astra",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*status\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"done\"\\s*\\}\\s*,\\s*phase\\s*:\\s*\\{\\s*_ne\\s*:\\s*\"audit\"\\s*\\}\\s*,\\s*reviewer\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"astra\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "result-review-grok",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*status\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"done\"\\s*\\}\\s*,\\s*phase\\s*:\\s*\\{\\s*_ne\\s*:\\s*\"audit\"\\s*\\}\\s*,\\s*reviewer\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"grok\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "build-request",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "BuildRequest"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "gate-request",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "GateRequest"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "result-blocked",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*status\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"blocked\"\\s*\\}\\s*,\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"impl\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "result-audit",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*phase\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"audit\"\\s*\\}\\s*,\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"impl\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "review-inbox",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardReview"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"impl\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "build-result",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "BuildResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"impl\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "gate-result",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "GateResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"impl\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "fire-outcome",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "FireOutcome"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*source_collection\\s*:\\s*\\{\\s*_ne\\s*:\\s*\"RunStart\"\\s*\\}\\s*,\\s*source_handoff_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"%:impl\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "result-blocked-proofs",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*status\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"blocked\"\\s*\\}\\s*,\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"proofs\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "result-audit-proofs",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*phase\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"audit\"\\s*\\}\\s*,\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"proofs\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "review-inbox-proofs",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "ShardReview"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"proofs\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "build-result-proofs",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "BuildResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"proofs\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "gate-result-proofs",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "GateResult"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*run_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"proofs\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "fire-outcome-proofs",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "FireOutcome"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*source_collection\\s*:\\s*\\{\\s*_ne\\s*:\\s*\"RunStart\"\\s*\\}\\s*,\\s*source_handoff_id\\s*:\\s*\\{\\s*_like\\s*:\\s*\"%:proofs\\-%\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
+              },
+              {
+                "capture": "triggers",
+                "key": "trigger_id",
+                "id": "fire-outcome-engineer",
+                "field": "source.event_source_id",
+                "target_capture": "event_sources",
+                "target_key": "event_source_id",
+                "category": "automation_wiring",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "FireOutcome"
+                  },
+                  {
+                    "field": "event_kind",
+                    "equals": "created"
+                  },
+                  {
+                    "field": "filter",
+                    "matches": "^\\s*\\{\\s*source_collection\\s*:\\s*\\{\\s*_eq\\s*:\\s*\"RunStart\"\\s*\\}\\s*\\}\\s*$"
+                  }
+                ]
               }
             ]
           },
           "tier": "acceptance",
-          "weight": 1
+          "weight": 6
         },
         {
           "check": "tool_calls_expected",
@@ -2281,7 +3255,21 @@
               "read_file",
               "file_mailbox_item"
             ],
-            "max_calls": 600
+            "max_calls": 600,
+            "forbidden": [
+              "agent_new",
+              "agent_message"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "crew_requests",
+            "min": 0,
+            "max": 0
           },
           "tier": "acceptance",
           "weight": 1
@@ -2426,89 +3414,6 @@
           "fields": [
             "schedule_id",
             "cadence"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "fires",
-          "collection": "TriggerFire",
-          "filter": {},
-          "fields": [
-            "fire_key",
-            "trigger_id",
-            "task_id",
-            "source_collection",
-            "source_doc_id",
-            "request_id",
-            "session_id",
-            "goal_id",
-            "emit_outcome",
-            "queued_serial",
-            "source_handoff_id",
-            "reply_session_id",
-            "created_at"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "outcomes",
-          "collection": "FireOutcome",
-          "filter": {},
-          "fields": [
-            "handoff_id",
-            "fire_key",
-            "trigger_id",
-            "source_collection",
-            "request_id",
-            "session_id",
-            "goal_id",
-            "terminal_state",
-            "reason",
-            "source_handoff_id",
-            "reply_session_id",
-            "created_at"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "requests",
-          "collection": "AgentRequest",
-          "filter": {},
-          "fields": [
-            "request_id",
-            "session_id",
-            "behavior_id",
-            "lifecycle_state",
-            "caused_by_trigger_id",
-            "caused_by_source_doc_id",
-            "failure_reason",
-            "created_at",
-            "terminalized_at"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "goals",
-          "collection": "Goal",
-          "filter": {},
-          "fields": [
-            "goal_id",
-            "session_id",
-            "status",
-            "token_budget",
-            "tokens_used",
-            "last_failure"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "runtime",
-          "collection": "AgentRuntime",
-          "filter": {},
-          "fields": [
-            "reconcile_phase",
-            "last_reconcile_result",
-            "last_reconcile_error"
           ]
         },
         {
@@ -2729,19 +3634,31 @@
         },
         {
           "kind": "documents",
-          "name": "audit_results",
-          "collection": "ShardResult",
+          "name": "crew_requests",
+          "collection": "AgentRequest",
           "filter": {
-            "phase": {
-              "_eq": "audit"
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "_not": {
+              "_or": [
+                {
+                  "behavior_id": {
+                    "_like": "%:engineer"
+                  }
+                },
+                {
+                  "behavior_id": {
+                    "_eq": "engineer"
+                  }
+                }
+              ]
             }
           },
           "fields": [
-            "handoff_id",
-            "status",
-            "report",
-            "reply_session_id",
-            "phase"
+            "request_id",
+            "behavior_id",
+            "lifecycle_state"
           ]
         }
       ]

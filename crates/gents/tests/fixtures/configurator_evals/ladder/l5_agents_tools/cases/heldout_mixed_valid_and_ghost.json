@@ -1,7 +1,7 @@
 {
   "case_id": "heldout-mixed-valid-and-ghost",
   "split": "held_out",
-  "reducer": "weighted_mean",
+  "reducer": "all",
   "stages": [
     {
       "stage_id": "configure-mixed",
@@ -97,15 +97,14 @@
     },
     {
       "stage_id": "delegate-to-valid",
-      "prompt": "Delegate a task to subagent target 'tgt-ho-a': have the helper reply with exactly HO-999 and nothing else. Wait for the result and tell me when it has arrived.",
+      "prompt": "Delegate a task to subagent 'ho-valid': have the helper reply with exactly HO-999 and nothing else. End your turn after dispatch; report the reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
           "check": "tool_calls_expected",
           "params": {
             "required": [
-              "agent_new",
-              "agent_message"
+              "agent_new"
             ],
             "forbidden": [
               "bash"
@@ -129,10 +128,19 @@
             "name": "ho-request",
             "expect": [
               {
-                "field": "input",
+                "field": "content",
                 "contains": "HO-999"
+              },
+              {
+                "field": "lifecycle_state",
+                "equals": "completed"
+              },
+              {
+                "field": "terminal_output",
+                "contains": "message_doc_id"
               }
-            ]
+            ],
+            "max_rows": 1
           },
           "tier": "acceptance",
           "weight": 2
@@ -173,11 +181,14 @@
             "request_id",
             "behavior_id",
             "session_id",
-            "input",
-            "lifecycle_state"
+            "content",
+            "lifecycle_state",
+            "lifecycle_state",
+            "terminal_output"
           ]
         }
-      ]
+      ],
+      "settle": true
     },
     {
       "stage_id": "verify-ghost-absent",
