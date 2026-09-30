@@ -359,9 +359,11 @@ fn seeded_outcome_cases_supply_the_source_handoff_contract() {
                     stage.stage_id
                 );
                 assert!(
-                    case.fixtures.schemas.iter().any(|sdl| {
-                        types.captures_iter(sdl).any(|schema| {
-                            schema[1] == seed.collection && handoff.is_match(&schema[2])
+                    case.fixtures.as_ref().is_some_and(|fixtures| {
+                        fixtures.schemas.iter().any(|sdl| {
+                            types.captures_iter(sdl).any(|schema| {
+                                schema[1] == seed.collection && handoff.is_match(&schema[2])
+                            })
                         })
                     }),
                     "{}: {} must declare handoff_id as String",
