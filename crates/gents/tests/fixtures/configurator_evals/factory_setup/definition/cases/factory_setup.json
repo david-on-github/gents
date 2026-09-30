@@ -3663,5 +3663,16 @@
         }
       ]
     }
-  ]
+  ],
+  "goal": {
+    "AgentBehavior": 10,
+    "InferenceProfile": 6,
+    "DatastoreToolSurface": 11,
+    "SubagentTarget": 4,
+    "EventSource": 24,
+    "Task": 23,
+    "Trigger": 25,
+    "Schedule": 1,
+    "schemas": 9
+  }
 }
