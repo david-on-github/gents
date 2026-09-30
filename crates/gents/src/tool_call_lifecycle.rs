@@ -188,6 +188,8 @@ mod recovery_conformance;
 mod recovery_orphan_conformance;
 #[cfg(test)]
 mod request_scope_conformance;
+#[cfg(test)]
+mod session_activity_conformance;
 
 pub(crate) use crate::streaming::AcceptedToolCall;
 pub use recovery::{

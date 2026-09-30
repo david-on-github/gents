@@ -40,6 +40,21 @@ private def refreshJson (name : String) (event : AgentSession.RequestFact)
   [("name", toJson name), ("operation", toJson "refresh"), ("before", documentJson indexed),
    ("event", requestJson event), ("rows", toJson (rows.map requestJson)), ("now", toJson (4 : Nat)),
    ("after", documentJson (AgentSession.refresh indexed rows event.observed 4))]
+private def toolActivityJson (name : String) (now : Nat) (published : Bool)
+    (stale : Bool := false) : Json :=
+  let r := { processingEvent with scope := { scope with requester := none } }
+  let before := AgentSession.advance { session with scope := r.scope } [r] r "new" 3
+  let event := if stale then { r.observed with docId := 999 } else r.observed
+  let rows := [{ r with observed := event }]
+  let after := AgentSession.toolActivity before rows event now published
+  Json.mkObj [("name", toJson name), ("operation", toJson "tool_activity"),
+    ("before", documentJson before), ("rows", toJson (rows.map requestJson)),
+    ("event", requestJson { r with observed := event }), ("now", toJson now),
+    ("published", toJson published),
+    ("steps", toJson [
+      Json.mkObj [("now", toJson now), ("after", documentJson after)],
+      Json.mkObj [("now", toJson (now + 1)),
+        ("after", documentJson (AgentSession.toolActivity after rows event (now + 1) published))]])]
 private def renameBefore : AgentSession.Document :=
   { indexed with title := some ⟨"task title", .task⟩ }
 private def renameJson : Json := Json.mkObj
@@ -126,6 +141,10 @@ def sessionDocumentsJson : String := (Json.mkObj
       retryJson "wrong_physical_parent" [old] 999,
       retryJson "existing_candidate_missing_from_auxiliary_projection" [old, olderExistingCandidate] 101]),
    ("projection", toJson [renameJson, clearTitleJson,
+      toolActivityJson "processing_tool_completion" 4 true,
+      toolActivityJson "processing_tool_clock_regression" 2 true,
+      toolActivityJson "stale_tool_completion" 4 true true,
+      toolActivityJson "unpublished_tool_completion" 4 false,
       advanceJson "stale_admission" old,
       advanceJson "current_admission" newerRequest,
       advanceJson "title_does_not_advance_public_observation" titleRequest session
