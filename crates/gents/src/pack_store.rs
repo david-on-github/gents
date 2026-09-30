@@ -72,20 +72,53 @@ impl VersionKey {
 }
 
 /// Whether `version` is safe as one path segment of the name index: ASCII
-/// lowercase alphanumeric plus `.`, `+`, `-`, non-empty, and never a bare `.`
-/// or `..` (otherwise a valid-looking version could name the parent
-/// directory). Uppercase is refused, not folded: the index directory can sit
-/// on a case-insensitive filesystem (macOS APFS by default), where
-/// `1.0.0-RC1` and `1.0.0-rc1` would otherwise silently collide and one
-/// would overwrite the other's entry. `pub(crate)` so [`crate::pack_resolve`]
-/// holds a pinned `@version` to the same rule the index files it against.
+/// alphanumeric plus `.`, `+`, `-`, non-empty, and never a bare `.` or `..`
+/// (otherwise a valid-looking version could name the parent directory).
+/// `pub(crate)` so [`crate::pack_resolve`] holds a pinned `@version` to the
+/// same rule the index files it against.
 pub(crate) fn is_valid_index_version(version: &str) -> bool {
     version != "."
         && version != ".."
         && !version.is_empty()
-        && version.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'+' | b'-')
-        })
+        && version
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'+' | b'-'))
+}
+
+/// The index file name for `version`: each uppercase letter becomes `_` and
+/// its lowercase, so `1.0.0-RC1` and `1.0.0-rc1` stay distinct files on a
+/// case-insensitive filesystem (macOS APFS by default). `_` is outside the
+/// version grammar, which makes the encoding reversible.
+fn encode_version(version: &str) -> String {
+    let mut out = String::with_capacity(version.len());
+    for ch in version.chars() {
+        if ch.is_ascii_uppercase() {
+            out.push('_');
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Inverse of [`encode_version`]; `None` for a file name it never produces.
+fn decode_version(file_name: &str) -> Option<String> {
+    let mut out = String::with_capacity(file_name.len());
+    let mut chars = file_name.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '_' {
+            out.push(
+                chars
+                    .next()
+                    .filter(char::is_ascii_lowercase)?
+                    .to_ascii_uppercase(),
+            );
+        } else {
+            out.push(ch);
+        }
+    }
+    is_valid_index_version(&out).then_some(out)
 }
 
 impl PackStore {
@@ -234,6 +267,23 @@ impl PackStore {
         )
     }
 
+    /// Where `header` is filed in the name index, or `None` when its
+    /// coordinate or version cannot be a path segment there. The one check
+    /// both [`Self::index`] and [`Self::release`] use, so release never
+    /// touches a path index would not have written.
+    fn index_entry_path(&self, header: &PackHeader) -> Option<PathBuf> {
+        let (namespace, name) = header.coordinate.split_once('/')?;
+        (is_valid_pack_name(namespace)
+            && is_valid_pack_name(name)
+            && is_valid_index_version(&header.version))
+        .then(|| {
+            self.by_name_root()
+                .join(namespace)
+                .join(name)
+                .join(encode_version(&header.version))
+        })
+    }
+
     /// Records `header` in the name index, replacing any prior entry for the
     /// same namespace/name/version. Called from [`Self::import_accepting`],
     /// after the archive itself is persisted, and from
@@ -246,34 +296,25 @@ impl PackStore {
     /// logged and left out of the index: the archive is still stored under
     /// its digest either way, so only the by-name lookup misses it.
     pub(crate) fn index(&self, header: &PackHeader) -> Result<()> {
-        let Some((namespace, name)) = header.coordinate.split_once('/') else {
-            tracing::warn!(
-                coordinate = %header.coordinate,
-                "pack coordinate is not namespace/name; not indexing it by name"
-            );
-            return Ok(());
-        };
-        if !is_valid_pack_name(namespace) || !is_valid_pack_name(name) {
-            tracing::warn!(
-                coordinate = %header.coordinate,
-                "pack coordinate is not snake_case; not indexing it by name"
-            );
-            return Ok(());
-        }
-        if !is_valid_index_version(&header.version) {
+        let Some(target) = self.index_entry_path(header) else {
             tracing::warn!(
                 coordinate = %header.coordinate,
                 version = %header.version,
-                "pack version cannot be indexed by name"
+                "pack coordinate or version cannot be indexed by name; not indexing it"
             );
             return Ok(());
+        };
+        if std::fs::read_to_string(&target).is_ok_and(|recorded| recorded.trim() == header.digest) {
+            return Ok(());
         }
-        let dir = self.by_name_root().join(namespace).join(name);
-        std::fs::create_dir_all(&dir)
+        let dir = target
+            .parent()
+            .context("a name index entry has no directory")?;
+        std::fs::create_dir_all(dir)
             .with_context(|| format!("creating the pack name index at {}", dir.display()))?;
         let mut staged = tempfile::Builder::new()
             .prefix(".staging-")
-            .tempfile_in(&dir)
+            .tempfile_in(dir)
             .with_context(|| format!("staging a pack name index entry in {}", dir.display()))?;
         staged
             .write_all(header.digest.as_bytes())
@@ -282,7 +323,6 @@ impl PackStore {
             .as_file()
             .sync_all()
             .context("syncing a pack name index entry")?;
-        let target = dir.join(&header.version);
         staged
             .persist(&target)
             .map_err(|error| error.error)
@@ -306,12 +346,9 @@ impl PackStore {
         let mut versions = Vec::new();
         for entry in entries {
             let entry = entry.with_context(|| format!("reading {}", dir.display()))?;
-            let Some(version) = entry.file_name().to_str().map(str::to_owned) else {
-                continue; // never written by this store
+            let Some(version) = entry.file_name().to_str().and_then(decode_version) else {
+                continue; // never written by this store, or an in-flight write
             };
-            if version.starts_with(".staging-") {
-                continue; // an in-flight write
-            }
             let digest = match std::fs::read_to_string(entry.path()) {
                 Ok(digest) => digest.trim().to_owned(),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue, // raced with a release
@@ -349,13 +386,18 @@ impl PackStore {
         name: &str,
         version: Option<&str>,
     ) -> Result<Option<StoredName>> {
+        if !is_valid_pack_name(namespace) || !is_valid_pack_name(name) {
+            // `Self::index` never files such a coordinate, so it can never hit.
+            return Ok(None);
+        }
         let dir = self.by_name_root().join(namespace).join(name);
         if let Some(version) = version {
             return self.lookup_exact_version(&dir, version);
         }
-        let mut versions = self.read_indexed_versions(&dir)?;
-        versions.sort_by(|a, b| VersionKey::parse(&a.version).cmp(&VersionKey::parse(&b.version)));
-        Ok(versions.pop())
+        Ok(self
+            .read_indexed_versions(&dir)?
+            .into_iter()
+            .max_by_key(|stored| VersionKey::parse(&stored.version)))
     }
 
     /// [`Self::lookup`] for one named version: the version is already the
@@ -367,7 +409,7 @@ impl PackStore {
             // exact lookup for it can never hit.
             return Ok(None);
         }
-        let path = dir.join(version);
+        let path = dir.join(encode_version(version));
         let digest = match std::fs::read_to_string(&path) {
             Ok(digest) => digest.trim().to_owned(),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -426,8 +468,8 @@ impl PackStore {
                 if versions.is_empty() {
                     continue;
                 }
-                versions.sort_by(|a, b| {
-                    VersionKey::parse(&b.version).cmp(&VersionKey::parse(&a.version))
+                versions.sort_by_cached_key(|stored| {
+                    std::cmp::Reverse(VersionKey::parse(&stored.version))
                 });
                 names.push((format!("{namespace}/{name}"), versions));
             }
@@ -436,59 +478,56 @@ impl PackStore {
         Ok(names)
     }
 
-    /// The `namespace, name, version` the digest about to be released was
-    /// filed under, read cheaply from what release is about to delete rather
-    /// than by scanning the whole index: the unpacked header if this digest
-    /// was ever opened, otherwise the stored archive's own first entry
-    /// ([`peek_header`], which reads only that far). `None` when neither is
-    /// present, meaning the digest is already gone from the content-addressed
-    /// store (a prior release, or a name-index entry left over from before
-    /// this pack was ever stored under it); [`Self::release`] falls back to
-    /// [`Self::remove_name_entries_for_digest`] in that case.
-    ///
-    /// One header names exactly one entry: `manifest.json`, which carries
-    /// the namespace, name and version, is itself part of what the pack
-    /// digest is computed over (see [`crate::pack_archive::read_pack`]), so
-    /// two different coordinates or versions can never share a digest.
-    fn indexed_coordinate_and_version(
-        &self,
-        archive: &Path,
-        unpacked: &Path,
-    ) -> Result<Option<(String, String, String)>> {
-        let header = if let Ok(bytes) = std::fs::read(unpacked.join(UNPACKED_HEADER)) {
-            serde_json::from_slice(&bytes).context("the unpacked pack's header is not valid")?
-        } else {
-            match std::fs::File::open(archive) {
-                Ok(file) => peek_header(io::BufReader::new(file), Bounds::default())
-                    .with_context(|| format!("reading the header of {}", archive.display()))?,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => {
-                    return Err(error).with_context(|| format!("opening {}", archive.display()))
+    /// The header of the pack about to be released, read cheaply from what
+    /// release is about to delete rather than by scanning the index: the
+    /// unpacked header if this digest was ever opened, otherwise the stored
+    /// archive's own first entry ([`peek_header`], which reads only that far).
+    /// `None` when neither is present or readable (a prior release, or a
+    /// damaged pack); [`Self::release`] then falls back to
+    /// [`Self::remove_name_entries_for_digest`]. An unreadable header is
+    /// logged, never an error: a damaged pack must stay removable.
+    fn stored_header(&self, archive: &Path, unpacked: &Path) -> Option<PackHeader> {
+        let header_path = unpacked.join(UNPACKED_HEADER);
+        if let Ok(bytes) = std::fs::read(&header_path) {
+            match serde_json::from_slice(&bytes) {
+                Ok(header) => return Some(header),
+                Err(error) => tracing::warn!(
+                    path = %header_path.display(),
+                    %error,
+                    "the unpacked pack header is not valid; scanning the name index instead"
+                ),
+            }
+        }
+        let file = match std::fs::File::open(archive) {
+            Ok(file) => file,
+            Err(error) => {
+                if error.kind() != io::ErrorKind::NotFound {
+                    tracing::warn!(
+                        path = %archive.display(),
+                        %error,
+                        "cannot open the stored pack; scanning the name index instead"
+                    );
                 }
+                return None;
             }
         };
-        let Some((namespace, name)) = header.coordinate.split_once('/') else {
-            return Ok(None);
-        };
-        Ok(Some((
-            namespace.to_owned(),
-            name.to_owned(),
-            header.version,
-        )))
+        match peek_header(io::BufReader::new(file), Bounds::default()) {
+            Ok(header) => Some(header),
+            Err(error) => {
+                tracing::warn!(
+                    path = %archive.display(),
+                    %error,
+                    "cannot read the stored pack header; scanning the name index instead"
+                );
+                None
+            }
+        }
     }
 
-    /// Removes `by-name/{namespace}/{name}/{version}`, only if it currently
-    /// records `digest`: the one entry [`Self::indexed_coordinate_and_version`]
-    /// can name directly.
-    fn remove_indexed_entry(
-        &self,
-        namespace: &str,
-        name: &str,
-        version: &str,
-        digest: &str,
-    ) -> Result<()> {
-        let path = self.by_name_root().join(namespace).join(name).join(version);
-        let recorded = match std::fs::read_to_string(&path) {
+    /// Removes the index entry file at `path`, only if it currently records
+    /// `digest`.
+    fn remove_entry_if_records(path: &Path, digest: &str) -> Result<()> {
+        let recorded = match std::fs::read_to_string(path) {
             Ok(recorded) => recorded,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
@@ -496,7 +535,7 @@ impl PackStore {
         if recorded.trim() != digest {
             return Ok(());
         }
-        match std::fs::remove_file(&path) {
+        match std::fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(error) => Err(error).with_context(|| format!("removing {}", path.display())),
@@ -538,25 +577,7 @@ impl PackStore {
                     let path = version_entry
                         .with_context(|| format!("reading {}", name_dir.display()))?
                         .path();
-                    let recorded = match std::fs::read_to_string(&path) {
-                        Ok(recorded) => recorded,
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-                        Err(error) => {
-                            return Err(error)
-                                .with_context(|| format!("reading {}", path.display()))
-                        }
-                    };
-                    if recorded.trim() != digest {
-                        continue;
-                    }
-                    match std::fs::remove_file(&path) {
-                        Ok(()) => {}
-                        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                        Err(error) => {
-                            return Err(error)
-                                .with_context(|| format!("removing {}", path.display()))
-                        }
-                    }
+                    Self::remove_entry_if_records(&path, digest)?;
                 }
             }
         }
@@ -634,7 +655,7 @@ impl PackStore {
         // Read before deleting: once the archive and its unpacked copy are
         // both gone, there is no cheap way left to name the one index entry
         // this digest was filed under.
-        let coordinate_and_version = self.indexed_coordinate_and_version(&archive, &unpacked)?;
+        let header = self.stored_header(&archive, &unpacked);
         let mut released = false;
         match std::fs::remove_file(&archive) {
             Ok(()) => released = true,
@@ -650,9 +671,12 @@ impl PackStore {
                 return Err(error).with_context(|| format!("removing {}", unpacked.display()))
             }
         }
-        match coordinate_and_version {
-            Some((namespace, name, version)) => {
-                self.remove_indexed_entry(&namespace, &name, &version, digest)?
+        match header {
+            // A header index() never filed has no entry to remove.
+            Some(header) => {
+                if let Some(path) = self.index_entry_path(&header) {
+                    Self::remove_entry_if_records(&path, digest)?;
+                }
             }
             None => self.remove_name_entries_for_digest(digest)?,
         }

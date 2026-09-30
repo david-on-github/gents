@@ -40,7 +40,7 @@ pub fn parse_pack_spec(spec: &str) -> Result<PackSpec<'_>> {
             anyhow::ensure!(!version.is_empty(), "{spec:?} names no version after @");
             anyhow::ensure!(
                 is_valid_index_version(version),
-                "{spec:?} names an invalid version; a version is lowercase ASCII letters, \
+                "{spec:?} names an invalid version; a version is ASCII letters, \
                  digits, '.', '+' or '-', and never a bare '.' or '..'"
             );
             (coordinate, Some(version))
@@ -110,13 +110,12 @@ pub async fn resolve_named(spec: &str, options: &ResolveOptions<'_>) -> Result<R
 
     if let Some(home) = options.home {
         let store = PackStore::new(home);
-        let installed = options.installed.iter().find(|record| {
+        for installed in options.installed.iter().filter(|record| {
             record.coordinate == coordinate
                 && parsed
                     .version
                     .is_none_or(|version| record.version == version)
-        });
-        if let Some(installed) = installed {
+        }) {
             if store.contains(&installed.digest)? {
                 return Ok(ResolvedNamedPack {
                     archive: store.open(&installed.digest)?,
@@ -249,6 +248,14 @@ mod tests {
     }
 
     #[test]
+    fn parse_pack_spec_accepts_an_uppercase_semver_pin() {
+        assert_eq!(
+            parse_pack_spec("demo@1.0.0-RC1").unwrap().version,
+            Some("1.0.0-RC1")
+        );
+    }
+
+    #[test]
     fn parse_pack_spec_refuses_malformed_or_non_snake_case_specs() {
         for spec in [
             "",
@@ -263,7 +270,6 @@ mod tests {
             "demo@1@2",
             "demo@a b",
             "demo@../x",
-            "demo@1.0.0-RC1",
         ] {
             assert!(parse_pack_spec(spec).is_err(), "{spec:?} should be refused");
         }

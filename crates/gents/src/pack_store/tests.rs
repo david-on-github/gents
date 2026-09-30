@@ -306,21 +306,94 @@ fn releasing_a_digest_whose_archive_is_already_gone_still_cleans_its_index_entry
 }
 
 #[test]
-fn an_uppercase_version_is_stored_but_not_indexed() {
+fn versions_differing_only_in_case_index_resolve_and_stay_distinct() {
     let home = tempfile::tempdir().unwrap();
     let store = PackStore::new(home.path());
-    let (bytes, header) = test_pack_named("name_index_i", "1.0.0-RC1");
-    store.import(bytes.as_slice(), None).unwrap();
+    let (upper_bytes, upper) = test_pack_named("name_index_i", "1.0.0-RC1");
+    let (lower_bytes, lower) = test_pack_named("name_index_i", "1.0.0-rc1");
+    store.import(upper_bytes.as_slice(), None).unwrap();
+    store.import(lower_bytes.as_slice(), None).unwrap();
+    assert_ne!(upper.digest, lower.digest);
 
+    for (version, header) in [("1.0.0-RC1", &upper), ("1.0.0-rc1", &lower)] {
+        assert_eq!(
+            store
+                .lookup("gents", "name_index_i", Some(version))
+                .unwrap()
+                .map(|entry| (entry.version, entry.digest)),
+            Some((version.to_owned(), header.digest.clone()))
+        );
+    }
+    let names = store.names().unwrap();
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0].1.len(), 2, "two distinct entries");
+}
+
+#[test]
+fn releasing_a_pack_with_an_unindexable_version_leaves_other_files_alone() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (bytes, header) = test_pack_named("escape", "../escape");
+    store.import(bytes.as_slice(), None).unwrap();
+    let decoy = store.by_name_root().join("gents/escape");
+    std::fs::create_dir_all(decoy.parent().unwrap()).unwrap();
+    std::fs::write(&decoy, &header.digest).unwrap();
+
+    assert!(store.release(&header.digest).unwrap());
     assert!(
-        store.contains(&header.digest).unwrap(),
-        "still content-addressed"
+        decoy.is_file(),
+        "release never follows an unindexed version"
     );
+}
+
+#[test]
+fn a_damaged_pack_can_still_be_released_with_its_index_entry() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (bytes, header) = test_pack_named("name_index_j", "1.0.0");
+    store.import(bytes.as_slice(), None).unwrap();
+    let entry = store.by_name_root().join("gents/name_index_j/1.0.0");
+    assert!(entry.is_file());
+    let archive = store.path(&header.digest).unwrap();
+    std::fs::write(&archive, b"not a pack").unwrap();
+
+    assert!(store.release(&header.digest).unwrap());
+    assert!(!archive.exists());
+    assert!(!entry.exists(), "the index entry went with the archive");
+}
+
+#[test]
+fn indexing_an_unchanged_entry_does_not_rewrite_it() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    let (bytes, header) = test_pack_named("name_index_k", "1.0.0");
+    store.import(bytes.as_slice(), None).unwrap();
+    let entry = store.by_name_root().join("gents/name_index_k/1.0.0");
+    let before = std::fs::metadata(&entry).unwrap().modified().unwrap();
+    let inode = |path: &Path| {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(path).unwrap())
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+            0u64
+        }
+    };
+    let ino = inode(&entry);
+    store.index(&header).unwrap();
     assert_eq!(
-        store.lookup("gents", "name_index_i", None).unwrap(),
-        None,
-        "uppercase would collide on a case-insensitive filesystem (macOS APFS \
-         by default), so it is refused rather than indexed"
+        std::fs::metadata(&entry).unwrap().modified().unwrap(),
+        before
     );
-    assert!(store.names().unwrap().is_empty());
+    assert_eq!(inode(&entry), ino);
+}
+
+#[test]
+fn lookup_refuses_a_coordinate_that_is_not_a_pack_name() {
+    let home = tempfile::tempdir().unwrap();
+    let store = PackStore::new(home.path());
+    assert_eq!(store.lookup("gents", "/etc", None).unwrap(), None);
+    assert_eq!(store.lookup("..", "x", None).unwrap(), None);
 }
