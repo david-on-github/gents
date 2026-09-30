@@ -124,7 +124,7 @@ fn l2_checks_follow_selected_context_and_tools_and_reject_a_wrong_grant() {
         serde_json::to_value(serde_json::from_value::<gents::document_config::Tools>(serde_json::json!({
             "agent_did": "did:key:eval-owner",
             "tools_id": "engineer-tools",
-            "host": subject["tools"][0]["host"],
+            "host": {"bash": {"mode":"Off"}, "root":"/eval/workspace"},
             "self_config": subject["tools"][0]["self_config"],
         })).unwrap()).unwrap(),
     ]});

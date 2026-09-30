@@ -114,7 +114,7 @@
                     },
                     {
                       "field": "host.root",
-                      "equals": null
+                      "matches": ".+"
                     },
                     {
                       "field": "self_config.enable_self_config",
@@ -330,7 +330,7 @@
                     },
                     {
                       "field": "host.root",
-                      "equals": null
+                      "matches": ".+"
                     },
                     {
                       "field": "self_config.enable_self_config",

@@ -57,7 +57,7 @@
       "coverage": [
         "parallel and serial",
         "template defaults",
-        "session routing",
+        "session routing configuration",
         "outcome settings"
       ],
       "title": "Document automation"
