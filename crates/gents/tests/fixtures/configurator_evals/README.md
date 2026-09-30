@@ -15,6 +15,9 @@ Current suites:
   Run `make live-host-maintenance-eval`; first live acceptance is still pending.
 - `progressive-configurator`: supplemental onboarding, Builder readiness,
   skill import/use and document automation. Run `make live-configurator-eval`.
+- `ladder/`: draft `gents eval` definition packs, one per configurator component
+  (inference, agent, datastore, automation, agents tools, graph), graded against
+  the `ladder/engineer_subject` pack. See each level's README for its run command.
 
 The host-steward suite includes isolated accepted/rejected improvement candidates;
 one live trial passed all ten stages. Approval-driven maintenance is registered

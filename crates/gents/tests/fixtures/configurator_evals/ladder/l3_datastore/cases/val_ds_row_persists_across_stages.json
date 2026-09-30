@@ -1,0 +1,182 @@
+{
+  "case_id": "val-ds-row-persists-across-stages",
+  "split": "validation",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Set up document automation for my pipeline on this node. Register this application schema:\n\ntype EvalAutomationInput {\n correlation: String\n message: String\n}\n\ntype EvalAutomationOutput {\n correlation: String\n result: String\n}\n\nThen create a DatastoreToolSurface named \"SteadyDocs\" for the EvalAutomationOutput collection with a create entry and a query entry \u2014 scoped, no unscoped defra_query \u2014 and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Don't touch anything else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "surfaces",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "SteadyDocs"
+              },
+              {
+                "field": "entries",
+                "contains": "EvalAutomationOutput"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "SteadyDocs"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "display_name",
+            "entries",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "exercise",
+      "prompt": "Using the datastore tool you configured, create one EvalAutomationOutput document with correlation \"val-foxtrot-007\" and result \"once\", then query EvalAutomationOutput to confirm it. Change nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "outputs",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "val-foxtrot-007"
+              },
+              {
+                "field": "result",
+                "equals": "once"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "val-foxtrot-007"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify_persistence",
+      "prompt": "Report how many EvalAutomationOutput documents with correlation \"val-foxtrot-007\" exist right now. Read-only, change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs_after",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "outputs_after",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "val-foxtrot-007"
+              },
+              {
+                "field": "result",
+                "equals": "once"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs_after",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "val-foxtrot-007"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        }
+      ]
+    }
+  ]
+}

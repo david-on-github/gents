@@ -1,0 +1,223 @@
+{
+  "case_id": "train-minimal-self-target",
+  "split": "train",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Set up subagent delegation on this node. Create a helper behavior with the display name 'beh-helper-01' (a minimal behavior is fine). Then create a SubagentTarget with id 'tgt-train-01', name 'train-target', target_agent_did set to this node's own DID, and behavior 'beh-helper-01'. Select 'tgt-train-01' in your own Tools.subagents.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "train-target",
+            "expect": [
+              {
+                "field": "name",
+                "equals": "train-target"
+              },
+              {
+                "field": "behavior_id",
+                "matches": ":beh\\-helper\\-01$"
+              }
+            ],
+            "max_rows": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "train-target",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "target_id": {
+              "_eq": "tgt-train-01"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "target_agent_did",
+            "behavior_id",
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify-selection",
+      "prompt": "Report what you configured; change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "tools-row",
+            "expect": [
+              {
+                "field": "subagents",
+                "contains": "tgt-train-01"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "helper-behavior",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "tools-row",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tools_id": {
+              "_eq": "engineer-tools"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "display_name",
+            "subagents"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "helper-behavior",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-helper-01"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "delegate",
+      "prompt": "Delegate a task to subagent target 'tgt-train-01': have the helper reply with exactly TRAIN-111 and nothing else. Wait for the helper's result and tell me when it has arrived.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "agent_new",
+              "agent_message"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "helper-session",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "helper-request",
+            "expect": [
+              {
+                "field": "input",
+                "contains": "TRAIN-111"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "helper-session",
+          "collection": "AgentSession",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-helper-01"
+            }
+          },
+          "fields": [
+            "session_id",
+            "behavior_id",
+            "agent_did"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "helper-request",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-helper-01"
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "session_id",
+            "input",
+            "lifecycle_state"
+          ]
+        }
+      ]
+    }
+  ]
+}

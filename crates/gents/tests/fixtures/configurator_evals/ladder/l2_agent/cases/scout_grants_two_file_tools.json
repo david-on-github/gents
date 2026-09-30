@@ -1,0 +1,255 @@
+{
+  "case_id": "scout-grants-two-file-tools",
+  "split": "train",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Create a new behavior on this node with the display name \"scout\". It gets its own AgentContext whose system prompt is exactly: You are Scout, a read-only file assistant. Find and report; never modify files. It gets its own Tools document granting exactly the file tools read_file and list_files, with bash off and datastore off. Do not change your own behavior, context, or tools. Apply it and confirm.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "scout_behavior",
+            "max_rows": 1,
+            "expect": [
+              {
+                "field": "behavior_id",
+                "matches": ":scout$"
+              },
+              {
+                "field": "display_name",
+                "matches": "(?i)^scout$"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              },
+              {
+                "field": "context_id",
+                "matches": ".+"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "scout_behavior",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:scout"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "readback_tools",
+      "prompt": "Read back the Tools document you created for scout and report it. Change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "scout_tools",
+            "max_rows": 1,
+            "expect": [
+              {
+                "field": "host.files.mode",
+                "matches": "ReadOnly|ReadWrite"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "scout_tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tools_id": {
+              "_like": "tools-%"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "display_name",
+            "host",
+            "datastore"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "exercise",
+      "prompt": "Now start a working session that runs behavior \"scout\" and have it list the files in the current workspace root. Change nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "scout_sessions",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "scout_requests",
+            "min_rows": 1,
+            "expect": [
+              {
+                "field": "behavior_id",
+                "matches": ":scout$"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "scout_sessions",
+          "collection": "AgentSession",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:scout"
+            }
+          },
+          "fields": [
+            "session_id",
+            "behavior_id",
+            "created_at"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "scout_requests",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:scout"
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "session_id"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify_no_side_effects",
+      "prompt": "Read back the configuration with the config tool and confirm: exactly one Tools document on this node grants read_file, and your own behavior, context, and Tools document are unchanged from before this task. Change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "tools_with_readfile",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 3
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "contexts_all",
+            "min_rows": 2,
+            "max_rows": 2,
+            "expect": [
+              {
+                "field": "context_id",
+                "matches": ".+"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "tools_with_readfile",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tools_id": {
+              "_like": "tools-%"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts_all",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "system_prompt",
+            "tools_id"
+          ]
+        }
+      ]
+    }
+  ]
+}

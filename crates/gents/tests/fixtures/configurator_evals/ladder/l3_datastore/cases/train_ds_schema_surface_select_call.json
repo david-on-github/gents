@@ -1,0 +1,171 @@
+{
+  "case_id": "train-ds-schema-surface-select-call",
+  "split": "train",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Set up document automation for my pipeline on this node. Register this application schema:\n\ntype EvalAutomationInput {\n correlation: String\n message: String\n}\n\ntype EvalAutomationOutput {\n correlation: String\n result: String\n}\n\nThen create a DatastoreToolSurface named \"EvalDocs\" for the EvalAutomationOutput collection with a create entry and a query entry \u2014 scoped to that collection, no unscoped defra_query \u2014 and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Don't touch anything else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "surfaces",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "EvalDocs"
+              },
+              {
+                "field": "entries",
+                "contains": "EvalAutomationOutput"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "EvalDocs"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "display_name",
+            "entries",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "exercise",
+      "prompt": "Now prove the setup works end to end: using the datastore tool you just wired up, create one EvalAutomationOutput document with correlation \"train-alpha-001\" and result \"ok\", then query EvalAutomationOutput to confirm the row is there. Change nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "outputs",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "train-alpha-001"
+              },
+              {
+                "field": "result",
+                "equals": "ok"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "train-alpha-001"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify_selection",
+      "prompt": "Report what you configured: read the current Tools selection and tell me which datastore surface ids are set. Change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "tools",
+            "expect": [
+              {
+                "field": "datastore",
+                "matches": "\"datastore_tool_surface_ids\":\\[\\s*\"[^\"]+\""
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tools_id": {
+              "_eq": "engineer-tools"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "datastore"
+          ]
+        }
+      ]
+    }
+  ]
+}

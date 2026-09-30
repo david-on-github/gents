@@ -1,0 +1,223 @@
+{
+  "case_id": "val-caller-behavior-and-delegate",
+  "split": "validation",
+  "reducer": "weighted_mean",
+  "stages": [
+    {
+      "stage_id": "helper-and-target",
+      "prompt": "Wire up subagent delegation on this node. Create a helper behavior with the display name 'beh-helper-02' (minimal is fine). Then create a SubagentTarget with id 'tgt-fixer-01', name 'fixer-target', target_agent_did set to this node's own DID, and behavior 'beh-helper-02'. Select 'tgt-fixer-01' in your own Tools.subagents.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "fixer-target",
+            "expect": [
+              {
+                "field": "name",
+                "equals": "fixer-target"
+              },
+              {
+                "field": "behavior_id",
+                "matches": ":beh\\-helper\\-02$"
+              }
+            ],
+            "max_rows": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "fixer-target",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "target_id": {
+              "_eq": "tgt-fixer-01"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "target_agent_did",
+            "behavior_id",
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "caller-selects-target",
+      "prompt": "Create a caller behavior with the display name 'beh-caller-01' (minimal is fine). Select 'tgt-fixer-01' in its Tools.subagents as well, and keep 'tgt-fixer-01' selected in your own Tools too.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "caller-behavior",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "tools-rows",
+            "expect": [
+              {
+                "field": "subagents",
+                "contains": "tgt-fixer-01"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "caller-behavior",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-caller-01"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "enabled"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools-rows",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tools_id": {
+              "_like": "tools-%"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "display_name",
+            "subagents"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "delegate",
+      "prompt": "Delegate a task to subagent target 'tgt-fixer-01': have the helper reply with exactly PONG-7391 and nothing else. Wait for the helper's result and tell me when it has arrived.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "agent_new",
+              "agent_message"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "helper-session",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "helper-request",
+            "expect": [
+              {
+                "field": "input",
+                "contains": "PONG-7391"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "helper-session",
+          "collection": "AgentSession",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-helper-02"
+            }
+          },
+          "fields": [
+            "session_id",
+            "behavior_id",
+            "agent_did"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "helper-request",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-helper-02"
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "session_id",
+            "input",
+            "lifecycle_state"
+          ]
+        }
+      ]
+    }
+  ]
+}

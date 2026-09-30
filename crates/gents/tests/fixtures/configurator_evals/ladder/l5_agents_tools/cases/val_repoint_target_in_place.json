@@ -1,0 +1,230 @@
+{
+  "case_id": "val-repoint-target-in-place",
+  "split": "validation",
+  "reducer": "weighted_mean",
+  "stages": [
+    {
+      "stage_id": "initial-config",
+      "prompt": "Create a SubagentTarget with id 'tgt-fix-01', name 'fix-target', target_agent_did set to this node's own DID, and behavior set to the existing engineer behavior. Select 'tgt-fix-01' in your own Tools.subagents.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "fix-target",
+            "expect": [
+              {
+                "field": "name",
+                "equals": "fix-target"
+              },
+              {
+                "field": "behavior_id",
+                "matches": "."
+              }
+            ],
+            "max_rows": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "fix-target",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "target_id": {
+              "_eq": "tgt-fix-01"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "target_agent_did",
+            "behavior_id",
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "repoint",
+      "prompt": "Change of plan: create a helper behavior with the display name 'beh-repoint-01' (minimal is fine). Then update the existing SubagentTarget 'tgt-fix-01' in place so its behavior is 'beh-repoint-01' \u2014 same target id, no second target document \u2014 and keep it selected in your own Tools.subagents.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "fix-target-rows",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "repointed-target",
+            "expect": [
+              {
+                "field": "behavior_id",
+                "matches": ":beh\\-repoint\\-01$"
+              }
+            ],
+            "max_rows": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "fix-target-rows",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "name": {
+              "_eq": "fix-target"
+            }
+          },
+          "fields": [
+            "target_id",
+            "name",
+            "behavior_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "repointed-target",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "target_id": {
+              "_eq": "tgt-fix-01"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "target_agent_did",
+            "behavior_id",
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "delegate-after-repoint",
+      "prompt": "Delegate a task to subagent target 'tgt-fix-01': have the helper reply with exactly REP-555 and nothing else. Wait for the result and tell me when it has arrived.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "agent_new",
+              "agent_message"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "repointed-session",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "repointed-request",
+            "expect": [
+              {
+                "field": "input",
+                "contains": "REP-555"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "repointed-session",
+          "collection": "AgentSession",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-repoint-01"
+            }
+          },
+          "fields": [
+            "session_id",
+            "behavior_id",
+            "agent_did"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "repointed-request",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:beh-repoint-01"
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "session_id",
+            "input",
+            "lifecycle_state"
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,118 @@
+{
+  "case_id": "val-self-target-existing-behavior",
+  "split": "validation",
+  "reducer": "weighted_mean",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "I want a subagent that runs this same engineer behavior. Create a SubagentTarget with id 'tgt-self-01', name 'self-target', target_agent_did set to this node's own DID, and behavior set to the existing engineer behavior \u2014 look it up, don't create a new behavior. Select 'tgt-self-01' in your own Tools.subagents.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "self-target",
+            "expect": [
+              {
+                "field": "name",
+                "equals": "self-target"
+              },
+              {
+                "field": "behavior_id",
+                "matches": "."
+              }
+            ],
+            "max_rows": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "self-target",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "target_id": {
+              "_eq": "tgt-self-01"
+            },
+            "target_agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "target_agent_did",
+            "behavior_id",
+            "name"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "delegate",
+      "prompt": "Delegate a task to subagent target 'tgt-self-01': have it reply with exactly ECHO-2468 and nothing else. Wait for the result and tell me when it has arrived.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "agent_new",
+              "agent_message"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "trial-sessions",
+            "min": 2
+          },
+          "tier": "acceptance",
+          "weight": 2
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "trial-sessions",
+          "collection": "AgentSession",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "session_id",
+            "behavior_id",
+            "agent_did"
+          ]
+        }
+      ]
+    }
+  ]
+}

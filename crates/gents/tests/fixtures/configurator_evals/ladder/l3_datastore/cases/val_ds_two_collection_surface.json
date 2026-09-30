@@ -1,0 +1,182 @@
+{
+  "case_id": "val-ds-two-collection-surface",
+  "split": "validation",
+  "reducer": "all",
+  "fixtures": {
+    "schemas": [
+      "type EvalAutomationInput {\n  correlation: String\n  message: String\n}",
+      "type EvalAutomationOutput {\n  correlation: String\n  result: String\n}"
+    ]
+  },
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "The EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"AutomationSurface\" scoped to both the EvalAutomationInput and EvalAutomationOutput collections, with a create entry and a query entry \u2014 no unscoped defra_query \u2014 and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "surfaces",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "AutomationSurface"
+              },
+              {
+                "field": "entries",
+                "contains": "EvalAutomationInput"
+              },
+              {
+                "field": "entries",
+                "contains": "EvalAutomationOutput"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "AutomationSurface"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "display_name",
+            "entries",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "exercise",
+      "prompt": "Using the datastore tool you configured, create one EvalAutomationInput document with correlation \"val-charlie-004\" and message \"kickoff\", and one EvalAutomationOutput document with correlation \"val-charlie-004\" and result \"done\". Change nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "outputs",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "val-charlie-004"
+              },
+              {
+                "field": "result",
+                "equals": "done"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "val-charlie-004"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "confirm_input_row",
+      "prompt": "Report what is stored under correlation \"val-charlie-004\" in EvalAutomationInput \u2014 read-only, change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "inputs",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "val-charlie-004"
+              },
+              {
+                "field": "message",
+                "equals": "kickoff"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "inputs",
+          "collection": "EvalAutomationInput",
+          "filter": {
+            "correlation": {
+              "_eq": "val-charlie-004"
+            }
+          },
+          "fields": [
+            "correlation",
+            "message"
+          ]
+        }
+      ]
+    }
+  ]
+}

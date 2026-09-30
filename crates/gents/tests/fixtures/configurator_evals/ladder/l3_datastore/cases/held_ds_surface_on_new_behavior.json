@@ -1,0 +1,201 @@
+{
+  "case_id": "held-ds-surface-on-new-behavior",
+  "split": "held_out",
+  "reducer": "all",
+  "fixtures": {
+    "schemas": [
+      "type EvalAutomationInput {\n  correlation: String\n  message: String\n}",
+      "type EvalAutomationOutput {\n  correlation: String\n  result: String\n}"
+    ]
+  },
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "The EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"HeldOutWriter\" for the EvalAutomationOutput collection with only a create entry (no query entry, no unscoped defra_query). Then create a new behavior named \"held-out-writer\" whose Tools select that surface under datastore.datastore_tool_surface_ids, and also select the same surface on The Engineer's own Tools. Change nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "surfaces",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "HeldOutWriter"
+              },
+              {
+                "field": "entries",
+                "contains": "EvalAutomationOutput"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "HeldOutWriter"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "display_name",
+            "entries",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "exercise",
+      "prompt": "Using the datastore tool now available to The Engineer, create one EvalAutomationOutput document with correlation \"held-zeta-008\" and result \"verified\", then confirm it with a query. Change nothing else.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "outputs",
+            "expect": [
+              {
+                "field": "correlation",
+                "equals": "held-zeta-008"
+              },
+              {
+                "field": "result",
+                "equals": "verified"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "held-zeta-008"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify_behavior_and_persistence",
+      "prompt": "Read-only check: confirm the behavior named \"held-out-writer\" exists on this node and report how many EvalAutomationOutput documents with correlation \"held-zeta-008\" exist. Change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "outputs_after",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "behaviors",
+            "expect": [
+              {
+                "field": "display_name",
+                "equals": "held-out-writer"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "outputs_after",
+          "collection": "EvalAutomationOutput",
+          "filter": {
+            "correlation": {
+              "_eq": "held-zeta-008"
+            }
+          },
+          "fields": [
+            "correlation",
+            "result"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "held-out-writer"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name"
+          ]
+        }
+      ]
+    }
+  ]
+}

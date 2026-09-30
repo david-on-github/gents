@@ -1,0 +1,171 @@
+{
+  "case_id": "val-minimal-limits",
+  "split": "validation",
+  "reducer": "all",
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "Keep it minimal: create an execution exec-lean with only max_turns 8 and max_total_tokens 60000 \u2014 don't configure anything else on it. Create a profile profile-lean on my existing backend pointing at exec-lean, and bind engineer to profile-lean.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "profile_bound",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "exec_limits",
+            "expect": [
+              {
+                "field": "max_turns",
+                "equals": 8
+              },
+              {
+                "field": "max_total_tokens",
+                "equals": 60000
+              },
+              {
+                "field": "deadline_duration_secs",
+                "equals": null
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "profile_bound",
+          "collection": "InferenceProfile",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "profile_id": {
+              "_eq": "profile-lean"
+            },
+            "execution_id": {
+              "_eq": "exec-lean"
+            }
+          },
+          "fields": [
+            "profile_id",
+            "execution_id",
+            "backend_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "exec_limits",
+          "collection": "InferenceExecution",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "execution_id": {
+              "_eq": "exec-lean"
+            }
+          },
+          "fields": [
+            "execution_id",
+            "max_turns",
+            "max_total_tokens",
+            "deadline_duration_secs"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "exercise",
+      "prompt": "Report what you configured; change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "limited_requests",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "behavior_bound",
+            "expect": [
+              {
+                "field": "inference_profile_id",
+                "equals": "profile-lean"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "limited_requests",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "engineer"
+            },
+            "max_total_tokens": {
+              "_eq": 60000
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "max_total_tokens"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "behavior_bound",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_eq": "engineer"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "inference_profile_id"
+          ]
+        }
+      ]
+    }
+  ]
+}

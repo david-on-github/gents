@@ -1,0 +1,297 @@
+{
+  "case_id": "default-filter-missing-field",
+  "split": "validation",
+  "reducer": "all",
+  "fixtures": {
+    "schemas": [
+      "type FallbackNote { message: String note: String handoff_id: String }"
+    ]
+  },
+  "stages": [
+    {
+      "stage_id": "configure",
+      "prompt": "On this node, set up document automation for me. A schema for a collection FallbackNote (string fields 'message' and 'note') is already published. Configure the following with the config tool, never bash: an EventSource with display_name 'FallbackNoteWatcher' watching source_collection 'FallbackNote' with event_kind 'created'; a Task with display_name 'FallbackNoteTask' targeting the engineer behavior with prompt_template 'Handle the note: {{ doc.message | default(\"fallback-message-88\") }}' and emit_outcome true; and a Trigger with display_name 'FallbackNoteTrigger' linking that EventSource to that Task with concurrency 'parallel'. Enable all three. Documents for this collection may legitimately omit the 'message' field, so the Task must still render when it is missing. Do not write any document into FallbackNote.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "trigger_config",
+            "expect": [
+              {
+                "field": "task_id",
+                "matches": ".+"
+              },
+              {
+                "field": "source",
+                "matches": ".+"
+              },
+              {
+                "field": "concurrency",
+                "equals": "parallel"
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "eventsource_config",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "trigger_config",
+          "collection": "Trigger",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "FallbackNoteTrigger"
+            }
+          },
+          "fields": [
+            "trigger_id",
+            "task_id",
+            "source",
+            "concurrency",
+            "session_id_template",
+            "enabled"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "eventsource_config",
+          "collection": "EventSource",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "FallbackNoteWatcher"
+            }
+          },
+          "fields": [
+            "event_source_id",
+            "source_collection",
+            "event_kind"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "task_config_readonly",
+      "prompt": "Report what you configured for the FallbackNote automation; change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "task_config",
+            "expect": [
+              {
+                "field": "task_id",
+                "matches": ".+"
+              },
+              {
+                "field": "prompt_template",
+                "contains": "doc.message"
+              },
+              {
+                "field": "prompt_template",
+                "contains": "default("
+              },
+              {
+                "field": "prompt_template",
+                "contains": "fallback-message-88"
+              },
+              {
+                "field": "emit_outcome",
+                "equals": true
+              },
+              {
+                "field": "enabled",
+                "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "task_config",
+          "collection": "Task",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "display_name": {
+              "_eq": "FallbackNoteTask"
+            }
+          },
+          "fields": [
+            "task_id",
+            "prompt_template",
+            "emit_outcome",
+            "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "seed_run",
+      "seed": {
+        "collection": "FallbackNote",
+        "document": {
+          "note": "no-message-here",
+          "handoff_id": "default-filter-missing-field-1"
+        }
+      },
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "trigger_requests",
+            "expect": [
+              {
+                "field": "request_id",
+                "matches": ".+"
+              },
+              {
+                "field": "content",
+                "contains": "fallback-message-88"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "fire_outcomes",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "trigger_requests",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "caused_by_trigger_id": {
+              "_ne": null
+            },
+            "lifecycle_state": {
+              "_eq": "completed"
+            }
+          },
+          "fields": [
+            "request_id",
+            "content",
+            "session_id",
+            "caused_by_trigger_id",
+            "caused_by_source_doc_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "fire_outcomes",
+          "collection": "FireOutcome",
+          "filter": {
+            "owner_did": {
+              "_eq": "$trial"
+            },
+            "source_collection": {
+              "_eq": "FallbackNote"
+            }
+          },
+          "fields": [
+            "fire_key",
+            "request_id",
+            "session_id",
+            "terminal_state",
+            "source_doc_id"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "verify_readonly",
+      "prompt": "Read the AgentRequest records caused by the FallbackNote trigger and report how many reached lifecycle_state completed; change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "completed_requests",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "completed_requests",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "caused_by_trigger_id": {
+              "_ne": null
+            },
+            "lifecycle_state": {
+              "_eq": "completed"
+            }
+          },
+          "fields": [
+            "request_id",
+            "session_id",
+            "caused_by_trigger_id",
+            "caused_by_source_doc_id",
+            "lifecycle_state"
+          ]
+        }
+      ]
+    }
+  ]
+}
