@@ -74,6 +74,8 @@ theorem denied_or_failed_do_not_emit
       simp [hpost] at hterm
   | fail _ hpost =>
       simp [hpost]
+  | interrupt _ hpost =>
+      simp [hpost]
   | deny_claimed _ _ hpost =>
       simp [hpost]
   | deny_running _ _ hpost =>
@@ -95,6 +97,8 @@ theorem denied_keeps_empty_journal
       simp [hpost] at hden
   | fail _ hpost =>
       simp [hpost] at hden
+  | interrupt _ hpost =>
+      simp [hpost] at hden
   | deny_claimed _ hjournal hpost =>
       simp [hpost, hjournal]
   | deny_running _ hjournal hpost =>
@@ -102,11 +106,14 @@ theorem denied_keeps_empty_journal
   | retry _ _ hpost =>
       simp [hpost] at hden
 
+/-- Failure keeps the journal, or marks its executing actions interrupted when
+recovery cut the attempt off; it never drops what an action did. -/
 theorem fail_preserves_journal
     {pre post : CallbackInvocation}
     (h : Transition pre post)
     (hfail : post.state = .failed) :
-    post.journal = pre.journal ∧ post.resultEmitted = false := by
+    (post.journal = pre.journal ∨ post.journal = interruptJournal pre.journal) ∧
+      post.resultEmitted = false := by
   cases h with
   | claim _ hpost =>
       simp [hpost] at hfail
@@ -115,6 +122,8 @@ theorem fail_preserves_journal
   | succeed _ _ hpost =>
       simp [hpost] at hfail
   | fail _ hpost =>
+      simp [hpost]
+  | interrupt _ hpost =>
       simp [hpost]
   | deny_claimed _ _ hpost =>
       simp [hpost] at hfail
@@ -152,6 +161,7 @@ theorem retry_starts_clean {pre post : CallbackInvocation}
   | run hp _ => simp [hpre] at hp
   | succeed hp _ _ => simp [hpre] at hp
   | fail hp _ => simp [hpre] at hp
+  | interrupt hp _ => simp [hpre] at hp
   | deny_claimed hp _ _ => simp [hpre] at hp
   | deny_running hp _ _ => simp [hpre] at hp
   | retry _ _ heq => simp [heq]
@@ -162,6 +172,84 @@ theorem retry_never_repeats_an_effect (inv : CallbackInvocation) (maxAttempts : 
     ∀ e ∈ inv.journal, ActionJournalState.effectful e.state = false := by
   simp [retryAllowed] at h
   exact h.2
+
+/-- An attempt cut off mid-run is never run again, whatever the attempt budget:
+the runtime cannot observe what external side effect it had, and repeating an
+unknown effect is unsafe. -/
+theorem interrupted_attempt_never_retried (inv : CallbackInvocation) (maxAttempts : Nat)
+    (h : ∃ e ∈ inv.journal, e.state = .interrupted) :
+    retryAllowed inv maxAttempts = false := by
+  obtain ⟨e, he, hs⟩ := h
+  cases hr : retryAllowed inv maxAttempts with
+  | false => rfl
+  | true =>
+      have := retry_never_repeats_an_effect inv maxAttempts hr e he
+      simp [hs, ActionJournalState.effectful] at this
+
+/-- A failed invocation with an interrupted action takes no further step: it
+stays failed. -/
+theorem interrupted_invocation_is_final {inv post : CallbackInvocation}
+    (hfailed : inv.state = .failed) (h : ∃ e ∈ inv.journal, e.state = .interrupted) :
+    ¬ Transition inv post := by
+  intro step
+  cases step with
+  | claim hp _ => simp [hfailed] at hp
+  | run hp _ => simp [hfailed] at hp
+  | succeed hp _ _ => simp [hfailed] at hp
+  | fail hp _ => simp [hfailed] at hp
+  | interrupt hp _ => simp [hfailed] at hp
+  | deny_claimed hp _ _ => simp [hfailed] at hp
+  | deny_running hp _ _ => simp [hfailed] at hp
+  | retry m hr _ =>
+      have := interrupted_attempt_never_retried inv m h
+      simp [this] at hr
+
+/-- Recovery of a cut-off attempt is the model's `interrupt` step. -/
+theorem recover_steps_by_interrupt (inv : CallbackInvocation)
+    (hrun : inv.state = .running) (hjournal : inv.journal ≠ []) :
+    Transition inv (recover inv) :=
+  .interrupt hrun (by simp [recover, hrun, hjournal])
+
+/-- Recovery never leaves a cut-off attempt that had started an action where a
+retry could run it again, whatever the attempt budget. -/
+theorem recovered_attempt_never_retried (inv : CallbackInvocation) (maxAttempts : Nat)
+    (hrun : inv.state = .running) (hexec : ∃ e ∈ inv.journal, e.state = .executing) :
+    retryAllowed (recover inv) maxAttempts = false := by
+  obtain ⟨e, he, hs⟩ := hexec
+  have hjournal : inv.journal ≠ [] := by
+    intro hnil
+    simp [hnil] at he
+  apply interrupted_attempt_never_retried
+  refine ⟨{ e with state := .interrupted }, ?_, rfl⟩
+  simp only [recover, hrun, hjournal, ne_eq, not_false_eq_true, and_self, if_true,
+    interruptJournal, List.mem_map]
+  exact ⟨e, he, by simp [hs, ActionJournalState.markInterrupted]⟩
+
+/-- A denial of a running invocation whose actions started is recovery. -/
+theorem deny_started_is_recover (inv : CallbackInvocation)
+    (hjournal : inv.journal ≠ []) : deny inv = recover inv := by
+  simp [deny, hjournal]
+
+/-- A denial of a running invocation is a model step: `deny_running` before any
+action started, `interrupt` after. -/
+theorem deny_steps (inv : CallbackInvocation) (hrun : inv.state = .running) :
+    Transition inv (deny inv) := by
+  by_cases hjournal : inv.journal = []
+  · exact .deny_running hrun hjournal (by simp [deny, hjournal])
+  · rw [deny_started_is_recover inv hjournal]
+    exact recover_steps_by_interrupt inv hrun hjournal
+
+/-- A denial never leaves a started attempt where a retry could run it again,
+so re-enabling a disabled callback cannot repeat an interrupted action. -/
+theorem denied_attempt_never_retried (inv : CallbackInvocation) (maxAttempts : Nat)
+    (hrun : inv.state = .running) (hexec : ∃ e ∈ inv.journal, e.state = .executing) :
+    retryAllowed (deny inv) maxAttempts = false := by
+  have hjournal : inv.journal ≠ [] := by
+    obtain ⟨e, he, _⟩ := hexec
+    intro hnil
+    simp [hnil] at he
+  rw [deny_started_is_recover inv hjournal]
+  exact recovered_attempt_never_retried inv maxAttempts hrun hexec
 
 /-- Retries are bounded by the attempt budget. -/
 theorem retry_is_bounded (inv : CallbackInvocation) (maxAttempts : Nat)

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
+use gents::config_client::GraphqlEndpoint;
 use serde_json::{json, Value};
 
 use crate::cli::args::P2pTransportArg;
@@ -58,7 +59,7 @@ pub(super) async fn load_collection_name_by_id(
     api_base: &str,
 ) -> BTreeMap<String, String> {
     let Ok(collections) =
-        http_get_json::<Vec<Value>>(client, &format!("{api_base}/collections/versions")).await
+        http_get_json::<Vec<Value>>(client.get(format!("{api_base}/collections/versions"))).await
     else {
         return BTreeMap::new();
     };
@@ -106,12 +107,15 @@ pub(crate) fn flatten_p2p_fields(map: &mut serde_json::Map<String, Value>, p2p: 
     }
 }
 
-pub(crate) async fn load_live_http_p2p_status(home: Option<&Path>, graphql: &str) -> Value {
+pub(crate) async fn load_live_http_p2p_status(
+    home: Option<&Path>,
+    graphql: &GraphqlEndpoint,
+) -> Value {
     let home_dir = resolve_home_dir(home);
     let runtime_state = read_runtime_state(&home_dir)
         .ok()
         .flatten()
-        .filter(|state| state.graphql == graphql);
+        .filter(|state| state.graphql == graphql.url());
     match fetch_live_http_p2p_status(home, graphql).await {
         Ok(status) => status,
         Err(error) => {
@@ -124,25 +128,26 @@ pub(crate) async fn load_live_http_p2p_status(home: Option<&Path>, graphql: &str
     }
 }
 
-pub(crate) async fn fetch_live_http_p2p_status(
-    home: Option<&Path>,
-    graphql: &str,
-) -> Result<Value> {
-    let client = super::p2p_http_client()?;
-    fetch_live_http_p2p_status_with_client(home, graphql, &client).await
+/// GET `url` on `graphql`'s node with a bearer minted for this request: the
+/// runtime's `/status` and `/metrics` scrape this repeatedly over one client.
+async fn get_authorized_json<T: serde::de::DeserializeOwned>(
+    graphql: &GraphqlEndpoint,
+    url: &str,
+) -> Result<T> {
+    http_get_json(graphql.authorize(super::p2p_http_client()?.get(url))?).await
 }
 
-pub(crate) async fn fetch_live_http_p2p_status_with_client(
+pub(crate) async fn fetch_live_http_p2p_status(
     home: Option<&Path>,
-    graphql: &str,
-    client: &reqwest::Client,
+    graphql: &GraphqlEndpoint,
 ) -> Result<Value> {
     use crate::http::version::{NodeIdentityResponse, P2pShareableAddressResponse};
     let home_dir = resolve_home_dir(home);
-    let runtime_state = read_runtime_state(&home_dir)?.filter(|state| state.graphql == graphql);
-    let api_base = crate::graphql_access::graphql_api_base(graphql)?;
+    let runtime_state =
+        read_runtime_state(&home_dir)?.filter(|state| state.graphql == graphql.url());
+    let api_base = crate::graphql_access::graphql_api_base(graphql.url())?;
     let identity =
-        http_get_json::<NodeIdentityResponse>(client, &format!("{api_base}/node/identity"))
+        get_authorized_json::<NodeIdentityResponse>(graphql, &format!("{api_base}/node/identity"))
             .await
             .ok();
     let transport = runtime_state
@@ -151,9 +156,9 @@ pub(crate) async fn fetch_live_http_p2p_status_with_client(
         .filter(|transport| !transport.is_empty())
         .unwrap_or(P2pTransportArg::None.as_str());
     let listen_addresses: Vec<String> =
-        http_get_json(client, &format!("{api_base}/p2p/info")).await?;
+        get_authorized_json(graphql, &format!("{api_base}/p2p/info")).await?;
     let shareable_address: P2pShareableAddressResponse =
-        http_get_json(client, &format!("{api_base}/p2p/shareable-address")).await?;
+        get_authorized_json(graphql, &format!("{api_base}/p2p/shareable-address")).await?;
     let shareable_address = normalize_optional_string(shareable_address.address.as_deref())
         .context("runtime reported an empty shareable P2P address")?;
     let peer_id = resolve_p2p_peer_id(
@@ -168,14 +173,16 @@ pub(crate) async fn fetch_live_http_p2p_status_with_client(
     )
     .context("runtime reported a shareable P2P address but no usable peer id")?;
     let peer_rows: Vec<P2pPeerRow> =
-        http_get_json(client, &format!("{api_base}/p2p/peers")).await?;
+        get_authorized_json(graphql, &format!("{api_base}/p2p/peers")).await?;
     let connected_peers = peer_rows.into_iter().map(|row| row.id).collect::<Vec<_>>();
     let replicator_count =
-        match http_get_json::<Vec<Value>>(client, &format!("{api_base}/p2p/replicators")).await {
+        match get_authorized_json::<Vec<Value>>(graphql, &format!("{api_base}/p2p/replicators"))
+            .await
+        {
             Ok(rows) => rows.len(),
             Err(_) => 0,
         };
-    let sync_status = http_get_json::<Value>(client, &format!("{api_base}/p2p/sync/status"))
+    let sync_status = get_authorized_json::<Value>(graphql, &format!("{api_base}/p2p/sync/status"))
         .await
         .unwrap_or(Value::Null);
     let p2p_admission = runtime_state
@@ -201,11 +208,10 @@ pub(crate) async fn fetch_live_http_p2p_status_with_client(
     }))
 }
 
-pub(super) async fn fetch_connected_peer_ids(graphql: &str) -> Result<Vec<String>> {
-    let client = super::p2p_http_client()?;
-    let api_base = crate::graphql_access::graphql_api_base(graphql)?;
+pub(super) async fn fetch_connected_peer_ids(graphql: &GraphqlEndpoint) -> Result<Vec<String>> {
+    let api_base = crate::graphql_access::graphql_api_base(graphql.url())?;
     let peer_rows: Vec<P2pPeerRow> =
-        http_get_json(&client, &format!("{api_base}/p2p/peers")).await?;
+        get_authorized_json(graphql, &format!("{api_base}/p2p/peers")).await?;
     Ok(peer_rows.into_iter().map(|row| row.id).collect())
 }
 

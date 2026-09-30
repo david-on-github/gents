@@ -217,51 +217,68 @@ pub(crate) struct ProcessRecord {
     pub(crate) identity: ProcessIdentity,
 }
 
+/// A durable host record, stored under its own key.
+pub(crate) trait HostRecord:
+    Serialize + serde::de::DeserializeOwned + Clone + Send + 'static
+{
+    fn key(&self) -> &str;
+}
+
+impl HostRecord for ProcessRecord {
+    fn key(&self) -> &str {
+        &self.tool_call_id
+    }
+}
+
 /// Durable records live in a directory of the runtime's exclusively locked
 /// store, so only that store's runtime reads them after a restart. Without a
 /// directory, records are volatile and a restart finds none.
 #[derive(Debug, Clone)]
-pub(crate) enum ProcessRecordStore {
-    Volatile(Arc<std::sync::Mutex<std::collections::HashMap<String, ProcessRecord>>>),
+pub(crate) enum HostRecordStore<R> {
+    Volatile(Arc<std::sync::Mutex<std::collections::HashMap<String, R>>>),
     Durable(PathBuf),
 }
 
-impl Default for ProcessRecordStore {
+pub(crate) type ProcessRecordStore = HostRecordStore<ProcessRecord>;
+
+impl<R> Default for HostRecordStore<R> {
     fn default() -> Self {
         Self::Volatile(Arc::default())
     }
 }
 
-impl ProcessRecordStore {
-    fn path_for(dir: &std::path::Path, tool_call_id: &str) -> PathBuf {
-        let name = tool_call_id
-            .as_bytes()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        dir.join(format!("{name}.json"))
-    }
+fn record_path(dir: &std::path::Path, key: &str) -> PathBuf {
+    let name = key
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    dir.join(format!("{name}.json"))
+}
 
+impl<R: HostRecord> HostRecordStore<R> {
     fn volatile(
-        records: &std::sync::Mutex<std::collections::HashMap<String, ProcessRecord>>,
-    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, ProcessRecord>> {
+        records: &std::sync::Mutex<std::collections::HashMap<String, R>>,
+    ) -> std::sync::MutexGuard<'_, std::collections::HashMap<String, R>> {
         records
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub(crate) fn write(&self, record: &ProcessRecord) -> std::io::Result<()> {
+    /// Replaces the record atomically. It must survive the crash it exists
+    /// for, so the file and its directory entry are synced before returning.
+    pub(crate) fn write(&self, record: &R) -> std::io::Result<()> {
         let dir = match self {
             Self::Volatile(records) => {
-                Self::volatile(records).insert(record.tool_call_id.clone(), record.clone());
+                Self::volatile(records).insert(record.key().to_owned(), record.clone());
                 return Ok(());
             }
             Self::Durable(dir) => dir,
         };
-        std::fs::create_dir_all(dir)?;
-        let path = Self::path_for(dir, &record.tool_call_id);
-        let temporary = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+        std::fs::create_dir_all(dir)?;
+        let path = record_path(dir, record.key());
+        let temporary = path.with_extension("json.tmp");
         {
             use std::io::Write;
             let mut file = std::fs::File::create(&temporary)?;
@@ -269,46 +286,42 @@ impl ProcessRecordStore {
             file.sync_all()?;
         }
         std::fs::rename(&temporary, &path)?;
-        // The record must survive the crash it exists for.
         std::fs::File::open(dir).and_then(|dir| dir.sync_all())
     }
 
-    pub(crate) fn read(&self, tool_call_id: &str) -> Option<ProcessRecord> {
+    pub(crate) fn read(&self, key: &str) -> Option<R> {
         let dir = match self {
-            Self::Volatile(records) => return Self::volatile(records).get(tool_call_id).cloned(),
+            Self::Volatile(records) => return Self::volatile(records).get(key).cloned(),
             Self::Durable(dir) => dir,
         };
-        let bytes = std::fs::read(Self::path_for(dir, tool_call_id)).ok()?;
-        match serde_json::from_slice::<ProcessRecord>(&bytes) {
-            Ok(record) if record.tool_call_id == tool_call_id => Some(record),
+        let bytes = std::fs::read(record_path(dir, key)).ok()?;
+        match serde_json::from_slice::<R>(&bytes) {
+            Ok(record) if record.key() == key => Some(record),
             Ok(_) | Err(_) => {
-                tracing::warn!(
-                    tool_call_id,
-                    "ignoring unreadable background process record"
-                );
+                tracing::warn!(key, "ignoring unreadable host record");
                 None
             }
         }
     }
 
-    pub(crate) fn remove(&self, tool_call_id: &str) {
+    pub(crate) fn remove(&self, key: &str) {
         let dir = match self {
             Self::Volatile(records) => {
-                Self::volatile(records).remove(tool_call_id);
+                Self::volatile(records).remove(key);
                 return;
             }
             Self::Durable(dir) => dir,
         };
-        match std::fs::remove_file(Self::path_for(dir, tool_call_id)) {
+        match std::fs::remove_file(record_path(dir, key)) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                tracing::warn!(tool_call_id, %error, "failed to remove background process record");
+                tracing::warn!(key, %error, "failed to remove host record");
             }
         }
     }
 
-    pub(crate) fn list(&self) -> Vec<ProcessRecord> {
+    pub(crate) fn list(&self) -> Vec<R> {
         let dir = match self {
             Self::Volatile(records) => return Self::volatile(records).values().cloned().collect(),
             Self::Durable(dir) => dir,
@@ -324,7 +337,7 @@ impl ProcessRecordStore {
                     .is_some_and(|extension| extension == "json")
             })
             .filter_map(|path| std::fs::read(path).ok())
-            .filter_map(|bytes| serde_json::from_slice::<ProcessRecord>(&bytes).ok())
+            .filter_map(|bytes| serde_json::from_slice::<R>(&bytes).ok())
             .collect()
     }
 }

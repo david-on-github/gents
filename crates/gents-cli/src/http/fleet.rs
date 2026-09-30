@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
@@ -34,7 +35,7 @@ struct FleetEnvelope {
     requests: Vec<AgentRequestRow>,
 }
 
-pub(crate) async fn load_fleet_snapshot(graphql: &str) -> Result<FleetSnapshot> {
+pub(crate) async fn load_fleet_snapshot(graphql: &GraphqlEndpoint) -> Result<FleetSnapshot> {
     let generated_at = Utc::now();
     let response = post_graphql(graphql, &fleet_query()).await?;
     let envelope = decode_fleet_response(response)?;

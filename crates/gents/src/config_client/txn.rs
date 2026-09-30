@@ -22,11 +22,11 @@ use super::write_telemetry::{
     ConflictSource, ReceiptRecovery, RetryOwner, RollbackStatus, WriteAttemptEvent,
     WriteAttemptOrdinal, WriteBackend, WriteMode, WriteOperation, WriteOutcome,
 };
-use super::{graphql_api_base, ConfigAccess};
+use super::{graphql_api_base, ConfigAccess, GraphqlEndpoint};
 
 enum TxnBackend<'a> {
     Http {
-        endpoint: &'a str,
+        endpoint: &'a GraphqlEndpoint,
         id: String,
         client: reqwest::Client,
     },
@@ -315,7 +315,7 @@ fn mutation_write_gate(node: &EmbeddedNode) -> Arc<MutationWriteGate> {
 
 enum RollbackOnDrop {
     Http {
-        endpoint: String,
+        endpoint: GraphqlEndpoint,
         id: String,
         client: reqwest::Client,
         armed: bool,
@@ -448,7 +448,7 @@ where
 }
 
 async fn begin_http_owned(
-    endpoint: String,
+    endpoint: GraphqlEndpoint,
     cancellation_rollback_scheduled: Arc<AtomicBool>,
 ) -> Result<(reqwest::Client, String, RollbackOnDrop)> {
     // Keep the response owner alive if the caller is cancelled while DefraDB
@@ -458,7 +458,7 @@ async fn begin_http_owned(
         .await
         .map_err(retry::transaction_storage_failure)?;
     let rollback = RollbackOnDrop::Http {
-        endpoint,
+        endpoint: endpoint.clone(),
         id: id.clone(),
         client: client.clone(),
         armed: true,
@@ -589,6 +589,63 @@ impl<'a> ConfigApplyTxn<'a> {
             .scope(Arc::clone(&fault), future)
             .await;
         (output, fault.count.load(Ordering::Relaxed))
+    }
+
+    /// Runs `attempt` with a failure injected after each successful mutation in
+    /// turn until an attempt commits without reaching the fault. Every faulted
+    /// attempt must fail with exactly that injection and leave `observe`
+    /// unchanged; the committing attempt must change it. Returns the committed
+    /// value and its mutation count.
+    #[cfg(test)]
+    pub(crate) async fn assert_every_mutation_rolls_back<T, E, S, A, AF, O, OF>(
+        mut attempt: A,
+        observe: O,
+    ) -> (T, usize)
+    where
+        E: std::fmt::Debug,
+        S: PartialEq + std::fmt::Debug,
+        A: FnMut() -> AF,
+        AF: Future<Output = std::result::Result<T, E>>,
+        O: Fn() -> OF,
+        OF: Future<Output = S>,
+    {
+        let before = observe().await;
+        let mut index = 1;
+        loop {
+            let (result, observed) =
+                Self::with_successful_mutation_failure_at(Some(index), attempt()).await;
+            match result {
+                Ok(value) => {
+                    assert_eq!(
+                        observed,
+                        index - 1,
+                        "a committed attempt must not pass the injected position"
+                    );
+                    assert_ne!(
+                        observe().await,
+                        before,
+                        "the committed attempt must be visible to the rollback observation"
+                    );
+                    return (value, observed);
+                }
+                Err(error) => {
+                    let detail = format!("{error:?}");
+                    assert!(
+                        detail.contains(&format!(
+                            "injected failure after successful transaction mutation {index}"
+                        )),
+                        "unexpected failure at mutation {index}: {detail}"
+                    );
+                    assert_eq!(observed, index, "injection must fire exactly once");
+                    assert_eq!(
+                        observe().await,
+                        before,
+                        "mutation {index} leaked a partial write"
+                    );
+                }
+            }
+            index += 1;
+        }
     }
 
     #[cfg(test)]
@@ -745,11 +802,11 @@ impl<'a> ConfigApplyTxn<'a> {
     }
 
     async fn begin_http(
-        endpoint: &'a str,
+        endpoint: &'a GraphqlEndpoint,
         cancellation_rollback_scheduled: Arc<AtomicBool>,
     ) -> Result<Self> {
         let (client, id, rollback_on_drop) = tokio::spawn(begin_http_owned(
-            endpoint.to_owned(),
+            endpoint.clone(),
             cancellation_rollback_scheduled,
         ))
         .await
@@ -855,9 +912,9 @@ impl<'a> ConfigApplyTxn<'a> {
             TxnBackend::Http {
                 endpoint, client, ..
             } => {
-                let url = format!("{}/collections/versions", graphql_api_base(endpoint)?);
-                let versions: Value = client
-                    .get(&url)
+                let url = format!("{}/collections/versions", graphql_api_base(endpoint.url())?);
+                let versions: Value = endpoint
+                    .authorize(client.get(&url))?
                     .send()
                     .await?
                     .error_for_status()?

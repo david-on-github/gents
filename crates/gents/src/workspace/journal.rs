@@ -7,6 +7,8 @@ pub enum ActionJournalState {
     Executing,
     EffectObserved,
     ResultDocsWritten,
+    /// Recovery found the action still executing; its outcome is unknown.
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +42,7 @@ pub fn action_journal_prefix_legal(entries: &[ActionJournalEntry]) -> bool {
             ActionJournalState::Executing
                 | ActionJournalState::EffectObserved
                 | ActionJournalState::ResultDocsWritten
+                | ActionJournalState::Interrupted
         ) {
             if !matches!(
                 by_index.get(idx - 1).copied().flatten(),
@@ -52,9 +55,10 @@ pub fn action_journal_prefix_legal(entries: &[ActionJournalEntry]) -> bool {
     true
 }
 
-/// Whether a failed invocation may run again: it has attempts left, and no
-/// action observed its effect or wrote results, so running it again cannot
-/// repeat anything.
+/// Whether a failed invocation may run again: it has attempts left and no
+/// action observed its effect or wrote results. An interrupted action is
+/// refused too: its outcome is unknown, so running it again could repeat an
+/// effect the runtime never saw.
 pub fn retry_allowed(
     state: &str,
     journal: &[ActionJournalEntry],
@@ -66,9 +70,32 @@ pub fn retry_allowed(
         && journal.iter().all(|entry| {
             !matches!(
                 entry.state,
-                ActionJournalState::EffectObserved | ActionJournalState::ResultDocsWritten
+                ActionJournalState::EffectObserved
+                    | ActionJournalState::ResultDocsWritten
+                    | ActionJournalState::Interrupted
             )
         })
+}
+
+/// Recovery of an invocation found running with `journal`. `Some` is the
+/// journal it fails with: the attempt was cut off, so every action still
+/// executing is marked interrupted and no retry repeats its unknown effect.
+/// `None` means nothing ran and the attempt carries on.
+pub fn recover_running(journal: &[ActionJournalEntry]) -> Option<Vec<ActionJournalEntry>> {
+    if journal.is_empty() {
+        return None;
+    }
+    Some(
+        journal
+            .iter()
+            .map(|entry| match entry.state {
+                ActionJournalState::Executing => {
+                    ActionJournalEntry::new(entry.index, ActionJournalState::Interrupted)
+                }
+                _ => entry.clone(),
+            })
+            .collect(),
+    )
 }
 
 pub(crate) fn current_state(

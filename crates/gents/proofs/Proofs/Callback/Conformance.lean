@@ -58,6 +58,9 @@ def callbackCases : List CallbackCase :=
   , mkCase "denied_executing_journal_illegal" .denied [.executing] false false
   , mkCase "failed_after_result_docs_no_emit_legal" .failed
       [.resultDocsWritten] false true
+  , mkCase "failed_interrupted_no_emit_legal" .failed [.interrupted] false true
+  , mkCase "action_1_interrupted_while_0_not_result_docs_written_illegal" .failed
+      [.validated, .interrupted] false false
   ]
 
 theorem callbackCasesLegalCorrect :
@@ -98,7 +101,7 @@ def groupedInvocation (state : InvocationState) : CallbackInvocation :=
     state := state, journal := [], resultEmitted := false }
 
 def transitionCases : List TransitionCase :=
-  let interrupted := { groupedInvocation .failed with
+  let reportedFailure := { groupedInvocation .failed with
     journal := [{ index := 0, state := .executing }], attempts := 1 }
   let recovering := { groupedInvocation .running with
     journal := [{ index := 0, state := .executing }] }
@@ -128,9 +131,13 @@ def transitionCases : List TransitionCase :=
       pre := groupedInvocation .running,
       post := { groupedInvocation .running with state := .denied, resultEmitted := false },
       step := .deny_running rfl rfl rfl }
-  , { name := "retry_after_interrupted_attempt_starts_clean",
-      pre := interrupted,
-      post := { interrupted with state := .pending, journal := [], resultEmitted := false },
+  , { name := "interrupt_marks_executing_action_and_fails",
+      pre := recovering,
+      post := recover recovering,
+      step := recover_steps_by_interrupt recovering rfl (by decide) }
+  , { name := "retry_after_reported_failure_starts_clean",
+      pre := reportedFailure,
+      post := { reportedFailure with state := .pending, journal := [], resultEmitted := false },
       step := .retry 3 (by decide) rfl }
   ]
 
@@ -149,7 +156,7 @@ def retryCases : List RetryCase :=
   let states := [InvocationState.failed, .succeeded, .denied, .running]
   let journals : List (List ActionJournalState) :=
     [[], [.executing], [.validated], [.effectObserved], [.resultDocsWritten],
-     [.resultDocsWritten, .executing]]
+     [.resultDocsWritten, .executing], [.interrupted]]
   states.flatMap fun state =>
     journals.flatMap fun journal =>
       [0, 1, 2, 3].flatMap fun attempts =>
@@ -164,7 +171,40 @@ def retryCases : List RetryCase :=
             state := state, journal := journal, attempts := attempts,
             maxAttempts := maxAttempts, allowed := retryAllowed inv maxAttempts }
 
-theorem retryCases_count : retryCases.length = 192 := by native_decide
+theorem retryCases_count : retryCases.length = 224 := by native_decide
+
+/-- Recovery and denial of every running invocation over a matrix of journals
+and attempts. The expected outcomes and later retry decisions are the model's
+own `recover`, `deny` and `retryAllowed`. -/
+structure RecoveryCase where
+  name : String
+  journal : List ActionJournalState
+  attempts : Nat
+  maxAttempts : Nat
+  post : CallbackInvocation
+  retryAllowedAfter : Bool
+  denied : CallbackInvocation
+  retryAllowedAfterDeny : Bool
+  deriving Repr
+
+def recoveryCases : List RecoveryCase :=
+  let journals : List (List ActionJournalState) :=
+    [[], [.validated], [.executing], [.effectObserved], [.resultDocsWritten],
+     [.resultDocsWritten, .executing], [.interrupted]]
+  journals.flatMap fun journal =>
+    [0, 1, 2, 3].map fun attempts =>
+      let inv : CallbackInvocation :=
+        { invocationId := "inv-1", ownerAgentDid := "dep-1", state := .running,
+          journal := numberedJournal journal, resultEmitted := false, attempts := attempts }
+      let post := recover inv
+      let denied := deny inv
+      { name := String.intercalate "," (journal.map ActionJournalState.toDefraDB) ++ ":"
+          ++ toString attempts ++ "/3"
+        journal := journal, attempts := attempts, maxAttempts := 3, post := post,
+        retryAllowedAfter := retryAllowed post 3, denied := denied,
+        retryAllowedAfterDeny := retryAllowed denied 3 }
+
+theorem recoveryCases_count : recoveryCases.length = 28 := by native_decide
 
 end Conformance
 end Callback

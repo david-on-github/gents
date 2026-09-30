@@ -388,22 +388,6 @@ async fn every_successful_publication_mutation_rolls_back_if_the_transaction_fai
             additional_params: None,
         })],
     };
-    let (baseline_node, baseline_path, baseline_lifecycle, _writer) =
-        fixture("mutation-rollback-baseline").await;
-    let (baseline, writes) =
-        crate::config_client::ConfigApplyTxn::with_successful_mutation_failure_at(
-            None,
-            publish_tool_turn_for_rollback_test(&baseline_node, &baseline_lifecycle, &message),
-        )
-        .await;
-    baseline.expect("baseline tool-bearing publication");
-    assert!(
-        writes >= 3,
-        "tool-bearing publication must have multiple writes"
-    );
-    baseline_node.shutdown().await;
-    let _ = std::fs::remove_dir_all(baseline_path);
-
     let (node, path, lifecycle, _writer) = fixture("mutation-rollback").await;
     let request_doc_id = crate::graphql::escape_graphql_string(&lifecycle.request().doc_id);
     let rows = || async {
@@ -421,38 +405,14 @@ async fn every_successful_publication_mutation_rolls_back_if_the_transaction_fai
         assert!(!response.has_errors(), "{:?}", response.errors);
         response.data.unwrap()
     };
-    let before = rows().await;
-    for index in 1..=writes {
-        let (result, observed) =
-            crate::config_client::ConfigApplyTxn::with_successful_mutation_failure_at(
-                Some(index),
-                publish_tool_turn_for_rollback_test(&node, &lifecycle, &message),
-            )
-            .await;
-        let error = result.expect_err("injected publication mutation must roll back");
-        assert!(
-            format!("{error:#}").contains(&format!(
-                "injected failure after successful transaction mutation {index}"
-            )),
-            "unexpected error at write {index}: {error:#}"
-        );
-        assert_eq!(observed, index, "injection must fire exactly once");
-        assert_eq!(
-            rows().await,
-            before,
-            "write {index} leaked a publication fact"
-        );
-    }
-    let (published, actual_writes) =
-        crate::config_client::ConfigApplyTxn::with_successful_mutation_failure_at(
-            None,
-            publish_tool_turn_for_rollback_test(&node, &lifecycle, &message),
-        )
-        .await;
-    published.expect("publication must succeed after every injected rollback");
-    assert_eq!(
-        actual_writes, writes,
-        "every mutation position must have been faulted"
+    let (_, writes) = crate::config_client::ConfigApplyTxn::assert_every_mutation_rolls_back(
+        || publish_tool_turn_for_rollback_test(&node, &lifecycle, &message),
+        rows,
+    )
+    .await;
+    assert!(
+        writes >= 3,
+        "tool-bearing publication must have multiple writes"
     );
     node.shutdown().await;
     let _ = std::fs::remove_dir_all(path);
@@ -570,97 +530,63 @@ async fn recovery_mutations_are_atomic_and_caller_replay_has_no_transactional_mu
     use crate::config_client::ConfigApplyTxn;
     use crate::lifecycle::{recover_expired_generation_with_facts, RecoveryResult};
 
-    // Discover the mutation count from the owner, then fault every position in
-    // a fresh recovery of the same shape. No test-side recovery write script.
-    let mut mutation_count = 0;
-    for baseline in [true, false] {
-        let (node, path, _lifecycle, _writer, observed, expiry) =
-            recovery_receipt_fixture("recovery-mutation-rollback").await;
-        let doc_id = observed.doc_id.as_deref().unwrap();
-        let escaped = crate::graphql::escape_graphql_string(doc_id);
-        let snapshot = || async {
-            let response = node.execute(&format!(
-                r#"{{
-                    AgentOutputSegment(filter: {{ request_doc_id: {{ _eq: "{escaped}" }} }}) {{ _docID }}
-                    AgentMessage(filter: {{ request_doc_id: {{ _eq: "{escaped}" }} }}) {{ _docID }}
-                    AgentToolCall(filter: {{ request_doc_id: {{ _eq: "{escaped}" }} }}) {{ _docID }}
-                    AgentSession {{ _docID observation }}
-                    AgentRequest(filter: {{ _docID: {{ _eq: "{escaped}" }} }}) {{ {} }}
-                }}"#,
-                crate::watcher::AGENT_REQUEST_FIELDS,
-            )).await;
-            assert!(!response.has_errors(), "{:?}", response.errors);
-            response
-        };
-        let before = snapshot().await;
-        let generation = observed.execution_generation.as_deref().unwrap();
-        let now = chrono::Utc::now();
-        let recover = || {
-            recover_expired_generation_with_facts(
-                &node,
-                &observed,
-                generation,
-                &expiry,
-                "recovery-atomicity-generation".into(),
-                now,
-                None,
-                None,
-            )
-        };
-        if baseline {
-            let (result, count) =
-                ConfigApplyTxn::with_successful_mutation_failure_at(None, recover()).await;
-            assert_eq!(result.unwrap(), RecoveryResult::Won { published: 1 });
-            assert!(
-                count >= 4,
-                "recovery must close, publish, swap generation and refresh the session"
-            );
-            mutation_count = count;
-        } else {
-            for index in 1..=mutation_count {
-                let (result, count) =
-                    ConfigApplyTxn::with_successful_mutation_failure_at(Some(index), recover())
-                        .await;
-                let error = result.expect_err("recovery must propagate injected failure");
-                assert!(
-                    format!("{error:#}").contains(&format!(
-                        "injected failure after successful transaction mutation {index}"
-                    )),
-                    "unexpected recovery error: {error:#}"
-                );
-                assert_eq!(count, index);
-                assert_eq!(
-                    snapshot().await.data,
-                    before.data,
-                    "recovery write {index} leaked"
-                );
-            }
-            let (recovered, actual_writes) =
-                ConfigApplyTxn::with_successful_mutation_failure_at(None, recover()).await;
-            assert_eq!(recovered.unwrap(), RecoveryResult::Won { published: 1 });
-            assert_eq!(
-                actual_writes, mutation_count,
-                "every recovery mutation must have been faulted"
-            );
-            let committed = snapshot().await.data;
-            assert_ne!(
-                committed.as_ref().unwrap()["AgentSession"],
-                before.data.as_ref().unwrap()["AgentSession"],
-                "successful recovery must update the session observation"
-            );
-            // Discard the first acknowledgement and resend the exact recovery
-            // identity at the caller boundary. This does not inject an
-            // acknowledgement loss inside the transaction owner. The hook
-            // counts transactional mutations, not arbitrary auto-commit writes.
-            let (replay, writes) =
-                ConfigApplyTxn::with_successful_mutation_failure_at(None, recover()).await;
-            assert_eq!(replay.unwrap(), RecoveryResult::Won { published: 1 });
-            assert_eq!(writes, 0);
-            assert_eq!(snapshot().await.data, committed);
-        }
-        node.shutdown().await;
-        let _ = std::fs::remove_dir_all(path);
-    }
+    let (node, path, _lifecycle, _writer, observed, expiry) =
+        recovery_receipt_fixture("recovery-mutation-rollback").await;
+    let doc_id = observed.doc_id.as_deref().unwrap();
+    let escaped = crate::graphql::escape_graphql_string(doc_id);
+    let snapshot = || async {
+        let response = node.execute(&format!(
+            r#"{{
+                AgentOutputSegment(filter: {{ request_doc_id: {{ _eq: "{escaped}" }} }}) {{ _docID }}
+                AgentMessage(filter: {{ request_doc_id: {{ _eq: "{escaped}" }} }}) {{ _docID }}
+                AgentToolCall(filter: {{ request_doc_id: {{ _eq: "{escaped}" }} }}) {{ _docID }}
+                AgentSession {{ _docID observation }}
+                AgentRequest(filter: {{ _docID: {{ _eq: "{escaped}" }} }}) {{ {} }}
+            }}"#,
+            crate::watcher::AGENT_REQUEST_FIELDS,
+        )).await;
+        assert!(!response.has_errors(), "{:?}", response.errors);
+        response.data
+    };
+    let before = snapshot().await;
+    let generation = observed.execution_generation.as_deref().unwrap();
+    let now = chrono::Utc::now();
+    let recover = || {
+        recover_expired_generation_with_facts(
+            &node,
+            &observed,
+            generation,
+            &expiry,
+            "recovery-atomicity-generation".into(),
+            now,
+            None,
+            None,
+        )
+    };
+    let (recovered, mutation_count) =
+        ConfigApplyTxn::assert_every_mutation_rolls_back(recover, snapshot).await;
+    assert_eq!(recovered, RecoveryResult::Won { published: 1 });
+    assert!(
+        mutation_count >= 4,
+        "recovery must close, publish, swap generation and refresh the session"
+    );
+    let committed = snapshot().await;
+    assert_ne!(
+        committed.as_ref().unwrap()["AgentSession"],
+        before.as_ref().unwrap()["AgentSession"],
+        "successful recovery must update the session observation"
+    );
+    // Discard the first acknowledgement and resend the exact recovery
+    // identity at the caller boundary. This does not inject an
+    // acknowledgement loss inside the transaction owner. The hook
+    // counts transactional mutations, not arbitrary auto-commit writes.
+    let (replay, writes) =
+        ConfigApplyTxn::with_successful_mutation_failure_at(None, recover()).await;
+    assert_eq!(replay.unwrap(), RecoveryResult::Won { published: 1 });
+    assert_eq!(writes, 0);
+    assert_eq!(snapshot().await, committed);
+    node.shutdown().await;
+    let _ = std::fs::remove_dir_all(path);
 }
 
 #[tokio::test]

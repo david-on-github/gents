@@ -157,7 +157,7 @@ async fn signed_conversation_pairing_replays_agent_config_over_p2p() {
     }
     assert!(!collections
         .iter()
-        .any(|value| matches!(value.as_str(), "InferenceBackend" | "OAuthCredential")));
+        .any(|value| gents_protocol::schemas::is_credential_collection(value)));
     assert_eq!(row_count(&data, "InferenceBackend"), 0);
     for (collection, field, expected) in [
         ("AgentBehavior", "context_id", "amy-context"),

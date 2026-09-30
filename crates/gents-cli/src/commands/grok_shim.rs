@@ -507,7 +507,7 @@ mod tests {
             ("default-history", inputs.behavior_id.as_str()),
         ] {
             crate::create_agent_request(
-                &inputs.graphql,
+                &gents::config_client::GraphqlEndpoint::anonymous(inputs.graphql.clone()),
                 did,
                 "A history entry",
                 Some(session),

@@ -87,12 +87,13 @@ export async function control(argv, env = process.env) {
       "close",
       "restore",
       "dismiss",
+      "principal",
     ].includes(operation)
   )
     throw new Error(`Unknown host operation: ${operation}`);
   if (
     argv.length !==
-    (["fault", "archive", "dismiss"].includes(operation) ? 3 : 2)
+    (["fault", "archive", "dismiss", "principal"].includes(operation) ? 3 : 2)
   )
     throw new Error("Incorrect host operation arguments");
   const host = new HostEnvironment(id);
@@ -122,6 +123,8 @@ export async function control(argv, env = process.env) {
     case "archive":
       await host.archiveRuntime(fault);
       return { archived: true };
+    case "principal":
+      return host.exportPrincipal(fault);
   }
 }
 

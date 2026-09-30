@@ -1,27 +1,9 @@
-use crate::document_config::{Task, TaskHook, TaskHookPhase};
+use crate::document_config::{Task, TaskHook};
 use crate::lean_vocab_test::{
-    lean_task_hook_admission_cases, lean_task_hook_recovery_cases, lean_task_hook_run_cases,
-    LeanTaskHook,
+    lean_hook_phase, lean_task_hook_admission_cases, lean_task_hook_recovery_cases,
+    lean_task_hook_run_cases,
 };
-
-fn phase(name: &str) -> TaskHookPhase {
-    match name {
-        "before" => TaskHookPhase::Before,
-        "after_success" => TaskHookPhase::AfterSuccess,
-        "after_failure" => TaskHookPhase::AfterFailure,
-        "finally" => TaskHookPhase::Finally,
-        other => panic!("generated contract emitted an unknown hook phase {other:?}"),
-    }
-}
-
-fn hook(generated: &LeanTaskHook) -> TaskHook {
-    TaskHook {
-        hook_id: generated.hook_id.clone(),
-        phase: phase(&generated.phase),
-        command: generated.command.clone(),
-        timeout_secs: generated.timeout_secs,
-    }
-}
+use crate::task_hooks::effective_timeout_secs;
 
 fn task_with_hooks(task_id: &str, hooks: Vec<TaskHook>) -> Task {
     Task {
@@ -51,7 +33,19 @@ fn generated_task_hook_admission_cases_fence_production_validation() {
         "task hook admission conformance cases must not be empty"
     );
     for case in cases {
-        let task = task_with_hooks(&case.name, case.hooks.iter().map(hook).collect());
+        for generated in &case.hooks {
+            assert_eq!(
+                effective_timeout_secs(&generated.to_task_hook()),
+                generated.effective_timeout_secs,
+                "{}: production timeout resolution disagrees with the model for {:?}",
+                case.name,
+                generated.hook_id
+            );
+        }
+        let task = task_with_hooks(
+            &case.name,
+            case.hooks.iter().map(|hook| hook.to_task_hook()).collect(),
+        );
         assert_eq!(
             task.validate().is_ok(),
             case.expected_admitted,
@@ -88,7 +82,7 @@ fn generated_task_hook_cases_fence_the_modeled_phase_vocabulary() {
             .collect::<std::collections::BTreeSet<_>>(),
     );
     for name in &emitted {
-        let encoded = serde_json::to_string(&phase(name)).expect("phase serializes");
+        let encoded = serde_json::to_string(&lean_hook_phase(name)).expect("phase serializes");
         assert_eq!(encoded, format!("\"{name}\""));
     }
 
@@ -97,7 +91,7 @@ fn generated_task_hook_cases_fence_the_modeled_phase_vocabulary() {
         .map(|case| (&case.name, &case.hooks))
         .chain(recovery_cases.iter().map(|case| (&case.name, &case.hooks)))
     {
-        let task = task_with_hooks(name, hooks.iter().map(hook).collect());
+        let task = task_with_hooks(name, hooks.iter().map(|hook| hook.to_task_hook()).collect());
         assert!(
             task.validate().is_ok(),
             "{name}: generated trace uses hooks production validation rejects: {:?}",

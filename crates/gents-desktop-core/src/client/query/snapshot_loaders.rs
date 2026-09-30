@@ -40,11 +40,11 @@ pub async fn load_full_snapshot_with_peer_records(
 ) -> Result<ClientStore> {
     let mut store = load_full_snapshot(node).await?;
     for peer in peers {
-        let Some(graphql) = peer.operator_graphql() else {
+        let Some(graphql) = crate::local_runtime::operator_endpoint(peer) else {
             continue;
         };
         match load_operator_config(
-            &gents::config_client::ConfigAccess::Graphql(graphql.to_string()),
+            &gents::config_client::ConfigAccess::Graphql(graphql.clone()),
             &peer.agent_did,
         )
         .await
@@ -56,7 +56,7 @@ pub async fn load_full_snapshot_with_peer_records(
                 tracing::warn!(
                     target: "gents_desktop_core::query",
                     agent_did = %peer.agent_did,
-                    graphql,
+                    graphql = %graphql,
                     error = %error,
                     "operator GraphQL config overlay failed; keeping the desktop replica"
                 );
@@ -269,10 +269,10 @@ pub async fn load_agent_scoped_snapshot_with_peer_records(
     if let Some(graphql) = peers
         .iter()
         .find(|peer| peer.agent_did == agent_did)
-        .and_then(PeerRecord::operator_graphql)
+        .and_then(crate::local_runtime::operator_endpoint)
     {
         match load_operator_config(
-            &gents::config_client::ConfigAccess::Graphql(graphql.to_string()),
+            &gents::config_client::ConfigAccess::Graphql(graphql.clone()),
             agent_did,
         )
         .await
@@ -284,7 +284,7 @@ pub async fn load_agent_scoped_snapshot_with_peer_records(
                 tracing::warn!(
                     target: "gents_desktop_core::query",
                     agent_did,
-                    graphql,
+                    graphql = %graphql,
                     error = %error,
                     "operator GraphQL config overlay failed; keeping the desktop replica"
                 );

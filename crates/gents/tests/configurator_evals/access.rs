@@ -168,7 +168,7 @@ async fn terminal_answer_distinguishes_pending_no_message_and_invalid_evidence()
         (json!([base.clone(), base]), false),
     ] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let access = ConfigAccess::Graphql(format!(
+        let access = ConfigAccess::graphql(format!(
             "http://{}/api/v0/graphql",
             listener.local_addr().unwrap()
         ));
@@ -193,7 +193,7 @@ async fn terminal_answer_distinguishes_pending_no_message_and_invalid_evidence()
 
 #[tokio::test]
 async fn evidence_access_rejects_mutation_before_contacting_runtime() {
-    let control = ConfigAccess::Graphql("http://127.0.0.1:1/api/v0/graphql".into());
+    let control = ConfigAccess::graphql("http://127.0.0.1:1/api/v0/graphql");
     let result = RuntimeAccess::from(&control)
         .query("mutation { delete_AgentRequest { _docID } }")
         .await;
@@ -218,7 +218,7 @@ async fn embedded_and_http_evidence_have_the_same_data_shape() {
         .route("/api/v0/graphql", post(query))
         .with_state(db.node.clone());
     let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
-    let access = ConfigAccess::Graphql(endpoint);
+    let access = ConfigAccess::graphql(endpoint);
     let query = "{ AgentRequest { request_id lifecycle_state } }";
     let local = RuntimeAccess::from(&db.node).query(query).await;
     let remote = RuntimeAccess::from(&access).query(query).await;

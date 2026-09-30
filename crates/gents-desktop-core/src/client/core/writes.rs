@@ -1106,13 +1106,15 @@ impl ClientCore {
         })
     }
 
-    pub fn operator_graphql(&self, agent_did: &str) -> Option<String> {
+    pub fn operator_graphql(
+        &self,
+        agent_did: &str,
+    ) -> Option<gents::config_client::GraphqlEndpoint> {
         self.sync_state
             .records()
             .iter()
             .find(|record| record.agent_did == agent_did)
-            .and_then(PeerRecord::operator_graphql)
-            .map(str::to_owned)
+            .and_then(crate::local_runtime::operator_endpoint)
     }
 
     pub fn operator_access(&self, agent_did: &str) -> Result<ConfigAccess> {
@@ -1122,11 +1124,11 @@ impl ClientCore {
             .into_iter()
             .find(|record| record.agent_did == agent_did);
         match record {
-            Some(record) if record.operator_graphql().is_some() => record
-                .operator_graphql()
-                .map(str::to_owned)
-                .map(ConfigAccess::Graphql)
-                .context("local standard runtime has no operator GraphQL endpoint"),
+            Some(record) if record.operator_graphql().is_some() => {
+                crate::local_runtime::operator_endpoint(&record)
+                    .map(ConfigAccess::Graphql)
+                    .context("local standard runtime has no operator GraphQL endpoint")
+            }
             Some(_) => anyhow::bail!(
                 "managed agent {agent_did} has no operator GraphQL endpoint; refusing a desktop-replica configuration fallback"
             ),

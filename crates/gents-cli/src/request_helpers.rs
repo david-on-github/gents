@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
@@ -65,12 +66,12 @@ pub(crate) struct CanonicalToolPresentation {
 /// missing or malformed terminal delivery is an error rather than an empty
 /// preview.
 pub(crate) async fn load_canonical_tool_presentation(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     tool_call_doc_id: &str,
     submitted: &SubmittedRequest,
     include_result: bool,
 ) -> Result<CanonicalToolPresentation> {
-    let access = gents::ConfigAccess::Graphql(graphql.to_owned());
+    let access = gents::ConfigAccess::Graphql(graphql.clone());
     let presentation = gents::session::load_tool_call_presentation(
         &access,
         tool_call_doc_id,
@@ -142,14 +143,11 @@ pub(crate) fn request_terminal_query(request_id: &str, physical: Option<&str>) -
 /// signed admission input remains on the request row and is never rewritten
 /// into response-shaped JSON.
 pub(crate) async fn observe_canonical_request_output(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     request: &AgentRequestRow,
 ) -> Result<gents::session::CanonicalRequestOutput> {
-    gents::session::observe_request_output(
-        &gents::ConfigAccess::Graphql(graphql.to_owned()),
-        request,
-    )
-    .await
+    gents::session::observe_request_output(&gents::ConfigAccess::Graphql(graphql.clone()), request)
+        .await
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -282,7 +280,7 @@ pub(crate) fn request_output_envelope(
 }
 
 pub(crate) async fn create_agent_request(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     content: &str,
     session_id: Option<&str>,
@@ -308,7 +306,7 @@ pub(crate) struct PreparedAgentRequest {
 }
 
 pub(crate) async fn prepare_agent_request(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     content: &str,
     session_id: Option<&str>,
@@ -384,7 +382,7 @@ pub(crate) async fn prepare_agent_request(
 /// already-committed pair; conflicting retries fail without mutating either
 /// document.
 pub(crate) async fn create_goal_backed_agent_request(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     content: &str,
     session_id: &str,
@@ -427,7 +425,7 @@ pub(crate) async fn create_goal_backed_agent_request(
     )
     .await?;
 
-    let access = gents::ConfigAccess::Graphql(graphql.to_string());
+    let access = gents::ConfigAccess::Graphql(graphql.clone());
     gents::goal::submit_goal_backed_request(
         &access,
         agent_did,
@@ -446,7 +444,7 @@ pub(crate) async fn create_goal_backed_agent_request(
 pub(crate) async fn create_goal_backed_agent_request_local(
     node: &defra_node::EmbeddedNode,
     actor: identity::Did,
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     objective: &str,
     token_budget: Option<i64>,
@@ -480,10 +478,10 @@ pub(crate) async fn create_goal_backed_agent_request_local(
 }
 
 pub(crate) async fn submit_prepared_agent_request_committed(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     prepared: &PreparedAgentRequest,
 ) -> Result<SubmittedRequest> {
-    let access = gents::ConfigAccess::Graphql(graphql.to_string());
+    let access = gents::ConfigAccess::Graphql(graphql.clone());
     let mutation = prepared
         .create
         .graphql_mutation()
@@ -508,7 +506,7 @@ pub(crate) async fn submit_prepared_agent_request_committed(
 }
 
 async fn committed_submitted_request(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     create: &AgentRequestCreate,
 ) -> Result<SubmittedRequest> {
     let row = read_submitted_receipt(graphql, create)
@@ -534,7 +532,7 @@ fn submitted_from_receipt(row: AgentRequestRow) -> Result<SubmittedRequest> {
 }
 
 pub(crate) async fn matching_prepared_receipt(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     create: &AgentRequestCreate,
 ) -> Result<Option<AgentRequestRow>> {
     let Some(row) = read_submitted_receipt(graphql, create).await? else {
@@ -550,7 +548,7 @@ pub(crate) async fn matching_prepared_receipt(
 }
 
 async fn read_submitted_receipt(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     create: &AgentRequestCreate,
 ) -> Result<Option<AgentRequestRow>> {
     let scope = gents::session::session_scope_filter(
@@ -595,7 +593,7 @@ async fn read_submitted_receipt(
 }
 
 async fn resolve_request_behavior_id(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     requested: Option<&str>,
 ) -> Result<String> {
@@ -732,7 +730,7 @@ fn wait_progress_marker(
 }
 
 pub(crate) async fn wait_for_terminal_response(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     request_id: &str,
     timeout_secs: u64,
     poll_secs: u64,
@@ -1042,7 +1040,10 @@ pub(crate) fn parse_valid_until_flag(raw: Option<&str>) -> Result<Option<DateTim
     }
 }
 
-pub(crate) async fn fetch_request_view(graphql: &str, request_id: &str) -> Result<AgentRequestRow> {
+pub(crate) async fn fetch_request_view(
+    graphql: &GraphqlEndpoint,
+    request_id: &str,
+) -> Result<AgentRequestRow> {
     let query = format!(
         r#"{{
             AgentRequest(
@@ -1176,7 +1177,10 @@ mod tests {
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let endpoint = format!("http://{}/graphql", listener.local_addr()?);
+        let endpoint = gents::config_client::GraphqlEndpoint::anonymous(format!(
+            "http://{}/graphql",
+            listener.local_addr()?
+        ));
         let server = tokio::spawn(async move {
             let _ = axum::serve(listener, app).await;
         });
@@ -1311,10 +1315,12 @@ mod tests {
         });
         let (prepared, receipt) = stable_test_prepared_request().await;
         *state.receipt.lock().unwrap() = receipt;
-        let submitted =
-            submit_prepared_agent_request_committed(&format!("http://{address}/"), &prepared)
-                .await
-                .expect("recover committed request");
+        let submitted = submit_prepared_agent_request_committed(
+            &gents::config_client::GraphqlEndpoint::anonymous(format!("http://{address}/")),
+            &prepared,
+        )
+        .await
+        .expect("recover committed request");
         assert_eq!(submitted.request_id, "stable-request-id");
         assert_eq!(
             state
@@ -1345,10 +1351,12 @@ mod tests {
         });
         let (prepared, receipt) = stable_test_prepared_request().await;
         *state.receipt.lock().unwrap() = receipt;
-        let submitted =
-            submit_prepared_agent_request_committed(&format!("http://{address}/"), &prepared)
-                .await
-                .expect("recover committed request after transport response loss");
+        let submitted = submit_prepared_agent_request_committed(
+            &gents::config_client::GraphqlEndpoint::anonymous(format!("http://{address}/")),
+            &prepared,
+        )
+        .await
+        .expect("recover committed request after transport response loss");
         assert_eq!(submitted.request_id, "stable-request-id");
         assert_eq!(
             state
@@ -1373,7 +1381,10 @@ mod tests {
             .insert(prepared.create.request_id.clone());
         *state.receipt.lock().unwrap() = receipt;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let endpoint = format!("http://{}/", listener.local_addr().unwrap());
+        let endpoint = gents::config_client::GraphqlEndpoint::anonymous(format!(
+            "http://{}/",
+            listener.local_addr().unwrap()
+        ));
         let router = Router::new()
             .route("/", post(ambiguous_submit_endpoint))
             .with_state(state.clone());
@@ -1418,7 +1429,10 @@ mod tests {
             axum::routing::post(move || async move { axum::Json(data) }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let endpoint = format!("http://{}/graphql", listener.local_addr()?);
+        let endpoint = gents::config_client::GraphqlEndpoint::anonymous(format!(
+            "http://{}/graphql",
+            listener.local_addr()?
+        ));
         let server = tokio::spawn(async move { axum::serve(listener, app).await });
         let result = super::prepare_agent_request(
             &endpoint,

@@ -162,7 +162,7 @@ pub(super) async fn execute(
     plugins: &PluginExecutor,
     journal: Vec<ActionJournalEntry>,
 ) -> Result<()> {
-    if !journal.is_empty() {
+    if let Some(journal) = crate::workspace::recover_running(&journal) {
         return persist_journal(
             node,
             invocation,

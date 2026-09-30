@@ -19,6 +19,7 @@ hook_id: string, phase: TaskHookPhase,
 command: Array<string>,
 /**
  * Per-command timeout in seconds. Absent/null uses 120; explicit values
- * must be positive. Launch failure, timeout, and nonzero exit are hook errors.
+ * must be between 1 and 86400. Launch failure, timeout, and nonzero exit are
+ * hook errors.
  */
 timeout_secs?: number | null, };

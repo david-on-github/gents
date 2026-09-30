@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -26,7 +27,7 @@ pub(crate) async fn status(args: StatusArgs) -> Result<()> {
 
 pub(crate) async fn load_runtime_status_output(
     home: Option<&Path>,
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
 ) -> Result<Value> {
     let behavior_readiness_row = load_live_behavior_readiness(graphql, agent_did).await?;
@@ -97,7 +98,7 @@ pub(crate) async fn load_runtime_status_output(
     let runtime_state = read_runtime_state(&home_dir)?;
     let p2p_status = crate::commands::p2p::load_live_http_p2p_status(home, graphql).await;
     let background_completion = match gents::load_background_completion_diagnostics(
-        &ConfigAccess::Graphql(graphql.to_string()),
+        &ConfigAccess::Graphql(graphql.clone()),
         agent_did,
     )
     .await
@@ -181,7 +182,7 @@ pub(crate) async fn load_runtime_status_output(
     Ok(output)
 }
 
-pub(crate) async fn load_liveness_value(graphql: &str, agent_did: &str) -> Value {
+pub(crate) async fn load_liveness_value(graphql: &GraphqlEndpoint, agent_did: &str) -> Value {
     if let Some(liveness) = load_live_http_liveness_value(graphql).await {
         return liveness;
     }
@@ -191,7 +192,7 @@ pub(crate) async fn load_liveness_value(graphql: &str, agent_did: &str) -> Value
     }
 }
 
-async fn load_live_http_liveness_value(graphql: &str) -> Option<Value> {
+async fn load_live_http_liveness_value(graphql: &GraphqlEndpoint) -> Option<Value> {
     let status_url = runtime_status_url(graphql).ok()?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
@@ -205,8 +206,8 @@ async fn load_live_http_liveness_value(graphql: &str) -> Option<Value> {
     body.get("liveness").cloned()
 }
 
-fn runtime_status_url(graphql: &str) -> Result<String> {
-    let mut url = reqwest::Url::parse(graphql).context("parsing GraphQL endpoint URL")?;
+fn runtime_status_url(graphql: &GraphqlEndpoint) -> Result<String> {
+    let mut url = reqwest::Url::parse(graphql.url()).context("parsing GraphQL endpoint URL")?;
     url.set_path("/status");
     url.set_query(None);
     url.set_fragment(None);
@@ -214,10 +215,10 @@ fn runtime_status_url(graphql: &str) -> Result<String> {
 }
 
 pub(crate) async fn load_live_behavior_readiness(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
 ) -> Result<Option<AgentBehaviorReadinessRow>> {
-    load_behavior_readiness(&ConfigAccess::Graphql(graphql.to_string()), agent_did).await
+    load_behavior_readiness(&ConfigAccess::Graphql(graphql.clone()), agent_did).await
 }
 
 pub(crate) async fn load_behavior_readiness(
@@ -252,7 +253,10 @@ mod tests {
     #[test]
     fn runtime_status_url_points_at_server_status_root() {
         assert_eq!(
-            runtime_status_url("http://127.0.0.1:9191/api/v0/graphql?ignored=true").unwrap(),
+            runtime_status_url(&gents::config_client::GraphqlEndpoint::anonymous(
+                "http://127.0.0.1:9191/api/v0/graphql?ignored=true"
+            ))
+            .unwrap(),
             "http://127.0.0.1:9191/status"
         );
     }

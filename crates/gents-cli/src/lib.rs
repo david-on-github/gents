@@ -4,9 +4,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use gents::defra_node::{EmbeddedNode, NodeBuilder, StorageBackend};
+use gents::defra_node::NodeBuilder;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
 
 mod caused_sessions;
 mod cli;
@@ -45,7 +44,10 @@ const DEFAULT_OLLAMA_ENDPOINT: &str = "http://localhost:11434/v1";
 const DEFAULT_OLLAMA_MODEL_NAME: &str = "hf.co/google/gemma-4-12B-it-qat-q4_0-gguf";
 const DEFAULT_CHATGPT_CODEX_MODEL_NAME: &str = "gpt-6-astra";
 const DEFAULT_XAI_GROK_OAUTH_MODEL_NAME: &str = "grok-4.7";
+#[cfg(not(all(debug_assertions, feature = "native-e2e")))]
 const DEFAULT_HTTP_PORT: u16 = 9191;
+#[cfg(all(debug_assertions, feature = "native-e2e"))]
+const DEFAULT_HTTP_PORT: u16 = 21919;
 const DEFAULT_CODEX_SHIM_PORT: u16 = 9292;
 const DEFAULT_CODEX_REMOTE: &str = "ws://127.0.0.1:9292/";
 const DEFAULT_INTERACTIVE_WAIT_TIMEOUT_SECS: u64 = 86_400;
@@ -498,76 +500,37 @@ pub(crate) fn expand_nonempty_values(values: &[String], flag_name: &str) -> Resu
 }
 
 pub(crate) async fn http_get_json<T: DeserializeOwned>(
-    client: &reqwest::Client,
-    url: &str,
+    request: reqwest::RequestBuilder,
 ) -> Result<T> {
+    let (url, body) = http_send_bytes(request).await?;
+    serde_json::from_slice(&body).with_context(|| format!("decoding JSON response from {url}"))
+}
+
+pub(crate) async fn http_send(request: reqwest::RequestBuilder) -> Result<()> {
+    http_send_bytes(request).await.map(|_| ())
+}
+
+async fn http_send_bytes(request: reqwest::RequestBuilder) -> Result<(reqwest::Url, Vec<u8>)> {
+    let (client, request) = request.build_split();
+    let request = request.context("building HTTP request")?;
+    let method = request.method().clone();
+    let url = request.url().clone();
     let response = client
-        .get(url)
-        .send()
+        .execute(request)
         .await
-        .with_context(|| format!("sending GET request to {url}"))?;
+        .with_context(|| format!("sending {method} request to {url}"))?;
     let status = response.status();
     let body = response
         .bytes()
         .await
-        .with_context(|| format!("reading GET response body from {url}"))?;
+        .with_context(|| format!("reading {method} response body from {url}"))?;
     if !status.is_success() {
         anyhow::bail!(
-            "GET {url} failed with {status}: {}",
+            "{method} {url} failed with {status}: {}",
             String::from_utf8_lossy(&body)
         );
     }
-    serde_json::from_slice(&body).with_context(|| format!("decoding JSON response from {url}"))
-}
-
-pub(crate) async fn http_post_json<B: Serialize>(
-    client: &reqwest::Client,
-    url: &str,
-    body: &B,
-) -> Result<()> {
-    let response = client
-        .post(url)
-        .json(body)
-        .send()
-        .await
-        .with_context(|| format!("sending POST request to {url}"))?;
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("reading POST response body from {url}"))?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "POST {url} failed with {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-    }
-    Ok(())
-}
-
-pub(crate) async fn http_delete_json<B: Serialize>(
-    client: &reqwest::Client,
-    url: &str,
-    body: &B,
-) -> Result<()> {
-    let response = client
-        .delete(url)
-        .json(body)
-        .send()
-        .await
-        .with_context(|| format!("sending DELETE request to {url}"))?;
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("reading DELETE response body from {url}"))?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "DELETE {url} failed with {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-    }
-    Ok(())
+    Ok((url, body.to_vec()))
 }
 
 /// The control plane a command reads and writes, holding the claim on the
@@ -612,14 +575,13 @@ pub(crate) async fn resolve_config_access(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Ok((ConfigAccess::Graphql(graphql.to_string()).into(), home_dir));
+        let endpoint = resolve_graphql_endpoint(Some(graphql), home)?;
+        return Ok((ConfigAccess::Graphql(endpoint).into(), home_dir));
     }
     if let Some(runtime_state) = read_runtime_state(&home_dir)? {
         if graphql_endpoint_available(&runtime_state.graphql).await {
-            return Ok((
-                ConfigAccess::Graphql(runtime_state.graphql).into(),
-                home_dir,
-            ));
+            let endpoint = home_graphql_endpoint(&home_dir, runtime_state.graphql);
+            return Ok((ConfigAccess::Graphql(endpoint).into(), home_dir));
         }
     }
 
@@ -630,7 +592,8 @@ pub(crate) async fn resolve_config_access(
     let node = {
         use std::sync::Arc;
         let node_arc = Arc::new(
-            persistent_node_builder_with_stored_identity(&home_dir, &data_dir)?
+            persistent_node_builder_with_stored_identity(&home_dir, &data_dir)
+                .await?
                 .build()
                 .await
                 .with_context(|| {
@@ -640,6 +603,7 @@ pub(crate) async fn resolve_config_access(
         gents::migration::ensure_all_runtime_migrations(node_arc.clone())
             .await
             .map_err(|error| gents::storage_backend::classify_store_error(error, &data_dir))?;
+        gents::store_key::upgrade::finish(&data_dir)?;
         Arc::try_unwrap(node_arc).unwrap_or_else(|_| {
             unreachable!("node_arc had exactly one strong reference at this point")
         })
@@ -653,18 +617,21 @@ pub(crate) async fn resolve_config_access(
     ))
 }
 
-pub(crate) fn persistent_node_builder(data_dir: &Path) -> Result<NodeBuilder> {
-    gents::storage_backend::reject_legacy_store(data_dir)?;
-    Ok(EmbeddedNode::builder()
-        .data_path(data_dir)
-        .with_storage_backend(StorageBackend::Regolith))
-}
-
-pub(crate) fn persistent_node_builder_with_stored_identity(
+/// The builder for an initialized home's store at `data_dir`, encrypted with
+/// the key the home recorded.
+pub(crate) async fn persistent_node_builder(
     home_dir: &Path,
     data_dir: &Path,
 ) -> Result<NodeBuilder> {
-    let mut builder = persistent_node_builder(data_dir)?;
+    gents::storage_backend::reject_legacy_store(data_dir)?;
+    let key = gents::store_key::open_home_store_key(home_dir, data_dir).await?;
+    gents::store_key::persistent_builder(data_dir, &key)
+}
+
+pub(crate) async fn persistent_node_builder_with_stored_identity(
+    home_dir: &Path,
+    data_dir: &Path,
+) -> Result<NodeBuilder> {
     let config = read_init_config(home_dir)?.ok_or_else(|| {
         anyhow::anyhow!(
             "gents home {} is not initialized; run `gents init --home {}` first",
@@ -673,8 +640,9 @@ pub(crate) fn persistent_node_builder_with_stored_identity(
         )
     })?;
     let identity = load_initialized_home_identity(home_dir, &config)?;
-    builder = builder.with_node_identity_did(identity.did().to_string());
-    Ok(builder)
+    Ok(persistent_node_builder(home_dir, data_dir)
+        .await?
+        .with_node_identity_did(identity.did().to_string()))
 }
 
 pub(crate) fn require_non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str> {
@@ -805,16 +773,45 @@ mod tests {
                 tool_package: None,
                 tool_ceiling: ToolCeilingArg::Readonly,
                 tool_root: None,
+                store_encryption: Some(
+                    gents::store_key::StoreEncryption::prepare(
+                        gents::store_key::StoreKeyCustodyChoice::File,
+                        &gents::store_key::home_key_file(&home),
+                        &default_data_dir(&home),
+                    )
+                    .unwrap(),
+                ),
             },
         )
         .unwrap();
 
         let node = persistent_node_builder_with_stored_identity(&home, &data)
+            .await
             .unwrap()
             .build()
             .await
             .unwrap();
         assert_eq!(node.node_identity_did(), Some(did.as_str()));
+    }
+
+    #[tokio::test]
+    async fn an_unrecorded_key_is_not_adopted_when_opening_an_older_home() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = initialized_home(temp.path());
+        let mut config = read_init_config(&home).unwrap().unwrap();
+        config.store_encryption = None;
+        write_init_config(&home, &config).unwrap();
+        let data = default_data_dir(&home);
+        let key_file = gents::store_key::home_key_file(&home);
+        let before = std::fs::read(&key_file).unwrap();
+
+        let error = match persistent_node_builder_with_stored_identity(&home, &data).await {
+            Ok(_) => panic!("an unrecorded key must not be adopted"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("unrecorded file"), "{error:#}");
+        assert_eq!(std::fs::read(key_file).unwrap(), before);
+        assert!(!data.join("MANIFEST").exists(), "the store is never opened");
     }
 
     /// An initialized home: the signing key and `init.json` every
@@ -837,9 +834,27 @@ mod tests {
                 tool_package: None,
                 tool_ceiling: ToolCeilingArg::Readonly,
                 tool_root: None,
+                store_encryption: Some(
+                    gents::store_key::StoreEncryption::prepare(
+                        gents::store_key::StoreKeyCustodyChoice::File,
+                        &gents::store_key::home_key_file(&home),
+                        &default_data_dir(&home),
+                    )
+                    .unwrap(),
+                ),
             },
         )
         .unwrap();
+        read_init_config(&home)
+            .unwrap()
+            .unwrap()
+            .store_encryption
+            .unwrap()
+            .initialize(
+                &gents::store_key::home_key_file(&home),
+                &default_data_dir(&home),
+            )
+            .unwrap();
         home
     }
 
@@ -888,13 +903,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn uninitialized_offline_home_requires_init() {
+    #[tokio::test]
+    async fn uninitialized_offline_home_requires_init() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let data = default_data_dir(&home);
 
-        let error = match persistent_node_builder_with_stored_identity(&home, &data) {
+        let error = match persistent_node_builder_with_stored_identity(&home, &data).await {
             Ok(_) => panic!("uninitialized home should not produce an unsigned node builder"),
             Err(error) => error,
         };

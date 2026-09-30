@@ -94,7 +94,7 @@ pub(super) async fn projection_acp_read_scope(
     Ok(Some(ProjectionAcpReadScope {
         actor_did: actor_did.to_string(),
         policy_id,
-        api_base: crate::graphql_access::graphql_api_base(graphql)?,
+        api_base: crate::graphql_access::graphql_api_base(graphql.url())?,
         resource_names,
     }))
 }

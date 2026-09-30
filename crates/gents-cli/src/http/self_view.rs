@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
@@ -133,7 +134,7 @@ struct CompactionRow {
 }
 
 pub(crate) async fn load_self_view(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
 ) -> Result<(Vec<SelfBehavior>, ContextBudget, ContextIndicator)> {
     let response = post_graphql(graphql, &self_view_query(agent_did)).await?;

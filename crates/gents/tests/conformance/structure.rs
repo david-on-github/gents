@@ -127,17 +127,16 @@ fn model_homes() -> BTreeMap<&'static str, Home> {
             WorkspaceTest("crates/gents/src/admission/stream_guard/conformance.rs"),
         ),
         (
+            "StoreEncryptionUpgrade",
+            WorkspaceTest("crates/gents/src/store_key/upgrade/tests.rs"),
+        ),
+        (
             "StreamingResponse",
             Module("conformance/streaming_compaction.rs"),
         ),
         (
             "TaskHooks",
-            Gap(
-                "#1600: admission is fenced against Task::validate by \
-                 lean_vocab_test/task_hooks_policy.rs; the generated phase and \
-                 recovery traces still have no host executor to drive, so \
-                 ordering and gating remain unbound",
-            ),
+            WorkspaceTest("crates/gents/src/lean_vocab_test/task_hook_executor.rs"),
         ),
         (
             "ToolExecution",

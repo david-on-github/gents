@@ -20,12 +20,6 @@ async fn claude_messages_tool_round_trip_through_owned_loop() {
 async fn signed_claude_tool_round_trip_with_scope(
     scope_kind: gents_protocol::rendered_request::CaptureScopeKind,
 ) {
-    use crate::claude_messages::{
-        install_messages_sse_fixtures, lock_fixtures_for_test, sse_fixture_final_text,
-    };
-    use crate::claude_subscription::{ClaudeSubscriptionClient, StaticBearer};
-    use rig::client::CompletionClient;
-
     let first_thinking = "reasoned";
     let first_signature = "sig-first";
     let second_thinking = "";
@@ -53,70 +47,12 @@ async fn signed_claude_tool_round_trip_with_scope(
     .into_iter()
     .map(|event| format!("data: {event}\n\n"))
     .collect::<String>();
-    let _guard = lock_fixtures_for_test();
-    install_messages_sse_fixtures(vec![first_turn, sse_fixture_final_text("done")]);
-    let (node, hook, writer, mut lifecycle) = owned_test_hook().await;
-
-    // Fixture-only: a refusing bearer keeps an extra turn off the network.
-    let model =
-        ClaudeSubscriptionClient::with_bearer(Arc::new(StaticBearer::failing("no credential")))
-            .completion_model("claude-sonnet-5");
-    let tools: Arc<Vec<Box<dyn ToolDyn>>> = Arc::new(vec![echo_tool()]);
-    let mut config = owned_config(4);
-    config.on_rendered_request = Some(crate::rendered_request::scope::ambient_arming_sink(
-        scope_kind,
-    ));
-    config.provider_input_counter = Arc::new(crate::provider_input::ProviderInputCounter::new(
-        crate::BackendProviderKind::ClaudeCliSubscription,
-        crate::OpenAiWireApi::ChatCompletions,
-        "claude-sonnet-5",
-    ));
-    config.replay = crate::provider_input::replay::owned_replay_input(
-        node.clone(),
-        lifecycle.request().clone(),
-        lifecycle
-            .request_commit_cid()
-            .expect("claimed request commit CID")
-            .to_owned(),
-        scope_kind,
-        crate::llm::backend_client::claude_subscription_replay_issuer()
-            .expect("Claude Messages route"),
-        crate::provider_input::ProviderInputProfile::ClaudeMessages,
-    );
-    let request_commit_cid = lifecycle
-        .request_commit_cid()
-        .expect("claimed request commit CID")
-        .to_owned();
-    let capture_factory =
-        crate::rendered_request::defra_rendered_request_capture_factory(node.clone());
-    let capture_scope = crate::rendered_request::scope_from_factory(
-        crate::rendered_request::context_for_claimed_request(
-            lifecycle.request(),
-            &request_commit_cid,
-            "claude-sonnet-5".to_owned(),
-            Some(crate::BackendProviderKind::ClaudeCliSubscription.as_str().to_owned()),
-        ),
-        Some(&capture_factory),
-    )
-    .expect("DefraDB rendered-request capture scope");
-
-    let stream = run_loop_stream(
-        model,
-        Some(hook.clone()),
-        TaggedMessage::unassociated(Message::user("use the echo tool")),
-        Vec::new(),
-        tools,
-        config,
-    );
-    let collected = collect_owned_scripted_stream_with_capture_scope(
-        stream,
-        &hook,
-        &writer,
-        &mut lifecycle,
-        gents_loop::provider_input::ProviderInputProfile::ClaudeMessages,
-        Some(capture_scope),
-    )
-    .await;
+    let ClaudeFixtureRun {
+        node,
+        lifecycle,
+        collected,
+        request_commit_cid,
+    } = run_claude_fixture_turns(first_turn, scope_kind).await;
     assert!(collected.error.is_none(), "{:?}", collected.error);
 
     assert_eq!(collected.tool_results, vec!["ECHOED".to_string()]);
@@ -126,49 +62,8 @@ async fn signed_claude_tool_round_trip_with_scope(
     // signed blocks can appear only after the accepted first turn's physical
     // header, closure, and Claude capture pass the replay resolver.
     let request_doc_id = lifecycle.request().doc_id.clone();
-    let captures = node
-        .execute(&format!(
-            r#"{{ RenderedRequest(filter: {{ request_doc_id: {{ _eq: "{}" }} }}, order: {{ turn_index: ASC }}) {{ turn_index capture_scope source request_commit_cid capture_version request_json }} }}"#,
-            crate::graphql::escape_graphql_string(&request_doc_id),
-        ))
-        .await;
-    assert!(
-        !captures.has_errors(),
-        "RenderedRequest query failed: {:?}",
-        captures.errors
-    );
-    let capture_rows = captures.data.as_ref().expect("capture data")["RenderedRequest"]
-        .as_array()
-        .expect("capture rows");
-    assert_eq!(capture_rows.len(), 2, "both Claude sends must be durable");
-    let expected_source = serde_json::to_value(
-        gents_protocol::rendered_request::RenderedRequestSource::ClaudeCliSubscription,
-    )
-    .expect("Claude capture source");
-    for (turn_index, row) in capture_rows.iter().enumerate() {
-        assert_eq!(row["capture_scope"], format!("{scope_kind}.1"));
-        assert_eq!(
-            row["turn_index"].as_u64(),
-            Some(turn_index as u64),
-            "capture turn coordinate"
-        );
-        assert_eq!(row["source"], expected_source, "Claude origin is physical");
-        assert_eq!(
-            row["request_commit_cid"].as_str(),
-            Some(request_commit_cid.as_str())
-        );
-    }
-    let second = &capture_rows[1];
-    let (captured_body, _) = crate::rendered_request::decode_capture_pair(
-        &crate::config_client::ConfigAccess::Local(node.clone()),
-        u32::try_from(second["capture_version"].as_u64().expect("capture version"))
-            .expect("version fits u32"),
-        second["request_json"]
-            .as_str()
-            .expect("encoded request JSON"),
-    )
-    .await
-    .expect("decode the second physical Claude capture");
+    let sends = captured_claude_sends(&node, &request_doc_id, &request_commit_cid, scope_kind).await;
+    let captured_body = &sends[1];
     let messages = captured_body["messages"].as_array().expect("Messages body");
     let assistant = messages
         .iter()
@@ -280,4 +175,251 @@ async fn signed_claude_tool_round_trip_with_scope(
         crate::tool_call_lifecycle::query::render_tool_result(&native).unwrap(),
         "ECHOED",
     );
+}
+
+/// Streams the Lean `ordered-signed-redacted-tool` replay (signed thinking,
+/// redacted thinking, `tool_use echo`) as turn 1 through the owned loop. The
+/// accepted continuation must replay exactly the modeled native blocks in
+/// stream order.
+#[tokio::test]
+async fn claude_messages_redacted_and_signed_tool_round_trip_through_owned_loop() {
+    let case = crate::lean_vocab_test::lean_prompt_assembly_claude_replay_cases()
+        .iter()
+        .find(|case| case.name == "ordered-signed-redacted-tool")
+        .expect("Lean ordered signed/redacted/tool replay case");
+    assert_eq!(case.outcome, "ok", "{}", case.name);
+    let expected = case
+        .replay
+        .iter()
+        .map(crate::lean_vocab_test::LeanClaudeReplayBlock::native_json)
+        .collect::<Vec<_>>();
+    let kinds = expected
+        .iter()
+        .map(|block| block["type"].as_str().expect("block type"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        kinds,
+        ["thinking", "redacted_thinking", "tool_use"],
+        "{}: the model case must keep its ordered shape",
+        case.name
+    );
+    let first_turn = claude_sse_for_blocks(&expected);
+
+    let scope_kind = gents_protocol::rendered_request::CaptureScopeKind::Inference;
+    let ClaudeFixtureRun {
+        node,
+        lifecycle,
+        collected,
+        request_commit_cid,
+    } = run_claude_fixture_turns(first_turn, scope_kind).await;
+    assert!(collected.error.is_none(), "{:?}", collected.error);
+    assert_eq!(collected.tool_results, vec!["ECHOED".to_string()]);
+    assert_eq!(collected.final_text.as_deref(), Some("done"));
+
+    let sends = captured_claude_sends(
+        &node,
+        &lifecycle.request().doc_id,
+        &request_commit_cid,
+        scope_kind,
+    )
+    .await;
+    let mut replayed = sends[1]["messages"]
+        .as_array()
+        .expect("Messages body")
+        .iter()
+        .find(|message| message["role"] == "assistant")
+        .expect("accepted assistant replay in second send")["content"]
+        .as_array()
+        .expect("assistant blocks")
+        .clone();
+    for block in &mut replayed {
+        block
+            .as_object_mut()
+            .expect("content object")
+            .remove("cache_control");
+    }
+    assert_eq!(
+        replayed, expected,
+        "the continuation must replay signed, redacted, and tool blocks in stream order"
+    );
+}
+
+/// Encodes native Messages content blocks as the SSE a provider streams for
+/// them, ending in a `tool_use` stop.
+fn claude_sse_for_blocks(blocks: &[serde_json::Value]) -> String {
+    let mut events = Vec::new();
+    for (index, block) in blocks.iter().enumerate() {
+        match block["type"].as_str().expect("block type") {
+            "thinking" => {
+                events.push(serde_json::json!({"type":"content_block_start","index":index,
+                    "content_block":{"type":"thinking","thinking":""}}));
+                events.push(serde_json::json!({"type":"content_block_delta","index":index,
+                    "delta":{"type":"thinking_delta","thinking":block["thinking"]}}));
+                events.push(serde_json::json!({"type":"content_block_delta","index":index,
+                    "delta":{"type":"signature_delta","signature":block["signature"]}}));
+            }
+            "redacted_thinking" => {
+                events.push(serde_json::json!({"type":"content_block_start","index":index,
+                    "content_block":{"type":"redacted_thinking","data":block["data"]}}));
+            }
+            "tool_use" => {
+                events.push(serde_json::json!({"type":"content_block_start","index":index,
+                    "content_block":{"type":"tool_use","id":block["id"],"name":block["name"],
+                        "input":{}}}));
+                events.push(serde_json::json!({"type":"content_block_delta","index":index,
+                    "delta":{"type":"input_json_delta",
+                        "partial_json":block["input"].to_string()}}));
+            }
+            other => panic!("no SSE encoding for {other}"),
+        }
+        events.push(serde_json::json!({"type":"content_block_stop","index":index}));
+    }
+    events.push(serde_json::json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},
+        "usage":{"input_tokens":10,"output_tokens":5}}));
+    events.push(serde_json::json!({"type":"message_stop"}));
+    events
+        .into_iter()
+        .map(|event| format!("data: {event}\n\n"))
+        .collect()
+}
+
+struct ClaudeFixtureRun {
+    node: Arc<defra_node::EmbeddedNode>,
+    lifecycle: crate::lifecycle::RequestLifecycle,
+    collected: CollectedScriptedStream,
+    request_commit_cid: String,
+}
+
+/// Runs the owned loop against `first_turn` then a final `done` text turn,
+/// with the echo tool and the Claude Messages replay and capture owners.
+async fn run_claude_fixture_turns(
+    first_turn: String,
+    scope_kind: gents_protocol::rendered_request::CaptureScopeKind,
+) -> ClaudeFixtureRun {
+    use crate::claude_messages::{
+        install_messages_sse_fixtures, lock_fixtures_for_test, sse_fixture_final_text,
+    };
+    use crate::claude_subscription::{ClaudeSubscriptionClient, StaticBearer};
+    use rig::client::CompletionClient;
+
+    let _guard = lock_fixtures_for_test();
+    install_messages_sse_fixtures(vec![first_turn, sse_fixture_final_text("done")]);
+    let (node, hook, writer, mut lifecycle) = owned_test_hook().await;
+
+    // Fixture-only: a refusing bearer keeps an extra turn off the network.
+    let model =
+        ClaudeSubscriptionClient::with_bearer(Arc::new(StaticBearer::failing("no credential")))
+            .completion_model("claude-sonnet-5");
+    let tools: Arc<Vec<Box<dyn ToolDyn>>> = Arc::new(vec![echo_tool()]);
+    let mut config = owned_config(4);
+    config.on_rendered_request = Some(crate::rendered_request::scope::ambient_arming_sink(
+        scope_kind,
+    ));
+    config.provider_input_counter = Arc::new(crate::provider_input::ProviderInputCounter::new(
+        crate::BackendProviderKind::ClaudeCliSubscription,
+        crate::OpenAiWireApi::ChatCompletions,
+        "claude-sonnet-5",
+    ));
+    config.replay = crate::provider_input::replay::owned_replay_input(
+        node.clone(),
+        lifecycle.request().clone(),
+        lifecycle
+            .request_commit_cid()
+            .expect("claimed request commit CID")
+            .to_owned(),
+        scope_kind,
+        crate::llm::backend_client::claude_subscription_replay_issuer()
+            .expect("Claude Messages route"),
+        crate::provider_input::ProviderInputProfile::ClaudeMessages,
+    );
+    let request_commit_cid = lifecycle
+        .request_commit_cid()
+        .expect("claimed request commit CID")
+        .to_owned();
+    let capture_factory =
+        crate::rendered_request::defra_rendered_request_capture_factory(node.clone());
+    let capture_scope = crate::rendered_request::scope_from_factory(
+        crate::rendered_request::context_for_claimed_request(
+            lifecycle.request(),
+            &request_commit_cid,
+            "claude-sonnet-5".to_owned(),
+            Some(crate::BackendProviderKind::ClaudeCliSubscription.as_str().to_owned()),
+        ),
+        Some(&capture_factory),
+    )
+    .expect("DefraDB rendered-request capture scope");
+
+    let stream = run_loop_stream(
+        model,
+        Some(hook.clone()),
+        TaggedMessage::unassociated(Message::user("use the echo tool")),
+        Vec::new(),
+        tools,
+        config,
+    );
+    let collected = collect_owned_scripted_stream_with_capture_scope(
+        stream,
+        &hook,
+        &writer,
+        &mut lifecycle,
+        gents_loop::provider_input::ProviderInputProfile::ClaudeMessages,
+        Some(capture_scope),
+    )
+    .await;
+    ClaudeFixtureRun {
+        node,
+        lifecycle,
+        collected,
+        request_commit_cid,
+    }
+}
+
+/// Decodes both durable Claude sends for the request, in turn order, after
+/// checking each capture's physical coordinates.
+async fn captured_claude_sends(
+    node: &Arc<defra_node::EmbeddedNode>,
+    request_doc_id: &str,
+    request_commit_cid: &str,
+    scope_kind: gents_protocol::rendered_request::CaptureScopeKind,
+) -> Vec<serde_json::Value> {
+    let captures = node
+        .execute(&format!(
+            r#"{{ RenderedRequest(filter: {{ request_doc_id: {{ _eq: "{}" }} }}, order: {{ turn_index: ASC }}) {{ turn_index capture_scope source request_commit_cid capture_version request_json }} }}"#,
+            crate::graphql::escape_graphql_string(request_doc_id),
+        ))
+        .await;
+    assert!(
+        !captures.has_errors(),
+        "RenderedRequest query failed: {:?}",
+        captures.errors
+    );
+    let capture_rows = captures.data.as_ref().expect("capture data")["RenderedRequest"]
+        .as_array()
+        .expect("capture rows");
+    assert_eq!(capture_rows.len(), 2, "both Claude sends must be durable");
+    let expected_source = serde_json::to_value(
+        gents_protocol::rendered_request::RenderedRequestSource::ClaudeCliSubscription,
+    )
+    .expect("Claude capture source");
+    let mut bodies = Vec::with_capacity(capture_rows.len());
+    for (turn_index, row) in capture_rows.iter().enumerate() {
+        assert_eq!(row["capture_scope"], format!("{scope_kind}.1"));
+        assert_eq!(
+            row["turn_index"].as_u64(),
+            Some(turn_index as u64),
+            "capture turn coordinate"
+        );
+        assert_eq!(row["source"], expected_source, "Claude origin is physical");
+        assert_eq!(row["request_commit_cid"].as_str(), Some(request_commit_cid));
+        let (body, _) = crate::rendered_request::decode_capture_pair(
+            &crate::config_client::ConfigAccess::Local(node.clone()),
+            u32::try_from(row["capture_version"].as_u64().expect("capture version"))
+                .expect("version fits u32"),
+            row["request_json"].as_str().expect("encoded request JSON"),
+        )
+        .await
+        .expect("decode the physical Claude capture");
+        bodies.push(body);
+    }
+    bodies
 }

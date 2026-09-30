@@ -35,7 +35,7 @@ pub(super) async fn decide_enrollment(
     let graphql = resolve_graphql_endpoint(args.graphql.as_deref(), args.home.as_deref())?;
     let body = submit_enrollment_decision(
         &home,
-        &graphql,
+        graphql.url(),
         request_id,
         action.clone(),
         if action == EnrollmentOperatorAction::Approve {
@@ -59,7 +59,7 @@ pub(crate) async fn submit_enrollment_decision(
     anyhow::ensure!(!request_id.is_empty(), "request_id must not be empty");
     let identity = resolve_home_identity(Some(home))
         .context("loading operator identity for enrollment decision")?;
-    let mut url = reqwest::Url::parse(&graphql).context("parsing runtime GraphQL endpoint")?;
+    let mut url = reqwest::Url::parse(graphql).context("parsing runtime GraphQL endpoint")?;
     url.set_path("/enrollment/decisions");
     url.set_query(None);
     url.set_fragment(None);
@@ -106,7 +106,7 @@ pub(super) async fn pending_enrollments(args: P2pAccessArgs) -> Result<()> {
     let identity = resolve_home_identity(args.home.as_deref())
         .context("loading operator identity for pending enrollments")?;
     let graphql = resolve_graphql_endpoint(args.graphql.as_deref(), args.home.as_deref())?;
-    let mut url = reqwest::Url::parse(&graphql).context("parsing runtime GraphQL endpoint")?;
+    let mut url = reqwest::Url::parse(graphql.url()).context("parsing runtime GraphQL endpoint")?;
     url.set_path("/enrollment/pending");
     url.set_query(None);
     url.set_fragment(None);

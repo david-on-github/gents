@@ -26,10 +26,10 @@
 # No `@policy` and no encryption directives. ACP is blocked on defradb.rs#1318
 # (`EmbeddedNode` exposes no policy or relationship API), and a policy id that
 # is never installed deploys cleanly while leaving rows anonymously readable.
-# `encrypt: true` protects replicated CRDT block deltas only — the local node
-# writes plaintext into the datastore — so it would be confidentiality theater
-# on a single-node install. #840's participant-boundary criterion is therefore
-# NOT met by this collection as shipped.
+# `encrypt: true` protects replicated CRDT block deltas only; the local
+# datastore is already encrypted at rest with the store key, which protects the
+# disk, not a reader of this node. #840's participant-boundary criterion is
+# therefore NOT met by this collection as shipped.
 type RenderedRequest @branchable {
     # sha256 over the canonical (agent_did, session_id, request_scope,
     # turn_index, attempt) tuple, where `request_scope` is the injective JSON

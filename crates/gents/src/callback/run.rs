@@ -284,24 +284,13 @@ pub fn resolve_action_plan_with_module(
     plan_from_callback(callback, source, module)
 }
 
-/// Host adapter may already have run; recovery must observe, not wipe.
-pub(crate) fn journal_has_started_host_execution(journal: &[ActionJournalEntry]) -> bool {
-    journal.iter().any(|entry| {
-        matches!(
-            entry.state,
-            ActionJournalState::Validated
-                | ActionJournalState::Executing
-                | ActionJournalState::EffectObserved
-                | ActionJournalState::ResultDocsWritten
-        )
-    })
-}
-
-/// Denied wipes the journal only before host execution. After Validated the
-/// journal is kept and the invocation is Failed so recovery can observe.
+/// Denied wipes the journal only before host execution. After it started, the
+/// denial fails the invocation through the recovery owner, so an action the
+/// host may already have run is marked interrupted and never retried.
 pub(crate) fn apply_planner_deny(invocation: &mut CallbackInvocationDoc, reason: &str) {
     let journal = decode_journal(invocation.action_journal.as_deref()).unwrap_or_default();
-    if journal_has_started_host_execution(&journal) {
+    if let Some(failed) = crate::workspace::recover_running(&journal) {
+        invocation.action_journal = Some(encode_journal(&failed));
         invocation.lifecycle_state = LIFECYCLE_FAILED.to_string();
         invocation.error = Some(reason.to_string());
         return;

@@ -101,7 +101,7 @@ pub(super) async fn workspace_root_set(args: WorkspaceRootUpsertArgs) -> Result<
     let enabled = !args.disabled;
     let updated_at = chrono::Utc::now().to_rfc3339();
 
-    let access = ConfigAccess::Graphql(args.graphql.clone());
+    let access = ConfigAccess::Graphql(crate::resolve_graphql_endpoint(Some(&args.graphql), None)?);
     let root_path_escaped = escape_graphql_string(&root_path);
     let display_name = match args.display_name.as_deref() {
         Some(value) => format!(r#""{}""#, escape_graphql_string(value)),

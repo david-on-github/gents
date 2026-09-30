@@ -83,8 +83,9 @@ async fn session_fork(args: SessionForkArgs) -> Result<()> {
         .context("resolving caller agent_did")?;
 
     if let Some(graphql) = args.graphql.as_deref() {
+        let endpoint = crate::resolve_graphql_endpoint(Some(graphql), args.home.as_deref())?;
         let outcome = fork_via_http(
-            graphql,
+            &endpoint,
             ForkParams {
                 source_session_id: &args.from,
                 fork_at_user_turn: args.at_user_turn,
@@ -110,6 +111,7 @@ async fn session_fork(args: SessionForkArgs) -> Result<()> {
     gents::ensure_runtime_schemas(&store.node)
         .await
         .context("ensuring runtime schemas")?;
+    gents::store_key::upgrade::finish(&data_dir)?;
 
     let outcome = fork(
         &store.node,
@@ -137,10 +139,15 @@ struct OfflineForkStore {
     _claim: gents::home::StoreLock,
 }
 
-/// The builder check runs before anything is created or claimed, so an
-/// uninitialized home keeps reporting `gents init` instead of a lock error.
+/// Initialization is checked before claiming; opening or upgrading the store
+/// requires the claim to remain held until the node closes.
 async fn open_offline_fork_store(home: &Path, data_dir: &Path) -> Result<OfflineForkStore> {
-    let builder = crate::persistent_node_builder_with_stored_identity(home, data_dir)?;
+    anyhow::ensure!(
+        crate::read_init_config(home)?.is_some(),
+        "gents home {} is not initialized; run `gents init --home {}` first",
+        home.display(),
+        home.display(),
+    );
     fs::create_dir_all(data_dir)
         .with_context(|| format!("creating data directory {}", data_dir.display()))?;
     // Only the held-store refusal carries the escape: an unconditional context
@@ -156,6 +163,7 @@ async fn open_offline_fork_store(home: &Path, data_dir: &Path) -> Result<Offline
             None => error,
         }
     })?;
+    let builder = crate::persistent_node_builder_with_stored_identity(home, data_dir).await?;
     let node = builder
         .build()
         .await
@@ -394,6 +402,14 @@ mod tests {
                 tool_package: None,
                 tool_ceiling: ToolCeilingArg::Readonly,
                 tool_root: None,
+                store_encryption: Some(
+                    gents::store_key::StoreEncryption::prepare(
+                        gents::store_key::StoreKeyCustodyChoice::File,
+                        &gents::store_key::home_key_file(&home),
+                        &default_data_dir(&home),
+                    )
+                    .unwrap(),
+                ),
             },
         )
         .unwrap();

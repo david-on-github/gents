@@ -72,6 +72,9 @@ inductive ActionJournalState where
   | executing
   | effectObserved
   | resultDocsWritten
+  /-- Recovery found the action still executing: the attempt was cut off and
+  what it did outside the runtime is unknown. -/
+  | interrupted
   deriving DecidableEq, Repr
 
 namespace ActionJournalState
@@ -81,12 +84,14 @@ def toDefraDB : ActionJournalState → String
   | .executing => "executing"
   | .effectObserved => "effectObserved"
   | .resultDocsWritten => "resultDocsWritten"
+  | .interrupted => "interrupted"
 
 def fromDefraDB? : String → Option ActionJournalState
   | "validated" => some .validated
   | "executing" => some .executing
   | "effectObserved" => some .effectObserved
   | "resultDocsWritten" => some .resultDocsWritten
+  | "interrupted" => some .interrupted
   | _ => none
 
 theorem fromDefraDB_toDefraDB (s : ActionJournalState) :
@@ -95,13 +100,23 @@ theorem fromDefraDB_toDefraDB (s : ActionJournalState) :
 
 def laterThanValidated : ActionJournalState → Bool
   | .validated => false
-  | .executing | .effectObserved | .resultDocsWritten => true
+  | .executing | .effectObserved | .resultDocsWritten | .interrupted => true
 
-/-- The action's effect happened, or its results were written. Running the
-invocation again could repeat that effect. -/
+/-- The action's effect happened, its results were written, or it was
+interrupted with an unknown outcome. Running the invocation again could repeat
+that effect. An interrupted action counts because an external side effect it
+may have caused is unobservable to the runtime and must not be repeated. An
+`executing` action does not count: a failed invocation keeps one only when its
+own attempt observed the failure (`Transition.fail`), and recovery, which
+cannot observe it, replaces it with `interrupted` (`CallbackInvocation.recover`). -/
 def effectful : ActionJournalState → Bool
-  | .effectObserved | .resultDocsWritten => true
+  | .effectObserved | .resultDocsWritten | .interrupted => true
   | .validated | .executing => false
+
+/-- Recovery's record of an action it found executing: its outcome is unknown. -/
+def markInterrupted : ActionJournalState → ActionJournalState
+  | .executing => .interrupted
+  | s => s
 
 end ActionJournalState
 

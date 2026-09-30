@@ -17,6 +17,16 @@ pub struct NativeE2eConfig {
     expect_empty_session_slice: bool,
     correlation_id: String,
     measure_performance: bool,
+    local_setup: Option<NativeLocalSetup>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeLocalSetup {
+    endpoint: String,
+    model: String,
+    phase: String,
+    tool_root: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -59,6 +69,15 @@ pub fn desktop_native_e2e_config() -> Result<Option<NativeE2eConfig>, BridgeErro
         }
 
         Ok(Some(NativeE2eConfig {
+            local_setup: std::env::var("GENTS_E2E_LOCAL_MODEL").ok().map(|model| {
+                NativeLocalSetup {
+                    model,
+                    endpoint: server_address.clone(),
+                    phase: std::env::var("GENTS_E2E_LOCAL_PHASE")
+                        .unwrap_or_else(|_| "setup".to_owned()),
+                    tool_root: std::env::var("GENTS_E2E_LOCAL_TOOL_ROOT").unwrap_or_default(),
+                }
+            }),
             agent_label: std::env::var("GENTS_E2E_AGENT_LABEL")
                 .unwrap_or_else(|_| "Fleet E2E Agent".to_owned()),
             server_address,

@@ -26,6 +26,7 @@ pub(crate) async fn provision(args: ProvisionArgs) -> Result<()> {
         args.bootstrap_macos_secure_enclave,
         args.keychain_label.as_deref(),
         args.secure_enclave_label.as_deref(),
+        crate::cli::args::store_key_custody(args.store_key_custody),
     )
     .await?;
 
@@ -115,6 +116,7 @@ async fn ensure_home_identity(
     bootstrap_macos_secure_enclave: bool,
     keychain_label: Option<&str>,
     secure_enclave_label: Option<&str>,
+    store_key_custody: gents::store_key::StoreKeyCustodyChoice,
 ) -> Result<ProvisionIdentityReport> {
     let bootstrap_count = [
         bootstrap_file_identity,
@@ -128,19 +130,8 @@ async fn ensure_home_identity(
         anyhow::bail!("bootstrap identity flags are mutually exclusive");
     }
 
-    if let Some(init_config) = read_init_config(home_dir)? {
-        let agent_did = init_config.agent_did.trim().to_string();
-        if !agent_did.is_empty() {
-            return Ok(ProvisionIdentityReport {
-                status: "existing",
-                agent_name: init_config.agent_name,
-                agent_did,
-                key_path: init_config.key_path,
-                identity_backend: init_config.identity_backend,
-                keychain_label: init_config.keychain_label,
-                secure_enclave_label: init_config.secure_enclave_label,
-            });
-        }
+    if let Some(report) = read_init_config(home_dir)?.and_then(report_from_stored_identity) {
+        return Ok(report);
     }
 
     if !bootstrap_file_identity && !bootstrap_macos_keychain && !bootstrap_macos_secure_enclave {
@@ -149,6 +140,12 @@ async fn ensure_home_identity(
             home_dir.display(),
             home_dir.display()
         );
+    }
+
+    let data_dir = crate::default_data_dir(home_dir);
+    let _store_lock = crate::commands::init::lock_init_store(home_dir, &data_dir, false)?;
+    if let Some(report) = read_init_config(home_dir)?.and_then(report_from_stored_identity) {
+        return Ok(report);
     }
 
     let key_path = if bootstrap_macos_keychain || bootstrap_macos_secure_enclave {
@@ -172,10 +169,24 @@ async fn ensure_home_identity(
         tool_package: ToolPackageArg::Readonly,
         tool_root: None,
         reset: false,
+        store_key_custody,
     })
     .await
     .with_context(|| format!("initializing identity metadata in {}", home_dir.display()))?;
     Ok(report_from_initialized_identity(initialized))
+}
+
+fn report_from_stored_identity(config: StoredInitConfig) -> Option<ProvisionIdentityReport> {
+    let agent_did = config.agent_did.trim().to_string();
+    (!agent_did.is_empty()).then_some(ProvisionIdentityReport {
+        status: "existing",
+        agent_name: config.agent_name,
+        agent_did,
+        key_path: config.key_path,
+        identity_backend: config.identity_backend,
+        keychain_label: config.keychain_label,
+        secure_enclave_label: config.secure_enclave_label,
+    })
 }
 
 fn report_from_initialized_identity(summary: IdentityOnlyHomeSummary) -> ProvisionIdentityReport {
@@ -199,4 +210,71 @@ fn next_steps(home_dir: &Path, root: &Path) -> Vec<String> {
             home_dir.display()
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn existing_provision_identity_remains_readable_while_runtime_holds_the_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let original = ensure_home_identity(
+            &home,
+            "owner",
+            true,
+            false,
+            false,
+            None,
+            None,
+            gents::store_key::StoreKeyCustodyChoice::File,
+        )
+        .await
+        .unwrap();
+        let before = std::fs::read(gents::home::init_config_path(&home)).unwrap();
+        let runtime_lock = gents::home::lock_home_store(&home).unwrap();
+        let observed = ensure_home_identity(
+            &home,
+            "different-requested-name",
+            false,
+            false,
+            false,
+            None,
+            None,
+            gents::store_key::StoreKeyCustodyChoice::File,
+        )
+        .await
+        .unwrap();
+        assert_eq!(observed.status, "existing");
+        assert_eq!(observed.agent_did, original.agent_did);
+        assert_eq!(observed.agent_name, "owner");
+        assert_eq!(
+            std::fs::read(gents::home::init_config_path(&home)).unwrap(),
+            before
+        );
+        drop(runtime_lock);
+
+        let new_home = temp.path().join("new-home");
+        let data = crate::default_data_dir(&new_home);
+        std::fs::create_dir_all(&data).unwrap();
+        let _held = gents::home::lock_store(&new_home, &data).unwrap();
+        let error = match ensure_home_identity(
+            &new_home,
+            "owner",
+            true,
+            false,
+            false,
+            None,
+            None,
+            gents::store_key::StoreKeyCustodyChoice::File,
+        )
+        .await
+        {
+            Ok(_) => panic!("bootstrap must hold the exclusive store lock"),
+            Err(error) => error,
+        };
+        assert!(error.downcast_ref::<gents::home::StoreLockHeld>().is_some());
+        assert!(!gents::home::init_config_path(&new_home).exists());
+    }
 }

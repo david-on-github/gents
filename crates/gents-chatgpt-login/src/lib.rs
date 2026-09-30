@@ -51,11 +51,22 @@ impl Default for LoginOptions {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LoginTokens {
     pub id_token: String,
     pub access_token: String,
     pub refresh_token: String,
+}
+
+/// Token values never reach logs or error text through `Debug`.
+impl std::fmt::Debug for LoginTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginTokens")
+            .field("id_token", &"[redacted]")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -599,6 +610,17 @@ pub async fn complete_device_code_login(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn login_tokens_debug_redacts_tokens() {
+        let tokens = LoginTokens {
+            id_token: "secret-id".into(),
+            access_token: "secret-access".into(),
+            refresh_token: "secret-refresh".into(),
+        };
+        let debug = format!("{tokens:?} {tokens:#?}");
+        assert!(!debug.contains("secret-"), "{debug}");
+    }
 
     #[test]
     fn authorize_url_preserves_the_codex_compatible_contract() {

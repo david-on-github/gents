@@ -83,6 +83,7 @@ pub mod starter_recipes;
 pub mod startup_readiness;
 pub mod startup_recovery;
 pub mod storage_backend;
+pub mod store_key;
 pub mod xai_grok_oauth;
 pub mod xai_oauth_login;
 pub mod xai_oauth_refresh;
@@ -182,6 +183,30 @@ pub(crate) mod test_support {
             "capture must authorize scripted provider send"
         );
         Ok(())
+    }
+
+    /// Sets a process environment variable and restores its previous value on
+    /// drop, including when the test panics.
+    pub(crate) struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        pub(crate) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
     }
 
     /// Install an explicit, inert inference/context/tools chain for a named test behavior.
@@ -326,6 +351,7 @@ pub mod session_message;
 pub mod session_origin;
 pub mod skills;
 pub mod streaming;
+pub(crate) mod task_hooks;
 pub mod template;
 pub mod tool_call_lifecycle;
 pub mod tool_control;

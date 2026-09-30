@@ -141,7 +141,8 @@ pub fn run_desktop_init_json(agent_home: &Path, desktop_home: &Path, label: &str
 }
 
 pub fn run_init_json(home_dir: &Path, args: &[&str]) -> Result<Value> {
-    let mut command_args = vec!["init"];
+    // Test homes keep their store key in a file, never the login keychain.
+    let mut command_args = vec!["init", "--store-key-custody", "file"];
     command_args.extend_from_slice(args);
     run_cli_json(home_dir, &command_args)
 }
@@ -234,6 +235,10 @@ fn spawn_server_with_ready_json_inner(
         loop {
             let stdout_so_far = read_captured_log(serve.stdout_log.as_ref())?;
             if let Some(value) = server_readiness_json(&stdout_so_far) {
+                super::graphql::register_served_home(
+                    &served_home_dir(home_dir, extra_args, envs),
+                    port,
+                )?;
                 return Ok((serve, port, value));
             }
             let exited = serve
@@ -312,7 +317,28 @@ pub fn spawn_server_with_env(
         .stderr(Stdio::from(stderr));
     configure_foreground_server_env(&mut command, envs);
     let child = command.spawn().context("spawning gents server")?;
+    super::graphql::register_served_home(&served_home_dir(home_dir, extra_args, envs), port)?;
     Ok(ServeProcess::with_logs(child, stdout_log, stderr_log))
+}
+
+/// The home a spawned `gents server` resolves: `--home`, then `GENTS_HOME`,
+/// then `$HOME/.gents` under the fixture `HOME`.
+fn served_home_dir(home_dir: &Path, extra_args: &[&str], envs: &[(&str, &str)]) -> PathBuf {
+    if let Some(index) = extra_args.iter().position(|arg| *arg == "--home") {
+        if let Some(home) = extra_args.get(index + 1) {
+            return PathBuf::from(home);
+        }
+    }
+    if let Some(home) = extra_args
+        .iter()
+        .find_map(|arg| arg.strip_prefix("--home="))
+    {
+        return PathBuf::from(home);
+    }
+    if let Some((_, home)) = envs.iter().find(|(name, _)| *name == "GENTS_HOME") {
+        return PathBuf::from(home);
+    }
+    home_dir.join(".gents")
 }
 
 /// Foreground test servers must retain ordinary CLI stderr even when the test

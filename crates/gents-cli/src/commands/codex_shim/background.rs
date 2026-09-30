@@ -413,7 +413,7 @@ mod tests {
             fs_root: None,
             node,
             background_execution_registry: gents::BackgroundExecutionRegistry::default(),
-            graphql: Arc::from("http://127.0.0.1/graphql"),
+            graphql: gents::config_client::GraphqlEndpoint::anonymous("http://127.0.0.1/graphql"),
             agent_did: Arc::from("did:test:background-watcher"),
             behavior_id: Arc::from("did:test:background-watcher:default"),
             id_counter: Arc::new(AtomicU64::new(1)),

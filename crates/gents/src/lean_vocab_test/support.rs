@@ -247,6 +247,7 @@ pub(crate) struct LeanContractSnapshot {
     pub(crate) capture_order_cases: Vec<LeanCaptureOrderCase>,
     pub(crate) aggregate_token_budget_cases: Vec<LeanAggregateTokenBudgetCase>,
     pub(crate) task_hook_admission_cases: Vec<LeanTaskHookAdmissionCase>,
+    pub(crate) store_encryption_upgrade_cases: Vec<serde_json::Value>,
     pub(crate) task_hook_run_cases: Vec<LeanTaskHookRunCase>,
     pub(crate) task_hook_recovery_cases: Vec<LeanTaskHookRecoveryCase>,
     pub(crate) follow_up_hooks: Vec<String>,
@@ -260,6 +261,7 @@ pub(crate) struct LeanContractSnapshot {
     pub(crate) workspace_binding_cases: Vec<LeanWorkspaceBindingCase>,
     pub(crate) callback_cases: Vec<LeanCallbackCase>,
     pub(crate) callback_retry_cases: Vec<LeanCallbackRetryCase>,
+    pub(crate) callback_recovery_cases: Vec<LeanCallbackRecoveryCase>,
     pub(crate) event_delivery_transition_case_count: usize,
     pub(crate) event_delivery_transition_cases: Vec<LeanEventDeliveryTransitionCase>,
     pub(crate) event_delivery_source_instances: Vec<LeanEventDeliverySourceInstance>,
@@ -450,6 +452,20 @@ pub(crate) struct LeanCallbackRetryCase {
     pub(crate) attempts: u32,
     pub(crate) max_attempts: u32,
     pub(crate) allowed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub(crate) struct LeanCallbackRecoveryCase {
+    pub(crate) name: String,
+    pub(crate) journal: Vec<String>,
+    pub(crate) attempts: u32,
+    pub(crate) max_attempts: u32,
+    pub(crate) post_state: String,
+    pub(crate) post_journal: Vec<String>,
+    pub(crate) retry_allowed_after: bool,
+    pub(crate) deny_post_state: String,
+    pub(crate) deny_post_journal: Vec<String>,
+    pub(crate) retry_allowed_after_deny: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -1216,6 +1232,10 @@ pub(crate) fn lean_workspace_binding_cases() -> &'static [LeanWorkspaceBindingCa
 
 pub(crate) fn lean_callback_retry_cases() -> &'static [LeanCallbackRetryCase] {
     &lean_contract_snapshot().callback_retry_cases
+}
+
+pub(crate) fn lean_callback_recovery_cases() -> &'static [LeanCallbackRecoveryCase] {
+    &lean_contract_snapshot().callback_recovery_cases
 }
 
 pub(crate) fn lean_callback_cases() -> &'static [LeanCallbackCase] {

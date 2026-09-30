@@ -352,14 +352,12 @@ fn client_route_is_directional_destination_scoped_and_control_plane_bounded() {
         owner,
     );
     assert!(!outbound.contains_key("AgentBehaviorReadiness"));
-    for excluded in [
-        "InferenceBackend",
-        "OAuthCredential",
-        "PeerPairingDesired",
-        "DataPlanePairingDesired",
-    ] {
+    for excluded in gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES
+        .iter()
+        .chain(&["PeerPairingDesired", "DataPlanePairingDesired"])
+    {
         assert!(
-            !template.collections.contains(&excluded),
+            !template.collections.contains(excluded),
             "client route must exclude {excluded}"
         );
     }
@@ -669,8 +667,14 @@ fn app_collection_admission_matches_lean_protocol_disjointness_contract() {
 
 /// Template selection is not ACP authorization. Ordinary routes may never
 /// select credentials; the explicit operator route still needs DID/ACP admission.
+/// The Rust credential set that broad subscriptions exclude is Lean's.
 #[test]
 fn ordinary_routes_exclude_credentials_and_operator_selection_remains_explicit() {
+    assert_eq!(
+        lean_string_list("credentialCollections"),
+        gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES,
+        "Rust credential collections must conform to the checked Lean model source"
+    );
     for id in [
         "client",
         "conversation",
@@ -680,9 +684,9 @@ fn ordinary_routes_exclude_credentials_and_operator_selection_remains_explicit()
         "subagent-coordinator",
     ] {
         let template = resolve_template(id).expect("builtin route");
-        for credential in ["InferenceBackend", "OAuthCredential"] {
+        for credential in gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES {
             assert!(
-                !template.collections.contains(&credential),
+                !template.collections.contains(credential),
                 "{id} leaks {credential}"
             );
         }

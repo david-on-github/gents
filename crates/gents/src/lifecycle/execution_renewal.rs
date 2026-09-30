@@ -12,11 +12,14 @@ use crate::graphql::{escape_graphql_string, response_has_documents};
 
 /// Owned by RequestLifecycle. Dropping the owner must not leave a heartbeat
 /// task keeping abandoned work alive indefinitely.
-pub(super) struct RenewalTask(tokio::task::JoinHandle<()>);
+pub(super) struct RenewalTask {
+    task: tokio::task::JoinHandle<()>,
+    lost: tokio_util::sync::CancellationToken,
+}
 
 impl Drop for RenewalTask {
     fn drop(&mut self) {
-        self.0.abort();
+        self.task.abort();
     }
 }
 
@@ -27,7 +30,9 @@ impl RenewalTask {
         generation: String,
         duration_ms: u64,
     ) -> Self {
-        Self(tokio::spawn(async move {
+        let lost = tokio_util::sync::CancellationToken::new();
+        let observed_lost = lost.clone();
+        let task = tokio::spawn(async move {
             // Poll more often than renewal is due, but only the bounded policy
             // writes. Skip missed ticks after suspension; never catch up with
             // a burst of renewals or revive an expired generation.
@@ -37,7 +42,10 @@ impl RenewalTask {
                 ticker.tick().await;
                 match renew_once(&node, &request_doc_id, &generation).await {
                     Ok(true) => {}
-                    Ok(false) => break,
+                    Ok(false) => {
+                        observed_lost.cancel();
+                        break;
+                    }
                     Err(error) => {
                         // Do not invent liveness on errors. The next bounded
                         // poll rereads authoritative state; expiry remains final.
@@ -45,7 +53,14 @@ impl RenewalTask {
                     }
                 }
             }
-        }))
+        });
+        Self { task, lost }
+    }
+
+    /// Cancelled once a renewal poll observes this generation no longer owns
+    /// its request: revoked, superseded, terminal, or expired.
+    pub(super) fn ownership_lost(&self) -> tokio_util::sync::CancellationToken {
+        self.lost.clone()
     }
 }
 

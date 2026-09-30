@@ -188,7 +188,7 @@ pub(super) fn lean_executable_contracts_cover_initial_domains() {
     assert_eq!(lean_contract_snapshot().command_sandbox_cases.len(), 6);
     assert_eq!(lean_contract_snapshot().command_env_cases.len(), 14);
     assert_eq!(lean_queue_deadline_cases().len(), 5);
-    assert_eq!(lean_recovery_sweep_cases().len(), 29);
+    assert_eq!(lean_recovery_sweep_cases().len(), 32);
     // The synthetic RecoveryEquivalence contract was deleted from Lean; the
     // recovery sweep cases above are the actual recovery guarantee.
     assert_eq!(lean_transcript_cases().len(), 11);
@@ -1447,6 +1447,12 @@ fn lean_contract_coverage_ledger_accounts_for_every_emitted_domain() {
         emitted.insert((
             "callback_retry_cases".to_string(),
             "CallbackRetryCases".to_string(),
+        ));
+    }
+    if !snapshot.callback_recovery_cases.is_empty() {
+        emitted.insert((
+            "callback_recovery_cases".to_string(),
+            "CallbackRecoveryCases".to_string(),
         ));
     }
     if !snapshot.callback_cases.is_empty() {

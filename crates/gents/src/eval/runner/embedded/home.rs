@@ -26,6 +26,9 @@ const NODE_RELEASE_TIMEOUT: Duration = Duration::from_secs(10);
 /// restores the same persisted key and collections.
 pub type P2PConfigForPath = Arc<dyn Fn(&Path) -> P2PConfig + Send + Sync>;
 
+/// Trial homes are harness scratch, not gents homes: their identity key sits
+/// beside the data, so a store key there would protect nothing, and they stay
+/// unencrypted at rest.
 pub struct EmbeddedHome {
     pub node: Arc<EmbeddedNode>,
     pub identity: Arc<dyn AgentIdentity>,

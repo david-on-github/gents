@@ -267,6 +267,8 @@ mod tests {
         let cli = crate::cli::Cli::try_parse_from([
             "gents",
             "init",
+            "--store-key-custody",
+            "file",
             "--agent-name",
             "updater",
             "--home",

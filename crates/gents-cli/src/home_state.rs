@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use gents::config_client::GraphqlEndpoint;
 use gents::identity::{
     load_macos_keychain_identity, load_macos_secure_enclave_identity, AgentIdentity, KeyIdentity,
 };
@@ -181,19 +182,72 @@ pub(crate) fn clear_runtime_state(home_dir: &Path) -> Result<bool> {
 pub(crate) fn resolve_graphql_endpoint(
     explicit: Option<&str>,
     home: Option<&Path>,
-) -> Result<String> {
-    if let Some(graphql) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
-        return Ok(graphql.to_string());
-    }
-
+) -> Result<GraphqlEndpoint> {
     let home_dir = resolve_home_dir(home);
-    if let Some(runtime_state) = read_runtime_state(&home_dir)? {
-        return Ok(runtime_state.graphql);
+    if let Some(graphql) = explicit.map(str::trim).filter(|value| !value.is_empty()) {
+        return Ok(home_graphql_endpoint(&home_dir, graphql));
     }
 
-    Ok(format!(
-        "http://127.0.0.1:{DEFAULT_HTTP_PORT}/api/v0/graphql"
+    if let Some(runtime_state) = read_runtime_state(&home_dir)? {
+        return Ok(home_graphql_endpoint(&home_dir, runtime_state.graphql));
+    }
+
+    Ok(home_graphql_endpoint(
+        &home_dir,
+        format!("http://127.0.0.1:{DEFAULT_HTTP_PORT}/api/v0/graphql"),
     ))
+}
+
+/// `url` acting as the home's principal when it is this home's own runtime
+/// endpoint or a loopback address and this process can load the principal's
+/// signing key; otherwise anonymous.
+///
+/// A served home admits HTTP writes, schema changes and P2P administration
+/// only from its own principal. DefraDB checks a bearer's audience against
+/// the `Host` header the sender chose, and bearers carry no nonce, so a
+/// bearer handed to another host could be replayed against any node that
+/// trusts this DID until it expires. Anonymous access reads, and a served
+/// home refuses everything else with an authorization error.
+pub(crate) fn home_graphql_endpoint(home_dir: &Path, url: impl Into<String>) -> GraphqlEndpoint {
+    let url = url.into();
+    let principal = match read_init_config(home_dir) {
+        Ok(Some(config)) if endpoint_serves_home(home_dir, &url) => {
+            load_initialized_home_identity(home_dir, &config)
+                .map(|identity| identity.did().to_string())
+                .map_err(|error| format!("{error:#}"))
+                .and_then(|did| {
+                    gents::identity::can_mint_defradb_bearer(&did)
+                        .then_some(did)
+                        .ok_or_else(|| "identity has no exportable signing key".to_string())
+                })
+        }
+        _ => Err("the endpoint is not this initialized home's runtime".to_string()),
+    };
+    match principal {
+        Ok(did) => GraphqlEndpoint::as_principal(url, did),
+        Err(reason) => {
+            tracing::debug!(%url, %reason, "reaching the runtime anonymously");
+            GraphqlEndpoint::anonymous(url)
+        }
+    }
+}
+
+/// Whether `url` is this home's recorded runtime endpoint or on loopback.
+fn endpoint_serves_home(home_dir: &Path, url: &str) -> bool {
+    let url = url.trim();
+    if read_runtime_state(home_dir)
+        .ok()
+        .flatten()
+        .is_some_and(|state| state.graphql.trim() == url)
+    {
+        return true;
+    }
+    reqwest::Url::parse(url).is_ok_and(|parsed| match parsed.host() {
+        Some(url::Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    })
 }
 
 pub(crate) fn resolve_agent_did(home: Option<&Path>, explicit: Option<&str>) -> Result<String> {
@@ -218,5 +272,56 @@ pub(crate) fn display_host(host: IpAddr) -> String {
     match host {
         IpAddr::V4(addr) if addr == Ipv4Addr::UNSPECIFIED => "127.0.0.1".to_string(),
         _ => host.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::endpoint_serves_home;
+
+    #[test]
+    fn bearers_go_only_to_the_homes_runtime_or_loopback() {
+        let home = tempfile::tempdir().unwrap();
+        assert!(endpoint_serves_home(
+            home.path(),
+            "http://127.0.0.1:9191/api/v0/graphql"
+        ));
+        assert!(endpoint_serves_home(
+            home.path(),
+            "http://localhost:9191/api/v0/graphql"
+        ));
+        assert!(endpoint_serves_home(
+            home.path(),
+            "http://[::1]:9191/api/v0/graphql"
+        ));
+        assert!(!endpoint_serves_home(
+            home.path(),
+            "http://100.69.4.79:9191/api/v0/graphql"
+        ));
+        assert!(!endpoint_serves_home(
+            home.path(),
+            "https://runtime.example.com/api/v0/graphql"
+        ));
+
+        std::fs::write(
+            home.path().join(crate::RUNTIME_STATE_FILE_NAME),
+            serde_json::to_vec(&serde_json::json!({
+                "home": home.path(),
+                "graphql": "http://100.69.4.79:9191/api/v0/graphql",
+                "agent_name": "a",
+                "agent_did": "did:key:z6Mk",
+                "default_behavior_id": "b",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(endpoint_serves_home(
+            home.path(),
+            "http://100.69.4.79:9191/api/v0/graphql"
+        ));
+        assert!(!endpoint_serves_home(
+            home.path(),
+            "http://100.69.4.80:9191/api/v0/graphql"
+        ));
     }
 }

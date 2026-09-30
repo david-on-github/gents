@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -194,7 +195,9 @@ struct SlotCounts {
     expired_processing: i64,
 }
 
-pub(crate) async fn load_fleet_slot_snapshot(graphql: &str) -> Result<FleetSlotSnapshot> {
+pub(crate) async fn load_fleet_slot_snapshot(
+    graphql: &GraphqlEndpoint,
+) -> Result<FleetSlotSnapshot> {
     let generated_at = Utc::now();
     let response = post_graphql(graphql, fleet_slot_snapshot_query()).await?;
     let envelope = decode_fleet_slot_query_response(response)?;

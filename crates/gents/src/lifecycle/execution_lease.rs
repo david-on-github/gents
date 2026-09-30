@@ -89,6 +89,11 @@ pub enum RequestTerminalOutcome {
 }
 
 impl RequestTerminalOutcome {
+    #[cfg(test)]
+    pub(crate) fn request_lifecycle_state(self) -> RequestLifecycleState {
+        self.request_state()
+    }
+
     fn request_state(self) -> RequestLifecycleState {
         match self {
             Self::Completed => RequestLifecycleState::Completed,
@@ -124,32 +129,93 @@ enum TerminalAuthority<'a> {
     },
 }
 
-impl RequestLifecycle {
-    pub(crate) async fn validate_owned_execution(&self) -> Result<()> {
-        let row = self
-            .request_view()
-            .await?
-            .context("execution request disappeared")?;
+impl RequestExecutionLease {
+    /// `decide` over this execution's generation and the current request
+    /// row's lease, or `None` when the row is gone.
+    async fn decide_lease(
+        &self,
+        node: &EmbeddedNode,
+        request_doc_id: &str,
+        decide: fn(super::execution_policy::LeaseObservation<'_>, &str, i64) -> bool,
+    ) -> Result<Option<bool>> {
+        let Some(row) = super::query::request_view(node, request_doc_id).await? else {
+            return Ok(None);
+        };
         let expiry = row
             .execution_lease_expires_at
             .as_deref()
             .context("missing execution expiry")?;
-        let deadline = DateTime::parse_from_rfc3339(expiry)?;
-        if !super::execution_policy::authorize_producer_decision(
-            super::execution_policy::LeaseObservation {
-                request: row.lifecycle_state.context("missing execution state")?,
-                generation: row
-                    .execution_generation
-                    .as_deref()
-                    .context("missing execution generation")?,
-                deadline_ms: deadline.timestamp_millis(),
-            },
-            self.execution_generation()?,
+        let observed = super::execution_policy::LeaseObservation {
+            request: row.lifecycle_state.context("missing execution state")?,
+            generation: row
+                .execution_generation
+                .as_deref()
+                .context("missing execution generation")?,
+            deadline_ms: DateTime::parse_from_rfc3339(expiry)?.timestamp_millis(),
+        };
+        Ok(Some(decide(
+            observed,
+            self.generation.as_str(),
             Utc::now().timestamp_millis(),
-        ) {
+        )))
+    }
+
+    pub(crate) async fn owns_execution(
+        &self,
+        node: &EmbeddedNode,
+        request_doc_id: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .decide_lease(node, request_doc_id, |observed, generation, now_ms| {
+                super::execution_policy::renewable_lifecycle(observed.request)
+                    && super::execution_policy::is_live(observed, generation, now_ms)
+            })
+            .await?
+            .unwrap_or(false))
+    }
+}
+
+impl RequestLifecycle {
+    async fn decide_lease(
+        &self,
+        decide: fn(super::execution_policy::LeaseObservation<'_>, &str, i64) -> bool,
+    ) -> Result<Option<bool>> {
+        self.execution_lease
+            .as_ref()
+            .context("request has no active execution generation")?
+            .decide_lease(&self.node, &self.request.doc_id, decide)
+            .await
+    }
+
+    pub(crate) async fn validate_owned_execution(&self) -> Result<()> {
+        if !self
+            .decide_lease(super::execution_policy::authorize_producer_decision)
+            .await?
+            .context("execution request disappeared")?
+        {
             return Err(ExecutionOwnershipLost.into());
         }
         Ok(())
+    }
+
+    /// Cancelled when the lease owner observes this execution lost its
+    /// request; never cancelled for an execution without a renewal owner.
+    pub(crate) fn ownership_lost(&self) -> tokio_util::sync::CancellationToken {
+        self.renewal_task
+            .as_ref()
+            .map(super::execution_renewal::RenewalTask::ownership_lost)
+            .unwrap_or_default()
+    }
+
+    /// Whether this execution's generation still holds a live lease on its
+    /// active request. A failure observed after the lease is lost belongs to
+    /// the request's current owner, not to this execution.
+    pub(crate) async fn owns_execution(&self) -> Result<bool> {
+        self.execution_lease
+            .as_ref()
+            .context("request has no active execution generation")?
+            .owns_execution(&self.node, &self.request.doc_id)
+            .await
     }
 
     pub async fn terminalize_owned(

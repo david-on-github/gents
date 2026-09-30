@@ -128,7 +128,10 @@ pub(crate) async fn bind_codex_shim(
         fs_root: args.fs_root,
         node: args.node,
         background_execution_registry: args.background_execution_registry,
-        graphql: Arc::from(args.graphql.clone()),
+        graphql: gents::config_client::GraphqlEndpoint::as_principal(
+            args.graphql.clone(),
+            args.agent_did.clone(),
+        ),
         agent_did: Arc::from(args.agent_did.clone()),
         behavior_id: Arc::from(bound_behavior_id.clone()),
         id_counter: Arc::new(AtomicU64::new(1)),

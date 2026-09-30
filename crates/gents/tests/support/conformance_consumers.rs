@@ -413,6 +413,13 @@ pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
             function: "generated_tool_timeout_cases_bind_native_resolution",
         },
         ConformanceConsumer::RustTest {
+            id: "agent::loop_stream::tests::claude_messages_redacted_and_signed_tool_round_trip_through_owned_loop",
+            package: "gents",
+            source_path: "crates/gents/src/agent/loop_stream/tests/claude.rs",
+            module_path: "agent::loop_stream::tests",
+            function: "claude_messages_redacted_and_signed_tool_round_trip_through_owned_loop",
+        },
+        ConformanceConsumer::RustTest {
             id: "agent::loop_stream::tests::generated_invalid_tool_progress_cases_drive_owned_loop",
             package: "gents",
             source_path: "crates/gents/src/agent/loop_stream/tests/invalid_tool_progress.rs",
@@ -516,6 +523,27 @@ pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
             source_path: "crates/gents/src/lean_vocab_test/task_hooks_policy.rs",
             module_path: "lean_vocab_test::task_hooks_policy",
             function: "generated_task_hook_cases_fence_the_modeled_phase_vocabulary",
+        },
+        ConformanceConsumer::RustTest {
+            id: "lean_vocab_test::task_hook_executor::generated_task_hook_run_cases_drive_real_host_commands",
+            package: "gents",
+            source_path: "crates/gents/src/lean_vocab_test/task_hook_executor.rs",
+            module_path: "lean_vocab_test::task_hook_executor",
+            function: "generated_task_hook_run_cases_drive_real_host_commands",
+        },
+        ConformanceConsumer::RustTest {
+            id: "lean_vocab_test::task_hook_recovery::generated_task_hook_recovery_cases_drive_startup_recovery_and_host_records",
+            package: "gents",
+            source_path: "crates/gents/src/lean_vocab_test/task_hook_recovery.rs",
+            module_path: "lean_vocab_test::task_hook_recovery",
+            function: "generated_task_hook_recovery_cases_drive_startup_recovery_and_host_records",
+        },
+        ConformanceConsumer::RustTest {
+            id: "lean_vocab_test::task_hook_recovery::generated_task_hook_sweep_cases_drive_the_record_sweep",
+            package: "gents",
+            source_path: "crates/gents/src/lean_vocab_test/task_hook_recovery.rs",
+            module_path: "lean_vocab_test::task_hook_recovery",
+            function: "generated_task_hook_sweep_cases_drive_the_record_sweep",
         },
         ConformanceConsumer::RustTest {
             id: "conformance::graph_pipeline::generated_validation_cases_fence_whole_graph_compilation_gate",
@@ -1580,6 +1608,13 @@ pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
             source_path: "crates/gents/tests/conformance/callback_lifecycle.rs",
             module_path: "conformance::callback_lifecycle",
             function: "generated_retry_decisions_match_runtime_owner",
+        },
+        ConformanceConsumer::RustTest {
+            id: "callback::tests::generated_recovery_and_denial_match_runtime_owners",
+            package: "gents",
+            source_path: "crates/gents/src/callback/tests.rs",
+            module_path: "callback::tests",
+            function: "generated_recovery_and_denial_match_runtime_owners",
         },
     ]
 }
