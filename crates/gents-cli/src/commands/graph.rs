@@ -5,9 +5,9 @@ use std::{io, io::IsTerminal as _, io::Write as _};
 use anyhow::{Context, Result};
 use gents::config_client::ConfigAccess;
 use gents::graph_package::{
-    default_bundled_graph_package_install_bindings, install_bundled_graph_package,
-    load_bundled_graph_package, load_installed_package_plan, prepare_entry_run, EntryRunRequest,
-    GraphInstallRecord, GraphPackageInstallBindings,
+    default_graph_package_install_bindings, install_loaded_graph_package,
+    load_archive_graph_package_with_environment, load_installed_package_plan, prepare_entry_run,
+    EntryRunRequest, GraphInstallRecord, GraphPackageInstallBindings,
 };
 use gents::graph_pipeline::{
     activate_graph_revision_with_access, load_active_graph_plan_with_access,
@@ -39,21 +39,32 @@ pub(crate) async fn dispatch(command: GraphCommand) -> Result<()> {
     }
 }
 
-pub(crate) async fn install(args: PackInstallArgs, emit_report: bool) -> Result<()> {
+pub(crate) async fn install(
+    source: &super::pack::PackSource,
+    args: PackInstallArgs,
+    emit_report: bool,
+) -> Result<()> {
     let (access, owner_did) = access_and_actor(&args.scope).await?;
-    install_with_access(&access, &owner_did, args, emit_report).await
+    install_with_access(&access, &owner_did, source, args, emit_report).await
 }
 
-/// Installs and activates a bundled graph package through a caller's open
-/// access, so a pack that installs it as a dependency keeps its one claim on
-/// the home's store for the whole install.
+/// Installs and activates a graph package, resolved from any source, through
+/// a caller's open access, so a pack that installs it as a dependency keeps
+/// its one claim on the home's store for the whole install.
 pub(crate) async fn install_with_access(
     access: &ConfigAccess,
     owner_did: &str,
+    source: &super::pack::PackSource,
     args: PackInstallArgs,
     emit_report: bool,
 ) -> Result<()> {
     let requested = super::pack::parse_inference_slot_bindings(&args.inference_slots)?;
+    let scope = gents::pack::PackInstallOptions {
+        agent_did: owner_did.to_owned(),
+    };
+    let package = load_archive_graph_package_with_environment(source.archive(), &scope, &|name| {
+        std::env::var(name).ok()
+    })?;
     let mut bindings = if let Some(path) = args.bindings.as_deref() {
         let bindings: GraphPackageInstallBindings = serde_json::from_slice(
             &std::fs::read(path)
@@ -69,8 +80,7 @@ pub(crate) async fn install_with_access(
         }
         bindings
     } else {
-        default_bundled_graph_package_install_bindings(access, &args.package, owner_did, &requested)
-            .await?
+        default_graph_package_install_bindings(access, &package, owner_did, &requested).await?
     };
     for (slot, profile_id) in requested {
         if let Some(existing) = bindings
@@ -83,10 +93,6 @@ pub(crate) async fn install_with_access(
             );
         }
     }
-    let scope = gents::pack::PackInstallOptions {
-        agent_did: bindings.agent_did.clone(),
-    };
-    let package = load_bundled_graph_package(&args.package, &scope)?;
     let preview = gents::pack::preview_pack_inference_bindings(
         access,
         &package.manifest,
@@ -104,10 +110,8 @@ pub(crate) async fn install_with_access(
             "would_write": false,
         }));
     }
-    let distribution = gents::pack::resolve_pack(&args.package)?;
     let plugin_home = crate::home_state::resolve_home_dir(args.scope.home.as_deref());
-    let (plugin_rollback, installed_plugins) = if distribution.manifest.metadata.plugins.is_empty()
-    {
+    let (plugin_rollback, installed_plugins) = if package.manifest.metadata.plugins.is_empty() {
         (Vec::new(), Vec::new())
     } else {
         // A plugin runs on the host of the node that calls it; a remote
@@ -118,13 +122,12 @@ pub(crate) async fn install_with_access(
              with --home",
             args.package
         );
-        let rollback =
-            super::pack::snapshot_pack_plugin_records(&plugin_home, &distribution.manifest);
+        let rollback = super::pack::snapshot_pack_plugin_records(&plugin_home, &package.manifest);
         let installed = super::pack::install_pack_plugins(
             &plugin_home,
-            &distribution.manifest,
-            &distribution.digest,
-            |path| distribution.asset(path),
+            &package.manifest,
+            &package.package_digest,
+            |path| source.asset(path),
             args.grant_authority,
         )
         .inspect_err(|_| super::pack::rollback_pack_plugin_records(&plugin_home, &rollback))?;
@@ -150,7 +153,7 @@ pub(crate) async fn install_with_access(
     // A failure past this point must not leave the plugins installed above
     // orphaned: undo them along with the graph install that never landed.
     let receipt =
-        match install_bundled_graph_package(access, owner_did, &args.package, &bindings, &record)
+        match install_loaded_graph_package(access, owner_did, &package, &bindings, None, &record)
             .await
         {
             Ok(receipt) => receipt,
@@ -250,7 +253,9 @@ async fn run(args: GraphRunArgs) -> Result<()> {
             "graph run requires the local Gents server to be running so workspace and request recovery remain active"
         );
     };
-    let plan = load_installed_package_plan(&access, &args.package, &actor)
+    let (namespace, name) = super::pack::split_namespace(&args.package);
+    let coordinate = format!("{namespace}/{name}");
+    let plan = load_installed_package_plan(&access, name, &actor)
         .await?
         .with_context(|| {
             format!(
@@ -262,19 +267,24 @@ async fn run(args: GraphRunArgs) -> Result<()> {
     let active_package = plan
         .package
         .as_ref()
-        .context("active revision has no bundled package attribution")?;
-    if active_package.name != args.package {
+        .context("active revision has no package attribution")?;
+    if active_package.name != name {
         anyhow::bail!(
-            "active revision does not belong to bundled package {:?}",
+            "active revision does not belong to package {:?}",
             args.package
         );
     }
-    let bundled_package = gents::pack::resolve_pack(&args.package)?;
-    if active_package.package_digest != bundled_package.digest {
+    let record = gents::pack::read_installed_pack(&access, &actor, &coordinate)
+        .await?
+        .with_context(|| {
+            format!("{coordinate} has no installation record; run `gents pack install {coordinate}` to reinstall")
+        })?;
+    if active_package.package_digest != record.digest {
         anyhow::bail!(
-            "installed graph package {:?} does not match this gents binary; run `gents pack install {}` before starting a run",
-            args.package,
-            args.package
+            "the active revision of {coordinate} was built from {} but the installed pack is {}; \
+             run `gents pack install {coordinate}` again",
+            active_package.package_digest,
+            record.digest
         );
     }
     let digest = plan.digest.clone();
@@ -742,7 +752,8 @@ async fn cancel(args: GraphCancelArgs) -> Result<()> {
 
 async fn toggle(args: GraphToggleArgs, enabled: bool) -> Result<()> {
     let (access, actor) = access_and_actor(&args.scope).await?;
-    let graph_id = load_installed_package_plan(&access, &args.package, &actor)
+    let (_, name) = super::pack::split_namespace(&args.package);
+    let graph_id = load_installed_package_plan(&access, name, &actor)
         .await?
         .context("package graph is not installed")?
         .graph_id;
