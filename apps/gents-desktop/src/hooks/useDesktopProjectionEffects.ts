@@ -1,4 +1,4 @@
-import { useEffect, type MutableRefObject } from "react";
+import { useEffect, useRef, type MutableRefObject } from "react";
 
 import type {
   DesktopClientUpdatedListenerFactory,
@@ -45,12 +45,20 @@ export function useDesktopProjectionEffects({
   selectedTrackedRequestIdRef,
   setError,
 }: DesktopProjectionEffectsArgs) {
+  // The selection whose bounded session projection this owner has already
+  // read. The first read changes the tracked request and agent DID that this
+  // effect depends on, which recreates the controller; only a new selection
+  // (or a restarted client) justifies reading the same session again.
+  const readSelectionRef = useRef<string | null>(null);
   useEffect(() => {
     // There is no bounded desktop projection to observe until the client is
     // running. Starting this owner during configuration bootstrap races the
     // lifecycle's authoritative snapshot read and can clear its failure while
     // leaving startupPhase at configuration-error.
-    if (!clientAvailable) return;
+    if (!clientAvailable) {
+      readSelectionRef.current = null;
+      return;
+    }
 
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -93,7 +101,12 @@ export function useDesktopProjectionEffects({
       })
       .catch(reportListenerError);
 
-    void controller.request("session");
+    const selection = selectedSessionId ?? "";
+    if (readSelectionRef.current !== selection) {
+      void controller.request("session").then(() => {
+        readSelectionRef.current = selection;
+      });
+    }
 
     const pollMs = timingConfig().activeSessionPollMs;
     if (
