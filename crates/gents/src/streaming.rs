@@ -750,7 +750,7 @@ fn trim_string_to_tail_bytes(buffer: &mut String, max_bytes: usize) {
     buffer.drain(..start);
 }
 
-fn tail_window(value: &str, max_bytes: usize) -> &str {
+pub(crate) fn tail_window(value: &str, max_bytes: usize) -> &str {
     if value.len() <= max_bytes {
         return value;
     }

@@ -8,6 +8,35 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- Every persistent store is encrypted at rest (DefraDB's AES-256-GCM value
+  encryption): a gents home's data directory and the desktop client's store.
+  `gents init` (including `--identity-only` and `gents provision`) creates a
+  per-store key and records its custody in `init.json`; the desktop records
+  its client store's key in `store-encryption.json`. On macOS the key is a
+  login-keychain item; elsewhere it is an owner-only `keys/store.aes256` file.
+  Existing plaintext stores upgrade in place, preserving identity, documents,
+  history, and host recovery journals. Interrupted upgrades resume from durable
+  intent; the original remains until the encrypted store opens successfully.
+  Initialization records key custody before writing encrypted data, so a failed
+  setup can retry with the same key. A store whose recorded key no longer exists
+  is refused (exit status 65 and the desktop's existing reset flow). Reset retires
+  the store and its recorded key together. A locked or denied Keychain is a
+  retryable error and never offers a reset. `gents server` on a home that was
+  never initialized is refused; run `gents init` first. Encryption protects
+  the disk and backups, not reads through a running node. Indexed field values
+  remain plaintext on disk.
+
+- `gents server` (and the desktop's managed runtime) turns on DefraDB node
+  access control owned by the home's principal. Anonymous HTTP writes, schema
+  changes and P2P administration are refused; HTTP reads are still anonymous.
+  The CLI signs as the home's principal only toward that home's own runtime
+  endpoint or a loopback address, and the desktop only toward a runtime it
+  hosts, so a client that cannot sign as the principal (another host, another
+  home's key, the DefraDB Explorer) loses write and P2P admin access. A home
+  whose identity backend is `macos-secure-enclave` can no longer be served;
+  re-initialize it with a file or `macos-keychain` identity. Existing stores
+  enable access control in place on their next start.
+
 - `Tools.self_config.self_config_dry_run` is renamed `self_config_preview`
   (#2062). It grants the `config` preview verb; it never blocked writes. There
   is no alias: rewrite stored Tools documents and manifests that set the old
@@ -140,6 +169,21 @@ source consistency checks, not a separate runtime compatibility version.
   (`tool call`) and every write (`self-config write`) under
   `gents::self_config`.
 
+- Task hooks configured on a Task now run (#1600). `before` hooks gate the
+  request before the agent starts; `after_success`/`after_failure` run before
+  the request's terminal is written, so a failing gate fails the request with
+  the tail of the command's own output; `finally` hooks always run. After-hooks
+  run after a workspace-bound request's seal and integration, so they cannot
+  block those; hook time counts against the request deadline. Hooks apply
+  to scheduled, event-fired and manual (`gents task run`, desktop) runs; a
+  goal-backed Task's hooks wrap only its opening request. A user interrupt
+  cancels a running `before`/`after_*` hook and interrupts the request, and a
+  revocation such as LatestOnly supersession cancels it too; neither cancels
+  cleanup. A hook's `timeout_secs` must be between 1 and 86400. A request whose Task was deleted or disabled after it
+  was fired fails instead of running without its hooks. Each attempt is
+  recorded on the host under `task-hooks/` in the data directory, so after a
+  crash or restart the remaining cleanup runs once, a surviving hook command
+  is stopped, and no attempted hook runs again (#1956).
 - Document-triggered Tasks support durable `queued_serial` delivery, atomic
   fire deduplication, restart catch-up and delivery after re-enabling a trigger
   (#2041). Delivery follows receiving-node arrival order, including replicated
@@ -261,6 +305,10 @@ source consistency checks, not a separate runtime compatibility version.
   failures retry on a capped backoff. Publication now refuses a Trigger that
   delivers a collection without a `String` `handoff_id` field to an
   `emit_outcome` Task.
+- A plugin callback invocation cut off mid-run is no longer run a second time
+  by recovery when its callback allows more than one attempt. Recovery records
+  the action as `interrupted` in the invocation's journal and fails it; a
+  failure the plugin reported is still retried.
 
 - `max_request_hop` bounds call depth again, not the number of calls (#2065).
   An `agent_new`/`agent_message` result returned to the calling session keeps

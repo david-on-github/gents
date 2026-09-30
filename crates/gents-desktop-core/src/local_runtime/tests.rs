@@ -2,9 +2,10 @@ use super::identity::{normalize_optional_string, resolve_p2p_peer_id};
 use super::{
     augment_peer_status_payload_for_desktop, await_serving_runtime_within,
     dangerously_overwrite_desktop_home, default_agent_home, graphql_endpoint_for_desktop_access,
-    init_standard_local_runtime, load_standard_runtime_identity, render_human_summary,
-    reset_desktop_runtime_state, runtime_graphql_url, runtime_status_url, serving_runtime,
-    DesktopInitOptions, DesktopInitSummary, StoredRuntimeState, LOCAL_STANDARD_SOURCE,
+    init_standard_local_runtime, load_operator_principal, load_standard_runtime_identity,
+    render_human_summary, reset_desktop_runtime_state, runtime_graphql_url, runtime_status_url,
+    serving_runtime, DesktopInitOptions, DesktopInitSummary, StoredRuntimeState,
+    LOCAL_STANDARD_SOURCE,
 };
 use crate::client::DesktopPaths;
 use gents_protocol::serve_lifecycle::ObservedServeLifecycle;
@@ -423,4 +424,48 @@ async fn discovery_fails_at_once_for_a_runtime_that_predates_readiness() {
         "{error:#}"
     );
     server.abort();
+}
+
+/// The desktop signs as a co-hosted runtime's principal only toward the
+/// endpoint that runtime's home currently serves.
+#[test]
+fn operator_principal_requires_the_homes_own_runtime_endpoint() {
+    use gents::identity::AgentIdentity as _;
+
+    let tempdir = tempfile::tempdir().unwrap();
+    let home = tempdir.path().join("agent");
+    std::fs::create_dir_all(&home).unwrap();
+    let key_path = home.join("principal.key");
+    let identity = gents::identity::KeyIdentity::load_or_create(&key_path, None).unwrap();
+    let did = identity.did().to_string();
+    let served = "http://127.0.0.1:9191/api/v0/graphql";
+    seed_home(&home, &did, served);
+    std::fs::write(
+        home.join("init.json"),
+        json!({ "agent_name": "Local", "agent_did": did, "key_path": key_path }).to_string(),
+    )
+    .unwrap();
+    let record = |graphql: &str| {
+        let mut record =
+            crate::client::PeerRecord::local_standard("Local", "iroh://peer", &did, graphql);
+        record.local_agent_home = Some(home.to_string_lossy().into_owned());
+        record
+    };
+
+    load_operator_principal(&record(served)).expect("the home's own runtime endpoint");
+
+    let elsewhere = load_operator_principal(&record("http://127.0.0.1:9999/api/v0/graphql"))
+        .expect_err("an endpoint the home does not serve");
+    assert!(
+        elsewhere.to_string().contains("does not serve"),
+        "{elsewhere:#}"
+    );
+
+    let mut remote = record(served);
+    remote.source = Some("manual".to_string());
+    assert!(load_operator_principal(&remote).is_err());
+
+    let mut homeless = record(served);
+    homeless.local_agent_home = None;
+    assert!(load_operator_principal(&homeless).is_err());
 }

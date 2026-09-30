@@ -3,6 +3,8 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use crate::test_support::EnvVarGuard;
+
 use super::args::{
     BashArgs, EditFileArgs, GlobArgs, GrepArgs, ListFilesArgs, ReadFileArgs, WriteFileArgs,
 };
@@ -404,28 +406,6 @@ fn compact_exec_meta(output: &str) -> serde_json::Value {
         .strip_prefix("gents_exec: ")
         .unwrap_or_else(|| panic!("missing gents_exec metadata line in output:\n{output}"));
     serde_json::from_str(raw).expect("metadata json")
-}
-
-struct EnvVarGuard {
-    key: &'static str,
-    previous: Option<String>,
-}
-
-impl EnvVarGuard {
-    fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
-        let previous = std::env::var(key).ok();
-        std::env::set_var(key, value);
-        Self { key, previous }
-    }
-}
-
-impl Drop for EnvVarGuard {
-    fn drop(&mut self) {
-        match &self.previous {
-            Some(previous) => std::env::set_var(self.key, previous),
-            None => std::env::remove_var(self.key),
-        }
-    }
 }
 
 /// Bounds a regression that would otherwise wait on a closed gate forever.

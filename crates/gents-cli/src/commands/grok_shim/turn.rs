@@ -1639,6 +1639,10 @@ impl TurnManager {
         _prompt_id: &str,
     ) -> Result<gents_protocol::row::AgentRequestRow> {
         let content = prompt_text(request);
+        let graphql = gents::config_client::GraphqlEndpoint::as_principal(
+            self.config.graphql.clone(),
+            self.config.actor.to_string(),
+        );
         let stable_request_id = uuid::Uuid::new_v4().to_string();
         let options = crate::RequestSubmitOptions::default();
         let submitted = if let Some(super::goals::GoalCommand::Create {
@@ -1649,7 +1653,7 @@ impl TurnManager {
             crate::create_goal_backed_agent_request_local(
                 &self.node,
                 self.config.actor.clone(),
-                self.config.graphql.as_ref(),
+                &graphql,
                 &self.config.agent_did,
                 &objective,
                 token_budget,
@@ -1661,7 +1665,7 @@ impl TurnManager {
             .await
         } else {
             let prepared = crate::request_helpers::prepare_agent_request(
-                self.config.graphql.as_ref(),
+                &graphql,
                 &self.config.agent_did,
                 &content,
                 Some(&request.session_id),
@@ -1671,16 +1675,13 @@ impl TurnManager {
             )
             .await?;
             let result = crate::request_helpers::submit_prepared_agent_request_committed(
-                self.config.graphql.as_ref(),
-                &prepared,
+                &graphql, &prepared,
             )
             .await;
             if result.is_err() {
-                if let Ok(Some(row)) = crate::request_helpers::matching_prepared_receipt(
-                    self.config.graphql.as_ref(),
-                    &prepared.create,
-                )
-                .await
+                if let Ok(Some(row)) =
+                    crate::request_helpers::matching_prepared_receipt(&graphql, &prepared.create)
+                        .await
                 {
                     self.interrupt_submitted(&row).await;
                 }

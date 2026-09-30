@@ -20,6 +20,8 @@ path = "src/main.rs"
 # cli_live_suite is #[ignore]d behind env gates, so default runs paid a
 # full gents+defradb+iroh link to execute nothing.
 live-e2e = []
+# Debug native desktop acceptance must never address the user's daily service.
+native-e2e = []
 
 # All other test binaries are auto-discovered; this explicit target overrides
 # autodiscovery for cli_live_suite so its link only happens on live runs

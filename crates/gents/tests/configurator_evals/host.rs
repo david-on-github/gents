@@ -12,6 +12,11 @@ pub(super) struct Host {
     pub access: ConfigAccess,
     evidence: PathBuf,
     inference_endpoint: String,
+    /// The runtime's principal: its node access control admits configuration
+    /// writes only from it. Its key lives in `_principal_key`, outside the
+    /// evidence tree.
+    principal_did: String,
+    _principal_key: tempfile::TempDir,
 }
 
 /// The container runtime is provisioned with `gents init --inference-url`,
@@ -202,6 +207,7 @@ impl Host {
             anyhow::bail!("host activation fence requires GraphQL access");
         };
         let endpoint = graphql
+            .url()
             .strip_suffix("/api/v0/graphql")
             .context("host GraphQL endpoint has unexpected path")?;
         let response = reqwest::Client::new()
@@ -569,11 +575,39 @@ impl Host {
             control(&["close", &id]).await?;
             return Err(error);
         }
+        let principal = async {
+            let principal_key = tempfile::tempdir()?;
+            let exported = principal_key.path().join("principal");
+            let receipt = control(&[
+                "principal",
+                &id,
+                exported.to_str().context("non-UTF8 principal key path")?,
+            ])
+            .await?;
+            let key_path = receipt["key_path"]
+                .as_str()
+                .context("principal key missing")?;
+            let identity = gents::KeyIdentity::load_existing(key_path, None)?;
+            anyhow::Ok((
+                gents::AgentIdentity::did(&identity).to_owned(),
+                principal_key,
+            ))
+        }
+        .await;
+        let (principal_did, principal_key) = match principal {
+            Ok(principal) => principal,
+            Err(error) => {
+                control(&["close", &id]).await?;
+                return Err(error);
+            }
+        };
         Ok(Self {
             id,
-            access: ConfigAccess::Graphql(endpoint),
+            access: ConfigAccess::graphql_as(endpoint, &principal_did),
             evidence: evidence.into(),
             inference_endpoint,
+            principal_did,
+            _principal_key: principal_key,
         })
     }
 
@@ -604,7 +638,7 @@ impl Host {
         let endpoint = receipt["graphql"]
             .as_str()
             .context("restart endpoint missing")?;
-        self.access = ConfigAccess::Graphql(endpoint.into());
+        self.access = ConfigAccess::graphql_as(endpoint, &self.principal_did);
         reporting::write_json_new(
             &self.evidence.join(format!("{stage}-restart.json")),
             &receipt,

@@ -1036,7 +1036,7 @@ async fn fake_transaction_server(
 #[tokio::test]
 async fn http_commit_conflict_replays_callback_under_new_transaction_id() {
     let (endpoint, state, server) = fake_transaction_server(FirstCommit::Conflict).await;
-    let access = ConfigAccess::Graphql(endpoint);
+    let access = ConfigAccess::graphql(endpoint);
     let callback_ids = Arc::new(Mutex::new(Vec::new()));
     let callback_ids_for_attempt = Arc::clone(&callback_ids);
 
@@ -1069,7 +1069,7 @@ async fn http_commit_conflict_replays_callback_under_new_transaction_id() {
 #[tokio::test]
 async fn non_conflict_commit_failure_does_not_replay_callback() {
     let (endpoint, state, server) = fake_transaction_server(FirstCommit::ServerError).await;
-    let access = ConfigAccess::Graphql(endpoint);
+    let access = ConfigAccess::graphql(endpoint);
     let callbacks = Arc::new(AtomicUsize::new(0));
     let callbacks_for_attempt = Arc::clone(&callbacks);
 
@@ -1099,7 +1099,7 @@ async fn non_conflict_commit_failure_does_not_replay_callback() {
 #[tokio::test]
 async fn idempotent_transaction_replays_non_conflict_commit_failure() {
     let (endpoint, state, server) = fake_transaction_server(FirstCommit::ServerError).await;
-    let access = ConfigAccess::Graphql(endpoint);
+    let access = ConfigAccess::graphql(endpoint);
     let callback_ids = Arc::new(Mutex::new(Vec::new()));
     let callback_ids_for_attempt = Arc::clone(&callback_ids);
 
@@ -1135,7 +1135,7 @@ async fn idempotent_transaction_replays_non_conflict_commit_failure() {
 #[tokio::test]
 async fn idempotent_transaction_replays_complete_callback_after_callback_error() {
     let (endpoint, state, server) = fake_transaction_server(FirstCommit::Succeed).await;
-    let access = ConfigAccess::Graphql(endpoint);
+    let access = ConfigAccess::graphql(endpoint);
     let callbacks = Arc::new(AtomicUsize::new(0));
     let callbacks_for_attempt = Arc::clone(&callbacks);
 
@@ -1174,7 +1174,7 @@ async fn idempotent_transaction_replays_complete_callback_after_callback_error()
 #[tokio::test]
 async fn idempotent_transaction_does_not_replay_domain_rejection() {
     let (endpoint, state, server) = fake_transaction_server(FirstCommit::Succeed).await;
-    let access = ConfigAccess::Graphql(endpoint);
+    let access = ConfigAccess::graphql(endpoint);
     let callbacks = Arc::new(AtomicUsize::new(0));
     let callbacks_for_attempt = Arc::clone(&callbacks);
 
@@ -1201,7 +1201,7 @@ async fn idempotent_transaction_does_not_replay_domain_rejection() {
 #[tokio::test]
 async fn observing_transaction_reports_conflict_without_replay() {
     let (endpoint, state, server) = fake_transaction_server(FirstCommit::Conflict).await;
-    let access = ConfigAccess::Graphql(endpoint);
+    let access = ConfigAccess::graphql(endpoint);
     let callbacks = Arc::new(AtomicUsize::new(0));
     let callbacks_for_attempt = Arc::clone(&callbacks);
 
@@ -1236,7 +1236,7 @@ async fn cancelling_callback_schedules_http_transaction_discard() {
 
     let (endpoint, state, server) = fake_transaction_server(FirstCommit::Succeed).await;
     let stage_observed = Arc::clone(&state.stage_observed);
-    let access = ConfigAccess::Graphql(endpoint);
+    let access = ConfigAccess::graphql(endpoint);
     let mut transaction = Box::pin(access.transact("test.http_cancel", |txn| {
         Box::pin(async move {
             txn.execute(

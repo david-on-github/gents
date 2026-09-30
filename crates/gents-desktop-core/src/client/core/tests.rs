@@ -1230,3 +1230,50 @@ async fn runtime_schema_skew_refuses_enrollment_and_projects_incompatible_sync()
 
     core.shutdown().await.expect("shutdown");
 }
+
+/// A new client store is recorded before its first write and reopens with
+/// its key; a removed key is the typed missing-key refusal, not a new store.
+#[tokio::test]
+async fn the_client_store_is_encrypted_with_its_recorded_key() {
+    use crate::client::paths::DesktopPaths;
+
+    let tmp = tempfile::TempDir::new().expect("tmpdir");
+    let paths = DesktopPaths::from_root(tmp.path().to_path_buf());
+    let core =
+        ClientCore::start_with_paths_and_options(paths.clone(), ClientCoreOptions::local_only())
+            .await
+            .expect("fresh client core");
+    core.shutdown().await.expect("shutdown");
+    drop(core);
+    let record: gents::store_key::StoreEncryption =
+        serde_json::from_slice(&std::fs::read(paths.store_encryption_path()).unwrap()).unwrap();
+    assert_eq!(record.custody, gents::store_key::StoreKeyCustody::File);
+    assert!(paths.store_key_path().is_file());
+
+    let core =
+        ClientCore::start_with_paths_and_options(paths.clone(), ClientCoreOptions::local_only())
+            .await
+            .expect("reopened client core");
+    core.shutdown().await.expect("shutdown");
+    drop(core);
+
+    std::fs::remove_file(paths.store_key_path()).unwrap();
+    let error = match ClientCore::start_with_paths_and_options(
+        paths.clone(),
+        ClientCoreOptions::local_only(),
+    )
+    .await
+    {
+        Ok(_) => panic!("a store without its key must not open"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        gents::storage_backend::incompatible_store(&error, paths.node_data_dir())
+            .map(|store| store.kind),
+        Some(gents::storage_backend::IncompatibleStoreKind::MissingStoreKey)
+    );
+    assert!(
+        !paths.store_key_path().exists(),
+        "no replacement key is created"
+    );
+}

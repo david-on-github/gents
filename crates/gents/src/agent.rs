@@ -352,6 +352,15 @@ impl Gents {
         self
     }
 
+    /// Keep durable task hook attempt records in `dir`, which must belong to
+    /// this runtime's exclusively locked store. Call before the runtime starts.
+    pub fn with_task_hook_records(mut self, dir: PathBuf) -> Self {
+        self.background_execution_registry = self
+            .background_execution_registry
+            .with_task_hook_records(dir);
+        self
+    }
+
     /// Resolve the exact operational configuration identity used by the
     /// runtime reconciler. Observers can use this to fence an external config
     /// transaction without reimplementing the fingerprint's field set.

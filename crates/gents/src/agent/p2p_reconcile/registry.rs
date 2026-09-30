@@ -146,6 +146,20 @@ pub async fn run_registry_heartbeat(
     network_id: String,
     cancel: CancellationToken,
 ) -> Result<()> {
+    let scope = Arc::clone(&node);
+    crate::identity::as_node_identity(
+        &scope,
+        registry_heartbeat(node, agent_did, network_id, cancel),
+    )
+    .await
+}
+
+async fn registry_heartbeat(
+    node: Arc<EmbeddedNode>,
+    agent_did: String,
+    network_id: String,
+    cancel: CancellationToken,
+) -> Result<()> {
     let Some(p2p) = node.p2p_arc() else {
         tracing::debug!("registry heartbeat idle because embedded node has no P2P transport");
         cancel.cancelled().await;

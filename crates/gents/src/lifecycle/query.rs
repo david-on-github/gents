@@ -4,36 +4,39 @@ use gents_protocol::row::AgentRequestRow;
 
 impl RequestLifecycle {
     pub(super) async fn request_view(&self) -> Result<Option<AgentRequestRow>> {
-        let doc_id = escape_graphql_string(&self.request.doc_id);
-        let query = format!(
-            r#"{{
-                AgentRequest(
-                    filter: {{ _docID: {{ _eq: "{doc_id}" }} }},
-                    limit: 1
-                ) {{
-                    request_id
-                    lifecycle_state
-                    backend_id
-                    execution_generation
-                    execution_lease_expires_at
-                    execution_origin
-                    failure_reason
-                    terminal_output
-                }}
-            }}"#,
-        );
+        request_view(&self.node, &self.request.doc_id).await
+    }
+}
 
-        let resp = crate::graphql::graphql_with_transaction_retry(
-            &self.node,
-            &query,
-            "request status query",
-        )
+pub(super) async fn request_view(
+    node: &EmbeddedNode,
+    request_doc_id: &str,
+) -> Result<Option<AgentRequestRow>> {
+    let doc_id = escape_graphql_string(request_doc_id);
+    let query = format!(
+        r#"{{
+            AgentRequest(
+                filter: {{ _docID: {{ _eq: "{doc_id}" }} }},
+                limit: 1
+            ) {{
+                request_id
+                lifecycle_state
+                backend_id
+                execution_generation
+                execution_lease_expires_at
+                execution_origin
+                failure_reason
+                terminal_output
+            }}
+        }}"#,
+    );
+
+    let resp = crate::graphql::graphql_with_transaction_retry(node, &query, "request status query")
         .await?;
 
-        let rows: Vec<AgentRequestRow> = crate::graphql::rows(&resp, "AgentRequest")?;
+    let rows: Vec<AgentRequestRow> = crate::graphql::rows(&resp, "AgentRequest")?;
 
-        Ok(rows.into_iter().next())
-    }
+    Ok(rows.into_iter().next())
 }
 
 /// ConfigAccess holds the node's mutation gate from transaction creation through

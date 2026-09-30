@@ -799,7 +799,7 @@ impl<M: rig::completion::CompletionModel + 'static> BehaviorDaemon<M> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::{
         assemble_request_context_message, await_with_request_deadline,
         ensure_request_deadline_open, request_deadline_remaining, stream_failure_reason,
@@ -1076,6 +1076,14 @@ mod tests {
             ]));
             Ok(StreamingCompletionResponse::stream(inner))
         }
+    }
+
+    pub(in crate::agent::daemon) fn test_behavior_with_deadline(
+        deadline: Duration,
+    ) -> Arc<ResolvedBehavior> {
+        let mut behavior = ResolvedBehavior::clone(&test_behavior());
+        behavior.deadline_duration = deadline;
+        Arc::new(behavior)
     }
 
     fn test_behavior() -> Arc<ResolvedBehavior> {

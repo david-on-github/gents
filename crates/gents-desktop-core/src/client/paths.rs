@@ -13,6 +13,8 @@ pub struct DesktopPaths {
     principal_metadata_path: PathBuf,
     identity_key_path: PathBuf,
     iroh_secret_key_path: PathBuf,
+    store_encryption_path: PathBuf,
+    store_key_path: PathBuf,
 }
 
 impl DesktopPaths {
@@ -41,6 +43,8 @@ impl DesktopPaths {
             principal_metadata_path: root.join("principal.json"),
             identity_key_path: root.join("principal.ed25519.key"),
             iroh_secret_key_path: root.join("node.iroh.key"),
+            store_encryption_path: root.join("store-encryption.json"),
+            store_key_path: root.join("store.key"),
             node_data_dir,
             root,
         }
@@ -80,6 +84,16 @@ impl DesktopPaths {
         &self.iroh_secret_key_path
     }
 
+    /// The client store's recorded at-rest encryption.
+    pub fn store_encryption_path(&self) -> &Path {
+        &self.store_encryption_path
+    }
+
+    /// The client store's key when it is kept in a file.
+    pub fn store_key_path(&self) -> &Path {
+        &self.store_key_path
+    }
+
     /// Whether this home contains enough durable client state to require a
     /// restart, even before enrollment has materialized its first peer row.
     ///
@@ -93,12 +107,15 @@ impl DesktopPaths {
             && self.node_data_dir.join("MANIFEST").is_file()
     }
 
-    /// Every entry of the desktop client's durable state: its store, peer
-    /// directory (and lease), principal identity and P2P key. The packaged
-    /// runtime copied under the same root is not client state.
+    /// Every entry of the desktop client's durable state: its store and the
+    /// store's encryption record and key file, peer directory (and lease),
+    /// principal identity and P2P key. The packaged runtime copied under the
+    /// same root is not client state.
     pub fn client_state_entries(&self) -> Vec<PathBuf> {
         vec![
             self.node_data_dir.clone(),
+            self.store_encryption_path.clone(),
+            self.store_key_path.clone(),
             self.peer_directory_path.clone(),
             self.peer_directory_path.with_extension("lock"),
             self.principal_metadata_path.clone(),

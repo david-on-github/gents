@@ -25,6 +25,7 @@ const BACKGROUND_COMPLETION_SIDE_EFFECT_SWEEP_IDS: &[&str] =
     &["tool_call_lifecycle_reconcile_background_completion_side_effects"];
 const INFERENCE_CALL_SWEEP_IDS: &[&str] = &["inference_call_recover_all_stale_calls"];
 const SESSION_MESSAGE_SWEEP_IDS: &[&str] = &["tool_call_lifecycle_recover_session_message_rows"];
+const TASK_HOOK_SWEEP_IDS: &[&str] = &["task_hook_recover_interrupted_cleanup"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PeriodicRecoverySweepMetadata {
@@ -42,6 +43,8 @@ pub enum PeriodicRecoverySweepOutcome {
     InferenceCalls(InferenceCallRecoveryReport),
     /// Session-message rows settled from their caused requests.
     SessionMessageRows(usize),
+    /// Task hook records whose recovered cleanup started.
+    TaskHookRecords(usize),
 }
 
 impl PeriodicRecoverySweepOutcome {
@@ -53,6 +56,7 @@ impl PeriodicRecoverySweepOutcome {
             Self::BackgroundCompletionSideEffects(report) => report.is_noop(),
             Self::InferenceCalls(report) => report.calls_recovered == 0,
             Self::SessionMessageRows(settled) => *settled == 0,
+            Self::TaskHookRecords(started) => *started == 0,
         }
     }
 }
@@ -107,6 +111,12 @@ const PERIODIC_RECOVERY_SWEEP_METADATA: &[PeriodicRecoverySweepMetadata] = &[
         sweep_ids: SESSION_MESSAGE_SWEEP_IDS,
         rust_function: "background_completion::settle_running_session_message_rows",
     },
+    // Runs after request repair so a request whose lease expired since the
+    // last tick has its terminal before its cleanup runs.
+    PeriodicRecoverySweepMetadata {
+        sweep_ids: TASK_HOOK_SWEEP_IDS,
+        rust_function: "task_hooks::recover_task_hook_records",
+    },
 ];
 
 const PERIODIC_RECOVERY_SWEEP_EXECUTORS: &[PeriodicRecoverySweepExecutor] = &[
@@ -133,6 +143,10 @@ const PERIODIC_RECOVERY_SWEEP_EXECUTORS: &[PeriodicRecoverySweepExecutor] = &[
     PeriodicRecoverySweepExecutor {
         metadata_index: 5,
         run: settle_session_message_rows,
+    },
+    PeriodicRecoverySweepExecutor {
+        metadata_index: 6,
+        run: recover_task_hook_records,
     },
 ];
 
@@ -236,5 +250,21 @@ fn settle_session_message_rows<'a>(
         crate::background_completion::settle_running_session_message_rows(node, agent_did)
             .await
             .map(PeriodicRecoverySweepOutcome::SessionMessageRows)
+    })
+}
+
+fn recover_task_hook_records<'a>(
+    node: &'a std::sync::Arc<EmbeddedNode>,
+    agent_did: &'a str,
+    background_executions: &'a crate::hook::BackgroundExecutionRegistry,
+) -> BoxFuture<'a, Result<PeriodicRecoverySweepOutcome>> {
+    Box::pin(async move {
+        crate::task_hooks::recover_task_hook_records(
+            node,
+            agent_did,
+            background_executions.task_hook_records(),
+        )
+        .await
+        .map(PeriodicRecoverySweepOutcome::TaskHookRecords)
     })
 }

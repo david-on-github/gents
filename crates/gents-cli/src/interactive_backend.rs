@@ -265,6 +265,7 @@ mod tests {
             identity_backend: IdentityBackendArg::File,
             keychain_label: None,
             secure_enclave_label: None,
+            store_key_custody: Some(crate::cli::args::StoreKeyCustodyArg::File),
             inference_endpoint: None,
             backend_id: None,
             backend_name: None,

@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::path::Path;
 use std::time::Duration;
 
@@ -55,7 +56,7 @@ pub(super) fn spawn_server_with_args_and_env(
 /// `/healthz` only proves that HTTP is up; gate commands on the authoritative
 /// runtime behavior-readiness projection.
 pub(super) async fn wait_runtime_ready(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     server: &mut Child,
 ) -> Result<()> {

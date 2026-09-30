@@ -572,18 +572,24 @@ impl GraphqlEnrollmentStore {
         );
         timeout(
             Duration::from_secs(20),
-            p2p.connect_peer(&request.candidate_ticket),
+            crate::identity::as_node_identity(
+                &self.node,
+                p2p.connect_peer(&request.candidate_ticket),
+            ),
         )
         .await
         .context("timed out connecting to enrollment candidate")?
         .map_err(anyhow::Error::msg)?;
         let peer =
             TransportPeerId::new(request.candidate_peer.clone()).map_err(anyhow::Error::msg)?;
-        let resolved = timeout(Duration::from_secs(20), p2p.resolve_peer_identity(&peer))
-            .await
-            .context("timed out resolving enrollment candidate identity")?
-            .map_err(anyhow::Error::msg)?
-            .context("enrollment candidate has no authenticated identity")?;
+        let resolved = timeout(
+            Duration::from_secs(20),
+            crate::identity::as_node_identity(&self.node, p2p.resolve_peer_identity(&peer)),
+        )
+        .await
+        .context("timed out resolving enrollment candidate identity")?
+        .map_err(anyhow::Error::msg)?
+        .context("enrollment candidate has no authenticated identity")?;
         anyhow::ensure!(
             resolved.to_string() == request.candidate_did,
             "candidate transport identity does not match its signed request DID"
@@ -749,7 +755,12 @@ impl GraphqlEnrollmentStore {
                 .await
                 .map_err(anyhow::Error::msg)
         };
-        match timeout(Duration::from_secs(20), delivery).await {
+        match timeout(
+            Duration::from_secs(20),
+            crate::identity::as_node_identity(&self.node, delivery),
+        )
+        .await
+        {
             Ok(Ok(())) => false,
             Ok(Err(error)) => {
                 tracing::warn!(error = %error, request_id = %request.request_id, "enrollment terminal committed; direct delivery will retry");

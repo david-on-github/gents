@@ -562,6 +562,158 @@ async fn create_session_with_behavior_id_rejects_mismatched_existing_binding() {
     let _ = std::fs::remove_dir_all(&data_path);
 }
 
+async fn session_rewrite_rows(node: &defra_node::EmbeddedNode) -> Vec<Vec<String>> {
+    let response = node
+        .execute(
+            "{ AgentSession { _docID session_id behavior_id } \
+               AgentMessage { _docID session_id sequence message_key } \
+               CompactionEntry { _docID session_id sequence compaction_key summary } }",
+        )
+        .await;
+    assert!(!response.has_errors(), "{:?}", response.errors);
+    let data = response.data.expect("session rewrite rows");
+    ["AgentSession", "AgentMessage", "CompactionEntry"]
+        .into_iter()
+        .map(|collection| {
+            let mut rows = data[collection]
+                .as_array()
+                .expect("collection rows")
+                .iter()
+                .map(|row| row.to_string())
+                .collect::<Vec<_>>();
+            rows.sort();
+            rows
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn fork_rolls_back_at_every_mutation_position() {
+    const AGENT: &str = "did:test:fork-rollback";
+    const SOURCE: &str = "fork-rollback-source";
+    let node = std::sync::Arc::new(defra_node::EmbeddedNode::builder().build().await.unwrap());
+    ensure_runtime_schemas(&node).await.unwrap();
+    crate::test_support::install_test_behavior(&node, AGENT, "fork-rollback").await;
+    create_session_with_behavior_id(&node, SOURCE, "fork-rollback", AGENT, "fork-rollback")
+        .await
+        .unwrap();
+    for sequence in 1..=3u32 {
+        import_history_observation(
+            &node,
+            &format!("fork-rollback-request-{sequence}"),
+            SOURCE,
+            AGENT,
+            None,
+            &format!("turn {sequence}"),
+            &format!("fork-rollback:{sequence}"),
+            sequence,
+            None,
+        )
+        .await;
+    }
+    save_compaction_entry(
+        &node,
+        SOURCE,
+        AGENT,
+        "fork-rollback-compaction",
+        "fork-rollback-compaction-doc",
+        "early turns",
+        &[],
+        &[],
+        2,
+        2,
+        100,
+        10,
+    )
+    .await
+    .unwrap();
+    let params = ForkParams {
+        source_session_id: SOURCE,
+        fork_at_user_turn: 3,
+        caller_agent_did: AGENT,
+        caller_requester_did: None,
+        target_behavior_id: None,
+    };
+
+    let (outcome, writes) = crate::config_client::ConfigApplyTxn::assert_every_mutation_rolls_back(
+        || fork(&node, params.clone()),
+        || session_rewrite_rows(&node),
+    )
+    .await;
+    assert_eq!(outcome.copied_messages, 3);
+    assert_eq!(outcome.copied_compaction_entries, 1);
+    assert!(
+        writes > 4,
+        "headers, compaction, and session header are separate writes: {writes}"
+    );
+    node.shutdown().await;
+}
+
+#[tokio::test]
+async fn compaction_save_fault_leaves_chain_and_generation_intact() {
+    const AGENT: &str = "did:test:compaction-rollback";
+    const SESSION: &str = "compaction-rollback";
+    let node = defra_node::EmbeddedNode::builder().build().await.unwrap();
+    ensure_runtime_schemas(&node).await.unwrap();
+    save_compaction_entry(
+        &node,
+        SESSION,
+        AGENT,
+        "request-first",
+        "request-doc-first",
+        "first summary",
+        &["/tmp/a.rs".to_string()],
+        &[],
+        2,
+        10,
+        100,
+        20,
+    )
+    .await
+    .unwrap();
+    let chain = || async {
+        let entries = load_compaction_entries(&node, SESSION, AGENT, None)
+            .await
+            .unwrap();
+        let state = load_prompt_compaction_state(&node, SESSION, AGENT, None, None)
+            .await
+            .unwrap();
+        (entries, state)
+    };
+    let (_, before) = chain().await;
+    let files = ["/tmp/b.rs".to_string()];
+
+    let (saved, _) = crate::config_client::ConfigApplyTxn::assert_every_mutation_rolls_back(
+        || {
+            save_compaction_entry_with_requester_did(
+                &node,
+                SESSION,
+                AGENT,
+                None,
+                "request-second",
+                "request-doc-second",
+                "second summary",
+                &files,
+                &[],
+                3,
+                20,
+                200,
+                30,
+                &before.generation,
+            )
+        },
+        chain,
+    )
+    .await;
+    assert_eq!(saved.sequence, 2);
+    assert_eq!(saved.files_read, vec!["/tmp/a.rs", "/tmp/b.rs"]);
+    let (entries, after) = chain().await;
+    assert_eq!(entries.len(), 2);
+    assert_ne!(after.generation, before.generation);
+    assert_eq!(after.compacted_through_sequence, Some(20));
+    node.shutdown().await;
+}
+
 /// Insert canonical replica observations for reader filtering tests. These
 /// tests intentionally place foreign facts beside local ones; they establish
 /// no claim about admission or publication authority. The writer tests below

@@ -162,7 +162,7 @@ pub fn resolve_access_token_expiry(
         .unwrap_or_else(|| now + Duration::minutes(15))
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct RefreshedTokens {
     pub access_token: String,
     pub refresh_token: String,
@@ -173,7 +173,7 @@ pub struct RefreshedTokens {
     pub access_token_expires_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthCredential {
     #[serde(default)]
     pub doc_id: Option<String>,
@@ -193,6 +193,44 @@ pub struct OAuthCredential {
     #[serde(default)]
     pub last_refresh: Option<DateTime<Utc>>,
     pub enabled: bool,
+}
+
+const REDACTED: &str = "[redacted]";
+
+/// Token values never reach logs or error text through `Debug`.
+impl std::fmt::Debug for RefreshedTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshedTokens")
+            .field("access_token", &REDACTED)
+            .field("refresh_token", &REDACTED)
+            .field("id_token", &self.id_token.as_ref().map(|_| REDACTED))
+            .field("account_id", &self.account_id)
+            .field("is_fedramp", &self.is_fedramp)
+            .field("plan_type", &self.plan_type)
+            .field("access_token_expires_at", &self.access_token_expires_at)
+            .finish()
+    }
+}
+
+/// Token values never reach logs or error text through `Debug`.
+impl std::fmt::Debug for OAuthCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthCredential")
+            .field("doc_id", &self.doc_id)
+            .field("credential_id", &self.credential_id)
+            .field("agent_did", &self.agent_did)
+            .field("provider", &self.provider)
+            .field("access_token", &REDACTED)
+            .field("refresh_token", &REDACTED)
+            .field("id_token", &self.id_token.as_ref().map(|_| REDACTED))
+            .field("account_id", &self.account_id)
+            .field("chatgpt_plan_type", &self.chatgpt_plan_type)
+            .field("is_fedramp", &self.is_fedramp)
+            .field("access_token_expires_at", &self.access_token_expires_at)
+            .field("last_refresh", &self.last_refresh)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 pub fn oauth_credential_id(agent_did: &str, provider: &str) -> String {
@@ -847,6 +885,25 @@ mod tests {
             last_refresh: Some(DateTime::<Utc>::from_timestamp(1_800_000_000, 0).unwrap()),
             enabled: true,
         }
+    }
+
+    #[test]
+    fn debug_redacts_every_token() {
+        let credential = sample_credential();
+        let refreshed = RefreshedTokens {
+            access_token: credential.access_token.clone(),
+            refresh_token: credential.refresh_token.clone(),
+            id_token: credential.id_token.clone(),
+            account_id: credential.account_id.clone(),
+            is_fedramp: false,
+            plan_type: None,
+            access_token_expires_at: credential.access_token_expires_at,
+        };
+        let debug = format!("{credential:?} {credential:#?} {refreshed:?} {refreshed:#?}");
+        for token in ["access-tok", "refresh-tok", "id-tok"] {
+            assert!(!debug.contains(token), "{token} leaked: {debug}");
+        }
+        assert!(debug.contains("acct-1"), "{debug}");
     }
 
     #[test]

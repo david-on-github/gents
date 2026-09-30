@@ -11,6 +11,7 @@ use identity::{FullIdentity as _, Identity as _, RawIdentity};
 mod file_key;
 
 pub use file_key::{load_file_identity, load_or_create_file_identity, InsecureKeyPermissions};
+pub(crate) use file_key::{publish_private_key_file, read_private_key_file};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceAccount {
@@ -158,6 +159,63 @@ pub fn commit_signer_identity_for_did(did: &str) -> Result<String> {
         .map_err(anyhow::Error::from)
         .with_context(|| format!("parsing commit signer DID {did}"))?;
     Ok(lowercase_hex(&public_key_bytes))
+}
+
+/// Lifetime of one minted DefraDB HTTP bearer. Every request mints its own,
+/// and DefraDB tolerates a further 60s of clock skew, so a bearer replayed by
+/// the host it was sent to stays usable for at most two minutes. DefraDB
+/// bearers carry no nonce.
+const DEFRADB_BEARER_LIFETIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Mint an `Authorization` header value that authenticates one DefraDB HTTP
+/// request as `did`.
+///
+/// DefraDB verifies the JWT against the request's `Host` header, so
+/// `audience` must be the `host[:port]` the request is sent to. Only a DID
+/// whose private key bytes this process registered can mint one; a
+/// hardware-backed key without exportable bytes is refused rather than
+/// silently falling back to an anonymous request.
+pub fn defradb_bearer_authorization(did: &str, audience: &str) -> Result<String> {
+    let config = defra_core::signing::get_identity(did)
+        .ok_or_else(|| anyhow!("no signing identity is loaded for {did}"))?;
+    let identity = raw_identity_from_signing_config(&config)
+        .with_context(|| format!("loading signing identity {did}"))?;
+    let token = identity::new_token(
+        &identity,
+        DEFRADB_BEARER_LIFETIME,
+        Some(audience.to_string()),
+        None,
+    )
+    .map_err(anyhow::Error::from)
+    .with_context(|| format!("minting DefraDB bearer token for {did}"))?;
+    let token = String::from_utf8(token).context("DefraDB bearer token is not UTF-8")?;
+    Ok(format!("Bearer {token}"))
+}
+
+/// Whether [`defradb_bearer_authorization`] can mint for `did` in this process.
+pub fn can_mint_defradb_bearer(did: &str) -> bool {
+    defra_core::signing::get_identity(did).is_some_and(|config| config.has_local_private_key())
+}
+
+/// Run `operation` with the node's own DID as the acting identity.
+///
+/// Mirrors DefraDB's private `EmbeddedNode::as_node_identity` until DefraDB
+/// installs the node identity on its P2P operations handle itself.
+///
+/// DefraDB node access control resolves the actor from the ambient request
+/// identity. `EmbeddedNode` installs it for queries, transactions and schema
+/// changes, but not for its P2P operations handle, so a node with access
+/// control enabled denies in-process P2P administration as anonymous unless
+/// it runs under this scope. Spawned tasks do not inherit the scope.
+pub async fn as_node_identity<F: std::future::Future>(
+    node: &defra_node::EmbeddedNode,
+    operation: F,
+) -> F::Output {
+    defra_core::current_identity::with_scoped_identity(
+        node.node_identity_did().map(ToOwned::to_owned),
+        operation,
+    )
+    .await
 }
 
 #[async_trait]
@@ -318,8 +376,10 @@ fn register_public_key(did: &str, key_type: crypto::KeyType, public_key: Vec<u8>
         );
 }
 
-#[cfg(target_os = "macos")]
-const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+/// `errSecItemNotFound`: the only Keychain status that proves an item is
+/// absent. Every other failure (locked keychain, denied access, cancelled
+/// prompt) leaves the item possibly intact.
+pub(crate) const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 #[cfg(target_os = "macos")]
 const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34018;
 
@@ -394,27 +454,72 @@ fn load_or_create_macos_keychain_raw_identity(
     label: &str,
     create_if_missing: bool,
 ) -> Result<RawIdentity> {
-    let keychain = security_framework::os::macos::keychain::SecKeychain::default()
-        .context("loading default macOS keychain")?;
-    match keychain.find_generic_password(MACOS_KEYCHAIN_SERVICE, label) {
-        Ok((password, _)) => RawIdentity::from_bytes(crypto::KeyType::Ed25519, password.as_ref())
+    match macos_keychain_find(MACOS_KEYCHAIN_SERVICE, label)? {
+        Ok(password) => RawIdentity::from_bytes(crypto::KeyType::Ed25519, &password)
             .map_err(anyhow::Error::from)
             .with_context(|| format!("loading macOS keychain identity {label}")),
-        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
+        Err(ERR_SEC_ITEM_NOT_FOUND) => {
             if !create_if_missing {
                 anyhow::bail!("macOS keychain identity not found for label {label}");
             }
             let private_key = crypto::generate_ed25519().map_err(anyhow::Error::from)?;
             let bytes = private_key.raw();
-            keychain
-                .set_generic_password(MACOS_KEYCHAIN_SERVICE, label, bytes)
+            macos_keychain_set(MACOS_KEYCHAIN_SERVICE, label, bytes)
                 .with_context(|| format!("storing macOS keychain identity {label}"))?;
             RawIdentity::from_private_key(private_key)
                 .map_err(anyhow::Error::from)
                 .with_context(|| format!("constructing macOS keychain identity {label}"))
         }
-        Err(error) => Err(anyhow::Error::from(error))
+        Err(code) => Err(anyhow!("macOS Keychain error {code}"))
             .with_context(|| format!("reading macOS keychain identity {label}")),
+    }
+}
+
+/// A login-keychain generic password, or the Keychain status that refused it.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_keychain_find(
+    service: &str,
+    label: &str,
+) -> Result<std::result::Result<k256::elliptic_curve::zeroize::Zeroizing<Vec<u8>>, i32>> {
+    let keychain = security_framework::os::macos::keychain::SecKeychain::default()
+        .context("loading default macOS keychain")?;
+    Ok(match keychain.find_generic_password(service, label) {
+        Ok((password, _)) => Ok(k256::elliptic_curve::zeroize::Zeroizing::new(
+            password.as_ref().to_vec(),
+        )),
+        Err(error) => Err(error.code()),
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_keychain_set(service: &str, label: &str, secret: &[u8]) -> Result<()> {
+    security_framework::os::macos::keychain::SecKeychain::default()
+        .context("loading default macOS keychain")?
+        .set_generic_password(service, label, secret)
+        .map_err(anyhow::Error::from)
+}
+
+/// Removes a login-keychain generic password; an absent one is not an error.
+/// `security-framework` discards `SecKeychainItemDelete`'s status, so deletion
+/// is complete only after a fresh lookup returns `errSecItemNotFound`.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_keychain_delete(service: &str, label: &str) -> Result<()> {
+    let keychain = security_framework::os::macos::keychain::SecKeychain::default()
+        .context("loading default macOS keychain")?;
+    match keychain.find_generic_password(service, label) {
+        Ok((_, item)) => {
+            item.delete();
+            match macos_keychain_find(service, label)? {
+                Err(ERR_SEC_ITEM_NOT_FOUND) => Ok(()),
+                Err(code) => Err(anyhow!("macOS Keychain error {code}"))
+                    .with_context(|| format!("verifying deletion of Keychain item {label}")),
+                Ok(_) => anyhow::bail!(
+                    "Keychain item {label} is still present after deletion; its custody record must be retained"
+                ),
+            }
+        }
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+        Err(error) => Err(anyhow::Error::from(error)),
     }
 }
 

@@ -33,6 +33,8 @@ inductive PersistedRecoveryCollection where
   | agentRequest
   | agentToolCall
   | inferenceCall
+  /-- Host task hook records (`Recovery.TaskHookRecordRow`). -/
+  | taskHookRecord
   deriving DecidableEq, Repr
 
 namespace PersistedRecoveryCollection
@@ -41,11 +43,13 @@ def toContract : PersistedRecoveryCollection → String
   | .agentRequest => "AgentRequest"
   | .agentToolCall => "AgentToolCall"
   | .inferenceCall => "InferenceCall"
+  | .taskHookRecord => "TaskHookRecord"
 
 def all : List PersistedRecoveryCollection :=
   [ .agentRequest
   , .agentToolCall
   , .inferenceCall
+  , .taskHookRecord
   ]
 
 theorem all_complete (collection : PersistedRecoveryCollection) :

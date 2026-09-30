@@ -1368,6 +1368,10 @@ pub(crate) struct ProvisionArgs {
         help = "Keychain label for the macOS Secure Enclave identity."
     )]
     pub(crate) secure_enclave_label: Option<String>,
+    /// Keychain on macOS and a file elsewhere when omitted. Tests pass
+    /// `file` so they never write login-keychain items.
+    #[arg(long, value_enum, hide = true)]
+    pub(crate) store_key_custody: Option<StoreKeyCustodyArg>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -1375,6 +1379,23 @@ pub(crate) enum IdentityBackendArg {
     File,
     MacosKeychain,
     MacosSecureEnclave,
+}
+
+/// Custody of a new home's store encryption key (`gents::store_key`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub(crate) enum StoreKeyCustodyArg {
+    File,
+    Keychain,
+}
+
+pub(crate) fn store_key_custody(
+    arg: Option<StoreKeyCustodyArg>,
+) -> gents::store_key::StoreKeyCustodyChoice {
+    match arg {
+        Some(StoreKeyCustodyArg::File) => gents::store_key::StoreKeyCustodyChoice::File,
+        Some(StoreKeyCustodyArg::Keychain) => gents::store_key::StoreKeyCustodyChoice::Keychain,
+        None => gents::store_key::StoreKeyCustodyChoice::default(),
+    }
 }
 
 #[derive(clap::Args)]
@@ -1424,6 +1445,10 @@ pub(crate) struct InitArgs {
         help = "Keychain label for --identity-backend macos-secure-enclave."
     )]
     pub(crate) secure_enclave_label: Option<String>,
+    /// Keychain on macOS and a file elsewhere when omitted. Tests pass
+    /// `file` so they never write login-keychain items.
+    #[arg(long, value_enum, hide = true)]
+    pub(crate) store_key_custody: Option<StoreKeyCustodyArg>,
     #[arg(
         long = "inference-url",
         value_name = "INFERENCE_URL",

@@ -118,7 +118,7 @@ async fn stamp_terminal_message(
     })?;
     let now = chrono::Utc::now().to_rfc3339();
     graphql_mutation_with_variables(
-            &ConfigAccess::Graphql(runtime.graphql.clone()),
+            &ConfigAccess::Graphql(crate::support::graphql::served_endpoint(&runtime.graphql)),
             r#"mutation($request_doc_id: String!, $terminal_output: JSON, $lifecycle_state: String!, $now: String!) {
                 update_AgentRequest(
                     filter: { _docID: { _eq: $request_doc_id } }
@@ -155,7 +155,7 @@ async fn insert_materialized_response(
         stamp_terminal_selection,
     } = fixture;
     let now = chrono::Utc::now().to_rfc3339();
-    let access = ConfigAccess::Graphql(runtime.graphql.clone());
+    let access = ConfigAccess::Graphql(crate::support::graphql::served_endpoint(&runtime.graphql));
 
     // Canonical request row: lifecycle is the only request state; the terminal
     // selection (`TerminalOutput`) is stamped by the terminalization owner.

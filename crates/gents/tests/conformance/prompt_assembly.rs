@@ -51,8 +51,8 @@ use crate::lean_vocab_test::{
     lean_prompt_assembly_claude_body_cases, lean_prompt_assembly_claude_map_cases,
     lean_prompt_assembly_claude_replay_cases, lean_prompt_assembly_claude_stream_cases,
     lean_prompt_assembly_claude_thinking_stream_cases, lean_prompt_assembly_sanitize_cases,
-    LeanClaudeReasoningPart, LeanClaudeStreamBlock, LeanClaudeStreamEvent, LeanPromptAssemblyItem,
-    LeanPromptAssemblyRow,
+    LeanClaudeReasoningPart, LeanClaudeReplayBlock, LeanClaudeStreamBlock, LeanClaudeStreamEvent,
+    LeanPromptAssemblyItem, LeanPromptAssemblyRow,
 };
 
 /// Stable identities for the abstract ids the model uses. The model abstracts
@@ -1466,7 +1466,15 @@ fn generated_claude_checkpoint_cases_bind_selected_assistant_projection() {
                 assert_eq!(case.outcome, "ok", "{}", case.name);
                 assert_eq!(prepared.len(), case.replay.len(), "{}", case.name);
                 for (row, expected) in prepared.iter().zip(&case.replay) {
-                    assert_eq!(row, &claude_replay_json(expected), "{}", case.name);
+                    assert_eq!(
+                        row,
+                        &expected
+                            .iter()
+                            .map(LeanClaudeReplayBlock::native_json)
+                            .collect::<Vec<_>>(),
+                        "{}",
+                        case.name
+                    );
                 }
                 // The live body owner emits the same strict codec output.
                 let native = checkpoint
@@ -1591,44 +1599,13 @@ fn generated_claude_replay_cases_drive_native_messages_body() {
                 .expect("content object")
                 .remove("cache_control");
         }
-        let expected = claude_replay_json(&case.replay);
+        let expected = case
+            .replay
+            .iter()
+            .map(LeanClaudeReplayBlock::native_json)
+            .collect::<Vec<_>>();
         assert_eq!(actual, expected, "replay ({})", case.name);
     }
-}
-
-fn claude_replay_json(
-    blocks: &[crate::lean_vocab_test::LeanClaudeReplayBlock],
-) -> Vec<serde_json::Value> {
-    blocks
-        .iter()
-        .map(|block| {
-            let payload = || {
-                String::from_utf8(block.payload.clone().expect("replay payload"))
-                    .expect("reconstructed UTF-8")
-            };
-            match block.kind.as_str() {
-                "text" => serde_json::json!({"type":"text", "text":payload()}),
-                "signedThinking" => serde_json::json!({
-                    "type":"thinking", "thinking":payload(),
-                    "signature":block.signature.as_deref().expect("modeled signature")
-                }),
-                "redactedThinking" => serde_json::json!({
-                    "type":"redacted_thinking", "data":payload()
-                }),
-                "toolUse" => {
-                    let arguments = String::from_utf8(block.arguments.clone().expect("arguments"))
-                        .expect("reconstructed UTF-8");
-                    serde_json::json!({
-                        "type":"tool_use", "id":block.id.as_deref().expect("provider id"),
-                        "name":block.name.as_deref().expect("tool name"),
-                        "input":serde_json::from_str::<serde_json::Value>(&arguments)
-                            .expect("modeled JSON arguments")
-                    })
-                }
-                other => panic!("unknown modeled replay output {other}"),
-            }
-        })
-        .collect()
 }
 
 /// Fence: `build_messages_body_native` reproduces `ClaudeMap.systemBlocks` /

@@ -132,7 +132,10 @@ async fn wait_for_live_behavior_readiness(
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let last_observation =
-            match crate::commands::status::load_live_behavior_readiness(graphql_url, agent_did)
+            match crate::commands::status::load_live_behavior_readiness(
+                &gents::config_client::GraphqlEndpoint::anonymous(graphql_url),
+                agent_did,
+            )
                 .await
             {
                 Ok(row) => match project_behavior_readiness_summary(row.as_ref(), agent_did, chrono::Utc::now()) {
@@ -618,6 +621,7 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
         .clone()
         .or_else(|| init_config.as_ref().map(|config| config.agent_name.clone()))
         .unwrap_or_else(|| DEFAULT_AGENT_NAME.to_string());
+    gents::home::ensure_home_identity_can_serve(&home_dir)?;
     let server_identity =
         resolve_server_identity(&args, init_config.as_ref(), &home_dir, &agent_name)?;
     let identity = server_identity.identity;
@@ -734,10 +738,22 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
         bind_probe_token.clone(),
     ))
     .merge(crate::http::explorer::explorer_router());
-    let mut node_builder = crate::persistent_node_builder(&data_dir)?
+    if let Some(node_identity_did) = server_identity.node_identity_did.as_deref() {
+        anyhow::ensure!(
+            gents::identity::can_mint_defradb_bearer(node_identity_did),
+            "identity {node_identity_did} has no exportable private key, so it cannot own the served node's access control; re-initialize the home with a file or macos-keychain identity to serve it"
+        );
+    }
+    let mut node_builder = crate::persistent_node_builder(&home_dir, &data_dir)
+        .await?
         .with_http(defra_node::HttpConfig::with_addr(http_addr).with_extra_routes(extra_routes));
     if let Some(node_identity_did) = server_identity.node_identity_did.as_ref() {
-        node_builder = node_builder.with_node_identity_did(node_identity_did.clone());
+        // The served home's principal owns node access control, so its HTTP
+        // API admits writes, schema changes and P2P administration only from
+        // requests that principal signs.
+        node_builder = node_builder
+            .with_node_identity_did(node_identity_did.clone())
+            .with_node_acp_enabled();
     }
     if let Some(config) = p2p_config {
         node_builder = node_builder.with_p2p(config);
@@ -762,6 +778,7 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
             error, &data_dir,
         ));
     }
+    gents::store_key::upgrade::finish(&data_dir)?;
     let schema = gents::agent::p2p_reconcile::read_client_replicated_schema(node.clone())
         .await
         .context("reading client route collection versions after migrations")?;
@@ -809,7 +826,9 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
     })?;
     // The store lock held above makes this runtime the only reader of these
     // records, so a surviving background process can be proven owned.
-    let agent = agent.with_background_process_records(data_dir.join("background-processes"));
+    let agent = agent
+        .with_background_process_records(data_dir.join("background-processes"))
+        .with_task_hook_records(data_dir.join("task-hooks"));
     let background_execution_registry = agent.background_execution_registry();
     let runtime_configuration_probe = agent.clone();
     activation_runtime
@@ -841,8 +860,11 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
             }
         }
 
-        let p2p_status =
-            load_local_server_p2p_status(node.as_ref(), args.p2p_transport, p2p_admission).await?;
+        let p2p_status = gents::identity::as_node_identity(
+            node.as_ref(),
+            load_local_server_p2p_status(node.as_ref(), args.p2p_transport, p2p_admission),
+        )
+        .await?;
         if let Some(p2p) = node.p2p_arc() {
             *enrollment_offer_issuer.write().await =
                 Some(crate::http::enrollment::EnrollmentOfferIssuer::new(

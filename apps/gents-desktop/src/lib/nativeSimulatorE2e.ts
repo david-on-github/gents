@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { bridgeCommand } from "@source-inc/gents-desktop-client";
+import { runNativeLocalE2e, type NativeLocalSetup } from "./nativeLocalE2e";
 
 import {
   sessionRowCount,
@@ -27,6 +28,7 @@ type NativeE2eConfig = {
   expectEmptySessionSlice: boolean;
   correlationId: string;
   measurePerformance: boolean;
+  localSetup?: NativeLocalSetup | null;
 };
 
 type NativeE2eStatus = {
@@ -87,6 +89,19 @@ async function runNativeSimulatorE2e() {
     return;
   }
   activeConfig = config;
+
+  if (config.localSetup) {
+    await runNativeLocalE2e(
+      {
+        ...config.localSetup,
+        agentLabel: config.agentLabel,
+        prompt: config.prompt,
+        expectedResponse: config.expectedResponse,
+      },
+      reportStatus,
+    );
+    return;
+  }
 
   try {
     await reportStatus({ stage: "starting" });

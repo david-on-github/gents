@@ -18,8 +18,7 @@ use crate::cli::args::{
 };
 
 pub(crate) use output::{
-    fetch_live_http_p2p_status_with_client, flatten_p2p_fields, load_live_http_p2p_status,
-    persisted_p2p_status,
+    fetch_live_http_p2p_status, flatten_p2p_fields, load_live_http_p2p_status, persisted_p2p_status,
 };
 
 pub(crate) async fn dispatch(command: P2pCommand) -> Result<()> {
@@ -109,8 +108,16 @@ pub(crate) fn p2p_http_client() -> Result<reqwest::Client> {
         .clone())
 }
 
-pub(super) async fn p2p_probe_get(client: &reqwest::Client, url: &str) -> Value {
-    match crate::http_get_json::<Value>(client, url).await {
+pub(super) async fn p2p_probe_get(
+    graphql: &gents::config_client::GraphqlEndpoint,
+    url: &str,
+) -> Value {
+    let request = p2p_http_client().and_then(|client| graphql.authorize(client.get(url)));
+    let response = match request {
+        Ok(request) => crate::http_get_json::<Value>(request).await,
+        Err(error) => Err(error),
+    };
+    match response {
         Ok(value) => json!({
             "ok": true,
             "value": value,

@@ -12,7 +12,7 @@ build = "build.rs"
 default = []
 # Compiles real native-E2E command bodies (still double-gated by debug_assertions
 # + GENTS_NATIVE_E2E=1). Never in default; app forwards for E2E launchers only.
-native-e2e = []
+native-e2e = ["gents-server/native-e2e"]
 
 [dependencies]
 anyhow.workspace = true

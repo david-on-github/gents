@@ -577,7 +577,7 @@ async fn init_openrouter_preset_applies_hosted_defaults() -> Result<()> {
 }
 
 #[test]
-fn init_hosted_preset_without_default_requires_model_name() -> Result<()> {
+fn init_hosted_preset_error_can_retry_with_the_same_identity_and_store_key() -> Result<()> {
     let tempdir = tempfile::tempdir().context("creating tempdir")?;
     let home_dir = tempdir.path().join("home");
     fs::create_dir_all(&home_dir)?;
@@ -586,6 +586,8 @@ fn init_hosted_preset_without_default_requires_model_name() -> Result<()> {
         .env("HOME", &home_dir)
         .env("RUST_LOG", "error")
         .arg("init")
+        .args(["--store-key-custody", "file"])
+        .args(["--agent-name", "retry-original-identity"])
         .arg("--backend-preset")
         .arg("openai")
         .output()
@@ -597,6 +599,20 @@ fn init_hosted_preset_without_default_requires_model_name() -> Result<()> {
         stderr.contains("--model-name is required for --backend-preset openai"),
         "expected missing model error, got:\n{stderr}"
     );
+
+    let runtime_home = home_dir.join(".gents");
+    let stored = read_json_file(&runtime_home.join("init.json"))?;
+    let agent_did = stored["agent_did"].as_str().context("recorded identity")?;
+    let identity_path = stored["key_path"].as_str().context("recorded key path")?;
+    let identity_bytes = fs::read(identity_path)?;
+    let store_key_path = gents::store_key::home_key_file(&runtime_home);
+    let store_key_bytes = fs::read(&store_key_path)?;
+    assert!(runtime_home.join("data/MANIFEST").exists());
+
+    let retried = run_init_json(&home_dir, &["--model-name", "retry-model"])?;
+    assert_eq!(retried["agent_did"], agent_did);
+    assert_eq!(fs::read(identity_path)?, identity_bytes);
+    assert_eq!(fs::read(store_key_path)?, store_key_bytes);
 
     Ok(())
 }
@@ -659,9 +675,17 @@ async fn init_identity_only_writes_stable_real_did_without_runtime_config() -> R
     let home_dir = tempdir.path().join("home");
     fs::create_dir_all(&home_dir)?;
 
-    let agent_name = format!("cli-identity-only-{}", Uuid::new_v4().simple());
+    let agent_name = "store";
     let first = run_init_json(&home_dir, &["--identity-only", "--agent-name", &agent_name])?;
     let first_agent_did = agent_did_from_init(&first)?;
+    let identity_path = gents::home::default_key_path(&home_dir.join(".gents"), agent_name);
+    let identity_bytes = fs::read(&identity_path)?;
+    assert_ne!(
+        identity_path,
+        gents::store_key::home_key_file(&home_dir.join(".gents"))
+    );
+    assert_eq!(identity_bytes.len(), 64);
+
     assert_eq!(
         first.get("identity_only").and_then(Value::as_bool),
         Some(true)
@@ -671,6 +695,7 @@ async fn init_identity_only_writes_stable_real_did_without_runtime_config() -> R
     let second = run_init_json(&home_dir, &["--identity-only", "--agent-name", &agent_name])?;
     let second_agent_did = agent_did_from_init(&second)?;
     assert_eq!(second_agent_did, first_agent_did);
+    assert_eq!(fs::read(identity_path)?, identity_bytes);
 
     let init_json = read_json_file(&home_dir.join(".gents").join("init.json"))?;
     assert_eq!(
@@ -691,6 +716,7 @@ async fn init_rejects_setting_both_api_key_and_api_key_env_var() -> Result<()> {
         .env("HOME", &home_dir)
         .env("RUST_LOG", "error")
         .arg("init")
+        .args(["--store-key-custody", "file"])
         .arg("--model-name")
         .arg("test-model")
         .arg("--api-key")
@@ -974,4 +1000,77 @@ async fn readiness_wait_survives_preflight_listener_closing_before_server_start(
     let result = ready.await;
     server.abort();
     result
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn init_reuses_recorded_store_custody_and_refuses_an_unrecorded_key() -> Result<()> {
+    let tempdir = tempfile::tempdir().context("creating tempdir")?;
+    let home_dir = tempdir.path().join("home");
+    fs::create_dir_all(&home_dir)?;
+    let home = home_dir.join(".gents");
+    let agent_name = format!("cli-store-key-{}", Uuid::new_v4().simple());
+
+    run_init_json(&home_dir, &["--identity-only", "--agent-name", &agent_name])?;
+    let config_path = gents::home::init_config_path(&home);
+    let recorded = read_json_file(&config_path)?["store_encryption"].clone();
+    assert_eq!(
+        recorded,
+        serde_json::json!({"version": 1, "custody": "file"}),
+        "{recorded}"
+    );
+    let key_file = gents::store_key::home_key_file(&home);
+    let key = fs::read(&key_file)?;
+    run_init_json(&home_dir, &["--identity-only", "--agent-name", &agent_name])?;
+    assert_eq!(fs::read(&key_file)?, key, "re-init reuses the recorded key");
+
+    let mut legacy = read_json_file(&config_path)?;
+    legacy
+        .as_object_mut()
+        .context("init.json object")?
+        .remove("store_encryption");
+    write_json_file(&config_path, &legacy)?;
+    let output = Command::new(cli_bin())
+        .env("HOME", &home_dir)
+        .env("RUST_LOG", "error")
+        .args(["config", "export", "--root"])
+        .arg(tempdir.path().join("export"))
+        .output()
+        .context("opening a home with unrecorded store custody")?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("unrecorded file"), "{stderr}");
+    assert!(stderr.contains("refusing to replace"), "{stderr}");
+    assert_eq!(fs::read(&key_file)?, key);
+    assert_eq!(read_json_file(&config_path)?, legacy);
+    assert!(
+        !home.join("data/MANIFEST").exists(),
+        "the store is never opened"
+    );
+    Ok(())
+}
+
+#[test]
+fn init_refuses_an_explicit_identity_path_that_collides_with_the_store_key() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let home_dir = temp.path().join("home");
+    let key_path = gents::store_key::home_key_file(&home_dir.join(".gents"));
+    gents::identity::load_or_create_file_identity(&key_path)?;
+    let original = fs::read(&key_path)?;
+    let error = run_init_json(
+        &home_dir,
+        &[
+            "--identity-only",
+            "--key-path",
+            key_path.to_str().context("key path")?,
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("refusing to replace"),
+        "{error:#}"
+    );
+    assert_eq!(fs::read(&key_path)?, original);
+    gents::identity::load_file_identity(&key_path)?;
+    assert!(!home_dir.join(".gents/init.json").exists());
+    Ok(())
 }
