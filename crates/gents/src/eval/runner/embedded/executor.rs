@@ -51,6 +51,7 @@ use crate::pack::{
     PackInferenceBindings, PackInstallOptions, PackManifest,
 };
 use crate::tool_surface::{BashMode, FileToolMode, ToolCeiling, ToolPolicySurface};
+use crate::toolset::CommandExecutionMode;
 use crate::{Collection, ConfigAccess, DocumentRuntimeOptions, RuntimeSnapshotObserver};
 
 /// How long a request is watched after it has been interrupted, on the stage
@@ -202,20 +203,25 @@ impl EmbeddedExecutor {
 
 /// The process ceiling of an embedded trial: file tools, read-write, rooted
 /// at the trial's own workspace, and host bash only when the definition asks
-/// for it, then confined to that root as a desktop node's ceiling is. It
-/// replaces the caller's ceiling because the root is per trial. Freezing still
-/// refuses a subject pack that grants itself host bash under
-/// [`Isolation::Embedded`]; a Tools document the subject writes at run time (a
-/// behavior it configures) is narrowed to this ceiling.
+/// for it. Bash is then capped at `WorkspaceWrite`, the sandboxed mode a
+/// desktop node's write package uses, so no grant a behavior holds can write
+/// outside the trial root. It replaces the caller's ceiling because the root
+/// is per trial. Freezing still refuses a subject pack that grants itself
+/// host bash under [`Isolation::Embedded`]; a Tools document the subject
+/// writes at run time (a behavior it configures) is narrowed to this ceiling.
 fn trial_tool_ceiling(workspace: &Path, host_bash: bool) -> ToolCeiling {
-    let ceiling = ToolCeiling::readwrite(workspace);
-    if host_bash {
-        return ceiling;
-    }
-    ceiling.with_policy(ToolPolicySurface::ceiling_with_host_modes(
+    let mut policy = ToolPolicySurface::ceiling_with_host_modes(
         FileToolMode::ReadWrite,
-        BashMode::Off,
-    ))
+        if host_bash {
+            BashMode::Unrestricted
+        } else {
+            BashMode::Off
+        },
+    );
+    if host_bash {
+        policy.bash.execution_mode = CommandExecutionMode::WorkspaceWrite;
+    }
+    ToolCeiling::readwrite(workspace).with_policy(policy)
 }
 
 /// The first reconcile of the trial runtime's event sources, once there is one.
@@ -968,10 +974,10 @@ async fn submit_and_observe(
         }
     }
 
-    let prods = if settling {
+    let (prods, prod_failed) = if settling {
         continue_until_done(spec, cancel, home, locator, stage, deadline, started).await
     } else {
-        0
+        (0, false)
     };
 
     let mut collected = true;
@@ -989,7 +995,14 @@ async fn submit_and_observe(
         });
     // The stage's own request decides how the stage ended; later requests in
     // the session are what the subject did next, not a second verdict on it.
-    let failure_kind = stage_failure_kind(observed.as_ref(), collected, cancelled, &evidence);
+    // A prod the harness could not send, or a capture it could not read to
+    // decide one, says nothing about the subject: the stage is
+    // infrastructure, owed another attempt.
+    let failure_kind = if prod_failed {
+        Some(OutcomeKind::Infrastructure)
+    } else {
+        stage_failure_kind(observed.as_ref(), collected, cancelled, &evidence)
+    };
     if settling && collected {
         if let Err(error) =
             extend_with_later_requests(&home.node, &locator.session_id, &request_id, &mut evidence)
@@ -1023,7 +1036,8 @@ async fn submit_and_observe(
 /// The stage's continuation prods: while the `until` capture holds no row and
 /// fewer than `max` prods were sent, send the prompt into the trial session,
 /// wait for that request and for the home to settle again. Bounded by the
-/// stage's deadline and by cancellation; returns how many were sent.
+/// stage's deadline and by cancellation; returns how many were sent, and
+/// whether the harness failed to read the capture or send a prod.
 async fn continue_until_done(
     spec: &TrialSpec,
     cancel: &CancellationToken,
@@ -1032,9 +1046,9 @@ async fn continue_until_done(
     stage: &StageSpec,
     deadline: Duration,
     started: Instant,
-) -> u32 {
+) -> (u32, bool) {
     let Some(continuation) = &stage.continuation else {
-        return 0;
+        return (0, false);
     };
     let until = stage.captures.iter().find_map(|capture| match capture {
         Capture::Documents {
@@ -1046,7 +1060,7 @@ async fn continue_until_done(
         _ => None,
     });
     let Some((collection, filter, fields)) = until else {
-        return 0;
+        return (0, false);
     };
     let prod = StageSpec {
         prompt: continuation.prompt.clone(),
@@ -1071,7 +1085,7 @@ async fn continue_until_done(
                     trial_id = %spec.trial_id,
                     "eval continuation could not read its until capture"
                 );
-                break;
+                return (prods, true);
             }
         }
         let remaining = deadline.saturating_sub(started.elapsed());
@@ -1087,7 +1101,7 @@ async fn continue_until_done(
                 trial_id = %spec.trial_id,
                 "eval continuation prod could not be submitted"
             );
-            break;
+            return (prods, true);
         }
         prods += 1;
         tracing::info!(target: "gents::eval", trial_id = %spec.trial_id, prods, "continuation prod sent");
@@ -1103,7 +1117,7 @@ async fn continue_until_done(
             _ = settle_home(&home.node, remaining) => {}
         }
     }
-    prods
+    (prods, false)
 }
 
 /// How long every request in a settling trial home must stay terminal, with no
@@ -1693,6 +1707,11 @@ mod tests {
                 BashMode::Unrestricted,
                 Some(workspace)
             )
+        );
+        // Every grant meets this ceiling, so no crew bash writes outside the root.
+        assert_eq!(
+            with.policy().bash.execution_mode,
+            CommandExecutionMode::WorkspaceWrite
         );
     }
 

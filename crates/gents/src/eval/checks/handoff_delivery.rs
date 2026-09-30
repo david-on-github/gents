@@ -148,12 +148,20 @@ impl Check for HandoffDelivery {
             Some(CaptureResult::Documents { rows }) => Some(rows.as_slice()),
             _ => None,
         };
-        let required = [
+        // A capture the params name is required. An optional one left out of
+        // the params stays optional, but a named one that failed would
+        // silently disable its gates.
+        let required: Vec<&String> = [
             &params.requests,
             &params.fires,
             &params.outcomes,
             &params.triggers,
-        ];
+        ]
+        .into_iter()
+        .chain(params.goals.as_ref())
+        .chain(params.runtime.as_ref())
+        .chain(params.sources.iter())
+        .collect();
         if let Some(missing) = required.iter().find(|name| rows(name).is_none()) {
             return grader(
                 "missing_capture",
