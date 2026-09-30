@@ -197,6 +197,37 @@ async fn rejects_missing_required_and_undeclared_fields() {
     .is_err());
 }
 
+#[tokio::test]
+async fn empty_field_declaration_reports_the_surface_contract_without_writing() {
+    let node = node_with_actionrequest().await;
+    let mut declaration = decl();
+    declaration.fields.clear();
+    let tool =
+        BoundedWriteTool::new(Arc::clone(&node), declaration).declared_by(Some("ingest".into()));
+    let definition = Tool::definition(&tool, String::new()).await;
+    assert_eq!(definition.parameters["properties"], json!({}));
+    let error = Tool::call(
+        &tool,
+        serde_json::from_value(json!({"summary":"queued"})).unwrap(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    for detail in [
+        "empty fields permits none",
+        "Schema fields are not inherited",
+        r#"surface "ingest", entry "request_action""#,
+        "next request",
+    ] {
+        assert!(error.contains(detail), "{error}");
+    }
+    let rows = crate::ConfigAccess::Local(node)
+        .execute("{ ActionRequest { _docID } }")
+        .await
+        .unwrap();
+    assert_eq!(rows["data"]["ActionRequest"], json!([]));
+}
+
 /// The advertised tool name comes from the declaration, not a shared const —
 /// this is what makes one declaration map to one uniquely-named runtime tool.
 #[tokio::test]
@@ -321,7 +352,10 @@ async fn runtime_fills_are_hidden_rejected_from_model_input_and_stamped_at_call_
     .unwrap_err()
     .to_string();
     assert!(
-        refused.contains(r#"field `run_id` is runtime-filled and must not be supplied to tool `write_result`: omit it. It is declared runtime-filled by surface "results" entry "write_result"; if the caller should supply it, the Engineer can make it a model argument by removing its fill with datastore edit"#),
+        refused.contains("request/trigger correlation ID")
+            && refused.contains("remove fill")
+            && refused.contains(r#"surface "results", entry "write_result""#)
+            && refused.contains("next request"),
         "{refused}"
     );
 

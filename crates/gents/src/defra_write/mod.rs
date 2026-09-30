@@ -122,11 +122,23 @@ impl BoundedWriteTool {
             let field = self.decl.fields.iter().find(|field| &field.name == key);
             if field.is_none() {
                 bail!(
-                    "field `{key}` not permitted by tool `{}`",
-                    self.decl.tool_name
+                    "{}",
+                    crate::document_config::undeclared_field_refusal(
+                        "field",
+                        key,
+                        &self.decl.tool_name,
+                        self.surface_id.as_deref(),
+                        &self
+                            .decl
+                            .fields
+                            .iter()
+                            .filter(|field| field.fill.is_none())
+                            .map(|field| field.name.as_str())
+                            .collect::<Vec<_>>(),
+                    )
                 );
             }
-            if field.is_some_and(|field| field.fill.is_some()) {
+            if let Some(fill) = field.and_then(|field| field.fill.as_ref()) {
                 bail!(
                     "{}",
                     crate::document_config::runtime_filled_refusal(
@@ -134,6 +146,7 @@ impl BoundedWriteTool {
                         key,
                         &self.decl.tool_name,
                         self.surface_id.as_deref(),
+                        fill,
                     )
                 );
             }

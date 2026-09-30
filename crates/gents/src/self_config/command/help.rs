@@ -261,11 +261,11 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "datastore [preview] create|edit  set: surface fields, or options.mailbox",
             ],
             notes: concat!(
-                "A create entry writes one document; a query entry (kind query) matches filter_fields exactly. Give every entry a description; it is the tool's description. fill: correlation makes the runtime write the trigger or request correlation ID and fill: {source_field: F} copies field F of the triggering document, so the calling model can never set a filled field: never fill a key the caller supplies. A caller-supplied key named correlation is {\"name\":\"correlation\",\"required\":true}; the runtime's ID is {\"name\":\"request_correlation\",\"fill\":\"correlation\"}. Filled fields must not be required. Writing the surface checks syntax only, selecting it checks tool-name collisions, and only a call proves the collection and fields.\nMailbox: for the existing MailboxItem collection set options.mailbox to a notification policy; the runtime supplies the canonical file_mailbox_item entry. It replaces entries, so keep other tools on another surface. Never create a replacement mailbox collection.\n",
+                "Create fields: writable arguments as {name} objects; omitted or empty means none. Query fields: returned columns; filter_fields: exact-match arguments as {name} objects. Each entry’s description becomes tool help.\nfill: correlation uses the request/trigger correlation ID; fill: {source_field: F} copies trigger field F. Omit fill for caller-supplied values. Filled fields cannot be required.\nCaller value: {\"name\":\"correlation\"}. Runtime ID: {\"name\":\"request_correlation\",\"fill\":\"correlation\"}.\nWrites check syntax; selection checks name collisions; calls check collection and fields.\nMailbox: options.mailbox supplies the canonical file_mailbox_item entry for existing MailboxItem. It replaces entries; put other tools on another surface. Never create a replacement mailbox collection.\n",
                 mailbox_identity_choice!(),
                 " A monitor uses condition identity: {\"argv\":[\"datastore\",\"create\"],\"target_id\":\"monitor-mailbox\",\"options\":{\"mailbox\":{\"identity\":{\"mode\":\"condition\",\"key\":\"host-health\"},\"kind\":\"flag\",\"action\":\"ack\"}}}"
             ),
-            next: "call the new tool from a fresh session of the selected behavior.",
+            next: "call the tool in the next request; the current request keeps its existing tools.",
         },
         "subagent-target" => Page {
             what: "an agent that agent_new may start (tools grant). TARGET_ID goes in target_id.",

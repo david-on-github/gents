@@ -781,9 +781,11 @@ async fn datastore_help_says_what_fill_means() {
     let page = ok(&tools, json!({"argv":["help","datastore"]})).await;
     let page = page.as_str().unwrap();
     for line in [
-        "fill: correlation makes the runtime write the trigger or request correlation ID",
-        "so the calling model can never set a filled field: never fill a key the caller supplies",
-        r#"A caller-supplied key named correlation is {"name":"correlation","required":true}; the runtime's ID is {"name":"request_correlation","fill":"correlation"}"#,
+        "fill: correlation uses the request/trigger correlation ID",
+        "Omit fill for caller-supplied values",
+        "omitted or empty means none",
+        "current request keeps its existing tools",
+        r#"Caller value: {"name":"correlation"}. Runtime ID: {"name":"request_correlation","fill":"correlation"}"#,
     ] {
         assert!(page.contains(line), "{line}\n{page}");
     }
