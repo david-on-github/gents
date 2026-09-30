@@ -199,8 +199,9 @@ pub fn reject_unrecorded_store(data_path: &Path) -> Result<()> {
 
 /// The key for the store at `data_path` given its owner's `record`: the
 /// recorded key, or a new one under `choice` for a store that does not exist
-/// yet. A store with data and no record is refused. A key file left by an
-/// interrupted creation guards no data, so it is replaced.
+/// yet. A store with data and no record is refused. An unrecorded file may
+/// belong to an identity or another store, so it must never be removed or
+/// adopted as an encryption key, including when creating a Keychain key.
 pub fn open_or_create_store_key(
     record: Option<&StoreEncryption>,
     choice: StoreKeyCustodyChoice,
@@ -211,12 +212,16 @@ pub fn open_or_create_store_key(
         return Ok((record.clone(), record.load(key_file, data_path)?));
     }
     reject_unrecorded_store(data_path)?;
-    match std::fs::remove_file(key_file) {
-        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+    match std::fs::symlink_metadata(key_file) {
+        Ok(_) => bail!(
+            "unrecorded file at {}; refusing to replace it with a store key",
+            key_file.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
             return Err(error)
-                .with_context(|| format!("removing stale store key {}", key_file.display()))
+                .with_context(|| format!("inspecting store key {}", key_file.display()))
         }
-        _ => {}
     }
     StoreEncryption::create(choice, key_file)
 }
@@ -241,9 +246,10 @@ pub fn open_or_create_home_store_key(
     open_or_create_store_key(record, choice, &home_key_file(home_dir), data_path)
 }
 
-/// A gents home's store key file.
+/// A gents home's store key file. Agent identity names always end in `.key`,
+/// so the encryption key uses a separate filename namespace.
 pub fn home_key_file(home_dir: &Path) -> PathBuf {
-    crate::home::keys_dir(home_dir).join("store.key")
+    crate::home::keys_dir(home_dir).join("store.aes256")
 }
 
 /// Loads the key recorded in an initialized home's `init.json` for its store

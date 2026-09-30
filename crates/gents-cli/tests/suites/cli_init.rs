@@ -660,9 +660,17 @@ async fn init_identity_only_writes_stable_real_did_without_runtime_config() -> R
     let home_dir = tempdir.path().join("home");
     fs::create_dir_all(&home_dir)?;
 
-    let agent_name = format!("cli-identity-only-{}", Uuid::new_v4().simple());
+    let agent_name = "store";
     let first = run_init_json(&home_dir, &["--identity-only", "--agent-name", &agent_name])?;
     let first_agent_did = agent_did_from_init(&first)?;
+    let identity_path = gents::home::default_key_path(&home_dir.join(".gents"), agent_name);
+    let identity_bytes = fs::read(&identity_path)?;
+    assert_ne!(
+        identity_path,
+        gents::store_key::home_key_file(&home_dir.join(".gents"))
+    );
+    assert_eq!(identity_bytes.len(), 64);
+
     assert_eq!(
         first.get("identity_only").and_then(Value::as_bool),
         Some(true)
@@ -672,6 +680,7 @@ async fn init_identity_only_writes_stable_real_did_without_runtime_config() -> R
     let second = run_init_json(&home_dir, &["--identity-only", "--agent-name", &agent_name])?;
     let second_agent_did = agent_did_from_init(&second)?;
     assert_eq!(second_agent_did, first_agent_did);
+    assert_eq!(fs::read(identity_path)?, identity_bytes);
 
     let init_json = read_json_file(&home_dir.join(".gents").join("init.json"))?;
     assert_eq!(
@@ -1026,5 +1035,31 @@ async fn init_records_store_encryption_and_a_legacy_home_is_refused() -> Result<
         !home.join("data/MANIFEST").exists(),
         "the store is never opened"
     );
+    Ok(())
+}
+
+#[test]
+fn init_refuses_an_explicit_identity_path_that_collides_with_the_store_key() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let home_dir = temp.path().join("home");
+    let key_path = gents::store_key::home_key_file(&home_dir.join(".gents"));
+    gents::identity::load_or_create_file_identity(&key_path)?;
+    let original = fs::read(&key_path)?;
+    let error = run_init_json(
+        &home_dir,
+        &[
+            "--identity-only",
+            "--key-path",
+            key_path.to_str().context("key path")?,
+        ],
+    )
+    .unwrap_err();
+    assert!(
+        format!("{error:#}").contains("refusing to replace"),
+        "{error:#}"
+    );
+    assert_eq!(fs::read(&key_path)?, original);
+    gents::identity::load_file_identity(&key_path)?;
+    assert!(!home_dir.join(".gents/init.json").exists());
     Ok(())
 }

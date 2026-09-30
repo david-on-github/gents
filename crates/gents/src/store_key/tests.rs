@@ -45,7 +45,7 @@ fn files_containing(root: &Path, needle: &[u8]) -> Vec<PathBuf> {
 }
 
 fn file_key(temp: &tempfile::TempDir) -> (StoreEncryption, StoreKey, PathBuf) {
-    let key_file = temp.path().join("keys").join("store.key");
+    let key_file = home_key_file(temp.path());
     let (record, key) =
         StoreEncryption::create(StoreKeyCustodyChoice::File, &key_file).expect("file store key");
     (record, key, key_file)
@@ -254,4 +254,19 @@ fn a_store_key_is_never_printed() {
     let debug = format!("{key:?}");
     assert_eq!(debug, "StoreKey([redacted])");
     assert!(!debug.contains(&format!("{:?}", bytes)));
+}
+
+#[test]
+fn an_unrecorded_identity_file_is_preserved_for_every_custody_choice() {
+    let temp = tempfile::tempdir().unwrap();
+    let key_file = home_key_file(temp.path());
+    crate::identity::load_or_create_file_identity(&key_file).unwrap();
+    let original = std::fs::read(&key_file).unwrap();
+    for choice in [StoreKeyCustodyChoice::File, StoreKeyCustodyChoice::Keychain] {
+        let error = open_or_create_store_key(None, choice, &key_file, &temp.path().join("data"))
+            .unwrap_err();
+        assert!(error.to_string().contains("refusing to replace"), "{error}");
+        assert_eq!(std::fs::read(&key_file).unwrap(), original);
+        crate::identity::load_file_identity(&key_file).unwrap();
+    }
 }

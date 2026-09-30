@@ -13,7 +13,7 @@ source consistency checks, not a separate runtime compatibility version.
   `gents init` (including `--identity-only` and `gents provision`) creates a
   per-store key and records its custody in `init.json`; the desktop records
   its client store's key in `store-encryption.json`. On macOS the key is a
-  login-keychain item; elsewhere it is an owner-only `keys/store.key` file.
+  login-keychain item; elsewhere it is an owner-only `keys/store.aes256` file.
   There is no conversion: a store created by an earlier release, or one whose
   recorded key no longer exists, is refused (exit status 65, and the desktop's
   existing reset flow) with a message to re-initialize the home
