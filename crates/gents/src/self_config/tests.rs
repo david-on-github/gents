@@ -4398,6 +4398,28 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     let defaults =
         ok(call_config_tool(&tools, command(&["execution", "get", "default-execution"])).await);
     assert_eq!(defaults["document"]["execution_id"], "default-execution");
+    assert_eq!(
+        defaults["effective"]["max_turns"],
+        crate::config::DEFAULT_MAX_TURNS
+    );
+    assert_eq!(
+        defaults["effective"]["provider_idle_timeout_secs"],
+        crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS
+    );
+    assert_eq!(
+        defaults["effective"]["deadline_duration_secs"],
+        crate::config::DEFAULT_DEADLINE_DURATION_SECS
+    );
+    assert!(defaults["effective"]["max_total_tokens"].is_null());
+    assert!(defaults["document"]["max_turns"].is_null());
+    let inventory = ok(call_config_tool(&tools, command(&["execution", "list"])).await);
+    let listed = inventory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["execution_id"] == "default-execution")
+        .unwrap();
+    assert_eq!(listed["effective"], defaults["effective"]);
     assert!(
         call_config_tool(&tools, command(&["execution", "edit", "default-execution"]))
             .await
@@ -4455,6 +4477,13 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     let execution =
         ok(call_config_tool(&tools, command(&["execution", "get", "lead-execution"])).await);
     assert_eq!(execution["document"]["max_turns"], 12);
+    assert_eq!(execution["effective"]["max_turns"], 12);
+    let bound = ok(call_config_tool(
+        &tools,
+        command(&["profile", "get", "execution", "--behavior", "lead"]),
+    )
+    .await);
+    assert_eq!(bound["effective"], execution["effective"]);
 
     // Automation that targets the Engineer itself.
     ok(call_config_tool(

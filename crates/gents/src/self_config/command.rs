@@ -162,6 +162,14 @@ fn config_help_resource(argv: &[String]) -> Option<Option<&str>> {
     None
 }
 
+/// Help bypasses dispatch and returns plain text, so it has no execution receipt.
+pub(crate) fn is_help_call(args: &Value) -> bool {
+    serde_json::from_value::<ConfigCommandParams>(args.clone())
+        .ok()
+        .and_then(|params| params.into_argv().ok())
+        .is_some_and(|argv| config_help_resource(&argv).is_some())
+}
+
 /// The command words a `RESOURCE ... --help` path names, so help can narrow
 /// to that command: operands after the resource, without `preview` or flags.
 fn help_verb(argv: &[String]) -> Vec<&str> {
@@ -224,7 +232,7 @@ impl Tool for ConfigCommandTool {
             name: Self::NAME.to_owned(),
             description: format!(
                 r#"Read and change this node's configuration: a native API, not a shell.
-Call {{"argv":[words],"target_id"?,"set"?:{{field:value}},"clear"?:[field],"options"?:{{name:value}}}}. Verbs: get, list, create, edit, preview (writes nothing): preview, apply, then read back.
+Call {{"argv":[words],"target_id"?,"set"?:{{field:value}},"clear"?:[field],"options"?:{{name:value}}}}. Put the resource before the verb: ["profile","list"], ["execution","get","ID"]. Preview writes nothing; apply, then read back.
 Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.behavior a command targets you.
 ["help"] lists resources. Granted: {}."#,
                 resources.join(", ")
@@ -527,7 +535,7 @@ impl ConfigCommandTool {
             "schema" => self.schema(&argv[1..]).await,
             "plan" => self.plan(&argv[1..]).await,
             other => bail!(
-                "unknown config resource or command {other:?}; accepted: help, get, {}. See [\"help\"]",
+                "unknown config resource or command {other:?}; put the resource first, e.g. [\"profile\",\"list\"]. Accepted: help, get, {}. See [\"help\"]",
                 model_resources(&self.categories, self.allow_pack_install).join(", ")
             ),
         }
@@ -1727,6 +1735,9 @@ impl ConfigCommandTool {
             let observation = self.backend_document_observation(value).await?;
             return ordered! {"resource": target.collection_name(), "document": value, "observation": observation}.pretty();
         }
+        if target == SelfConfigTarget::InferenceExecution {
+            return ordered! {"resource": target.collection_name(), "effective": super::read::execution_settings(Some(value))?, "document": value}.pretty();
+        }
         ordered! {"resource": target.collection_name(), "document": value}.pretty()
     }
 
@@ -1806,6 +1817,10 @@ impl ConfigCommandTool {
             let document = Value::Object(document);
             let observation = self.backend_document_observation(&document).await?;
             return ordered! {"resource": target.collection_name(), "document": document, "observation": observation}.pretty();
+        }
+        if target == SelfConfigTarget::InferenceExecution {
+            let document = Value::Object(document);
+            return ordered! {"resource": target.collection_name(), "effective": super::read::execution_settings(Some(&document))?, "document": document}.pretty();
         }
         ordered! {"resource": target.collection_name(), "document": document}.pretty()
     }
@@ -1928,6 +1943,14 @@ impl ConfigCommandTool {
             .collect::<Vec<_>>();
         let truncated = selected.len() > limit;
         selected.truncate(limit);
+        if target == SelfConfigTarget::InferenceExecution {
+            for row in &mut selected {
+                let effective = super::read::execution_settings(Some(row))?;
+                row.as_object_mut()
+                    .context("execution row must be an object")?
+                    .insert("effective".into(), effective);
+            }
+        }
         let next_cursor = truncated
             .then(|| {
                 selected
@@ -2212,7 +2235,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
             patch_contract(
                 SelfConfigTarget::InferenceExecution,
                 json!({
-                    "display_name":"string|null","max_turns":format!("positive integer|null; default {}", crate::config::DEFAULT_MAX_TURNS),"max_total_tokens":"positive integer|null; null is unlimited","stream_batch_ms":"positive integer|null; default 1000","stream_liveness_timeout_secs":format!("positive integer|null; default {} and less than deadline", crate::config::DEFAULT_STREAM_LIVENESS_TIMEOUT_SECS),"provider_idle_timeout_secs":format!("positive integer|null; default {}", crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS),"deadline_duration_secs":format!("positive integer|null; default 86400; at most {}", crate::document_config::MAX_DEADLINE_DURATION_SECS),"retry_policy_id":"existing same-principal retry policy ID|null","tags":"array<string>; default []"
+                    "display_name":"string|null","max_turns":format!("positive integer|null; default {}", crate::config::DEFAULT_MAX_TURNS),"max_total_tokens":"positive integer|null; null is unlimited","stream_batch_ms":"positive integer|null; persistence batching interval; default 1000 ms","stream_liveness_timeout_secs":format!("positive integer|null; renewed execution lease, independent of provider output; default {} seconds and less than deadline", crate::config::DEFAULT_STREAM_LIVENESS_TIMEOUT_SECS),"provider_idle_timeout_secs":format!("positive integer|null; maximum provider transport silence; default {} seconds", crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS),"deadline_duration_secs":format!("positive integer|null; default 86400; at most {}", crate::document_config::MAX_DEADLINE_DURATION_SECS),"retry_policy_id":"existing same-principal retry policy ID|null; null uses request-origin retry defaults","tags":"array<string>; default []"
                 }),
             ),
             patch_contract(
@@ -2244,7 +2267,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
             patch_contract(
                 SelfConfigTarget::Task,
                 json!({
-                    "display_name":"string|null","description":"string|null","prompt_template":"string; rendered per invocation","emit_outcome":"boolean; true writes a FireOutcome on completion; default false; leave false for outcome consumers","goal_objective_template":"string|null","goal_token_budget":"positive integer|null; requires goal_objective_template; absent means unlimited","hooks":"array<{hook_id:string,phase:before|after_success|after_failure|finally,command:nonempty array<string>,timeout_secs?:positive integer}>; default []","enabled":"boolean; default true","output_schema_ref":"string|null","tags":"array<string>; default []"
+                    "display_name":"string|null","description":"string|null","prompt_template":"string; rendered per invocation","emit_outcome":"boolean; true writes the standard FireOutcome run record on completion; default false; leave false for outcome consumers","goal_objective_template":"string|null","goal_token_budget":"positive integer|null; requires goal_objective_template; absent means unlimited","hooks":"array<{hook_id:string,phase:before|after_success|after_failure|finally,command:nonempty array<string>,timeout_secs?:positive integer}>; default []","enabled":"boolean; default true","output_schema_ref":"string|null","tags":"array<string>; default []"
                 }),
             ),
             patch_contract(

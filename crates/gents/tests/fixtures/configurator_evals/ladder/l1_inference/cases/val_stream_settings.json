@@ -87,119 +87,7 @@
             "forbidden": [
               "bash"
             ],
-            "allowed_argv": {
-              "config": [
-                [
-                  "help"
-                ],
-                [
-                  "get"
-                ],
-                [
-                  "behavior",
-                  "get"
-                ],
-                [
-                  "behavior",
-                  "list"
-                ],
-                [
-                  "profile",
-                  "get"
-                ],
-                [
-                  "profile",
-                  "list"
-                ],
-                [
-                  "execution",
-                  "get"
-                ],
-                [
-                  "execution",
-                  "list"
-                ],
-                [
-                  "backend",
-                  "get"
-                ],
-                [
-                  "backend",
-                  "list"
-                ],
-                [
-                  "tools",
-                  "get"
-                ],
-                [
-                  "tools",
-                  "list"
-                ],
-                [
-                  "--help"
-                ],
-                [
-                  "behavior",
-                  "--help"
-                ],
-                [
-                  "tools",
-                  "--help"
-                ],
-                [
-                  "datastore",
-                  "--help"
-                ],
-                [
-                  "subagent-target",
-                  "--help"
-                ],
-                [
-                  "skill",
-                  "--help"
-                ],
-                [
-                  "discovery",
-                  "--help"
-                ],
-                [
-                  "profile",
-                  "--help"
-                ],
-                [
-                  "execution",
-                  "--help"
-                ],
-                [
-                  "backend",
-                  "--help"
-                ],
-                [
-                  "mcp-service",
-                  "--help"
-                ],
-                [
-                  "automation",
-                  "--help"
-                ],
-                [
-                  "schema",
-                  "--help"
-                ],
-                [
-                  "cleanup",
-                  "--help"
-                ],
-                [
-                  "pack",
-                  "--help"
-                ],
-                [
-                  "plan",
-                  "--help"
-                ]
-              ]
-            }
+            "config_read_only": true
           },
           "tier": "acceptance",
           "weight": 1
@@ -230,10 +118,10 @@
           "params": {
             "all": [
               {
-                "matches": "(?i)(limit|budget|allowance)"
+                "matches": "(?i)(stream|batch)"
               },
               {
-                "matches": "(?i)(suggest|recommend|could|would|propos|can)"
+                "matches": "(?i)(timeout|time.out|silence|idle|wait|deadline)"
               }
             ]
           },

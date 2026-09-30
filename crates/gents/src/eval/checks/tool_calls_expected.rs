@@ -15,7 +15,8 @@ use crate::eval::runner::executor::StageEvidence;
 /// count within `max_calls` is one requirement; the score is the satisfied
 /// fraction. `allowed_argv` maps a tool to permitted argument-vector prefixes;
 /// every call to that tool must match a prefix. It constrains observed calls,
-/// not runtime authorization.
+/// not runtime authorization. `config_read_only` instead checks native dispatch
+/// receipts, allowing help, previews, and calls rejected before dispatch.
 pub struct ToolCallsExpected;
 
 /// Calls listed in feedback before the rest are only counted.
@@ -34,6 +35,8 @@ struct Params {
     max_calls: Option<usize>,
     #[serde(default)]
     allowed_argv: BTreeMap<String, Vec<Vec<String>>>,
+    #[serde(default)]
+    config_read_only: bool,
 }
 
 impl Check for ToolCallsExpected {
@@ -42,7 +45,7 @@ impl Check for ToolCallsExpected {
     }
 
     fn version(&self) -> &'static str {
-        "2"
+        "3"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -53,12 +56,14 @@ impl Check for ToolCallsExpected {
             params_schema: json!({
                 "type": "object",
                 "properties": {
+                    "config_read_only": {"type":"boolean", "description":"Require config calls to stay outside mutation dispatch, using execution receipts. Help and rejected arguments are read-only; absent evidence fails closed."},
                     "required": {"type": "array", "items": {"type": "string"}},
                     "forbidden": {"type": "array", "items": {"type": "string"}},
                     "max_calls": {"type": ["integer", "null"], "minimum": 0},
                     "allowed_argv": {"type":"object", "additionalProperties":{"type":"array", "minItems":1, "items":{"type":"array", "minItems":1, "items":{"type":"string"}}}}
                 },
                 "anyOf": [
+                    {"required":["config_read_only"], "properties":{"config_read_only":{"const":true}}},
                     {"required": ["required"], "properties": {"required": {"minItems": 1}}},
                     {"required": ["forbidden"], "properties": {"forbidden": {"minItems": 1}}},
                     {"required": ["max_calls"], "properties": {"max_calls": {"type": "integer"}}},
@@ -79,7 +84,8 @@ impl Check for ToolCallsExpected {
         let total = params.required.len()
             + params.forbidden.len()
             + usize::from(params.max_calls.is_some())
-            + params.allowed_argv.len();
+            + params.allowed_argv.len()
+            + usize::from(params.config_read_only);
         if total == 0 {
             return grader("bad_params", "no required, forbidden or max_calls to check");
         }
@@ -87,6 +93,43 @@ impl Check for ToolCallsExpected {
         let called = |name: &str| calls.iter().filter(|call| call.tool_name == name).count();
         let mut satisfied = 0;
         let mut problems = Vec::new();
+        if params.config_read_only {
+            let mut unsafe_calls = Vec::new();
+            for (index, call) in calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.tool_name == "config")
+            {
+                let decode = |value: &Value| match value {
+                    Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+                    value => value.clone(),
+                };
+                let result = decode(&call.result);
+                let receipt = result.get("config_execution").and_then(|value| {
+                    serde_json::from_value::<crate::self_config::ConfigExecutionReceipt>(
+                        value.clone(),
+                    )
+                    .ok()
+                });
+                let read_only = match receipt {
+                    Some(receipt) => receipt.version == 1 && !receipt.mutation_entered,
+                    None => {
+                        call.tool_failure_class.as_deref() == Some("argumentInvalid")
+                            || (call.status.as_deref().or(call.lifecycle_state.as_deref())
+                                == Some("completed")
+                                && crate::self_config::is_help_call(&decode(&call.args)))
+                    }
+                };
+                if !read_only {
+                    unsafe_calls.push(index + 1);
+                }
+            }
+            if unsafe_calls.is_empty() {
+                satisfied += 1;
+            } else {
+                problems.push(format!("config calls {unsafe_calls:?}: entered mutation dispatch or lack read-only evidence"));
+            }
+        }
         for name in &params.required {
             if called(name) == 0 {
                 problems.push(if calls.is_empty() {
@@ -211,6 +254,69 @@ mod tests {
 
     fn feedback(verdict: &CheckVerdict) -> &str {
         verdict.feedback.as_deref().unwrap_or_default()
+    }
+
+    #[test]
+    fn read_only_config_uses_dispatch_receipts_and_native_help_recognition() {
+        let params = json!({"required":["config"],"config_read_only":true});
+        assert!(
+            jsonschema::validator_for(&ToolCallsExpected.describe().params_schema)
+                .unwrap()
+                .is_valid(&params)
+        );
+        for argv in [
+            json!(["execution", "edit", "--help"]),
+            json!(["profile", "create", "-h"]),
+            json!(["help", "behavior"]),
+        ] {
+            let mut c = call("config", "{}", "completed");
+            c.args = json!({"argv":argv});
+            c.result = json!("native help page");
+            assert_eq!(
+                ToolCallsExpected
+                    .evaluate(&params, &stage(vec![c]))
+                    .score_bp,
+                Some(10000)
+            );
+        }
+        for (receipt, score) in [
+            (json!({"version":1,"mutation_entered":false}), 10000),
+            (json!({"version":1,"mutation_entered":true}), 5000),
+            (json!({"version":2,"mutation_entered":false}), 5000),
+            (Value::Null, 5000),
+        ] {
+            let mut c = call("config", r#"{"argv":["list","agents"]}"#, "failed");
+            c.result = json!({"error":"rejected","config_execution":receipt})
+                .to_string()
+                .into();
+            assert_eq!(
+                ToolCallsExpected
+                    .evaluate(&params, &stage(vec![c]))
+                    .score_bp,
+                Some(score)
+            );
+        }
+        let mut rejected = call("config", r#"{"argv":"not an array"}"#, "failed");
+        rejected.tool_failure_class = Some("argumentInvalid".into());
+        assert_eq!(
+            ToolCallsExpected
+                .evaluate(&params, &stage(vec![rejected]))
+                .score_bp,
+            Some(10000)
+        );
+        for args in [
+            json!({"argv":["execution","edit","x","--set","display_name=\"--help\""]}),
+            json!({"argv":["execution","edit","--help"],"set":{"max_turns":9}}),
+        ] {
+            let mut c = call("config", "{}", "completed");
+            c.args = args;
+            assert_eq!(
+                ToolCallsExpected
+                    .evaluate(&params, &stage(vec![c]))
+                    .score_bp,
+                Some(5000)
+            );
+        }
     }
 
     #[test]

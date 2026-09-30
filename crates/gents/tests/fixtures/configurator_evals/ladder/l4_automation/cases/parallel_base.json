@@ -43,7 +43,7 @@
               },
               {
                 "field": "concurrency",
-                "equals": "parallel"
+                "matches": "^(parallel|null)$"
               },
               {
                 "field": "enabled",
@@ -60,8 +60,6 @@
             "links": [
               {
                 "capture": "trigger_config",
-                "key": "concurrency",
-                "id": "parallel",
                 "field": "task_id",
                 "target_capture": "task_config",
                 "target_key": "task_id",
@@ -78,12 +76,14 @@
                     "field": "enabled",
                     "equals": true
                   }
-                ]
+                ],
+                "source_match": {
+                  "field": "concurrency",
+                  "matches": "^(parallel|null)$"
+                }
               },
               {
                 "capture": "trigger_config",
-                "key": "concurrency",
-                "id": "parallel",
                 "field": "source.event_source_id",
                 "target_capture": "eventsource_config",
                 "target_key": "event_source_id",
@@ -96,7 +96,11 @@
                     "field": "event_kind",
                     "matches": "^(created|null)$"
                   }
-                ]
+                ],
+                "source_match": {
+                  "field": "concurrency",
+                  "matches": "^(parallel|null)$"
+                }
               }
             ]
           },

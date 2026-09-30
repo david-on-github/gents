@@ -259,3 +259,76 @@ fn runtime_captures_use_current_schema_fields() {
         }
     }
 }
+
+#[test]
+fn streaming_discovery_checks_streams_and_waits_without_budget_keywords() {
+    use gents::eval::runner::embedded::observe::MessageEvidence;
+    let definition = definitions()
+        .into_iter()
+        .find(|d| d.definition_id == "configurator-l1-inference")
+        .unwrap();
+    let stage = &definition
+        .cases
+        .iter()
+        .find(|c| c.case_id == "val-stream-settings")
+        .unwrap()
+        .stages[0];
+    let check = stage
+        .checks
+        .iter()
+        .find(|c| c.check == "final_message_matches")
+        .unwrap();
+    let registry = CheckRegistry::builtin();
+    for (message, expected) in [("Stream batches persist every second. Provider silence times out after five minutes; reducing the batching interval may make updates smoother.",10000),("I recommend changing the budget.",0)] {
+        let mut evidence = ScriptedExecutor::passed_evidence("did:x","discover","unused",vec![]).stages.remove(0);
+        evidence.messages = vec![MessageEvidence { role: "assistant".into(), content: message.into(), created_at: None }];
+        assert_eq!(registry.get(&check.check).unwrap().evaluate(&check.params,&evidence).score_bp,Some(expected));
+    }
+}
+
+#[test]
+fn parallel_automation_accepts_default_concurrency_and_still_checks_its_task() {
+    let definition = definitions()
+        .into_iter()
+        .find(|d| d.definition_id == "configurator-l4-automation")
+        .unwrap();
+    let configured = &definition
+        .cases
+        .iter()
+        .find(|c| c.split == gents::document_config::EvalSplit::Train)
+        .unwrap()
+        .stages[0];
+    let registry = CheckRegistry::builtin();
+    for (concurrency, task, accepted) in [
+        (serde_json::Value::Null, "task", true),
+        (serde_json::json!("parallel"), "task", true),
+        (serde_json::json!("serial"), "task", false),
+        (serde_json::Value::Null, "missing", false),
+    ] {
+        let mut evidence =
+            ScriptedExecutor::passed_evidence("did:x", "configure", "unused", vec![])
+                .stages
+                .remove(0);
+        evidence.captures.insert("trigger_config".into(), CaptureResult::Documents { rows:vec![serde_json::json!({"concurrency":concurrency,"task_id":task,"enabled":true,"source":{"event_source_id":"source"}})] });
+        evidence.captures.insert("task_config".into(), CaptureResult::Documents { rows:vec![serde_json::json!({"task_id":"task","behavior_id":"engineer","emit_outcome":true,"enabled":true})] });
+        evidence.captures.insert("eventsource_config".into(), CaptureResult::Documents { rows:vec![serde_json::json!({"event_source_id":"source","source_collection":"TrainPing","event_kind":null})] });
+        let all_pass = configured
+            .checks
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.check.as_str(),
+                    "captured_fields_match" | "crew_spec_match"
+                )
+            })
+            .all(|c| {
+                registry
+                    .get(&c.check)
+                    .unwrap()
+                    .evaluate(&c.params, &evidence)
+                    .kind
+                    == OutcomeKind::Passed
+            });
+        assert_eq!(all_pass, accepted);
+    }
+}

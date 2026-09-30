@@ -6,6 +6,7 @@
 //! chain. Persona requests reuse the existing signed admission and reconciliation path.
 
 mod command;
+pub(crate) use command::is_help_call;
 mod execution;
 pub use execution::ConfigExecutionReceipt;
 mod graph_preview;
@@ -145,6 +146,7 @@ pub(crate) use ordered;
 /// Reading order of an effective configuration: the behavior and its chain,
 /// then what it may do, then grants and timing.
 const EFFECTIVE_ORDER: &[&str] = &[
+    "execution_settings",
     "behavior_id",
     "behavior",
     "context",
@@ -590,7 +592,7 @@ fn automation_request(
                         .ok_or_else(|| anyhow!("trigger task is required"))?;
                     anyhow::ensure!(
                         core.task_owned(txn, anchor, task).await?,
-                        "trigger task belongs to another behavior"
+                        "trigger task is not present on the selected behavior; create its task first, or preview connected documents together with [\"help\",\"plan\"]"
                     );
                 }
             }

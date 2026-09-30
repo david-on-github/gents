@@ -27,7 +27,9 @@ use crate::eval::runner::executor::{CaptureResult, StageEvidence};
 ///   whose `key` equals `id` exists (one requirement) and holds each
 ///   expectation (one requirement each).
 /// - `links`: `[{capture, key, id, field, target_capture, target_key, expect, category?}]`
-///   follows a stored ID in `field` and tests the selected target row. Optional
+///   follows a stored ID in `field` and tests the selected target row. A
+///   `source_match` field expectation can replace `key`/`id`; it must select
+///   exactly one source row. Optional
 ///   `via` hops follow more references before testing. `reported_fields` requires
 ///   non-null target values in the final assistant message (ignoring case).
 /// - `agents`: `{behaviors, contexts, tools, expect: [{behavior_id, category?,
@@ -115,8 +117,12 @@ struct RowSpec {
 #[serde(deny_unknown_fields)]
 struct LinkSpec {
     capture: String,
+    #[serde(default)]
     key: String,
+    #[serde(default)]
     id: String,
+    #[serde(default)]
+    source_match: Option<Expectation>,
     field: String,
     target_capture: String,
     target_key: String,
@@ -336,7 +342,7 @@ impl Check for CrewSpecMatch {
     }
 
     fn version(&self) -> &'static str {
-        "4"
+        "5"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -379,6 +385,7 @@ impl Check for CrewSpecMatch {
                         "properties": {
                             "capture": {"type": "string"}, "key": {"type": "string"},
                             "id": {"type": "string"}, "field": {"type": "string"},
+                            "source_match": expectation,
                             "target_capture": {"type": "string"}, "target_key": {"type": "string"},
                             "category": category, "expect": expectations,
                             "reported_fields": strings,
@@ -388,7 +395,11 @@ impl Check for CrewSpecMatch {
                                 }, "required":["field","target_capture","target_key"], "additionalProperties":false
                             }}
                         },
-                        "required": ["capture", "key", "id", "field", "target_capture", "target_key"],
+                        "required": ["capture", "field", "target_capture", "target_key"],
+                        "oneOf": [
+                            {"required":["key","id"],"not":{"required":["source_match"]}},
+                            {"required":["source_match"],"not":{"anyOf":[{"required":["key"]},{"required":["id"]}]}}
+                        ],
                         "additionalProperties": false
                     }},
                     "agents": {
@@ -495,7 +506,31 @@ impl Check for CrewSpecMatch {
                 Ok(tests) => tests,
                 Err(detail) => return grader("bad_params", detail),
             };
-            let source = rows(&spec.capture).and_then(|rows| find(rows, &spec.key, &spec.id));
+            let source = if let Some(selector) = spec.source_match {
+                if !spec.key.is_empty() || !spec.id.is_empty() {
+                    return grader("bad_params", "links use either key/id or source_match");
+                }
+                let (field, matcher) = match test(selector) {
+                    Ok(test) => test,
+                    Err(detail) => return grader("bad_params", detail),
+                };
+                rows(&spec.capture).and_then(|rows| {
+                    let mut matches = rows
+                        .iter()
+                        .filter(|row| matcher.holds(&lookup(row, &field)));
+                    let first = matches.next();
+                    if matches.next().is_some() {
+                        None
+                    } else {
+                        first
+                    }
+                })
+            } else {
+                if spec.key.is_empty() || spec.id.is_empty() {
+                    return grader("bad_params", "links require key/id or source_match");
+                }
+                rows(&spec.capture).and_then(|rows| find(rows, &spec.key, &spec.id))
+            };
             let reference = source.map(|row| lookup(row, &spec.field));
             let mut target = reference.as_ref().and_then(Value::as_str).and_then(|id| {
                 rows(&spec.target_capture).and_then(|rows| find(rows, &spec.target_key, id))
@@ -552,9 +587,15 @@ impl Check for CrewSpecMatch {
                 let context = behavior
                     .and_then(|row| row.get("context_id").and_then(Value::as_str))
                     .and_then(|id| find(contexts, "context_id", id));
+                let no_tools = json!({});
                 let tools_row = context
                     .and_then(|row| row.get("tools_id").and_then(Value::as_str))
-                    .and_then(|id| find(tools, "tools_id", id));
+                    .and_then(|id| find(tools, "tools_id", id))
+                    .or_else(|| {
+                        context
+                            .filter(|row| row.get("tools_id").is_some_and(Value::is_null))
+                            .map(|_| &no_tools)
+                    });
                 let id = &spec.behavior_id;
                 tally.record(category, behavior.is_some(), || {
                     format!("behavior {id} absent")
@@ -1063,6 +1104,66 @@ mod tests {
             ]);
             let verdict = CrewSpecMatch.evaluate(&params, &evidence);
             assert_eq!(verdict.score_bp, Some(expected), "{}", verdict.raw);
+        }
+    }
+
+    #[test]
+    fn source_match_follows_one_role_and_rejects_ambiguity_and_decoys() {
+        let params = json!({"links":[{"capture":"behaviors","source_match":{"field":"display_name","matches":"(?i)^(code )?reviewer$"},"field":"inference_profile_id","target_capture":"profiles","target_key":"profile_id","expect":[{"field":"max_turns","equals":30}]}]});
+        assert!(
+            jsonschema::validator_for(&CrewSpecMatch.describe().params_schema)
+                .unwrap()
+                .is_valid(&params)
+        );
+        for (name, selected, duplicate, expected) in [
+            ("Code Reviewer", "right", false, 10000),
+            ("Reviewer", "wrong", false, 5000),
+            ("Writer", "right", false, 0),
+            ("Reviewer", "right", true, 0),
+        ] {
+            let mut behaviors = vec![
+                json!({"behavior_id":"unpredictable-id","display_name":name,"inference_profile_id":selected}),
+            ];
+            if duplicate {
+                behaviors.push(behaviors[0].clone());
+            }
+            let evidence = stage(&[
+                ("behaviors", behaviors),
+                (
+                    "profiles",
+                    vec![
+                        json!({"profile_id":"right","max_turns":30}),
+                        json!({"profile_id":"wrong","max_turns":100}),
+                    ],
+                ),
+            ]);
+            assert_eq!(
+                CrewSpecMatch.evaluate(&params, &evidence).score_bp,
+                Some(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn null_tools_selection_has_no_grants_but_a_dangling_reference_fails() {
+        let params = json!({"agents":{"behaviors":"behaviors","contexts":"contexts","tools":"tools","expect":[{"behavior_id":"planner","tools":[{"field":"host.bash.mode","matches":"^(Off|null)$"},{"field":"subagents.enabled","matches":"^(false|null)$"}]}]}});
+        for (context, expected) in [
+            (json!({"context_id":"c","tools_id":null}), 10000),
+            (json!({"context_id":"c","tools_id":"missing"}), 3333),
+            (json!({"context_id":"c"}), 3333),
+        ] {
+            let evidence = stage(&[
+                (
+                    "behaviors",
+                    vec![json!({"behavior_id":"planner","context_id":"c"})],
+                ),
+                ("contexts", vec![context]),
+                ("tools", vec![]),
+            ]);
+            assert_eq!(
+                CrewSpecMatch.evaluate(&params, &evidence).score_bp,
+                Some(expected)
+            );
         }
     }
 

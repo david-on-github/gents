@@ -275,7 +275,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         },
         "execution" => Page {
             what: "an InferenceExecution: the run limits (turns, deadline, tokens, stream timeouts) a profile selects (profile grant). EXECUTION_ID goes in target_id.",
-            commands: &["execution list|get", "execution [preview] create|edit  set: execution fields"],
+            commands: &["execution list", "execution get EXECUTION_ID", "execution [preview] create|edit EXECUTION_ID  set: execution fields"],
             notes: "Omitted fields use defaults. A profile selects it through execution_id.",
             next: "bind it as in the recipe, then read it back with profile get execution and options.behavior.",
         },
@@ -284,7 +284,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             commands: &[
                 "behavior list  options: limit, cursor",
                 "behavior get [BEHAVIOR_ID]",
-                "behavior [preview] create  options: display-name, system-prompt, preset (readonly|write), profile; optional description, root; argv switch --default",
+                "behavior [preview] create  options: display-name, system-prompt, preset (readonly|write), profile; readonly permits shell commands; to forbid shell set host.bash.mode Off; optional description, root; argv switch --default",
                 "behavior [preview] clone  options: from, display-name, profile; optional overrides",
                 "behavior [preview] disable  options.id",
                 "behavior [preview] default BEHAVIOR_ID",
@@ -332,7 +332,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "automation" => Page {
             what: "documents that start work without a user: event-source or schedule, trigger, task (automation grant). Use it to run a behavior on new documents or on a timer.",
             commands: &["automation get|preview|edit KIND  target_id; options.behavior; KIND is event-source, trigger, task or schedule"],
-            notes: "preview and edit are upserts. A task belongs to the selected behavior and its triggers use only its tasks; each fire renders the task into a request of that behavior.\nfilter is a GraphQL object literal in a string, keys unquoted, as in the recipe. Template roots: doc (the source document; its fields must exist in the schema), event, args, session, request, group; a missing value fails the fire. Render the data the task needs apart from its instructions.\nConcurrency: parallel (default); queued_serial runs one at a time in order, never skipping; serial skips a fire while work runs; latest_only supersedes. queued_serial, session_id_template (deliver into an existing session) and emit_outcome need an event source.\nPipelines: a stage's task writes its output through a datastore surface, and that collection's event source fires the next stage. Fan-in: an event source group waits for expected_count documents sharing correlation_field.",
+            notes: "preview and edit are upserts. A task belongs to the selected behavior and its triggers use only its tasks; each fire renders the task into a request of that behavior.\nfilter is a GraphQL object literal in a string, keys unquoted, as in the recipe. Template roots: doc (the source document; its fields must exist in the schema), event, args, session, request, group; a missing value fails the fire. Render the data the task needs apart from its instructions.\nTask.emit_outcome=true writes the standard FireOutcome run record; default false writes none.\nConcurrency: parallel (default); queued_serial runs one at a time in order, never skipping; serial skips a fire while work runs; latest_only supersedes. queued_serial, session_id_template (deliver into an existing session) and emit_outcome need an event source.\nPipelines: a stage's task writes its output through a datastore surface, and that collection's event source fires the next stage. Fan-in: an event source group waits for expected_count documents sharing correlation_field.",
             next: "create one source document and read the resulting request and its output.",
         },
         "cleanup" => Page {
