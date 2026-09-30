@@ -9,7 +9,7 @@
 # Held-out cases run only with GENTS_EVAL_SPLITS=held_out.
 #
 # GENTS_EVAL_TARGET: target file name (default workstation-1).
-# GENTS_EVAL_HOME / GENTS_EVAL_PORT: isolated eval home / port (default 9493).
+# GENTS_EVAL_HOME / GENTS_EVAL_PORT: isolated home / optional fixed port.
 # GENTS_EVAL_PER_TRIAL: concurrent calls per trial (default 1).
 # GENTS_EVAL_REASONING / GENTS_EVAL_TEMPERATURE / GENTS_EVAL_TOP_P: high / 1 / .95.
 # GENTS_EVAL_WATCH: auto, 1 or 0. Auto uses the native TUI in a terminal.
@@ -31,7 +31,27 @@ PER_TRIAL=${GENTS_EVAL_PER_TRIAL:-1}
 TARGET=${GENTS_EVAL_TARGET:-workstation-1}
 SPLITS=${GENTS_EVAL_SPLITS:-train validation}
 EVAL_HOME=${GENTS_EVAL_HOME:-$HOME/gents-eval-homes/ladder-$SHA}
-PORT=${GENTS_EVAL_PORT:-9493}
+PORT_OVERRIDE=${GENTS_EVAL_PORT:-}
+PORT=$(python3 - "$EVAL_HOME/runtime.json" "$PORT_OVERRIDE" <<'PYPORT'
+import json, pathlib, sys, urllib.parse
+path, override = sys.argv[1:]
+port = 9493
+try:
+    url = urllib.parse.urlparse(json.loads(pathlib.Path(path).read_text())["graphql"])
+    if url.hostname == "127.0.0.1" and url.port:
+        port = url.port
+except (OSError, ValueError, KeyError, TypeError):
+    pass
+if override:
+    try:
+        port = int(override)
+    except ValueError:
+        sys.exit("GENTS_EVAL_PORT must be an integer between 1 and 65535")
+if not 1 <= port <= 65535:
+    sys.exit("GENTS_EVAL_PORT must be between 1 and 65535")
+print(port)
+PYPORT
+)
 REASONING=${GENTS_EVAL_REASONING:-high}
 TEMPERATURE=${GENTS_EVAL_TEMPERATURE:-1.0}
 TOP_P=${GENTS_EVAL_TOP_P:-0.95}
@@ -95,16 +115,39 @@ GRAPHQL="http://127.0.0.1:$PORT/api/v0/graphql"
 # with --home fall back to opening the store themselves until runtime.json does.
 served() {
   grep -qF "127.0.0.1:$PORT/" "$EVAL_HOME/runtime.json" 2>/dev/null &&
-    curl -fsS -m 3 -H 'content-type: application/json' -d '{"query":"{ AgentPrincipal { agent_did } }"}' "$GRAPHQL" >/dev/null 2>&1
+    curl -fsS -m 3 -H 'content-type: application/json' -d '{"query":"{ AgentPrincipal { agent_did } }"}' "$GRAPHQL" 2>/dev/null |
+      python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d.get("errors") and any(r.get("agent_did")==sys.argv[1] for r in d.get("data",{}).get("AgentPrincipal",[])) else 1)' "$DID" 2>/dev/null
 }
 if ! served; then
+  if [ -z "$PORT_OVERRIDE" ]; then
+    PORT=$(python3 - "$PORT" <<'PYFREE'
+import socket, sys
+with socket.socket() as listener:
+    try:
+        listener.bind(("127.0.0.1", int(sys.argv[1])))
+    except OSError:
+        listener.bind(("127.0.0.1", 0))
+    print(listener.getsockname()[1])
+PYFREE
+)
+    GRAPHQL="http://127.0.0.1:$PORT/api/v0/graphql"
+  fi
   echo "serving $EVAL_HOME on $PORT (log $EVAL_HOME/server.log) ..." >&2
   (cd "$EVAL_HOME/work" && exec nohup "$GENTS" server --home "$EVAL_HOME" --http-port "$PORT" \
     </dev/null >"$EVAL_HOME/server.log" 2>&1) &
-  echo $! >"$EVAL_HOME/server.pid"
+  EVAL_SERVER_PID=$!
+  echo "$EVAL_SERVER_PID" >"$EVAL_HOME/server.pid"
   disown
-  for _ in $(seq 1 90); do served && break; sleep 2; done
-  served || { echo "the eval home did not come up; see $EVAL_HOME/server.log" >&2; exit 1; }
+  for _ in $(seq 1 90); do
+    served && break
+    if ! kill -0 "$EVAL_SERVER_PID" 2>/dev/null; then
+      echo "the eval server exited during startup:" >&2
+      tail -n 20 "$EVAL_HOME/server.log" >&2
+      exit 1
+    fi
+    sleep 2
+  done
+  served || { echo "the eval home did not become ready; see $EVAL_HOME/server.log" >&2; tail -n 20 "$EVAL_HOME/server.log" >&2; exit 1; }
 fi
 
 # The trial copies the backend, sampling, profile and the profile's bound
