@@ -1075,7 +1075,11 @@ mod tests {
             LiveBackendOverride {
                 inference_url: Some(self.endpoint.clone()),
                 model_name: Some(model_name.to_string()),
-                provider: Some("openai-compatible".to_string()),
+                provider: Some(
+                    gents::BackendProviderKind::OpenAiCompatible
+                        .as_str()
+                        .to_owned(),
+                ),
                 api_key: Some("desktop-live-test-key".to_string()),
                 api_key_env_var: None,
             }
