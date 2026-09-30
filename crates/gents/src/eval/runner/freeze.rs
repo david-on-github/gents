@@ -17,8 +17,8 @@ use crate::config_client::{
     desired_state_document_digest, read_desired_state_record_in_txn, ConfigAccess,
 };
 use crate::document_config::{
-    BackendAuth, EvalDefinition, EvalSplit, InferenceBackend, InferenceProfile, InferenceSampling,
-    PackConfig,
+    BackendAuth, EvalDefinition, EvalSplit, InferenceBackend, InferenceExecution, InferenceProfile,
+    InferenceRetryPolicy, InferenceSampling, PackConfig,
 };
 use crate::eval::checks::CHECK_REGISTRY_VERSION;
 use crate::eval::runner::executor::{Capture, InferenceBinding, Isolation};
@@ -720,6 +720,38 @@ async fn inference_binding(
         ),
         None => None,
     };
+    let execution: Option<InferenceExecution> = match &profile.execution_id {
+        Some(execution_id) => Some(
+            read_document(access, Collection::InferenceExecution, owner, execution_id)
+                .await?
+                .ok_or_else(|| {
+                    refused(format!(
+                        "inference profile {:?} names no execution {execution_id:?}",
+                        profile.profile_id
+                    ))
+                })?,
+        ),
+        None => None,
+    };
+    let retry_policy: Option<InferenceRetryPolicy> =
+        match execution.as_ref().and_then(|e| e.retry_policy_id.as_ref()) {
+            Some(retry_policy_id) => Some(
+                read_document(
+                    access,
+                    Collection::InferenceRetryPolicy,
+                    owner,
+                    retry_policy_id,
+                )
+                .await?
+                .ok_or_else(|| {
+                    refused(format!(
+                        "inference profile {:?} names no retry policy {retry_policy_id:?}",
+                        profile.profile_id
+                    ))
+                })?,
+            ),
+            None => None,
+        };
 
     if matches!(backend.auth, BackendAuth::PrincipalOAuth) {
         return Err(refused(format!(
@@ -733,6 +765,11 @@ async fn inference_binding(
         profile: serde_json::to_value(&profile)?,
         backend: serde_json::to_value(&backend)?,
         sampling: sampling.as_ref().map(serde_json::to_value).transpose()?,
+        execution: execution.as_ref().map(serde_json::to_value).transpose()?,
+        retry_policy: retry_policy
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?,
         // The loop fills the per-trial seed: `seed_base + trial_index`.
         seed: 0,
     })
