@@ -27,7 +27,8 @@ const duration=s=>s==null?'—':s<60?`${Math.floor(s)}s`:s<3600?`${Math.floor(s/
 const labels={running:'Running',pass:'Passed',fail:'Failed',not_evidence:'Not evidence',unknown:'Unknown',abandoned:'Stopped',stopped:'Stopped',planned:'Queued'};
 const colors={running:'#5d8edb',pass:'#219976',fail:'#ce7264',not_evidence:'#d4a153',unknown:'#bda674',abandoned:'#acb7c0',stopped:'#acb7c0',planned:'#e4eaf0'};
 const friendly={AgentBehavior:'Roles',InferenceProfile:'Profiles',EventSource:'Sources',SubagentTarget:'Targets',Task:'Tasks',Trigger:'Triggers',schemas:'Schemas',AgentRequest:'Requests'};
-let selection='active', filter='all', selectedTrial=null, summaries=[], runs=[], paused=false, busy=false, sidebarState='', watched=new Set();
+const initialRuns=new URLSearchParams(location.search).get('runs');let pinned=Boolean(initialRuns);
+let selection='active', filter='all', selectedTrial=null, summaries=[], runs=[], paused=false, busy=false, sidebarState='', watched=new Set(initialRuns?initialRuns.split(','):[]);
 const station=r=>(r.home.match(/workstation-\d+/)||[])[0]||r.home.split('/').pop();
 const suite=r=>r.run.definition.definition_id==='factory-setup'?'Crew configuration':r.run.definition.definition_id.replace('configurator-','').replaceAll('-',' ');
 const age=s=>s?Math.max(0,(Date.now()-Date.parse(s))/1000):null;
@@ -67,8 +68,8 @@ function renderDetail(){const s=allSlots().find(s=>s.key===selectedTrial);if(!s)
  $('detailBody').scrollTop=scroll;
 }
 async function get(path){const r=await fetch(path,{cache:'no-store'});if(!r.ok)throw Error(`Dashboard request failed (${r.status})`);return r.json()}
-async function refresh(){if(paused||busy)return;busy=true;try{const index=await get('/api/runs');summaries=index.runs;summaries.filter(r=>r.counts.running).forEach(r=>watched.add(r.key));const keys=selection==='active'?summaries.filter(r=>watched.has(r.key)).map(r=>r.key):[selection];runs=await Promise.all(keys.map(key=>get('/api/run?key='+encodeURIComponent(key))));renderSidebar();render();$('notice').style.display='none';$('connection').innerHTML='<span class="running-dot"></span>Live · '+new Date().toLocaleTimeString();}catch(e){$('notice').textContent=`Updates unavailable: ${e.message}. Showing the last snapshot.`;$('notice').style.display='block';$('connection').textContent='Disconnected';}finally{busy=false}}
-function choose(key){if(key==='active')watched=new Set();selection=key;sidebarState='';selectedTrial=null;closeDetail();refresh()}
+async function refresh(){if(paused||busy)return;busy=true;try{const index=await get('/api/runs');summaries=index.runs;if(!pinned)summaries.filter(r=>r.counts.running).forEach(r=>watched.add(r.key));if(selection==='active'&&watched.size)history.replaceState(null,'',location.pathname+'?runs='+encodeURIComponent([...watched].join(',')));const keys=selection==='active'?summaries.filter(r=>watched.has(r.key)).map(r=>r.key):[selection];runs=await Promise.all(keys.map(key=>get('/api/run?key='+encodeURIComponent(key))));renderSidebar();render();$('notice').style.display='none';$('connection').innerHTML='<span class="running-dot"></span>Live · '+new Date().toLocaleTimeString();}catch(e){$('notice').textContent=`Updates unavailable: ${e.message}. Showing the last snapshot.`;$('notice').style.display='block';$('connection').textContent='Disconnected';}finally{busy=false}}
+function choose(key){if(key==='active'){watched=new Set();pinned=false;history.replaceState(null,'',location.pathname);}selection=key;sidebarState='';selectedTrial=null;closeDetail();refresh()}
 $('activeRuns').onclick=()=>choose('active');$('runList').onclick=e=>{const button=e.target.closest('[data-run]');if(button)choose(button.dataset.run)};
 $('filters').onclick=e=>{const b=e.target.closest('[data-filter]');if(!b)return;filter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('selected',x===b));render()};
 $('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'Resume updates':'Pause updates';$('connection').textContent=paused?'Paused':'Reconnecting…';if(!paused)refresh()};
