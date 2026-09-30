@@ -18,7 +18,10 @@ mod test;
 pub(crate) mod update;
 use crate::cli::*;
 use anyhow::{Context, Result};
-use gents::pack::{pack_catalog, resolve_pack, PackKind, PackManifest, ResolvedPack};
+use futures_util::StreamExt;
+use gents::pack::{PackKind, PackManifest};
+use gents::pack_archive::PackArchive;
+use gents::pack_resolve::{resolve_named, ResolveOptions, ResolvedFrom};
 use serde_json::json;
 use std::collections::BTreeMap;
 
@@ -48,14 +51,7 @@ pub(crate) fn parse_inference_slot_bindings(
 
 pub(crate) async fn dispatch(command: PackCommand) -> Result<()> {
     match command {
-        PackCommand::List => {
-            let entries: Vec<_> = pack_catalog()?.into_iter().map(|pack| json!({
-                "name":pack.name,"version":pack.version,"description":pack.description,
-                "kind":pack.metadata.kind,"authors":pack.metadata.authors,"tags":pack.metadata.tags,
-                "inference_slots":pack.metadata.inference_slots
-            })).collect();
-            crate::print_json(&json!({"packs":entries}))
-        }
+        PackCommand::List(args) => list(args).await,
         PackCommand::Show(args) => inspect::show(args).await,
         PackCommand::Verify(args) => inspect::verify(args),
         PackCommand::New(args) => scaffold::new(args),
@@ -72,7 +68,7 @@ pub(crate) async fn dispatch(command: PackCommand) -> Result<()> {
         PackCommand::Remove(args) => remove::remove(args).await,
         PackCommand::Outdated(args) => update::outdated(args).await,
         PackCommand::Update(args) => update::update(args).await,
-        PackCommand::Prune(args) => cache::prune(args),
+        PackCommand::Prune(args) => cache::prune(args).await,
         PackCommand::Scenario(PackScenarioCommand::Run(args)) => scenario::run(args).await,
         PackCommand::Scenario(PackScenarioCommand::Init(args)) => scenario::init_pack(args).await,
         PackCommand::Scenario(PackScenarioCommand::Seed(args)) => scenario::seed(args).await,
@@ -89,66 +85,151 @@ pub(crate) async fn dispatch(command: PackCommand) -> Result<()> {
     }
 }
 
-/// A pack, wherever it came from: compiled into this binary, or downloaded
-/// from the registry and verified. Everything past resolution (materialize,
-/// cache, install) works the same either way, so it is written once against
-/// this instead of twice against `ResolvedPack` and a registry type.
-enum PackSource {
-    Bundled(ResolvedPack),
-    Registry(registry::RegistryPack),
-    /// Named by digest or path, and opened from the home's pack store.
-    Stored(gents::pack_archive::PackArchive),
+/// A pack, wherever it came from: an explicit local path or digest, an
+/// already-installed coordinate, the home's pack store, or the registry.
+/// Everything past resolution (materialize, cache, install) works the same
+/// regardless, so it is written once against this instead of once per source.
+pub(crate) struct PackSource {
+    archive: PackArchive,
+    from: Source,
+}
+
+enum Source {
+    /// Named by digest or path (`sha256:`, `./x.pack`, `./dir`).
+    Local,
+    /// The coordinate's installed record named this digest, and the home's
+    /// store still holds it.
+    Installed,
+    /// The home's pack store held it; no network call was made.
+    Store,
+    /// Fetched from the registry, which stored and indexed it for next time.
+    Registry {
+        namespace: String,
+        name: String,
+        version: String,
+        artifact_digest: String,
+    },
 }
 
 impl PackSource {
-    fn manifest(&self) -> &PackManifest {
-        match self {
-            Self::Bundled(pack) => &pack.manifest,
-            Self::Registry(pack) => pack.archive.manifest(),
-            Self::Stored(pack) => pack.manifest(),
-        }
+    pub(crate) fn manifest(&self) -> &PackManifest {
+        self.archive.manifest()
     }
 
     /// The pack's content digest: identical whichever way it arrived, which
     /// is what makes it safe to use as the asset-cache key either way.
-    fn digest(&self) -> &str {
-        match self {
-            Self::Bundled(pack) => &pack.digest,
-            Self::Registry(pack) => &pack.digest,
-            Self::Stored(pack) => pack.digest(),
-        }
+    pub(crate) fn digest(&self) -> &str {
+        self.archive.digest()
     }
 
-    fn asset(&self, path: &str) -> Result<&[u8]> {
-        match self {
-            Self::Bundled(pack) => pack.asset(path),
-            Self::Registry(pack) => pack.archive.asset(path),
-            Self::Stored(pack) => pack.asset(path),
-        }
+    pub(crate) fn asset(&self, path: &str) -> Result<&[u8]> {
+        self.archive.asset(path)
     }
 
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Bundled(_) => "bundled",
-            Self::Registry(_) => "registry",
-            Self::Stored(_) => "local",
+    /// The underlying archive, for a caller (the graph installer) that needs
+    /// more than one asset's bytes at a time.
+    pub(crate) fn archive(&self) -> &PackArchive {
+        &self.archive
+    }
+
+    pub(crate) fn label(&self) -> &'static str {
+        match &self.from {
+            Source::Local => "local",
+            Source::Installed => "installed",
+            Source::Store => "store",
+            Source::Registry { .. } => "registry",
         }
     }
 
     /// A human-readable resolution note: which coordinate on the registry
     /// this pack came from, when it did.
-    fn describe(&self) -> String {
-        match self {
-            Self::Bundled(_) => self.label().to_owned(),
-            Self::Stored(pack) => format!("{} ({})", self.label(), pack.digest()),
-            Self::Registry(pack) => format!(
-                "{} ({}/{}@{})",
-                self.label(),
-                pack.namespace,
-                pack.name,
-                pack.version
+    pub(crate) fn describe(&self) -> String {
+        match &self.from {
+            Source::Registry {
+                namespace,
+                name,
+                version,
+                artifact_digest,
+            } => format!(
+                "{} ({namespace}/{name}@{version}, artifact sha256:{artifact_digest})",
+                self.label()
             ),
+            _ => format!("{} ({})", self.label(), self.digest()),
         }
+    }
+}
+
+/// Shared by every gents-cli unit test that needs a resolved pack: the
+/// bundled-catalog fixtures live in the gents crate and open into a store
+/// the same way any local pack spec does, so a test never has to spin up a
+/// fake registry just to get a [`PackSource`].
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::path::{Path, PathBuf};
+
+    /// A gents-crate fixture pack directory:
+    /// `crates/gents/tests/fixtures/packs/<name>`.
+    pub(crate) fn fixture_dir(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../gents/tests/fixtures/packs")
+            .join(name)
+    }
+
+    /// Every fixture pack directory under `crates/gents/tests/fixtures/packs`.
+    pub(crate) fn every_fixture_dir() -> Vec<PathBuf> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../gents/tests/fixtures/packs");
+        let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
+            .unwrap_or_else(|error| panic!("reading {}: {error:#}", root.display()))
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.join("manifest.json").is_file())
+            .collect();
+        dirs.sort();
+        dirs
+    }
+
+    /// Recursively copies `from` into `to`, so a test can mutate a fixture
+    /// (build its plugin, edit a config) without touching the checked-in
+    /// copy other tests share.
+    pub(crate) fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            let target = to.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_tree(&entry.path(), &target)?;
+            } else {
+                std::fs::copy(entry.path(), &target)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Builds every plugin `manifest` declares from source whose artifact is
+    /// not already on disk at `dir`, the way `gents pack build` does.
+    pub(crate) fn build_unbuilt_plugins(dir: &Path, manifest: &super::PackManifest) {
+        for plugin in &manifest.metadata.plugins {
+            if plugin.source.is_some() && !dir.join(&plugin.artifact).is_file() {
+                super::build::build_plugin(dir, manifest, plugin)
+                    .unwrap_or_else(|error| panic!("building plugin {}: {error:#}", plugin.name));
+            }
+        }
+    }
+
+    /// Opens `dir` into `home`'s store, the way a local path spec resolves.
+    pub(crate) fn local_pack_source(dir: &Path, home: &Path) -> super::PackSource {
+        let archive = super::local::open(&super::local::LocalName::Path(dir), home)
+            .unwrap_or_else(|error| panic!("opening {}: {error:#}", dir.display()));
+        super::PackSource {
+            archive,
+            from: super::Source::Local,
+        }
+    }
+
+    /// Opens a fixture pack directory into `home`'s store, the way a local
+    /// path spec resolves.
+    pub(crate) fn fixture_pack_source(name: &str, home: &Path) -> super::PackSource {
+        local_pack_source(&fixture_dir(name), home)
     }
 }
 
@@ -159,36 +240,98 @@ pub(crate) fn split_namespace(name: &str) -> (&str, &str) {
     gents::pack_registry::split_pack_coordinate(name)
 }
 
-/// Resolves a pack named by digest or path from the home's store; otherwise
-/// a pack compiled into this binary first, and only when that fails the
-/// registry, downloading, verifying, and storing the result. Both bundled and
-/// registry failures are reported together so a real problem with the
-/// bundled lookup is never masked by a registry error.
-async fn resolve_pack_source(
-    name: &str,
+/// `gents pack list`: every pack the home's store holds, by name index, with
+/// the versions on hand, the preferred one's digest and manifest summary,
+/// and whether it is currently installed. No catalog ships in the binary, so
+/// an empty, unused home lists nothing.
+async fn list(args: PackListArgs) -> Result<()> {
+    let home = crate::home_state::resolve_home_dir(args.home.as_deref());
+    let store = gents::pack_store::PackStore::new(&home);
+    let installed: std::collections::BTreeSet<String> =
+        gents::pack::installed_packs(Some(&home), None)
+            .await?
+            .into_iter()
+            .map(|pack| pack.coordinate)
+            .collect();
+    let mut entries = Vec::new();
+    for (coordinate, versions) in store.names()? {
+        let (namespace, name) = coordinate
+            .split_once('/')
+            .context("malformed pack store name index entry")?;
+        let Some(preferred) = store.lookup(namespace, name, None)? else {
+            // Every entry has at least one version whose archive exists, or
+            // `lookup` would not have indexed it; this is unreachable in
+            // practice and simply skipped rather than failing the listing.
+            continue;
+        };
+        let archive = store.open(&preferred.digest)?;
+        let manifest = archive.manifest();
+        entries.push(json!({
+            "pack": coordinate,
+            "versions": versions.into_iter().map(|entry| entry.version).collect::<Vec<_>>(),
+            "version": preferred.version,
+            "digest": preferred.digest,
+            "kind": manifest.metadata.kind,
+            "description": manifest.description,
+            "inference_slots": manifest.metadata.inference_slots,
+            "installed": installed.contains(&coordinate),
+        }));
+    }
+    crate::print_json(&json!({ "packs": entries }))
+}
+
+/// Resolves a pack named by digest or path, an already-installed coordinate,
+/// the home's pack store, or the registry, in that order. Local forms
+/// (`sha256:`, `./x.pack`, `./dir`, an absolute path) never reach the
+/// registry; everything else goes through [`resolve_named`], which stores
+/// and indexes a registry fetch so the next resolution of that version is
+/// free of the network too.
+pub(crate) async fn resolve_pack_source(
+    spec: &str,
     registry_override: Option<&str>,
     home: &std::path::Path,
 ) -> Result<PackSource> {
-    if let Some(local) = local::classify(name) {
-        return local::open(&local, home).map(PackSource::Stored);
+    if let Some(local) = local::classify(spec) {
+        let archive = local::open(&local, home)?;
+        return Ok(PackSource {
+            archive,
+            from: Source::Local,
+        });
     }
-    match resolve_pack(name) {
-        Ok(pack) => Ok(PackSource::Bundled(pack)),
-        Err(bundled_error) => {
-            let (namespace, pack_name) = split_namespace(name);
-            let base_url = registry::resolve_registry_url(registry_override);
-            let client = registry::RegistryClient::new(base_url.clone());
-            let fetched = registry::fetch_pack(&client, Some(home), namespace, pack_name, None)
-                .await
-                .map_err(|registry_error| {
-                    anyhow::anyhow!(
-                        "{name} is not compiled into this binary ({bundled_error}) and fetching \
-                         it from the registry at {base_url} also failed: {registry_error}"
-                    )
-                })?;
-            Ok(PackSource::Registry(fetched))
+    let installed: Vec<gents::pack::InstalledPack> = gents::pack::list_home_installs(home)?
+        .into_iter()
+        .map(|record| gents::pack::InstalledPack {
+            coordinate: record.coordinate,
+            version: record.version,
+            digest: record.digest,
+        })
+        .collect();
+    let options = ResolveOptions {
+        home: Some(home),
+        registry_url: registry::resolve_registry_url(registry_override),
+        installed: &installed,
+    };
+    let resolved = resolve_named(spec, &options).await?;
+    let from = match resolved.from {
+        ResolvedFrom::Installed => Source::Installed,
+        ResolvedFrom::Store => Source::Store,
+        ResolvedFrom::Registry {
+            artifact_digest,
+            version,
+        } => {
+            let parsed = gents::pack_resolve::parse_pack_spec(spec)?;
+            Source::Registry {
+                namespace: parsed.namespace.to_owned(),
+                name: parsed.name.to_owned(),
+                version,
+                artifact_digest,
+            }
         }
-    }
+    };
+    Ok(PackSource {
+        archive: resolved.archive,
+        from,
+    })
 }
 
 fn materialize(pack: &PackSource, root: &std::path::Path) -> Result<()> {
@@ -247,22 +390,6 @@ fn materialize_cached_pack(
     Ok((root, lock))
 }
 
-pub(crate) fn materialize_named_pack(
-    name: &str,
-) -> Result<(
-    std::path::PathBuf,
-    gents::file_lock::FileLock,
-    gents::pack::PackManifest,
-)> {
-    let pack = resolve_pack(name)?;
-    let manifest = pack.manifest.clone();
-    let (root, lease) = materialize_cached_pack(
-        &crate::home_state::resolve_home_dir(None),
-        &PackSource::Bundled(pack),
-    )?;
-    Ok((root, lease, manifest))
-}
-
 /// A subject pack for `gents eval run` and `gents optimization run`: a
 /// directory on disk, or a name resolved the way `gents pack install`
 /// resolves one (compiled in, else the registry).
@@ -310,15 +437,18 @@ impl SubjectPack {
 /// one that starts with `.`, `/` or `~`, or one with a path separator that
 /// is a directory (`acme/widget` is otherwise a namespaced pack name). Any
 /// other spec is a pack name, even when a directory of that name is in the
-/// working directory: it resolves as `gents pack install` resolves one. A
-/// compiled-in pack is handed to the runner by name unless `directory` asks
-/// for a directory; a registry pack, or a compiled-in one when `directory`
-/// is set, is materialized into `<home>/packs/<name>/<digest>`.
+/// working directory: it resolves as `gents pack install` resolves one
+/// (local, installed, store, then registry) and materializes into
+/// `<home>/packs/<name>/<digest>`.
 pub(crate) async fn resolve_subject_pack(
     home: &std::path::Path,
     spec: &str,
     registry: Option<&str>,
-    directory: bool,
+    // vertexia: every resolved pack now materializes (no more zero-copy
+    // bundled-by-name fast path once PackSource always wraps an archive);
+    // callers still pass this flag, unused, until it is dropped from
+    // every call site along with the eval/optimization subject resolvers.
+    _directory: bool,
 ) -> Result<SubjectPack> {
     let path = std::path::Path::new(spec);
     if names_a_directory(spec) {
@@ -336,15 +466,6 @@ pub(crate) async fn resolve_subject_pack(
     }
     let pack = resolve_pack_source(spec, registry, home).await?;
     let manifest = pack.manifest().clone();
-    if !directory && matches!(pack, PackSource::Bundled(_)) {
-        return Ok(SubjectPack {
-            source: gents::eval::runner::CellSource::InstalledPack {
-                name: spec.to_owned(),
-            },
-            manifest,
-            _lease: None,
-        });
-    }
     let (root, lease) = materialize_cached_pack(home, &pack)?;
     Ok(SubjectPack {
         source: gents::eval::runner::CellSource::Directory(root),
@@ -488,13 +609,7 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                 !args.force_rebind_concrete_did,
                 "--force-rebind-concrete-did applies only to document packs"
             );
-            anyhow::ensure!(
-                matches!(pack, PackSource::Bundled(_)),
-                "{} is a graph pack; only a graph pack compiled into this binary can be \
-                 installed today, so it cannot be installed from the registry yet",
-                args.package
-            );
-            super::graph::install(args, true).await
+            super::graph::install(&pack, args, true).await
         }
         PackKind::Documents => {
             anyhow::ensure!(
@@ -527,16 +642,21 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
             // Resolve and preview the complete dependency closure before any
             // schema or configuration write. Reused slot names intentionally
             // share one user selection across the root and dependency pack.
-            let dependencies = pack
-                .manifest()
-                .metadata
-                .dependencies
-                .iter()
-                .map(|name| resolve_pack(name))
-                .collect::<Result<Vec<_>>>()?;
+            // Resolution never overlaps a write: up to 4 dependencies resolve
+            // concurrently (store first, then the registry) before this.
+            let dependencies: Vec<PackSource> =
+                futures_util::stream::iter(pack.manifest().metadata.dependencies.iter())
+                    .map(|coordinate| {
+                        resolve_pack_source(coordinate, args.registry.as_deref(), &home)
+                    })
+                    .buffered(4)
+                    .collect::<Vec<_>>()
+                    .await
+                    .into_iter()
+                    .collect::<Result<Vec<_>>>()?;
             for dependency in &dependencies {
                 anyhow::ensure!(
-                    matches!(dependency.manifest.metadata.kind, PackKind::Graph),
+                    dependency.manifest().metadata.kind == PackKind::Graph,
                     "only graph dependencies are currently installable"
                 );
             }
@@ -549,7 +669,7 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     .any(|declared| declared.name.as_str() == slot.as_str());
                 let declared_by_dependency = dependencies.iter().any(|dependency| {
                     dependency
-                        .manifest
+                        .manifest()
                         .metadata
                         .inference_slots
                         .iter()
@@ -585,7 +705,7 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     .iter()
                     .filter(|(slot, _)| {
                         dependency
-                            .manifest
+                            .manifest()
                             .metadata
                             .inference_slots
                             .iter()
@@ -595,12 +715,12 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     .collect();
                 let preview = gents::pack::preview_pack_inference_bindings(
                     &access,
-                    &dependency.manifest,
+                    dependency.manifest(),
                     &owner,
                     &dependency_requested,
                 )
                 .await?;
-                dependency_inference.insert(dependency.manifest.name.clone(), preview);
+                dependency_inference.insert(dependency.manifest().name.clone(), preview);
             }
             let temp = tempfile::tempdir()?;
             materialize(&pack, temp.path())?;
@@ -644,12 +764,13 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                 .map(|dependency| {
                     format!(
                         "{}/{}",
-                        dependency.manifest.metadata.namespace, dependency.manifest.name
+                        dependency.manifest().metadata.namespace,
+                        dependency.manifest().name
                     )
                 })
                 .collect();
-            for dependency in dependencies {
-                let dependency_slots = dependency_inference[&dependency.manifest.name]
+            for dependency in &dependencies {
+                let dependency_slots = dependency_inference[dependency.manifest().name.as_str()]
                     .bindings
                     .iter()
                     .map(|(slot, profile)| format!("{slot}={profile}"))
@@ -657,8 +778,9 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                 super::graph::install_with_access(
                     &access,
                     &owner,
+                    dependency,
                     PackInstallArgs {
-                        package: dependency.manifest.name,
+                        package: dependency.manifest().name.clone(),
                         bindings: None,
                         inference_slots: dependency_slots,
                         preview: false,
@@ -863,8 +985,7 @@ mod tests {
             .err()
             .expect("no pack is named src");
         assert!(
-            bare.to_string()
-                .starts_with("src is not compiled into this binary"),
+            format!("{bare:#}").contains("is not in the pack store of"),
             "{bare:#}"
         );
         let dotted = resolve_subject_pack(home.path(), "./src", unreachable, false)
@@ -876,8 +997,8 @@ mod tests {
 
     #[test]
     fn concurrent_materialization_publishes_complete_assets() {
-        let pack = resolve_pack("mailbox").unwrap();
-        let source = PackSource::Bundled(resolve_pack("mailbox").unwrap());
+        let home = tempfile::tempdir().unwrap();
+        let source = test_support::fixture_pack_source("assets_fixture", home.path());
         let root = tempfile::tempdir().unwrap();
         let barrier = std::sync::Barrier::new(8);
         std::thread::scope(|scope| {
@@ -889,11 +1010,11 @@ mod tests {
             }
         });
         for path in std::iter::once("manifest.json")
-            .chain(pack.manifest.metadata.assets.iter().map(String::as_str))
+            .chain(source.manifest().metadata.assets.iter().map(String::as_str))
         {
             assert_eq!(
                 std::fs::read(root.path().join(path)).unwrap(),
-                pack.asset(path).unwrap()
+                source.asset(path).unwrap()
             );
         }
     }
@@ -903,12 +1024,12 @@ mod tests {
     fn materialized_assets_are_readable_like_distribution_files() {
         use std::os::unix::fs::PermissionsExt;
 
-        let pack = resolve_pack("mailbox").unwrap();
-        let source = PackSource::Bundled(resolve_pack("mailbox").unwrap());
+        let home = tempfile::tempdir().unwrap();
+        let source = test_support::fixture_pack_source("assets_fixture", home.path());
         let root = tempfile::tempdir().unwrap();
         materialize(&source, root.path()).unwrap();
         for path in std::iter::once("manifest.json")
-            .chain(pack.manifest.metadata.assets.iter().map(String::as_str))
+            .chain(source.manifest().metadata.assets.iter().map(String::as_str))
         {
             assert_eq!(
                 std::fs::metadata(root.path().join(path))
@@ -933,7 +1054,7 @@ mod tests {
     #[test]
     fn scenario_cache_lease_excludes_pruning() {
         let home = tempfile::tempdir().unwrap();
-        let pack = PackSource::Bundled(resolve_pack("pipeline").unwrap());
+        let pack = test_support::fixture_pack_source("documents_fixture", home.path());
         let (root, lease) = materialize_cached_pack(home.path(), &pack).unwrap();
         let exclusive = cache::cache_lock(root.parent().unwrap()).unwrap();
         assert!(exclusive.try_lock().is_err());
@@ -955,7 +1076,8 @@ mod tests {
     #[test]
     fn abandoned_staging_file_does_not_poison_install_or_allow_overwrite() {
         use std::io::Write;
-        let pack = PackSource::Bundled(resolve_pack("mailbox").unwrap());
+        let home = tempfile::tempdir().unwrap();
+        let pack = test_support::fixture_pack_source("assets_fixture", home.path());
         let root = tempfile::tempdir().unwrap();
         // Model process death before publication: a partial temporary file
         // remains, but no destination has been exposed.
@@ -976,69 +1098,65 @@ mod tests {
         );
     }
 
+    /// The CI gate for real (packs-repo) packs moves to packs CI
+    /// (`gents pack test`); this keeps only the gents-side machinery honest,
+    /// over the checked-in fixture.
     #[test]
-    fn every_bundled_document_pack_materializes_a_valid_configuration() {
-        for manifest in pack_catalog().unwrap() {
-            if manifest.metadata.kind != PackKind::Documents {
-                continue;
-            }
-            let pack = resolve_pack(&manifest.name).unwrap();
-            let root = tempfile::tempdir().unwrap();
-            materialize(
-                &PackSource::Bundled(resolve_pack(&manifest.name).unwrap()),
-                root.path(),
-            )
-            .unwrap();
-            let config = gents::pack::load_pack_config(
-                &pack.manifest,
-                &gents::pack::PackInstallOptions {
-                    agent_did: "did:key:zPackCatalogValidationOwner".into(),
-                },
-                &|path| pack.asset(path).map(Vec::from),
-                &|_| None,
-            )
-            .unwrap_or_else(|error| panic!("{}: {error:#}", manifest.name));
-            gents::config_client::DesiredStateApplyPlan::from_pack_config(&config)
-                .unwrap_or_else(|error| panic!("{}: {error:#}", manifest.name));
-        }
+    fn a_document_pack_materializes_a_valid_configuration() {
+        let home = tempfile::tempdir().unwrap();
+        let pack = test_support::fixture_pack_source("documents_fixture", home.path());
+        let root = tempfile::tempdir().unwrap();
+        materialize(&pack, root.path()).unwrap();
+        let config = gents::pack::load_pack_config(
+            pack.manifest(),
+            &gents::pack::PackInstallOptions {
+                agent_did: "did:key:zPackCatalogValidationOwner".into(),
+            },
+            &|path| pack.asset(path).map(Vec::from),
+            &|_| None,
+        )
+        .unwrap();
+        gents::config_client::DesiredStateApplyPlan::from_pack_config(&config).unwrap();
     }
 
     #[tokio::test]
-    async fn resolution_prefers_a_pack_compiled_into_this_binary() {
+    async fn resolution_prefers_the_home_store_without_the_registry() {
+        let home = tempfile::tempdir().unwrap();
+        // Store it first, the way `gents pack fetch --store` or a prior
+        // install would have.
+        let _ = test_support::fixture_pack_source("assets_fixture", home.path());
         // An unroutable registry: if resolution incorrectly fell through to
-        // it for a bundled pack, this fails fast instead of hanging on a
-        // real network call or silently succeeding some other way.
+        // it, this fails fast instead of hanging on a real network call or
+        // silently succeeding some other way.
         let source = resolve_pack_source(
-            "mailbox",
+            "fixture/assets_fixture",
             Some("http://127.0.0.1:1"),
-            tempfile::tempdir().unwrap().path(),
+            home.path(),
         )
         .await
-        .expect("a bundled pack must resolve without touching the registry");
-        assert!(matches!(source, PackSource::Bundled(_)));
-        assert_eq!(source.label(), "bundled");
+        .expect("a stored pack must resolve without touching the registry");
+        assert_eq!(source.label(), "store");
     }
 
     #[tokio::test]
-    async fn resolution_falls_back_to_the_registry_and_reports_both_failures() {
-        // `ResolvedPack`/`PackSource` are not `Debug`, so this checks the
-        // `Err` case by hand rather than via `expect_err`.
+    async fn resolution_falls_back_to_the_registry_and_reports_the_offline_sentence() {
         let result = resolve_pack_source(
-            "definitely_not_a_bundled_pack",
+            "definitely_not_a_stored_pack",
             Some("http://127.0.0.1:1"),
             tempfile::tempdir().unwrap().path(),
         )
         .await;
         let Err(error) = result else {
-            panic!("neither bundled nor registry has this pack");
+            panic!("neither the store nor the registry has this pack");
         };
         let message = format!("{error:#}");
         assert!(
-            message.contains("not compiled into this binary"),
+            message.contains("is not in the pack store of")
+                && message.contains("could not be reached"),
             "{message}"
         );
         assert!(
-            message.contains("definitely_not_a_bundled_pack"),
+            message.contains("definitely_not_a_stored_pack"),
             "{message}"
         );
     }

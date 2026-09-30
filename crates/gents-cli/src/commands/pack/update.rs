@@ -346,8 +346,9 @@ mod tests {
             graphql: None,
             agent_did: None,
         };
+        let fixture = super::super::test_support::fixture_dir("assets_fixture");
         crate::request_helpers::capture_report(super::super::install(PackInstallArgs {
-            package: "mailbox".to_owned(),
+            package: fixture.to_str().unwrap().to_owned(),
             bindings: None,
             inference_slots: Vec::new(),
             preview: false,
@@ -367,7 +368,7 @@ mod tests {
         );
 
         let (registry, _state) = crate::commands::pack::registry::tests::serve_fake_pack(
-            "mailbox",
+            "assets_fixture",
             "1.0.0",
             Vec::new(),
             format!("sha256:{}", "a".repeat(64)),
@@ -381,7 +382,7 @@ mod tests {
         .expect("outdated must list the file-recorded install");
         let packs = report["packs"].as_array().unwrap();
         assert_eq!(packs.len(), 1, "{packs:?}");
-        assert_eq!(packs[0]["pack"], "gents/mailbox");
+        assert_eq!(packs[0]["pack"], "fixture/assets_fixture");
         assert!(
             !home.path().join("data").exists(),
             "outdated never opened a node either"

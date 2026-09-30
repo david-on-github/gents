@@ -579,7 +579,7 @@ fn parse_graph(argv: &[&str]) -> GraphCommand {
 
 #[test]
 fn pack_catalog_and_install_parse() {
-    assert!(matches!(parse_pack(&["list"]), PackCommand::List));
+    assert!(matches!(parse_pack(&["list"]), PackCommand::List(_)));
     assert!(
         matches!(parse_pack(&["show", "code_review"]), PackCommand::Show(args) if args.package == "code_review")
     );

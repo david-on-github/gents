@@ -314,7 +314,7 @@ pub(crate) struct GraphScopeArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct PackShowArgs {
-    #[arg(help = "A bundled or registry name, sha256:<hex>, a .pack file, or ./dir")]
+    #[arg(help = "A local path/sha256:<hex>, an installed coordinate, or a registry name")]
     pub(crate) package: String,
     #[arg(long, help = "Home whose pack store holds local packs")]
     pub(crate) home: Option<PathBuf>,
@@ -323,6 +323,17 @@ pub(crate) struct PackShowArgs {
         help = "Pack registry base URL. Defaults to GENTS_REGISTRY, then the public registry"
     )]
     pub(crate) registry: Option<String>,
+    #[arg(
+        long,
+        help = "Print {config, scenario} as an install would load them, instead of the manifest and files"
+    )]
+    pub(crate) config: bool,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct PackListArgs {
+    #[arg(long, help = "Home whose pack store to list")]
+    pub(crate) home: Option<PathBuf>,
 }
 
 /// What `gents pack new` and `init` start a pack from.
@@ -493,7 +504,7 @@ pub(crate) struct PackFmtArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct PackDiffArgs {
-    #[arg(help = "A bundled or registry name, sha256:<hex>, a .pack file, or ./dir")]
+    #[arg(help = "A local path/sha256:<hex>, an installed coordinate, or a registry name")]
     pub(crate) a: String,
     #[arg(help = "The pack to compare it with, named the same ways")]
     pub(crate) b: String,
@@ -579,9 +590,10 @@ pub(crate) struct PackVerifyArgs {
 
 #[derive(clap::Subcommand)]
 pub(crate) enum PackCommand {
-    /// List all packs bundled in this binary.
-    List,
-    /// Inspect a pack: its manifest, digest and every file.
+    /// List the packs in the home's store.
+    List(PackListArgs),
+    /// Inspect a pack: its manifest, digest and every file, or (with
+    /// `--config`) its loaded configuration and scenario.
     Show(PackShowArgs),
     /// Check a .pack file or a stored pack against its digest.
     Verify(PackVerifyArgs),
@@ -636,7 +648,8 @@ pub(crate) enum PackCommand {
     Owner(PackOwnerArgs),
     /// Publish a built `.pack` to the pack registry.
     Publish(PackPublishArgs),
-    /// Download a pack's `.pack` from the registry without installing it.
+    /// Download a pack without installing it, or admit it into the home's
+    /// pack store with `--store`.
     Fetch(PackFetchArgs),
 }
 
@@ -652,12 +665,23 @@ pub(crate) enum PackScenarioCommand {
 
 #[derive(clap::Args)]
 pub(crate) struct PackFetchArgs {
-    #[arg(help = "Pack to download, as `name` or `namespace/name`")]
+    #[arg(
+        help = "Pack to download, as `name` or `namespace/name`; with --store, also a directory or .pack file"
+    )]
     pub(crate) package: String,
     #[arg(long, help = "Version to download; defaults to the latest published")]
     pub(crate) version: Option<String>,
     #[arg(
         long,
+        conflicts_with = "out",
+        help = "Admit the pack into the home's pack store and name index, instead of writing a file"
+    )]
+    pub(crate) store: bool,
+    #[arg(long, help = "Home whose pack store --store fills")]
+    pub(crate) home: Option<std::path::PathBuf>,
+    #[arg(
+        long,
+        conflicts_with = "store",
         help = "Where to write the .pack; defaults to <namespace>.<name>-<version>.pack here"
     )]
     pub(crate) out: Option<std::path::PathBuf>,
@@ -886,7 +910,7 @@ pub(crate) struct PackPruneArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct PackInstallArgs {
-    #[arg(help = "A bundled or registry name, sha256:<hex>, a .pack file, or ./dir")]
+    #[arg(help = "A local path/sha256:<hex>, an installed coordinate, or a registry name")]
     pub(crate) package: String,
     #[arg(
         long,
@@ -919,7 +943,7 @@ pub(crate) struct PackInstallArgs {
     pub(crate) force_rebind_concrete_did: bool,
     #[arg(
         long,
-        help = "Pack registry base URL, used when the pack is not bundled in this binary. Defaults to GENTS_REGISTRY, then the public registry"
+        help = "Pack registry base URL, used when the pack is not found locally or already installed. Defaults to GENTS_REGISTRY, then the public registry"
     )]
     pub(crate) registry: Option<String>,
     #[command(flatten)]
@@ -1035,7 +1059,7 @@ pub(crate) struct GraphToggleArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct PackRunArgs {
-    #[arg(help = "Pack directory, or a name resolved under packs/")]
+    #[arg(help = "Pack directory, or a name resolved as gents pack install resolves one")]
     pub(crate) pack: String,
     #[arg(long, help = "Reuse this home instead of a fresh one per run")]
     pub(crate) home: Option<PathBuf>,
@@ -1057,6 +1081,18 @@ pub(crate) struct PackRunArgs {
         help = "Allow a prepare-step plugin that declares standing authority (bind_dir alone needs none)"
     )]
     pub(crate) grant_authority: bool,
+    #[arg(
+        long = "with-pack",
+        value_name = "DIR_OR_PACK",
+        action = clap::ArgAction::Append,
+        help = "Admit a directory or .pack file into the run's home store first, so a graph dependency resolves from it offline; repeatable"
+    )]
+    pub(crate) with_pack: Vec<PathBuf>,
+    #[arg(
+        long,
+        help = "Pack registry base URL, used to resolve the pack and its graph dependencies. Defaults to GENTS_REGISTRY, then the public registry"
+    )]
+    pub(crate) registry: Option<String>,
 }
 
 #[derive(clap::Args)]
