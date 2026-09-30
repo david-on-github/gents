@@ -24,6 +24,8 @@ type DesktopProjectionEffectsArgs = {
   selectedSessionIdRef: MutableRefObject<string | null>;
   selectedTrackedRequestId: string | null;
   selectedTrackedRequestIdRef: MutableRefObject<string | null>;
+  /** Store version the projected session snapshot was built from, if any. */
+  projectedStoreVersionRef?: MutableRefObject<number | null>;
   setError: (error: string | null) => void;
 };
 
@@ -43,6 +45,7 @@ export function useDesktopProjectionEffects({
   selectedSessionIdRef,
   selectedTrackedRequestId,
   selectedTrackedRequestIdRef,
+  projectedStoreVersionRef,
   setError,
 }: DesktopProjectionEffectsArgs) {
   // The selection whose bounded session projection this owner has already
@@ -87,6 +90,22 @@ export function useDesktopProjectionEffects({
           selectedSessionIdRef.current,
           selectedTrackedRequestIdRef.current,
         );
+        // A bounded session read merges the selected request into the store
+        // and so emits its own store notice. When the projected session was
+        // built from that revision or a later one, the session part of the
+        // refresh would only reread the same rows; the fleet index still
+        // observes the change.
+        const projected = projectedStoreVersionRef?.current ?? null;
+        if (
+          scope === "full" &&
+          event.reason === "store" &&
+          typeof event.storeVersion === "number" &&
+          projected !== null &&
+          event.storeVersion <= projected
+        ) {
+          await controller.request("snapshot");
+          return;
+        }
         await controller.request(scope);
       },
       reportListenerError,

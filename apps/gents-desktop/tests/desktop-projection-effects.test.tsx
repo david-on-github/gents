@@ -3,12 +3,20 @@ import { describe, expect, it, vi } from "vitest";
 
 import { useDesktopProjectionEffects } from "../src/hooks/useDesktopProjectionEffects";
 
+type Handler = (event: {
+  reason: string;
+  storeVersion: number | null;
+  reconcileVersion: number | null;
+}) => void | Promise<void>;
+
 function harness() {
   const refreshSession = vi.fn(async () => null);
   const refreshSnapshot = vi.fn(async () => {});
   const refreshSessionLiveDelta = vi.fn(async () => true);
   const selectedSessionIdRef = { current: "session-1" as string | null };
   const selectedTrackedRequestIdRef = { current: null as string | null };
+  const projectedStoreVersionRef = { current: null as number | null };
+  let handler: Handler | null = null;
   const hook = renderHook(
     (props: {
       selectedTrackedRequestId: string | null;
@@ -16,7 +24,10 @@ function harness() {
     }) =>
       useDesktopProjectionEffects({
         clientAvailable: true,
-        listenToUpdates: () => Promise.resolve(() => {}),
+        listenToUpdates: (next) => {
+          handler = next as Handler;
+          return Promise.resolve(() => {});
+        },
         refreshSession,
         refreshSessionLiveDelta,
         refreshSnapshot,
@@ -25,13 +36,21 @@ function harness() {
         selectedSessionIdRef,
         selectedTrackedRequestId: props.selectedTrackedRequestId,
         selectedTrackedRequestIdRef,
+        projectedStoreVersionRef,
         setError: () => {},
       }),
     {
       initialProps: { selectedTrackedRequestId: null, selectedSessionId: "session-1" },
     },
   );
-  return { hook, refreshSession, selectedSessionIdRef };
+  return {
+    hook,
+    refreshSession,
+    refreshSnapshot,
+    selectedSessionIdRef,
+    projectedStoreVersionRef,
+    emit: (event: Parameters<Handler>[0]) => handler?.(event),
+  };
 }
 
 describe("useDesktopProjectionEffects", () => {
@@ -63,5 +82,24 @@ describe("useDesktopProjectionEffects", () => {
     });
     expect(refreshSession).toHaveBeenCalledTimes(2);
     expect(refreshSession).toHaveBeenLastCalledWith("session-2");
+  });
+
+  it("does not reread the session for a store notice its snapshot already reflects", async () => {
+    const { refreshSession, refreshSnapshot, projectedStoreVersionRef, emit } =
+      harness();
+    await act(async () => {});
+    expect(refreshSession).toHaveBeenCalledTimes(1);
+
+    projectedStoreVersionRef.current = 6;
+    await act(async () => {
+      await emit({ reason: "store", storeVersion: 6, reconcileVersion: 1 });
+    });
+    expect(refreshSession).toHaveBeenCalledTimes(1);
+    expect(refreshSnapshot).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await emit({ reason: "store", storeVersion: 7, reconcileVersion: 1 });
+    });
+    expect(refreshSession).toHaveBeenCalledTimes(2);
   });
 });

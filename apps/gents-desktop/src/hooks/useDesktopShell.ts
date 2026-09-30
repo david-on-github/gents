@@ -33,6 +33,7 @@ export function useDesktopShell({
   const selectedSessionIdRef = useRef<string | null>(null);
   const selectedAgentDidRef = useRef<string | null>(null);
   const selectedTrackedRequestIdRef = useRef<string | null>(null);
+  const projectedStoreVersionRef = useRef<number | null>(null);
   const [sending, setSending] = useState(false);
   const submissionInFlight = useRef(false);
   const [savingBehaviorConfig, setSavingBehaviorConfig] = useState(false);
@@ -176,6 +177,8 @@ export function useDesktopShell({
   selectedAgentDidRef.current = selectedAgentDid;
   selectedSessionIdRef.current = selectedSessionId;
   selectedTrackedRequestIdRef.current = selectedTrackedRequestId;
+  projectedStoreVersionRef.current =
+    selectedSessionSnapshot?.projectionRevision?.storeVersion ?? null;
 
   useDesktopShellEffects({
     api,
@@ -201,6 +204,7 @@ export function useDesktopShell({
     selectedSessionIdRef,
     selectedTrackedRequestIdRef,
     selectedTrackedRequestId,
+    projectedStoreVersionRef,
     sending,
     setLocalWorkflow,
     setError,
