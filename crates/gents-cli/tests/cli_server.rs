@@ -273,9 +273,12 @@ async fn server_error_after_runtime_spawn_drains_the_runtime() -> Result<()> {
     );
 
     let data_dir = home_dir.join(".gents").join("data");
-    let node = EmbeddedNode::builder()
-        .data_path(&data_dir)
-        .with_storage_backend(StorageBackend::Regolith)
+    let node = gents::store_key::open_home_store_key(&home_dir.join(".gents"), &data_dir)?
+        .encrypt(
+            EmbeddedNode::builder()
+                .data_path(&data_dir)
+                .with_storage_backend(StorageBackend::Regolith),
+        )
         .build()
         .await
         .with_context(|| format!("opening embedded node at {}", data_dir.display()))?;

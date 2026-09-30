@@ -19,6 +19,13 @@ pub enum IncompatibleStoreKind {
     /// identity owner refuses it rather than trusting a possibly exposed
     /// key; the home it belongs to needs a fresh start.
     InsecureKey,
+    /// A store with no recorded at-rest key: written unencrypted by an
+    /// earlier release (or left by an interrupted initialization). Encryption
+    /// cannot be turned on in place.
+    UnencryptedStore,
+    /// An encrypted store whose recorded key is definitely gone (its Keychain
+    /// item or key file no longer exists), so its data cannot be read.
+    MissingStoreKey,
 }
 
 impl IncompatibleStoreKind {
@@ -60,6 +67,12 @@ fn describe(kind: IncompatibleStoreKind, data_path: &Path) -> String {
         ),
         IncompatibleStoreKind::ForeignVersion => format!(
             "{path} was written by a different Gents version whose schema this release does not know, so it cannot open that store. Use the version that wrote it, or back it up to start fresh"
+        ),
+        IncompatibleStoreKind::UnencryptedStore => format!(
+            "{path} is not encrypted at rest: it was created by an older Gents version (or by an initialization that did not finish). This release opens only encrypted stores and cannot convert one, so re-initialize the home to start fresh (`gents init --dangerously-overwrite`), backing it up first if you need its data"
+        ),
+        IncompatibleStoreKind::MissingStoreKey => format!(
+            "{path} is encrypted, but the key this home recorded for it no longer exists (its Keychain item or key file was removed), so its data cannot be read. Re-initialize the home to start fresh (`gents init --dangerously-overwrite`)"
         ),
     }
 }

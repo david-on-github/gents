@@ -395,6 +395,14 @@ mod tests {
                 tool_package: None,
                 tool_ceiling: ToolCeilingArg::Readonly,
                 tool_root: None,
+                store_encryption: Some(
+                    gents::store_key::StoreEncryption::create(
+                        gents::store_key::StoreKeyCustodyChoice::File,
+                        &gents::store_key::home_key_file(&home),
+                    )
+                    .unwrap()
+                    .0,
+                ),
             },
         )
         .unwrap();

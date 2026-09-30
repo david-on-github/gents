@@ -40,6 +40,8 @@ pub struct ProvisionOptions {
     pub agent_name: String,
     pub tool_ceiling: ManagedToolCeiling,
     pub tool_root: Option<PathBuf>,
+    /// Custody of a new home's store key; tests request a file key.
+    pub store_key_custody: gents::store_key::StoreKeyCustodyChoice,
 }
 
 pub async fn ensure_standard_home(options: ProvisionOptions) -> Result<()> {
@@ -95,6 +97,9 @@ async fn ensure_standard_home_inner(options: ProvisionOptions) -> Result<()> {
     if let Some(tool_root) = options.tool_root {
         argv.push("--tool-root".to_string());
         argv.push(tool_root.display().to_string());
+    }
+    if options.store_key_custody == gents::store_key::StoreKeyCustodyChoice::File {
+        argv.extend(["--store-key-custody".to_string(), "file".to_string()]);
     }
     let cli = Cli::try_parse_from(argv).context("building standard Gents provision request")?;
     let Command::Init(args) = cli.command else {
@@ -163,6 +168,7 @@ mod tests {
                 tool_package: Some(crate::cli::args::ToolPackageArg::Yolo),
                 tool_ceiling: ManagedToolCeiling::Readwrite,
                 tool_root: Some(first_root.display().to_string()),
+                store_encryption: None,
             },
         )
         .unwrap();
@@ -172,6 +178,7 @@ mod tests {
             agent_name: "A different ignored name".to_string(),
             tool_ceiling: ManagedToolCeiling::Readonly,
             tool_root: Some(second_root.clone()),
+            store_key_custody: gents::store_key::StoreKeyCustodyChoice::File,
         })
         .await
         .unwrap();

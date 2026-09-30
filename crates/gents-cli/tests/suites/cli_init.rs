@@ -586,6 +586,7 @@ fn init_hosted_preset_without_default_requires_model_name() -> Result<()> {
         .env("HOME", &home_dir)
         .env("RUST_LOG", "error")
         .arg("init")
+        .args(["--store-key-custody", "file"])
         .arg("--backend-preset")
         .arg("openai")
         .output()
@@ -691,6 +692,7 @@ async fn init_rejects_setting_both_api_key_and_api_key_env_var() -> Result<()> {
         .env("HOME", &home_dir)
         .env("RUST_LOG", "error")
         .arg("init")
+        .args(["--store-key-custody", "file"])
         .arg("--model-name")
         .arg("test-model")
         .arg("--api-key")
@@ -974,4 +976,55 @@ async fn readiness_wait_survives_preflight_listener_closing_before_server_start(
     let result = ready.await;
     server.abort();
     result
+}
+
+/// `gents init` records the store key it created, re-init reuses it, and a
+/// home an earlier release initialized (no recorded key) is refused with the
+/// store-refusal exit status rather than opened or converted.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn init_records_store_encryption_and_a_legacy_home_is_refused() -> Result<()> {
+    let tempdir = tempfile::tempdir().context("creating tempdir")?;
+    let home_dir = tempdir.path().join("home");
+    fs::create_dir_all(&home_dir)?;
+    let home = home_dir.join(".gents");
+    let agent_name = format!("cli-store-key-{}", Uuid::new_v4().simple());
+
+    run_init_json(&home_dir, &["--identity-only", "--agent-name", &agent_name])?;
+    let config_path = gents::home::init_config_path(&home);
+    let recorded = read_json_file(&config_path)?["store_encryption"].clone();
+    assert_eq!(
+        recorded,
+        serde_json::json!({"version": 1, "custody": "file"}),
+        "{recorded}"
+    );
+    let key_file = gents::store_key::home_key_file(&home);
+    let key = fs::read(&key_file)?;
+    run_init_json(&home_dir, &["--identity-only", "--agent-name", &agent_name])?;
+    assert_eq!(fs::read(&key_file)?, key, "re-init reuses the recorded key");
+
+    let mut legacy = read_json_file(&config_path)?;
+    legacy
+        .as_object_mut()
+        .context("init.json object")?
+        .remove("store_encryption");
+    write_json_file(&config_path, &legacy)?;
+    let output = Command::new(cli_bin())
+        .env("HOME", &home_dir)
+        .env("RUST_LOG", "error")
+        .args(["config", "export", "--root"])
+        .arg(tempdir.path().join("export"))
+        .output()
+        .context("opening a legacy home")?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        output.status.code(),
+        Some(gents_server::native_service::INCOMPATIBLE_STORE_EXIT_CODE),
+        "{stderr}"
+    );
+    assert!(stderr.contains("not encrypted at rest"), "{stderr}");
+    assert!(
+        !home.join("data/MANIFEST").exists(),
+        "the store is never opened"
+    );
+    Ok(())
 }

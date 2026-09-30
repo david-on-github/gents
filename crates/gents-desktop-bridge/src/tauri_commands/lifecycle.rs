@@ -196,7 +196,9 @@ async fn run_detached_client_start<R: Runtime>(
         match acquire_client_lifecycle(Arc::clone(&state.client_lifecycle), CLIENT_LIFECYCLE_WAIT)
             .await
         {
-            Ok(lifecycle) => start_client_core_async(paths, lifecycle).await,
+            Ok(lifecycle) => {
+                start_client_core_async(paths, state.policy.store_key_custody, lifecycle).await
+            }
             Err(error) => Err((error, None)),
         };
     {
@@ -431,6 +433,7 @@ type ClientStartFailure = (
 /// owns the lifecycle guard and hands it back with the core.
 async fn start_client_core_async(
     paths: gents_desktop_core::client::DesktopPaths,
+    store_key_custody: gents::store_key::StoreKeyCustodyChoice,
     lifecycle: ClientLifecycleGuard,
 ) -> Result<(ClientCore, ClientLifecycleGuard), ClientStartFailure> {
     let node_data_dir = paths.node_data_dir().to_path_buf();
@@ -441,7 +444,12 @@ async fn start_client_core_async(
         .stack_size(CLIENT_START_STACK_SIZE)
         .spawn(move || {
             tauri::async_runtime::block_on(async move {
-                let result = ClientCore::start_with_paths_reporting_stages(paths, stage_tx).await;
+                let options = gents_desktop_core::client::ClientCoreOptions {
+                    store_key_custody,
+                    ..Default::default()
+                };
+                let result =
+                    ClientCore::start_with_paths_reporting_stages(paths, options, stage_tx).await;
                 deliver_client_start(tx, result, lifecycle, |core: ClientCore| async move {
                     core.shutdown().await
                 })
@@ -788,6 +796,7 @@ mod tests {
         let config = crate::config::BridgeConfig {
             home: crate::config::HomePolicy::FixedRoot(temp.path().join("desktop")),
             bootstrap: crate::config::BootstrapPolicy::PairedRemoteOnly,
+            store_key_custody: gents::store_key::StoreKeyCustodyChoice::File,
             ..Default::default()
         };
         let policy = crate::state::resolve_policy(&config, None).expect("policy");
@@ -859,6 +868,55 @@ mod tests {
     /// A desktop state whose principal key an older build wrote with ambient
     /// (0644) permissions fails start as an incompatible local store, before
     /// any node or peer directory is opened, and the key is left as it was.
+    /// An earlier release's desktop client store is plaintext and may hold
+    /// credential collections it subscribed to. It is refused as unencrypted
+    /// through the same typed refusal the reset flow retires, and no key is
+    /// created for it.
+    #[tokio::test]
+    async fn an_unencrypted_old_client_store_fails_start_as_an_incompatible_local_store() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let paths = gents_desktop_core::client::DesktopPaths::from_root(temp.path());
+        let legacy = gents::defra_node::EmbeddedNode::builder()
+            .data_path(paths.node_data_dir())
+            .with_storage_backend(gents::defra_node::StorageBackend::Regolith)
+            .build()
+            .await
+            .expect("legacy client store");
+        legacy.shutdown().await;
+        drop(legacy);
+
+        let lifecycle = Arc::new(tokio::sync::Mutex::new(())).lock_owned().await;
+        let Err((error, store)) = start_client_core_async(
+            paths.clone(),
+            gents::store_key::StoreKeyCustodyChoice::File,
+            lifecycle,
+        )
+        .await
+        else {
+            panic!("an unencrypted store must not start the client");
+        };
+        assert_eq!(error.code, BridgeErrorCode::IncompatibleLocalStore);
+        let store = store.expect("typed refusal");
+        assert_eq!(
+            store.kind,
+            gents::storage_backend::IncompatibleStoreKind::UnencryptedStore
+        );
+        assert!(store.kind.is_older(), "the reset may offer deletion");
+        assert_eq!(store.data_path, paths.node_data_dir());
+        assert!(!paths.store_encryption_path().exists());
+        assert!(!paths.store_key_path().exists());
+        for entry in [paths.store_encryption_path(), paths.store_key_path()] {
+            assert!(
+                paths
+                    .client_state_entries()
+                    .iter()
+                    .any(|path| path == entry),
+                "the reset retires {}",
+                entry.display()
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn an_insecure_old_client_key_fails_start_as_an_incompatible_local_store() {
@@ -873,7 +931,13 @@ mod tests {
         .unwrap();
 
         let lifecycle = Arc::new(tokio::sync::Mutex::new(())).lock_owned().await;
-        let Err((error, store)) = start_client_core_async(paths.clone(), lifecycle).await else {
+        let Err((error, store)) = start_client_core_async(
+            paths.clone(),
+            gents::store_key::StoreKeyCustodyChoice::File,
+            lifecycle,
+        )
+        .await
+        else {
             panic!("an insecure key must not start the client");
         };
         assert_eq!(error.code, BridgeErrorCode::IncompatibleLocalStore);

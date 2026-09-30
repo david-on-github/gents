@@ -34,44 +34,68 @@ pub fn load_or_create_file_identity(path: &Path) -> Result<RawIdentity> {
         return Ok(identity);
     }
 
+    let private_key = crypto::generate_ed25519().map_err(anyhow::Error::from)?;
+    let bytes = private_key.raw();
+    match publish_private_key_file(path, &bytes) {
+        Ok(true) => RawIdentity::from_bytes(crypto::KeyType::Ed25519, &bytes)
+            .map_err(anyhow::Error::from)
+            .with_context(|| format!("constructing identity from {}", path.display())),
+        Ok(false) => load_file_identity(path),
+        Err(error) => Err(error),
+    }
+}
+
+/// Publishes `bytes` complete at `path` with owner-only access, creating a
+/// private parent directory. Never replaces an existing file: `Ok(false)`
+/// reports that another writer's file is already there.
+pub(crate) fn publish_private_key_file(path: &Path, bytes: &[u8]) -> Result<bool> {
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty());
     if let Some(parent) = parent {
         create_private_parent(parent)?;
     }
-
-    let private_key = crypto::generate_ed25519().map_err(anyhow::Error::from)?;
-    let bytes = private_key.raw();
     let mut staged = tempfile::NamedTempFile::new_in(parent.unwrap_or_else(|| Path::new(".")))
-        .with_context(|| format!("staging identity key for {}", path.display()))?;
+        .with_context(|| format!("staging key for {}", path.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         staged
             .as_file()
             .set_permissions(fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("securing staged identity key for {}", path.display()))?;
+            .with_context(|| format!("securing staged key for {}", path.display()))?;
     }
     staged
-        .write_all(&bytes)
-        .with_context(|| format!("writing staged identity key for {}", path.display()))?;
+        .write_all(bytes)
+        .with_context(|| format!("writing staged key for {}", path.display()))?;
     staged
         .as_file()
         .sync_all()
-        .with_context(|| format!("syncing staged identity key for {}", path.display()))?;
+        .with_context(|| format!("syncing staged key for {}", path.display()))?;
 
     match staged.persist_noclobber(path) {
-        Ok(_) => RawIdentity::from_bytes(crypto::KeyType::Ed25519, &bytes)
-            .map_err(anyhow::Error::from)
-            .with_context(|| format!("constructing identity from {}", path.display())),
-        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => load_file_identity(path),
-        Err(error) => Err(error.error)
-            .with_context(|| format!("persisting identity key to {}", path.display())),
+        Ok(_) => Ok(true),
+        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => Ok(false),
+        Err(error) => {
+            Err(error.error).with_context(|| format!("persisting key to {}", path.display()))
+        }
     }
 }
 
 fn read_existing(path: &Path) -> Result<Option<RawIdentity>> {
+    let Some(bytes) = read_private_key_file(path)? else {
+        return Ok(None);
+    };
+    RawIdentity::from_bytes(crypto::KeyType::Ed25519, &bytes)
+        .map_err(anyhow::Error::from)
+        .with_context(|| format!("loading identity from {}", path.display()))
+        .map(Some)
+}
+
+/// Reads an existing owner-only key file without following a symlink;
+/// `None` when it does not exist. A key group or other users can access is
+/// refused as [`InsecureKeyPermissions`].
+pub(crate) fn read_private_key_file(path: &Path) -> Result<Option<Vec<u8>>> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -82,26 +106,21 @@ fn read_existing(path: &Path) -> Result<Option<RawIdentity>> {
     let mut file = match options.open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(error).with_context(|| format!("opening identity key {}", path.display()))
-        }
+        Err(error) => return Err(error).with_context(|| format!("opening key {}", path.display())),
     };
     validate_opened_key(&file, path)?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)
-        .with_context(|| format!("reading identity key {}", path.display()))?;
-    RawIdentity::from_bytes(crypto::KeyType::Ed25519, &bytes)
-        .map_err(anyhow::Error::from)
-        .with_context(|| format!("loading identity from {}", path.display()))
-        .map(Some)
+        .with_context(|| format!("reading key {}", path.display()))?;
+    Ok(Some(bytes))
 }
 
 fn validate_opened_key(file: &File, path: &Path) -> Result<()> {
     let metadata = file
         .metadata()
-        .with_context(|| format!("inspecting identity key {}", path.display()))?;
+        .with_context(|| format!("inspecting key {}", path.display()))?;
     if !metadata.file_type().is_file() {
-        bail!("identity key {} is not a regular file", path.display());
+        bail!("key {} is not a regular file", path.display());
     }
     #[cfg(unix)]
     {

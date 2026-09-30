@@ -1387,9 +1387,13 @@ async fn initialized_trace_node(
     let _identity = gents::KeyIdentity::load_or_create(key_path, None)
         .context("loading initialized trace identity")?;
 
-    EmbeddedNode::builder()
-        .data_path(agent_home.join("data"))
-        .with_storage_backend(StorageBackend::Regolith)
+    let data = agent_home.join("data");
+    gents::store_key::open_home_store_key(agent_home, &data)?
+        .encrypt(
+            EmbeddedNode::builder()
+                .data_path(&data)
+                .with_storage_backend(StorageBackend::Regolith),
+        )
         .with_node_identity_did(agent_did)
         .build()
         .await

@@ -45,10 +45,10 @@ impl ClientCore {
     /// completes, so a caller bounding the start can say where it stalled.
     pub async fn start_with_paths_reporting_stages(
         paths: DesktopPaths,
+        options: ClientCoreOptions,
         completed_stage: watch::Sender<&'static str>,
     ) -> Result<Self> {
-        Self::start_reporting_stages(paths, ClientCoreOptions::default(), Some(completed_stage))
-            .await
+        Self::start_reporting_stages(paths, options, Some(completed_stage)).await
     }
 
     async fn start_reporting_stages(
@@ -71,12 +71,16 @@ impl ClientCore {
         };
         paths.ensure_root_dirs().await?;
         gents::storage_backend::reject_legacy_store(paths.node_data_dir())?;
+        let store_key = open_or_create_client_store_key(&paths, options.store_key_custody)?;
 
         let principal = PrincipalIdentity::load_or_create(&paths).await?;
         checkpoint("paths_and_identity");
-        let mut node_builder = NodeBuilder::default()
-            .data_path(paths.node_data_dir())
-            .with_storage_backend(StorageBackend::Regolith)
+        let mut node_builder = store_key
+            .encrypt(
+                NodeBuilder::default()
+                    .data_path(paths.node_data_dir())
+                    .with_storage_backend(StorageBackend::Regolith),
+            )
             .with_p2p(desktop_p2p_config(&paths, &options))
             .with_node_identity_did(principal.did());
         if let Some(http_addr) = options.http_addr {
@@ -425,6 +429,43 @@ pub(super) fn normalize_required<'a>(field: &str, value: &'a str) -> Result<&'a 
     (!trimmed.is_empty())
         .then_some(trimmed)
         .with_context(|| format!("{field} must not be empty"))
+}
+
+/// The client store's key: the one its record names, or a new one recorded
+/// before the store is first written. A store with data and no record (an
+/// earlier release's unencrypted store) is refused as
+/// [`gents::storage_backend::IncompatibleStoreKind::UnencryptedStore`].
+fn open_or_create_client_store_key(
+    paths: &DesktopPaths,
+    choice: gents::store_key::StoreKeyCustodyChoice,
+) -> Result<gents::store_key::StoreKey> {
+    let record_path = paths.store_encryption_path();
+    let record = match std::fs::read(record_path) {
+        Ok(bytes) => Some(
+            serde_json::from_slice::<gents::store_key::StoreEncryption>(&bytes)
+                .with_context(|| format!("decoding {}", record_path.display()))?,
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading {}", record_path.display()))
+        }
+    };
+    let (created, key) = gents::store_key::open_or_create_store_key(
+        record.as_ref(),
+        choice,
+        paths.store_key_path(),
+        paths.node_data_dir(),
+    )?;
+    if record.is_none() {
+        let staged = tempfile::NamedTempFile::new_in(paths.root())
+            .with_context(|| format!("staging {}", record_path.display()))?;
+        serde_json::to_writer(staged.as_file(), &created)?;
+        staged.as_file().sync_all()?;
+        staged
+            .persist(record_path)
+            .with_context(|| format!("writing {}", record_path.display()))?;
+    }
+    Ok(key)
 }
 
 #[cfg(test)]

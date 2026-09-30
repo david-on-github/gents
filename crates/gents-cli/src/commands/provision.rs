@@ -26,6 +26,7 @@ pub(crate) async fn provision(args: ProvisionArgs) -> Result<()> {
         args.bootstrap_macos_secure_enclave,
         args.keychain_label.as_deref(),
         args.secure_enclave_label.as_deref(),
+        crate::cli::args::store_key_custody(args.store_key_custody),
     )
     .await?;
 
@@ -115,6 +116,7 @@ async fn ensure_home_identity(
     bootstrap_macos_secure_enclave: bool,
     keychain_label: Option<&str>,
     secure_enclave_label: Option<&str>,
+    store_key_custody: gents::store_key::StoreKeyCustodyChoice,
 ) -> Result<ProvisionIdentityReport> {
     let bootstrap_count = [
         bootstrap_file_identity,
@@ -172,6 +174,7 @@ async fn ensure_home_identity(
         tool_package: ToolPackageArg::Readonly,
         tool_root: None,
         reset: false,
+        store_key_custody,
     })
     .await
     .with_context(|| format!("initializing identity metadata in {}", home_dir.display()))?;

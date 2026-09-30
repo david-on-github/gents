@@ -39,6 +39,10 @@ pub struct StoredInitConfig<ToolPackage = String, ToolCeiling = String> {
     pub tool_package: Option<ToolPackage>,
     pub tool_ceiling: ToolCeiling,
     pub tool_root: Option<String>,
+    /// The home store's at-rest encryption. Absent only in a home an earlier
+    /// release initialized, whose store is refused as unencrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_encryption: Option<crate::store_key::StoreEncryption>,
 }
 
 /// The home gents uses when none is named: `GENTS_HOME` when set, otherwise
@@ -234,9 +238,12 @@ fn lock_path(home_dir: &Path, path: PathBuf) -> Result<StoreLock> {
 
 /// The default identity key path under a gents home, for the named agent.
 pub fn default_key_path(home_dir: &Path, agent_name: &str) -> PathBuf {
-    home_dir
-        .join(KEYS_DIR_NAME)
-        .join(format!("{agent_name}.key"))
+    keys_dir(home_dir).join(format!("{agent_name}.key"))
+}
+
+/// The directory a gents home keeps its file keys in.
+pub fn keys_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(KEYS_DIR_NAME)
 }
 
 /// The path `init.json` lives at under a gents home.
@@ -1029,6 +1036,7 @@ mod tests {
             tool_package: Some("Readonly".to_string()),
             tool_ceiling: "Readonly".to_string(),
             tool_root: None,
+            store_encryption: None,
         }
     }
 

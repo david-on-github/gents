@@ -77,9 +77,13 @@ pub async fn initialized_agent_node(
     let _identity = gents::KeyIdentity::load_or_create(key_path, None)
         .context("loading initialized agent identity")?;
 
-    gents::defra_node::EmbeddedNode::builder()
-        .data_path(agent_home.join("data"))
-        .with_storage_backend(gents::defra_node::StorageBackend::Regolith)
+    let data = agent_home.join("data");
+    gents::store_key::open_home_store_key(agent_home, &data)?
+        .encrypt(
+            gents::defra_node::EmbeddedNode::builder()
+                .data_path(&data)
+                .with_storage_backend(gents::defra_node::StorageBackend::Regolith),
+        )
         .with_node_identity_did(&agent_did)
         .build()
         .await

@@ -727,6 +727,7 @@ async fn start_managed_server<'a, R: Runtime>(
                 agent_name: agent_name.to_string(),
                 tool_ceiling: authority.tool_ceiling.into(),
                 tool_root: authority.tool_root.clone(),
+                store_key_custody: state.policy.store_key_custody,
             },
         )
         .await?;
@@ -3279,6 +3280,7 @@ pub async fn desktop_managed_server_restart<R: Runtime>(
         agent_name: request.agent_name.clone(),
         tool_ceiling: tool_ceiling.into(),
         tool_root: authority.tool_root.clone(),
+        store_key_custody: state.policy.store_key_custody,
     };
     if let Err(error) = stop_before_reprovision(
         || async { run_native(native_service(&app, &state)?, |service| service.stop(false)).await },
@@ -3990,6 +3992,7 @@ mod tests {
                 agent_name: "Scout".to_string(),
                 tool_ceiling: ManagedServerToolCeiling::Readwrite.into(),
                 tool_root: None,
+                store_key_custody: gents::store_key::StoreKeyCustodyChoice::File,
             },
         )
         .await
@@ -5457,6 +5460,7 @@ mod tests {
                 },
                 snapshot_grants: SnapshotGrants::core_only(),
                 managed_server: ManagedServerPolicy::Allowed,
+                store_key_custody: gents::store_key::StoreKeyCustodyChoice::File,
             },
             None,
         )
@@ -6297,6 +6301,7 @@ mod tests {
                 },
                 snapshot_grants: SnapshotGrants::core_only(),
                 managed_server: ManagedServerPolicy::Allowed,
+                store_key_custody: gents::store_key::StoreKeyCustodyChoice::File,
             },
             None,
         )

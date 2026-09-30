@@ -62,6 +62,8 @@ pub struct ClientCoreOptions {
     pub rate_limit_rate: f64,
     pub max_pending_dags: usize,
     pub install_replicators_on_bootstrap: bool,
+    /// Custody of a new client store's at-rest key.
+    pub store_key_custody: gents::store_key::StoreKeyCustodyChoice,
 }
 
 impl Default for ClientCoreOptions {
@@ -79,16 +81,20 @@ impl Default for ClientCoreOptions {
             rate_limit_rate: DESKTOP_P2P_RATE_LIMIT_RATE,
             max_pending_dags: p2p::sync::DEFAULT_MAX_PENDING_DAGS,
             install_replicators_on_bootstrap: true,
+            store_key_custody: gents::store_key::StoreKeyCustodyChoice::default(),
         }
     }
 }
 
 impl ClientCoreOptions {
+    /// The loopback-only profile tests and fixtures run: no relay or
+    /// discovery, and a file store key so no login-keychain item is written.
     pub fn local_only() -> Self {
         Self {
             bind_addr: Some(IpAddr::V4(Ipv4Addr::LOCALHOST)),
             relay_mode: IrohRelayModeConfig::Disabled,
             discovery: IrohDiscoveryConfig::Disabled,
+            store_key_custody: gents::store_key::StoreKeyCustodyChoice::File,
             ..Self::default()
         }
     }

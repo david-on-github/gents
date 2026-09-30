@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use gents::defra_node::{EmbeddedNode, NodeBuilder, StorageBackend};
+use gents::defra_node::NodeBuilder;
 use serde::de::DeserializeOwned;
 
 mod caused_sessions;
@@ -612,18 +612,18 @@ pub(crate) async fn resolve_config_access(
     ))
 }
 
-pub(crate) fn persistent_node_builder(data_dir: &Path) -> Result<NodeBuilder> {
+/// The builder for an initialized home's store at `data_dir`, encrypted with
+/// the key the home recorded.
+pub(crate) fn persistent_node_builder(home_dir: &Path, data_dir: &Path) -> Result<NodeBuilder> {
     gents::storage_backend::reject_legacy_store(data_dir)?;
-    Ok(EmbeddedNode::builder()
-        .data_path(data_dir)
-        .with_storage_backend(StorageBackend::Regolith))
+    let key = gents::store_key::open_home_store_key(home_dir, data_dir)?;
+    gents::store_key::persistent_builder(data_dir, &key)
 }
 
 pub(crate) fn persistent_node_builder_with_stored_identity(
     home_dir: &Path,
     data_dir: &Path,
 ) -> Result<NodeBuilder> {
-    let mut builder = persistent_node_builder(data_dir)?;
     let config = read_init_config(home_dir)?.ok_or_else(|| {
         anyhow::anyhow!(
             "gents home {} is not initialized; run `gents init --home {}` first",
@@ -632,8 +632,8 @@ pub(crate) fn persistent_node_builder_with_stored_identity(
         )
     })?;
     let identity = load_initialized_home_identity(home_dir, &config)?;
-    builder = builder.with_node_identity_did(identity.did().to_string());
-    Ok(builder)
+    Ok(persistent_node_builder(home_dir, data_dir)?
+        .with_node_identity_did(identity.did().to_string()))
 }
 
 pub(crate) fn require_non_empty<'a>(field: &str, value: &'a str) -> Result<&'a str> {
@@ -764,6 +764,14 @@ mod tests {
                 tool_package: None,
                 tool_ceiling: ToolCeilingArg::Readonly,
                 tool_root: None,
+                store_encryption: Some(
+                    gents::store_key::StoreEncryption::create(
+                        gents::store_key::StoreKeyCustodyChoice::File,
+                        &gents::store_key::home_key_file(&home),
+                    )
+                    .unwrap()
+                    .0,
+                ),
             },
         )
         .unwrap();
@@ -774,6 +782,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(node.node_identity_did(), Some(did.as_str()));
+    }
+
+    /// Every embedded open of a home goes through the recorded store key, so a
+    /// home an earlier release initialized is refused before its store opens.
+    #[test]
+    fn a_home_initialized_before_store_encryption_is_refused_as_unencrypted() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = initialized_home(temp.path());
+        let mut config = read_init_config(&home).unwrap().unwrap();
+        config.store_encryption = None;
+        write_init_config(&home, &config).unwrap();
+        let data = default_data_dir(&home);
+
+        let error = match persistent_node_builder_with_stored_identity(&home, &data) {
+            Ok(_) => panic!("an unencrypted home must not open"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            gents::storage_backend::incompatible_store(&error, &data).map(|store| store.kind),
+            Some(gents::storage_backend::IncompatibleStoreKind::UnencryptedStore)
+        );
+        assert_eq!(
+            crate::native_service::incompatible_store_exit_code(
+                gents::storage_backend::IncompatibleStoreKind::UnencryptedStore
+            ),
+            crate::native_service::INCOMPATIBLE_STORE_EXIT_CODE
+        );
+        assert!(!data.join("MANIFEST").exists(), "the store is never opened");
     }
 
     /// An initialized home: the signing key and `init.json` every
@@ -796,6 +832,14 @@ mod tests {
                 tool_package: None,
                 tool_ceiling: ToolCeilingArg::Readonly,
                 tool_root: None,
+                store_encryption: Some(
+                    gents::store_key::StoreEncryption::create(
+                        gents::store_key::StoreKeyCustodyChoice::File,
+                        &gents::store_key::home_key_file(&home),
+                    )
+                    .unwrap()
+                    .0,
+                ),
             },
         )
         .unwrap();

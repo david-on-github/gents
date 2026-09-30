@@ -164,6 +164,7 @@ fn platform_bridge_config() -> BridgeConfig {
         },
         snapshot_grants: SnapshotGrants::all(),
         managed_server: platform_managed_server_policy(),
+        store_key_custody: gents::store_key::StoreKeyCustodyChoice::default(),
     }
 }
 
