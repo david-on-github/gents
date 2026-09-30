@@ -6,7 +6,7 @@
 //! chain. Persona requests reuse the existing signed admission and reconciliation path.
 
 mod command;
-pub(crate) use command::is_help_call;
+pub(crate) use command::{is_help_call, ConfigCommandParams};
 mod execution;
 pub use execution::ConfigExecutionReceipt;
 mod graph_preview;
