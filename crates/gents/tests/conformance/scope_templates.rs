@@ -352,14 +352,12 @@ fn client_route_is_directional_destination_scoped_and_control_plane_bounded() {
         owner,
     );
     assert!(!outbound.contains_key("AgentBehaviorReadiness"));
-    for excluded in [
-        "InferenceBackend",
-        "OAuthCredential",
-        "PeerPairingDesired",
-        "DataPlanePairingDesired",
-    ] {
+    for excluded in gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES
+        .iter()
+        .chain(&["PeerPairingDesired", "DataPlanePairingDesired"])
+    {
         assert!(
-            !template.collections.contains(&excluded),
+            !template.collections.contains(excluded),
             "client route must exclude {excluded}"
         );
     }

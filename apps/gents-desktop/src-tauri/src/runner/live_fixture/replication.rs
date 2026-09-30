@@ -1,7 +1,9 @@
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use gents_desktop_core::client::{ClientCore, DesktopPaths, PeerRecord};
+use gents_desktop_core::client::{
+    subscribed_collection_names, ClientCore, DesktopPaths, PeerRecord,
+};
 
 use super::agent::LiveAgentDocs;
 
@@ -53,14 +55,14 @@ pub(super) async fn configure_live_replicators(
         remote_core,
         &desktop_addr,
         &format!("{label} -> desktop replicator"),
-        subscribed_collection_names_for_runner(),
+        subscribed_collection_names(),
     )
     .await?;
     set_replicator_with_retry(
         desktop_core,
         &remote_addr,
         &format!("desktop -> {label} replicator"),
-        subscribed_collection_names_for_runner(),
+        subscribed_collection_names(),
     )
     .await?;
     Ok(())
@@ -154,14 +156,14 @@ async fn set_replicator_with_retry(
     core: &ClientCore,
     addr: &str,
     label: &str,
-    collections: Vec<String>,
+    collections: Vec<&'static str>,
 ) -> Result<()> {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         match core
             .p2p()
             .add_replicator(
-                collections.clone(),
+                collections.iter().map(|name| (*name).to_owned()).collect(),
                 Some(addr),
                 Default::default(),
                 Vec::new(),
@@ -177,53 +179,6 @@ async fn set_replicator_with_retry(
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
         }
-    }
-}
-
-/// Collections the live fixture replicates between its two nodes.
-///
-/// `RenderedRequest` is deliberately excluded. Its `request_json` and
-/// `provenance_json` are the whole conversation, the system prompt, and the
-/// tool surface in plaintext — `RenderedRequest` carries no `@policy` and no
-/// field encryption, because both are blocked on defradb.rs#1318 — and this
-/// list is built from `ALL_COLLECTION_NAMES` verbatim, so a new collection
-/// joins the P2P subscription set with no decision being taken about it.
-/// Capture is on by default, so shipping those bodies to a fixture peer would
-/// be exactly that unmade decision. Credential collections stay off the
-/// desktop for the same reason as in its own subscription set.
-fn subscribed_collection_names_for_runner() -> Vec<String> {
-    gents_protocol::schemas::RUNTIME_COLLECTION_NAMES
-        .iter()
-        .chain(gents_protocol::schemas::ALL_COLLECTION_NAMES.iter())
-        .filter(|name| !gents_protocol::schemas::is_local_audit_collection(name))
-        .filter(|name| !gents_protocol::schemas::is_credential_collection(name))
-        .map(|name| (*name).to_string())
-        .collect()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::subscribed_collection_names_for_runner;
-
-    /// The runner's subscription set is derived from a list that grows
-    /// whenever a collection is added, so the exclusion has to be asserted
-    /// rather than assumed.
-    #[test]
-    fn the_runner_does_not_replicate_plaintext_provider_bodies() {
-        let names = subscribed_collection_names_for_runner();
-        for sensitive in gents_protocol::schemas::LOCAL_AUDIT_COLLECTION_NAMES
-            .iter()
-            .chain(gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES)
-        {
-            assert!(
-                !names.iter().any(|name| name == sensitive),
-                "{sensitive} must stay out of the fixture replication set: {names:?}"
-            );
-        }
-        assert!(
-            names.iter().any(|name| name == "AgentRequest"),
-            "the exclusion must not have emptied the set: {names:?}"
-        );
     }
 }
 
