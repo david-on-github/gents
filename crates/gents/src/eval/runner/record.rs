@@ -148,7 +148,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let access = ConfigAccess::Graphql(format!("http://{address}/api/v0/graphql"));
+        let access = ConfigAccess::graphql(format!("http://{address}/api/v0/graphql"));
         let recorder = DocumentRecorder::new(&access);
         let owner = "did:key:eval-recorder-test";
         let completion = TrialCompletion {

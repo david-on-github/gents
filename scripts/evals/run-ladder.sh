@@ -124,8 +124,8 @@ GRAPHQL="http://127.0.0.1:$PORT/api/v0/graphql"
 # with --home fall back to opening the store themselves until runtime.json does.
 served() {
   grep -qF "127.0.0.1:$PORT/" "$EVAL_HOME/runtime.json" 2>/dev/null &&
-    curl -fsS -m 3 -H 'content-type: application/json' -d '{"query":"{ AgentPrincipal { agent_did } }"}' "$GRAPHQL" 2>/dev/null |
-      python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if not d.get("errors") and any(r.get("agent_did")==sys.argv[1] for r in d.get("data",{}).get("AgentPrincipal",[])) else 1)' "$DID" 2>/dev/null
+    "$GENTS" query --home "$EVAL_HOME" --graphql "$GRAPHQL" --collection AgentPrincipal --field agent_did 2>/dev/null |
+      python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if any(r.get("agent_did")==sys.argv[1] for r in d.get("results",[])) else 1)' "$DID" 2>/dev/null
 }
 if ! served; then
   if [ -z "$PORT_OVERRIDE" ]; then
