@@ -10,7 +10,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Whenever a new FallbackNote record arrives, handle its message yourself and acknowledge it. Let separate records run independently. Keep a completion record for each run. Some records have no message. In that case, handle \"fallback-message-88\" instead. The FallbackNote records already have a message field. Set this up now; I will send records later.",
+      "prompt": "Whenever a new FallbackNote record arrives, handle its message yourself and acknowledge it. Let separate records run independently. Keep the app's standard run record so I can see whether each run succeeded or failed. Some records have no message. In that case, handle \"fallback-message-88\" instead. The FallbackNote records already have a message field. Set this up now; I will send records later.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -94,7 +94,7 @@
                   },
                   {
                     "field": "event_kind",
-                    "equals": "created"
+                    "matches": "^(created|null)$"
                   }
                 ]
               }

@@ -283,7 +283,7 @@ pub async fn run(
     refuse_if_held(&run_dir(&request.runs_dir, &request.run_id)?)?;
     let frozen = freeze(access, request, executor.isolation()).await?;
     clear_cancel(&frozen.run_dir)?;
-    let recorder = DocumentRecorder(access);
+    let recorder = DocumentRecorder::new(access);
     execute_frozen(&frozen, &recorder, executor, registry, cancel, options).await
 }
 
@@ -306,7 +306,7 @@ pub async fn resume(
 ) -> Result<RunOutcome> {
     let frozen = thaw(access, owner, run_id, runs_dir, executor.isolation()).await?;
     clear_cancel(&frozen.run_dir)?;
-    let recorder = DocumentRecorder(access);
+    let recorder = DocumentRecorder::new(access);
     execute_frozen(&frozen, &recorder, executor, registry, cancel, options).await
 }
 
@@ -1378,7 +1378,7 @@ mod tests {
     impl<'a> FaultingRecorder<'a> {
         fn new(access: &'a ConfigAccess) -> Self {
             Self {
-                inner: DocumentRecorder(access),
+                inner: DocumentRecorder::new(access),
                 fail_on: None,
                 calls: Mutex::new(Vec::new()),
             }
@@ -2058,7 +2058,7 @@ mod tests {
         request.breaker_threshold = 2;
         let gate = CancellationToken::new();
         let recorder = GatingRecorder {
-            inner: DocumentRecorder(&launching.access),
+            inner: DocumentRecorder::new(&launching.access),
             completions: Mutex::new(0),
             open_after: 2,
             gate: gate.clone(),
@@ -2253,7 +2253,7 @@ mod tests {
         request_cancel(&launching.runs_dir(), "run-early").unwrap();
         let outcome = execute_frozen(
             &frozen,
-            &DocumentRecorder(&launching.access),
+            &DocumentRecorder::new(&launching.access),
             &ScriptedExecutor::new().with_default(passed()),
             &CheckRegistry::builtin(),
             CancellationToken::new(),
@@ -2325,7 +2325,7 @@ mod tests {
             .await
             .unwrap();
         let recorder = MarkAfterComplete {
-            inner: DocumentRecorder(&launching.access),
+            inner: DocumentRecorder::new(&launching.access),
             runs_dir: launching.runs_dir(),
         };
         let outcome = execute_frozen(
@@ -2574,7 +2574,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn concurrency_four_writes_the_same_documents_as_one() {
+    async fn concurrency_32_writes_the_same_documents_as_one() {
         async fn run_at(
             concurrency: u32,
         ) -> (
@@ -2584,6 +2584,7 @@ mod tests {
             let (launching, pack) = launching("captured_rows_count").await;
             let mut request = request(&launching, &pack, "run-1");
             request.concurrency = concurrency;
+            request.trials_per_case = 8;
             let outcome = run(
                 &launching.access,
                 &request,
@@ -2594,7 +2595,7 @@ mod tests {
             )
             .await
             .unwrap();
-            assert_eq!(outcome.completed, 8);
+            assert_eq!(outcome.completed, 32);
             let trials = load_trials(&launching.access, OWNER, "run-1")
                 .await
                 .unwrap();
@@ -2605,7 +2606,7 @@ mod tests {
         }
 
         let (serial_trials, serial_verdicts) = run_at(1).await;
-        let (parallel_trials, parallel_verdicts) = run_at(4).await;
+        let (parallel_trials, parallel_verdicts) = run_at(32).await;
         assert_eq!(serial_trials, parallel_trials);
         assert_eq!(serial_verdicts, parallel_verdicts);
     }

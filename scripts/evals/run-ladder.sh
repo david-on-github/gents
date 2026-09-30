@@ -253,7 +253,11 @@ EOF
 report: $GENTS eval show $RUN_ID --home $EVAL_HOME
 trial:  $GENTS eval trial $RUN_ID engineer <case_id> [index] --home $EVAL_HOME
 EOF
-    [ "$status" = 0 ] || echo "eval run exited $status; resume with: $GENTS eval resume $RUN_ID --home $EVAL_HOME" >&2
+    if [ "$status" != 0 ]; then
+      echo "matrix stopped after an execution error; resume with: $GENTS eval resume $RUN_ID --home $EVAL_HOME" >&2
+      echo "the eval home stays served on $PORT" >&2
+      exit "$status"
+    fi
   done
 done
 echo "the eval home stays served on $PORT; stop it with: kill \$(cat $EVAL_HOME/server.pid)" >&2

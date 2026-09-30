@@ -94,7 +94,7 @@
                   },
                   {
                     "field": "event_kind",
-                    "equals": "created"
+                    "matches": "^(created|null)$"
                   }
                 ]
               }

@@ -139,6 +139,69 @@
                 [
                   "tools",
                   "list"
+                ],
+                [
+                  "--help"
+                ],
+                [
+                  "behavior",
+                  "--help"
+                ],
+                [
+                  "tools",
+                  "--help"
+                ],
+                [
+                  "datastore",
+                  "--help"
+                ],
+                [
+                  "subagent-target",
+                  "--help"
+                ],
+                [
+                  "skill",
+                  "--help"
+                ],
+                [
+                  "discovery",
+                  "--help"
+                ],
+                [
+                  "profile",
+                  "--help"
+                ],
+                [
+                  "execution",
+                  "--help"
+                ],
+                [
+                  "backend",
+                  "--help"
+                ],
+                [
+                  "mcp-service",
+                  "--help"
+                ],
+                [
+                  "automation",
+                  "--help"
+                ],
+                [
+                  "schema",
+                  "--help"
+                ],
+                [
+                  "cleanup",
+                  "--help"
+                ],
+                [
+                  "pack",
+                  "--help"
+                ],
+                [
+                  "plan",
+                  "--help"
                 ]
               ]
             }

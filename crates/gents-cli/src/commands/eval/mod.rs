@@ -74,6 +74,12 @@ pub(crate) fn usage_error(command: &EvalCommand) -> Option<String> {
 }
 
 pub(crate) async fn dispatch(command: EvalCommand) -> Result<()> {
+    if matches!(
+        command,
+        EvalCommand::Run(_) | EvalCommand::Resume(_) | EvalCommand::Init(_)
+    ) {
+        resources::prepare()?;
+    }
     if let EvalCommand::Cancel(args) = &command {
         return cancel_without_context(args).await.map_err(surface_refusal);
     }
@@ -674,3 +680,5 @@ mod tests {
             .is_some_and(|dir| dir.join("manifest.json").is_file()));
     }
 }
+
+mod resources;

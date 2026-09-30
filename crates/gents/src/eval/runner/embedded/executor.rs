@@ -1260,11 +1260,9 @@ async fn request_counts(node: &EmbeddedNode) -> Result<(usize, usize)> {
     Ok((rows.len(), running))
 }
 
-/// Append the assistant messages and inference calls of every request the
-/// trial session received after `request_id`, in session order. Tool calls
-/// need no merge: [`collect_request_evidence`] reads them from the request's
-/// run timeline, which spans its whole session, while messages and inference
-/// calls are read per request.
+/// Append evidence from requests the trial session received after this stage
+/// began. Each request contributes its own tool calls once; earlier setup
+/// requests and calls in child sessions remain outside the stage.
 async fn extend_with_later_requests(
     node: &Arc<EmbeddedNode>,
     session_id: &str,
@@ -1279,6 +1277,7 @@ async fn extend_with_later_requests(
     for request in later {
         let more = collect_request_evidence(node, &request.request_id).await?;
         evidence.messages.extend(more.messages);
+        evidence.tool_calls.extend(more.tool_calls);
         evidence.inference_calls.extend(more.inference_calls);
     }
     Ok(())

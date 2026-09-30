@@ -336,7 +336,7 @@ impl Check for CrewSpecMatch {
     }
 
     fn version(&self) -> &'static str {
-        "3"
+        "4"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -585,10 +585,10 @@ impl Check for CrewSpecMatch {
                                         .and_then(|rows| find(rows, "surface_id", reference))
                                 })
                                 .and_then(|row| {
-                                    serde_json::from_value::<DatastoreToolSurfaceDocument>(
-                                        row.clone(),
-                                    )
-                                    .ok()
+                                    let mut document = row.clone();
+                                    document.as_object_mut()?.remove("_docID");
+                                    serde_json::from_value::<DatastoreToolSurfaceDocument>(document)
+                                        .ok()
                                 });
                             if let Some(surface) = surface.filter(|s| s.enabled) {
                                 for entry in surface.entries.unwrap_or_default() {
@@ -943,7 +943,7 @@ mod tests {
         let mut e = home();
         let tool =
             json!({"tools_id":"t1","datastore":{"datastore_tool_surface_ids":["arbitrary-id"]}});
-        let surface = json!({"surface_id":"arbitrary-id","agent_did":"did:x","entries":[{"kind":"create","tool_name":"save_result","collection":"Result","description":"Save the caller's result","fields":[{"name":"correlation","required":true},{"name":"result","required":true}]},{"kind":"query","tool_name":"find_result","collection":"Result","description":"Find results by the caller's key","fields":["correlation","result"],"filter_fields":[{"name":"correlation"}]}]});
+        let surface = json!({"_docID":"physical-surface","surface_id":"arbitrary-id","agent_did":"did:x","entries":[{"kind":"create","tool_name":"save_result","collection":"Result","description":"Save the caller's result","fields":[{"name":"correlation","required":true},{"name":"result","required":true}]},{"kind":"query","tool_name":"find_result","collection":"Result","description":"Find results by the caller's key","fields":["correlation","result"],"filter_fields":[{"name":"correlation"}]}]});
         e.captures.insert(
             "tools".into(),
             CaptureResult::Documents {
