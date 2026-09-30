@@ -84,12 +84,21 @@ fn every_subject_is_the_desktop_engineer_on_an_eval_node() {
             "{name}: one slot binds the Engineer and, through its backend, the crew"
         );
         let context = &config.contexts[0];
-        // A variant may trim the shipped prompt only when its directory says
-        // so; every other subject runs the prompt the desktop ships.
-        if !dir.to_string_lossy().contains("trimmed") {
+        // A `_preview` variant appends one instruction to the shipped prompt
+        // (the preview A/B); every other subject runs it unchanged.
+        let prompt = context.system_prompt.as_deref().unwrap_or_default();
+        if dir.to_string_lossy().ends_with("_preview") {
+            assert!(
+                prompt.starts_with(gents_protocol::SETUP_STEWARD_PROMPT.trim_end())
+                    && prompt.trim_end().ends_with(
+                        "Preview every configuration write and apply it only after the preview is clean."
+                    ),
+                "{name}: the shipped Setup prompt plus the preview line"
+            );
+        } else {
             assert_eq!(
-                context.system_prompt.as_deref(),
-                Some(gents_protocol::SETUP_STEWARD_PROMPT),
+                prompt,
+                gents_protocol::SETUP_STEWARD_PROMPT,
                 "{name}: engineer/system_prompt.md must equal the shipped Setup prompt"
             );
         }
@@ -174,6 +183,13 @@ fn the_definition_validates_and_every_check_accepts_its_params() {
         .find(|check| check.check == "handoff_delivery")
         .expect("the harness gate");
     assert_eq!(gate.tier, gents::document_config::EvalTier::Development);
+    // Crew agents build and read git under the trial root, and an Engineer
+    // that stops before its receipt is prodded, a graded count.
+    assert!(definition.subject.host_bash);
+    assert_eq!(
+        stage.continuation.as_ref().map(|c| c.until.as_str()),
+        Some("receipt")
+    );
     // Evidence with every capture empty: each check must reach a verdict about
     // the subject (or say no fire happened), never reject its own params.
     let mut evidence =

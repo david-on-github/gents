@@ -55,6 +55,14 @@ pub struct EvalSubject {
     )]
     #[cfg_attr(feature = "typescript", ts(as = "Option<Vec<String>>", optional = nullable))]
     pub inference_slots: Vec<String>,
+    /// The trial's process ceiling also grants host bash, confined to its
+    /// workspace root, as a desktop node's ceiling does. Behaviors the subject
+    /// configures at run time (a crew's builds and git reads) need it; the
+    /// subject pack's own Tools still may not grant host bash to an embedded
+    /// trial.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "typescript", ts(as = "Option<bool>", optional = nullable))]
+    pub host_bash: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -189,6 +197,11 @@ pub struct EvalStage {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "typescript", ts(as = "Option<bool>", optional = nullable))]
     pub settle: bool,
+    /// Continuation prods for a settling stage whose subject ends its turn
+    /// before it is done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "typescript", ts(optional = nullable))]
+    pub continuation: Option<EvalContinuation>,
     #[serde(
         default,
         deserialize_with = "super::serde_helpers::deserialize_default_on_null",
@@ -209,6 +222,20 @@ pub struct EvalStage {
         ts(as = "Option<Vec<EvalCapture>>", optional = nullable)
     )]
     pub capture: Vec<EvalCapture>,
+}
+
+/// Once a settling stage's home is quiet, the stage sends `prompt` into the
+/// trial session as a new user turn, and settles again, until the capture
+/// named `until` holds a row or `max` prods have been sent. The number sent
+/// is stage evidence: a grade about the subject, never a failure.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+pub struct EvalContinuation {
+    pub prompt: String,
+    pub max: u32,
+    /// A documents capture of the same stage.
+    pub until: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -319,6 +346,24 @@ impl EvalDefinition {
                     ensure!(
                         !seed.collection.trim().is_empty(),
                         "eval definition {id} case {case_id} stage {stage_id} seed collection must be named"
+                    );
+                }
+                if let Some(continuation) = &stage.continuation {
+                    ensure!(
+                        stage.settle,
+                        "eval definition {id} case {case_id} stage {stage_id} continuation requires settle"
+                    );
+                    ensure!(
+                        !continuation.prompt.trim().is_empty() && continuation.max >= 1,
+                        "eval definition {id} case {case_id} stage {stage_id} continuation needs a prompt and a max of at least 1"
+                    );
+                    ensure!(
+                        stage.capture.iter().any(|capture| matches!(
+                            capture,
+                            EvalCapture::Documents { name, .. } if name == &continuation.until
+                        )),
+                        "eval definition {id} case {case_id} stage {stage_id} continuation until names no documents capture {:?}",
+                        continuation.until
                     );
                 }
                 let mut check_names = BTreeSet::new();
@@ -604,6 +649,33 @@ mod tests {
         unknown["cases"][0]["stages"][0]["capture"] =
             json!([{"kind": "file", "name": "r", "glob": "*", "extra": 1}]);
         assert!(serde_json::from_value::<EvalDefinition>(unknown).is_err());
+    }
+
+    #[test]
+    fn a_continuation_needs_settle_and_a_documents_capture_to_wait_for() {
+        let continuation = json!({"prompt": "Continue.", "max": 3, "until": "receipt"});
+        invalid(
+            |v| v["cases"][0]["stages"][0]["continuation"] = continuation.clone(),
+            "continuation requires settle",
+        );
+        invalid(
+            |v| {
+                v["cases"][0]["stages"][0]["settle"] = true.into();
+                v["cases"][0]["stages"][0]["continuation"] = continuation.clone();
+            },
+            "continuation until names no documents capture \"receipt\"",
+        );
+        let mut value = definition();
+        let stage = &mut value["cases"][0]["stages"][0];
+        stage["settle"] = true.into();
+        stage["continuation"] = continuation;
+        stage["capture"] = json!([{"kind": "documents", "name": "receipt", "collection": "MailboxItem", "filter": {}}]);
+        let parsed = parse(value);
+        parsed.validate().unwrap();
+        assert_eq!(
+            parsed.cases[0].stages[0].continuation.as_ref().unwrap().max,
+            3
+        );
     }
 
     #[test]

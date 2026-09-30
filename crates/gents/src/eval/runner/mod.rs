@@ -581,6 +581,19 @@ async fn execute_trial(
     let mut spec = trial_spec(frozen, planned, case, cell, executor.wants_script_key())?;
 
     let locator = executor.provision(&spec).await;
+    // Names the trial's cell beside its DID, the only identity a trial's own
+    // log lines carry.
+    tracing::info!(
+        target: "gents::eval",
+        run_id,
+        cell = %planned.cell_id,
+        case = %planned.case_id,
+        trial_index = planned.trial_index,
+        attempt = planned.attempt,
+        agent_did = %locator.trial_agent_did,
+        session_id = %locator.session_id,
+        "trial started"
+    );
     let identity = TrialIdentity {
         trial_id: planned.trial_id.clone(),
         run_id: run_id.to_owned(),
@@ -735,6 +748,7 @@ fn trial_spec(
             frozen.definition.fixtures.as_ref(),
             case.fixtures.as_ref(),
         )?,
+        host_bash: frozen.definition.subject.host_bash,
         stages: stage_specs(case, &frozen.captures),
         trial_dir: frozen.run_dir.join("trials").join(&planned.trial_id),
         script_key: wants_script_key.then(|| ScriptKey {
@@ -762,6 +776,7 @@ fn stage_specs(case: &EvalCase, fallback: &[Capture]) -> Vec<StageSpec> {
             }),
             deadline_secs: stage.deadline_secs,
             settle: stage.settle,
+            continuation: stage.continuation.clone(),
             captures: if stage.capture.is_empty() {
                 fallback.to_vec()
             } else {

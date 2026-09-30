@@ -4,7 +4,8 @@
   "inference": {
     "backend": "the one existing backend (config backend list); do not edit it",
     "model_name": "GLM-5.3-Flash-NVFP4",
-    "reasoning_effort": "high where the backend catalog lists it, otherwise unset"
+    "reasoning_effort": "high",
+    "sampling": {"temperature": 1.0, "top_p": 0.95, "note": "one InferenceSampling per profile, bound through the profile's sampling settings"}
   },
   "profiles": [
     {"profile_id": "glm-a", "execution_id": "glm-a-execution", "used_by": ["factory-worker-a", "factory-verifier"]},

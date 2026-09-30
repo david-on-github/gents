@@ -174,7 +174,7 @@ impl EmbeddedExecutor {
         // Replaces any observer the caller's options carried: the trial's
         // latch is the only reader of this runtime's snapshots.
         options.runtime_snapshot_observer = Some(Arc::new(EventSourcesReady(event_sources_ready)));
-        options.tool_ceiling = trial_tool_ceiling(&workspace);
+        options.tool_ceiling = trial_tool_ceiling(&workspace, spec.host_bash);
         // A failed boot has already stopped whatever it spawned, so the home is
         // ours to close.
         let runtime = match boot_runtime(&home, home.identity.clone(), options).await {
@@ -201,14 +201,18 @@ impl EmbeddedExecutor {
 }
 
 /// The process ceiling of an embedded trial: file tools, read-write, rooted
-/// at the trial's own workspace, and no host bash. It replaces the caller's
-/// ceiling because the root is per trial. File tools confine themselves to the
-/// root; host bash would run on this host with its network, which is why
-/// freezing refuses any pack granting it under [`Isolation::Embedded`]. A
-/// Tools document the subject writes at run time (a behavior it configures)
-/// is narrowed to this ceiling in the same way.
-fn trial_tool_ceiling(workspace: &Path) -> ToolCeiling {
-    ToolCeiling::readwrite(workspace).with_policy(ToolPolicySurface::ceiling_with_host_modes(
+/// at the trial's own workspace, and host bash only when the definition asks
+/// for it, then confined to that root as a desktop node's ceiling is. It
+/// replaces the caller's ceiling because the root is per trial. Freezing still
+/// refuses a subject pack that grants itself host bash under
+/// [`Isolation::Embedded`]; a Tools document the subject writes at run time (a
+/// behavior it configures) is narrowed to this ceiling.
+fn trial_tool_ceiling(workspace: &Path, host_bash: bool) -> ToolCeiling {
+    let ceiling = ToolCeiling::readwrite(workspace);
+    if host_bash {
+        return ceiling;
+    }
+    ceiling.with_policy(ToolPolicySurface::ceiling_with_host_modes(
         FileToolMode::ReadWrite,
         BashMode::Off,
     ))
@@ -363,6 +367,7 @@ impl TrialExecutor for EmbeddedExecutor {
                 None => Some(OutcomeKind::Unknown),
             };
             stages.push(StageEvidence {
+                prods: 0,
                 stage_id: index.to_string(),
                 request_id: Some(request.request_id),
                 terminal_state,
@@ -829,6 +834,7 @@ async fn run_stage(
             &stage.captures,
         )
         .await,
+        prods: observed.prods,
     }
 }
 
@@ -836,6 +842,7 @@ async fn run_stage(
 struct ObservedStage {
     /// `None` when the request was never submitted.
     request_id: Option<String>,
+    prods: u32,
     terminal_state: Option<RequestLifecycleState>,
     failure_kind: Option<OutcomeKind>,
     evidence: RequestEvidence,
@@ -853,6 +860,7 @@ impl ObservedStage {
     fn unsubmitted() -> Self {
         Self {
             request_id: None,
+            prods: 0,
             terminal_state: None,
             failure_kind: Some(OutcomeKind::Infrastructure),
             evidence: RequestEvidence::default(),
@@ -960,6 +968,12 @@ async fn submit_and_observe(
         }
     }
 
+    let prods = if settling {
+        continue_until_done(spec, cancel, home, locator, stage, deadline, started).await
+    } else {
+        0
+    };
+
     let mut collected = true;
     let mut evidence = collect_request_evidence(&home.node, &request_id)
         .await
@@ -989,6 +1003,7 @@ async fn submit_and_observe(
             );
             return ObservedStage {
                 request_id: Some(request_id),
+                prods,
                 terminal_state: observed.as_ref().map(|observed| observed.terminal_state),
                 failure_kind: Some(OutcomeKind::Infrastructure),
                 evidence,
@@ -998,10 +1013,97 @@ async fn submit_and_observe(
 
     ObservedStage {
         request_id: Some(request_id),
+        prods,
         terminal_state: observed.as_ref().map(|observed| observed.terminal_state),
         failure_kind,
         evidence,
     }
+}
+
+/// The stage's continuation prods: while the `until` capture holds no row and
+/// fewer than `max` prods were sent, send the prompt into the trial session,
+/// wait for that request and for the home to settle again. Bounded by the
+/// stage's deadline and by cancellation; returns how many were sent.
+async fn continue_until_done(
+    spec: &TrialSpec,
+    cancel: &CancellationToken,
+    home: &EmbeddedHome,
+    locator: &TrialLocator,
+    stage: &StageSpec,
+    deadline: Duration,
+    started: Instant,
+) -> u32 {
+    let Some(continuation) = &stage.continuation else {
+        return 0;
+    };
+    let until = stage.captures.iter().find_map(|capture| match capture {
+        Capture::Documents {
+            name,
+            collection,
+            filter,
+            fields,
+        } if name == &continuation.until => Some((collection, filter, fields)),
+        _ => None,
+    });
+    let Some((collection, filter, fields)) = until else {
+        return 0;
+    };
+    let prod = StageSpec {
+        prompt: continuation.prompt.clone(),
+        ..stage.clone()
+    };
+    let mut prods = 0;
+    while prods < continuation.max && !cancel.is_cancelled() {
+        match capture_documents(
+            &home.node,
+            collection,
+            filter,
+            fields,
+            &locator.trial_agent_did,
+        )
+        .await
+        {
+            Ok(rows) if !rows.is_empty() => break,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    trial_id = %spec.trial_id,
+                    "eval continuation could not read its until capture"
+                );
+                break;
+            }
+        }
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        let request_id = uuid::Uuid::new_v4().to_string();
+        if let Err(error) =
+            submit_stage(&home.node, locator, &spec.behavior_id, &prod, &request_id).await
+        {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                trial_id = %spec.trial_id,
+                "eval continuation prod could not be submitted"
+            );
+            break;
+        }
+        prods += 1;
+        tracing::info!(target: "gents::eval", trial_id = %spec.trial_id, prods, "continuation prod sent");
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => break,
+            _ = await_terminal(&home.node, &request_id, remaining, GRACE, POLL) => {}
+        }
+        let remaining = deadline.saturating_sub(started.elapsed());
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => break,
+            _ = settle_home(&home.node, remaining) => {}
+        }
+    }
+    prods
 }
 
 /// How long every request in a settling trial home must stay terminal, with no
@@ -1575,6 +1677,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_trial_ceiling_grants_bash_only_when_the_definition_asks_for_it() {
+        let workspace = Path::new("/runs/r/trials/t/workspace");
+        let without = trial_tool_ceiling(workspace, false);
+        assert_eq!(
+            (without.file_tools(), without.bash(), without.root()),
+            (FileToolMode::ReadWrite, BashMode::Off, Some(workspace))
+        );
+        let with = trial_tool_ceiling(workspace, true);
+        assert_eq!(
+            (with.file_tools(), with.bash(), with.root()),
+            (
+                FileToolMode::ReadWrite,
+                BashMode::Unrestricted,
+                Some(workspace)
+            )
+        );
+    }
+
+    #[test]
     fn unrooted_host_tools_are_rooted_at_the_trial_workspace() {
         let config: PackConfig = serde_json::from_value(json!({
             "agent_principal": {"agent_did": "did:x"},
@@ -1790,6 +1911,7 @@ mod tests {
             }),
             deadline_secs: 120,
             settle: false,
+            continuation: None,
             captures: Vec::new(),
         };
         let locator = TrialLocator {
@@ -2152,6 +2274,7 @@ mod tests {
             seed: None,
             deadline_secs: 1,
             settle: false,
+            continuation: None,
             captures: vec![
                 Capture::Documents {
                     name: "requests".to_string(),

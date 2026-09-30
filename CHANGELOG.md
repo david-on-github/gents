@@ -128,11 +128,17 @@ source consistency checks, not a separate runtime compatibility version.
   Two checks join the registry (version 3): `crew_spec_match` grades a declared
   configuration per category, and `handoff_delivery` is a harness gate over
   trigger fires, outcomes and sessions. An eval stage may set `settle` to keep
-  observing until the trial home is quiet. Embedded trials now get file tools
-  rooted at their own workspace (still no host bash), unrooted pack host tools
-  are rooted there, a directory fixture asset materializes every file under
-  it, and a trial runtime that stops during startup fails with its own error
-  instead of waiting out the readiness timeout.
+  observing until the trial home is quiet, and a `continuation` that prods a
+  subject which ends its turn early (`max` prods until a named capture holds;
+  the count is graded evidence, never a failure). Embedded trials now get file
+  tools rooted at their own workspace, plus host bash confined there when the
+  definition's `subject.host_bash` asks for it. Unrooted pack host tools are
+  rooted there, a directory fixture asset materializes every file under it,
+  and a trial runtime that stops during startup fails with its own error
+  instead of waiting out the readiness timeout. The runner logs `trial
+  started` (cell, trial, agent DID), and the config tool logs every call
+  (`tool call`) and every write (`self-config write`) under
+  `gents::self_config`.
 
 - Document-triggered Tasks support durable `queued_serial` delivery, atomic
   fire deduplication, restart catch-up and delivery after re-enabling a trigger

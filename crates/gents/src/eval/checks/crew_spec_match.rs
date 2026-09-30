@@ -34,6 +34,8 @@ use crate::eval::runner::executor::{CaptureResult, StageEvidence};
 ///   that row names an allowed field (one requirement per field present).
 /// - `receipt`: `{capture, fields: [field], ids: [id], category?}`: each id
 ///   appears in the text of some row's fields.
+/// - `continuation`: `{max, category?}`: each of the `max` prods the stage
+///   did not need is one requirement held.
 ///
 /// An expectation is `captured_fields_match`'s: `{field, equals | contains |
 /// matches}`, `field` a dotted path; a JSON string along the path is read as
@@ -56,6 +58,19 @@ struct Params {
     templates: Vec<TemplateSpec>,
     #[serde(default)]
     receipt: Option<Receipt>,
+    #[serde(default)]
+    continuation: Option<Continuation>,
+}
+
+/// Grades how many continuation prods the stage needed: `max - prods` of
+/// `max` requirements hold, so finishing unprompted scores full marks and a
+/// prod costs a requirement rather than failing the trial.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Continuation {
+    max: u32,
+    #[serde(default)]
+    category: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -309,6 +324,11 @@ impl Check for CrewSpecMatch {
                         "required": ["capture", "key", "id", "fields", "allowed"],
                         "additionalProperties": false
                     }},
+                    "continuation": {
+                        "type": "object",
+                        "properties": {"max": {"type": "integer", "minimum": 1}, "category": category},
+                        "required": ["max"], "additionalProperties": false
+                    },
                     "receipt": {
                         "type": "object",
                         "properties": {
@@ -437,6 +457,14 @@ impl Check for CrewSpecMatch {
             }
         }
 
+        if let Some(continuation) = &params.continuation {
+            let category = continuation.category.as_deref().or(Some("continuation"));
+            for index in 0..continuation.max {
+                tally.record(category, index >= stage.prods, || {
+                    format!("continuation prod {} was needed", index + 1)
+                });
+            }
+        }
         let (satisfied, total) = tally
             .categories
             .values()
@@ -477,6 +505,7 @@ impl Check for CrewSpecMatch {
             "by_tool": by_tool,
             "inference_calls": stage.inference_calls.len(),
             "messages": stage.messages.len(),
+            "prods": stage.prods,
         });
         verdict
     }
@@ -615,6 +644,18 @@ mod tests {
         assert!(is_id("did:key:z6Mk:worker-a", "worker-a"));
         assert!(!is_id("did:key:z6Mk:big-worker-a", "worker-a"));
         assert!(!is_id("worker-ab", "worker-a"));
+    }
+
+    #[test]
+    fn each_prod_needed_costs_one_continuation_requirement() {
+        let mut evidence = home();
+        evidence.prods = 2;
+        let verdict = CrewSpecMatch.evaluate(&json!({"continuation": {"max": 5}}), &evidence);
+        assert_eq!(
+            verdict.raw["categories"]["continuation"],
+            json!({"satisfied": 3, "total": 5})
+        );
+        assert_eq!(verdict.raw["activity"]["prods"], 2);
     }
 
     #[test]

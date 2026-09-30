@@ -53,8 +53,13 @@
     {
       "stage_id": "setup",
       "prompt": "Your kickoff is the file factory/kickoff.md under your tool root. Read all of it with read_file (page with offsets if a read is cut short), then carry it out exactly as if I had pasted it here.",
-      "deadline_secs": 5400,
+      "deadline_secs": 7200,
       "settle": true,
+      "continuation": {
+        "prompt": "Continue until setup is complete and the checks pass.",
+        "max": 5,
+        "until": "receipt"
+      },
       "checks": [
         {
           "check": "handoff_delivery",
@@ -134,6 +139,10 @@
                     "equals": "GLM-5.3-Flash-NVFP4"
                   },
                   {
+                    "field": "reasoning_effort",
+                    "equals": "high"
+                  },
+                  {
                     "field": "execution_id",
                     "equals": "glm-a-execution"
                   }
@@ -155,6 +164,10 @@
                   {
                     "field": "model_name",
                     "equals": "GLM-5.3-Flash-NVFP4"
+                  },
+                  {
+                    "field": "reasoning_effort",
+                    "equals": "high"
                   },
                   {
                     "field": "execution_id",
@@ -180,6 +193,10 @@
                     "equals": "GLM-5.3-Flash-NVFP4"
                   },
                   {
+                    "field": "reasoning_effort",
+                    "equals": "high"
+                  },
+                  {
                     "field": "execution_id",
                     "equals": "claude-lead-execution"
                   }
@@ -203,6 +220,10 @@
                     "equals": "GLM-5.3-Flash-NVFP4"
                   },
                   {
+                    "field": "reasoning_effort",
+                    "equals": "high"
+                  },
+                  {
                     "field": "execution_id",
                     "equals": "astra-lead-execution"
                   }
@@ -224,6 +245,10 @@
                   {
                     "field": "model_name",
                     "equals": "GLM-5.3-Flash-NVFP4"
+                  },
+                  {
+                    "field": "reasoning_effort",
+                    "equals": "high"
                   },
                   {
                     "field": "execution_id",
@@ -2212,6 +2237,9 @@
                 "inbox-outcome-engineer",
                 "engineer-watch"
               ]
+            },
+            "continuation": {
+              "max": 5
             }
           },
           "tier": "acceptance",
@@ -2682,6 +2710,21 @@
             "commit",
             "status",
             "hits"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "receipt",
+          "collection": "MailboxItem",
+          "filter": {
+            "title": {
+              "_ilike": "%receipt%"
+            }
+          },
+          "fields": [
+            "title",
+            "summary",
+            "created_at"
           ]
         },
         {
