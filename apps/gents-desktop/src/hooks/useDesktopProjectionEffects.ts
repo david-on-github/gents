@@ -106,7 +106,12 @@ export function useDesktopProjectionEffects({
           await controller.request("snapshot");
           return;
         }
-        await controller.request(scope);
+        await controller.request(
+          scope,
+          event.reason === "store" && typeof event.storeVersion === "number"
+            ? event.storeVersion
+            : null,
+        );
       },
       reportListenerError,
       listenToUpdates,
