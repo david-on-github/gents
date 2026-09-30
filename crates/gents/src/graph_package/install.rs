@@ -128,6 +128,19 @@ pub async fn default_bundled_graph_package_install_bindings(
         agent_did: owner_did.to_owned(),
     };
     let package = load_bundled_graph_package(package_name, &scope)?;
+    default_graph_package_install_bindings(access, &package, owner_did, requested).await
+}
+
+/// Select an existing principal without inventing host, model, or role
+/// defaults, for a package already resolved from any source (a directory, a
+/// `.pack`, the home's store, or the registry). The bundled-only sibling
+/// above is the same lookup for a package this binary ships.
+pub async fn default_graph_package_install_bindings(
+    access: &ConfigAccess,
+    package: &LoadedGraphPackage,
+    owner_did: &str,
+    requested: &crate::pack::PackInferenceBindings,
+) -> Result<GraphPackageInstallBindings> {
     validate_owner(access, owner_did).await?;
     let preview = crate::pack::preview_pack_inference_bindings(
         access,
@@ -531,7 +544,7 @@ async fn install_package(
 }
 
 /// Publication owner shared by named distributions and already resolved packs.
-pub(crate) async fn install_loaded_graph_package(
+pub async fn install_loaded_graph_package(
     access: &ConfigAccess,
     actor_did: &str,
     package: &LoadedGraphPackage,

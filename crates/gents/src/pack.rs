@@ -649,6 +649,19 @@ pub fn validate_pack_manifest(manifest: &PackManifest) -> Result<()> {
         manifest.metadata.kind == PackKind::Documents || manifest.metadata.dependencies.is_empty(),
         "only document packs support package dependencies; nested graph/asset dependencies are unsupported"
     );
+    for dependency in &manifest.metadata.dependencies {
+        anyhow::ensure!(
+            !dependency.contains('@'),
+            "dependency {dependency:?} must be a coordinate (name or ns/name), not a pinned version"
+        );
+        let (namespace, name) = dependency
+            .split_once('/')
+            .unwrap_or((crate::pack_archive::DEFAULT_NAMESPACE, dependency.as_str()));
+        anyhow::ensure!(
+            is_valid_pack_name(namespace) && is_valid_pack_name(name),
+            "dependency {dependency:?} is not a valid pack coordinate"
+        );
+    }
     anyhow::ensure!(
         !manifest.description.trim().is_empty() && !manifest.metadata.authors.is_empty(),
         "pack needs description and authors"
@@ -1251,5 +1264,40 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("at least 1"), "{message}");
         assert!(!message.contains("ceiling"), "{message}");
+    }
+
+    fn documents_manifest(dependencies: Vec<&str>) -> PackManifest {
+        serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "name": "dep_test",
+            "version": "1.0.0",
+            "description": "a test documents pack",
+            "authors": ["gents"],
+            "kind": "documents",
+            "assets": ["README.md", "pack_config.json"],
+            "config": "pack_config.json",
+            "dependencies": dependencies,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn dependency_coordinates_are_bare_or_namespaced_names_never_pinned() {
+        validate_pack_manifest(&documents_manifest(vec!["acme/widget"])).unwrap();
+        validate_pack_manifest(&documents_manifest(vec!["widget"])).unwrap();
+
+        let pinned = validate_pack_manifest(&documents_manifest(vec!["acme/widget@1.0.0"]))
+            .expect_err("a dependency must not pin a version");
+        assert!(
+            format!("{pinned:#}").contains("must be a coordinate"),
+            "{pinned:#}"
+        );
+
+        let bad = validate_pack_manifest(&documents_manifest(vec!["Acme/Widget"]))
+            .expect_err("a dependency coordinate must be snake_case");
+        assert!(
+            format!("{bad:#}").contains("is not a valid pack coordinate"),
+            "{bad:#}"
+        );
     }
 }

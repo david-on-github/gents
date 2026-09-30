@@ -99,7 +99,7 @@ pub(crate) fn load_package(
     )
 }
 
-pub(crate) fn load_archive_graph_package_with_environment(
+pub fn load_archive_graph_package_with_environment(
     archive: &crate::pack_archive::PackArchive,
     options: &PackInstallOptions,
     environment: &dyn Fn(&str) -> Option<String>,
