@@ -1520,7 +1520,7 @@ async fn terminalize_transaction(
         lifecycle_state: {{ _eq: "{expected}" }}{requester_filter}{spawned_filter} }}, input: {{
         status: "{}", lifecycle_state: "{state}", started_at: {started_at},
         deadline_at: "{deadline_at}", completed_at: "{completed_at}", latency_ms: {latency_ms}{failure}{cancel}
-    }}) {{ _docID }} }}"#, escape_graphql_string(terminal_status))).await?;
+    }}) {{ _docID request_id }} }}"#, escape_graphql_string(terminal_status))).await?;
     if !lifecycle["data"]["update_AgentToolCall"]
         .as_array()
         .is_some_and(|rows| !rows.is_empty())
@@ -1529,6 +1529,20 @@ async fn terminalize_transaction(
         // closure without its terminal, and no delivery sequence consumed.
         return Ok(false);
     }
+
+    let request_id = lifecycle["data"]["update_AgentToolCall"][0]["request_id"]
+        .as_str()
+        .context("published tool terminal omitted logical request identity")?;
+    crate::session::refresh_session_request_observation_in_txn(
+        txn,
+        agent_did,
+        requester_did,
+        session_id,
+        request_doc_id,
+        request_id,
+        &completed_at,
+    )
+    .await?;
 
     let segment_response = txn
         .execute_with_variables(
