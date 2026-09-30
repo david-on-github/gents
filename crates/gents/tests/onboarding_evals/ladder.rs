@@ -151,6 +151,64 @@ fn l2_checks_follow_selected_context_and_tools_and_reject_a_wrong_grant() {
 }
 
 #[test]
+fn delegation_requires_delivery_of_the_matching_child_reply() {
+    let definition = definitions()
+        .into_iter()
+        .find(|d| d.definition_id == "configurator-l5-agents-tools")
+        .unwrap();
+    let stage = definition
+        .cases
+        .iter()
+        .find(|c| c.split == gents::document_config::EvalSplit::Train)
+        .unwrap()
+        .stages
+        .iter()
+        .find(|s| s.stage_id == "delegate")
+        .unwrap();
+    let check = stage
+        .checks
+        .iter()
+        .find(|c| c.check == "crew_spec_match")
+        .unwrap();
+    let mut evidence =
+        ScriptedExecutor::passed_evidence("did:key:eval-owner", "delegate", "TRAIN-111", vec![])
+            .stages
+            .remove(0);
+    evidence.captures.insert("helper-request".into(), CaptureResult::Documents { rows: vec![
+        serde_json::json!({"behavior_id":"scope:beh-helper-01", "caused_by_parent_tool_call_doc_id":"matching-call"})
+    ]});
+    let delivered = serde_json::json!({"_docID":"matching-call", "lifecycle_state":"completed", "completion_notification_delivered_at":"2026-09-30T00:00:00Z"});
+    evidence.captures.insert(
+        "delegation_calls".into(),
+        CaptureResult::Documents {
+            rows: vec![delivered.clone()],
+        },
+    );
+    let registry = CheckRegistry::builtin();
+    let grader = registry.get("crew_spec_match").unwrap();
+    assert_eq!(
+        grader.evaluate(&check.params, &evidence).score_bp,
+        Some(10000)
+    );
+    for (field, value) in [
+        (
+            "completion_notification_delivered_at",
+            serde_json::Value::Null,
+        ),
+        ("_docID", serde_json::json!("unrelated-call")),
+    ] {
+        let mut row = delivered.clone();
+        row[field] = value;
+        evidence.captures.insert(
+            "delegation_calls".into(),
+            CaptureResult::Documents { rows: vec![row] },
+        );
+        let verdict = grader.evaluate(&check.params, &evidence);
+        assert!(verdict.score_bp.unwrap() < 10000, "{}", verdict.raw);
+    }
+}
+
+#[test]
 fn runtime_captures_use_current_schema_fields() {
     use std::collections::{BTreeMap, BTreeSet};
     let types = regex::Regex::new(r"type\s+(\w+)[^{]*\{([^}]+)\}").unwrap();

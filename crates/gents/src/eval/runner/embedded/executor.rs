@@ -603,7 +603,7 @@ async fn install(spec: &TrialSpec, home: &EmbeddedHome, workspace: &Path) -> Res
     .context("installing the trial pack")?;
 
     install_workspace_root(&home.node, workspace).await?;
-    install_fixtures(&access, &spec.fixtures, workspace).await
+    install_fixtures(&access, &spec.fixtures, workspace, &agent_did).await
 }
 
 /// Bind every inference slot the pack declares to the profile the run froze.
@@ -781,6 +781,7 @@ async fn install_fixtures(
     access: &ConfigAccess,
     fixtures: &TrialFixtures,
     workspace: &Path,
+    trial_did: &str,
 ) -> Result<()> {
     for sdl in &fixtures.schemas {
         access
@@ -793,7 +794,7 @@ async fn install_fixtures(
             access,
             "eval.trial.fixture_document",
             &fixture.collection,
-            &fixture.document,
+            &bind_fixture_owner(&fixture.document, trial_did),
         )
         .await?;
     }
@@ -807,6 +808,25 @@ async fn install_fixtures(
             .with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
+}
+
+fn bind_fixture_owner(value: &Value, trial_did: &str) -> Value {
+    match value {
+        Value::String(text) if text == "$trial" => Value::String(trial_did.into()),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|v| bind_fixture_owner(v, trial_did))
+                .collect(),
+        ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), bind_fixture_owner(value, trial_did)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 /// Writes one authored row and returns its `_docID`. The document is arbitrary
@@ -1402,7 +1422,7 @@ async fn seed_and_await_fire(
         &access,
         "eval.trial.seed_document",
         &seed.collection,
-        &seed.document,
+        &bind_fixture_owner(&seed.document, home.did()),
     )
     .await?;
     tracing::debug!(collection = %seed.collection, doc_id = %doc_id, "eval seed document written");

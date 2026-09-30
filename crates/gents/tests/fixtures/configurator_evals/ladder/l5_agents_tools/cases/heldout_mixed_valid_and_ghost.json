@@ -144,6 +144,43 @@
           },
           "tier": "acceptance",
           "weight": 2
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "links": [
+              {
+                "capture": "ho-request",
+                "key": "behavior_id",
+                "id": "beh-ho-01",
+                "field": "caused_by_parent_tool_call_doc_id",
+                "target_capture": "delegation_calls",
+                "target_key": "_docID",
+                "expect": [
+                  {
+                    "field": "lifecycle_state",
+                    "equals": "completed"
+                  },
+                  {
+                    "field": "completion_notification_delivered_at",
+                    "matches": "^[0-9]{4}-"
+                  }
+                ]
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "final_message_matches",
+          "params": {
+            "all": [
+              "HO-999"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
@@ -183,8 +220,29 @@
             "session_id",
             "content",
             "lifecycle_state",
+            "terminal_output",
+            "caused_by_parent_tool_call_doc_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "delegation_calls",
+          "collection": "AgentToolCall",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tool_name": {
+              "_in": [
+                "agent_new",
+                "agent_message"
+              ]
+            }
+          },
+          "fields": [
+            "_docID",
             "lifecycle_state",
-            "terminal_output"
+            "completion_notification_delivered_at"
           ]
         }
       ],

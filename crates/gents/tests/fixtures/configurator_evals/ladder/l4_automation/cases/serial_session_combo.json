@@ -4,13 +4,25 @@
   "reducer": "all",
   "fixtures": {
     "schemas": [
-      "type ComboNote { message: String handoff_id: String reply_session_id: String }"
+      "type ComboNote { message: String handoff_id: String }"
+    ],
+    "documents": [
+      {
+        "collection": "AgentSession",
+        "document": {
+          "session_id": "eval-serial-session-combo-destination",
+          "agent_did": "$trial",
+          "behavior_id": "engineer",
+          "created_at": "2026-01-01T00:00:00Z",
+          "requester_did": "$trial"
+        }
+      }
     ]
   },
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "On this node, set up document automation for me. A schema for a collection ComboNote (string fields 'message', 'handoff_id', and 'reply_session_id') is already published. Configure the following with the config tool, never bash: an EventSource with display_name 'ComboNoteWatcher' watching source_collection 'ComboNote' with event_kind 'created'; a Task with display_name 'ComboNoteTask' targeting the engineer behavior with prompt_template 'Handle the combo note: {{ doc.message }}' and emit_outcome true; and a Trigger with display_name 'ComboNoteTrigger' linking that EventSource to that Task with concurrency 'queued_serial' and session_id_template '{{ doc.reply_session_id }}'. Each caller supplies the existing session ID in reply_session_id; route the request into that session. Enable the Task and Trigger. Do not write any document into ComboNote. Configure this routing only; I will send notes after setup.",
+      "prompt": "On this node, set up document automation for me. A schema for a collection ComboNote (string field 'message') is already published. The existing destination session 'eval-serial-session-combo-destination' belongs to your engineer behavior. Configure the following with the config tool, never bash: an EventSource with display_name 'ComboNoteWatcher' watching source_collection 'ComboNote' with event_kind 'created'; a Task with display_name 'ComboNoteTask' targeting the engineer behavior with prompt_template 'Handle the combo note: {{ doc.message }}' and emit_outcome true; and a Trigger with display_name 'ComboNoteTrigger' linking that EventSource to that Task with concurrency 'queued_serial' and session_id_template set to 'eval-serial-session-combo-destination' as a literal string (not a template expression). Enable the Task and Trigger. Do not write any document into ComboNote.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -45,7 +57,7 @@
               },
               {
                 "field": "session_id_template",
-                "equals": "{{ doc.reply_session_id }}"
+                "equals": "eval-serial-session-combo-destination"
               },
               {
                 "field": "enabled",
@@ -159,6 +171,172 @@
             "prompt_template",
             "emit_outcome",
             "enabled"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "seed_run",
+      "seed": {
+        "collection": "ComboNote",
+        "document": {
+          "message": "combo-echo-71",
+          "handoff_id": "serial-session-combo-1"
+        }
+      },
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "fires",
+            "expect": [
+              {
+                "field": "trigger_id",
+                "matches": ".+"
+              },
+              {
+                "field": "request_id",
+                "matches": ".+"
+              },
+              {
+                "field": "session_id",
+                "equals": "eval-serial-session-combo-destination"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "completed_requests",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "rows": [
+              {
+                "capture": "completed_requests",
+                "key": "session_id",
+                "id": "eval-serial-session-combo-destination",
+                "expect": [
+                  {
+                    "field": "lifecycle_state",
+                    "equals": "completed"
+                  }
+                ]
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "fires",
+          "collection": "TriggerFire",
+          "filter": {
+            "owner_did": {
+              "_eq": "$trial"
+            },
+            "source_collection": {
+              "_eq": "ComboNote"
+            }
+          },
+          "fields": [
+            "fire_key",
+            "trigger_id",
+            "task_id",
+            "request_id",
+            "session_id",
+            "source_doc_id",
+            "queued_serial"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "completed_requests",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "caused_by_trigger_id": {
+              "_ne": null
+            },
+            "lifecycle_state": {
+              "_eq": "completed"
+            }
+          },
+          "fields": [
+            "request_id",
+            "session_id",
+            "caused_by_trigger_id",
+            "caused_by_source_doc_id",
+            "lifecycle_state"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "outcome_readonly",
+      "prompt": "Report the configured automation and its expected routing. Change nothing.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "fire_outcomes",
+            "expect": [
+              {
+                "field": "fire_key",
+                "matches": ".+"
+              },
+              {
+                "field": "request_id",
+                "matches": ".+"
+              },
+              {
+                "field": "session_id",
+                "equals": "eval-serial-session-combo-destination"
+              },
+              {
+                "field": "terminal_state",
+                "equals": "completed"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "fire_outcomes",
+          "collection": "FireOutcome",
+          "filter": {
+            "owner_did": {
+              "_eq": "$trial"
+            },
+            "source_collection": {
+              "_eq": "ComboNote"
+            }
+          },
+          "fields": [
+            "fire_key",
+            "request_id",
+            "session_id",
+            "terminal_state",
+            "source_doc_id"
           ]
         }
       ]

@@ -153,7 +153,7 @@
     },
     {
       "stage_id": "report-delegation",
-      "prompt": "Report what you configured; change nothing.",
+      "prompt": "Report the helper's actual reply from the delegation you just sent. Change nothing.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -187,6 +187,43 @@
           },
           "tier": "acceptance",
           "weight": 2
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "links": [
+              {
+                "capture": "helper-request",
+                "key": "behavior_id",
+                "id": "beh-fix2-01",
+                "field": "caused_by_parent_tool_call_doc_id",
+                "target_capture": "delegation_calls",
+                "target_key": "_docID",
+                "expect": [
+                  {
+                    "field": "lifecycle_state",
+                    "equals": "completed"
+                  },
+                  {
+                    "field": "completion_notification_delivered_at",
+                    "matches": "^[0-9]{4}-"
+                  }
+                ]
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "final_message_matches",
+          "params": {
+            "all": [
+              "FIX2-888"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
@@ -208,8 +245,8 @@
             "session_id",
             "content",
             "lifecycle_state",
-            "lifecycle_state",
-            "terminal_output"
+            "terminal_output",
+            "caused_by_parent_tool_call_doc_id"
           ]
         },
         {
@@ -228,6 +265,27 @@
             "session_id",
             "behavior_id",
             "agent_did"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "delegation_calls",
+          "collection": "AgentToolCall",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tool_name": {
+              "_in": [
+                "agent_new",
+                "agent_message"
+              ]
+            }
+          },
+          "fields": [
+            "_docID",
+            "lifecycle_state",
+            "completion_notification_delivered_at"
           ]
         }
       ]

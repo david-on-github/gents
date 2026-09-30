@@ -70,7 +70,8 @@ pub struct EvalSubject {
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub struct EvalFixtureDocument {
     pub collection: String,
-    /// An app-collection row. Its schema belongs to that collection.
+    /// A fixture row. String values equal to `$trial` bind to the trial's DID
+    /// when installed; object keys and strings containing it stay literal.
     #[cfg_attr(feature = "typescript", ts(type = "unknown"))]
     pub document: serde_json::Value,
 }
