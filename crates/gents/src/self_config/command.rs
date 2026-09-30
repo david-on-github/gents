@@ -81,6 +81,9 @@ impl ConfigCommandParams {
                 | ["skill" | "schema", "get", ..]
                 | ["pack", "get" | "install" | "update" | "remove", ..] => 2,
                 ["automation", "get" | "preview" | "edit", _, ..] => 3,
+                ["tools", ..] => bail!(
+                    "target_id is not accepted by tools; omit it and select the owning behavior with options.behavior, e.g. {{\"argv\":[\"tools\",\"get\"],\"options\":{{\"behavior\":\"BEHAVIOR_ID\"}}}}"
+                ),
                 _ => bail!(
                     "target_id is not accepted by {:?}; put the ID in argv where [\"help\"] shows it",
                     words.join(" ")

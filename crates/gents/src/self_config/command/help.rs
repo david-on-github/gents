@@ -268,10 +268,10 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             next: "call the tool in the next request; the current request keeps its existing tools.",
         },
         "subagent-target" => Page {
-            what: "an agent that agent_new may start (tools grant). TARGET_ID goes in target_id.",
-            commands: &["subagent-target list|get", "subagent-target [preview] create|edit  set: target fields"],
-            notes: "name is the agent name the model sees; target_agent_did owns the behavior. A local behavior_id must exist; its short slug resolves when target_agent_did is this principal.",
-            next: "select it: tools get, then tools edit with set.subagents = the current object with this ID added to target_ids.",
+            what: "a named route to a behavior for agent_new (tools grant). TARGET_ID goes in target_id or argv.",
+            commands: &["subagent-target list", "subagent-target get TARGET_ID", "subagent-target [preview] create|edit TARGET_ID  set: target fields"],
+            notes: "name is the agent name the model sees; target_agent_did owns the behavior. A local behavior_id must exist; its short slug resolves when target_agent_did is this principal. Multiple callers can select the same target.",
+            next: "read tools get, then tools edit: preserve set.subagents, set enabled true and add this ID to target_ids. Selecting targets alone leaves delegation disabled. Use options.behavior to grant another caller; tools apply next request.",
         },
         "execution" => Page {
             what: "an InferenceExecution: the run limits (turns, deadline, tokens, stream timeouts) a profile selects (profile grant). EXECUTION_ID goes in target_id.",
@@ -320,7 +320,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "backend get [BACKEND_ID]",
                 "backend get|preview|edit  options.behavior: the backend that behavior's profile uses",
             ],
-            notes: "Create makes an enabled, unauthenticated OpenAI-compatible backend and never takes a credential. list, get and discover show the last credential-free catalog; discover contacts only an unauthenticated backend. Credentials and OAuth are operator-owned and never readable.",
+            notes: "Create makes an enabled, unauthenticated OpenAI-compatible backend and never takes a credential. list and get read the cached credential-free catalog. discover probes an unauthenticated backend and writes its refreshed catalog; it is not read-only. Credentials and OAuth are operator-owned and never readable.",
             next: "create a profile on it with a discovered model ([\"help\",\"profile\"]).",
         },
         "mcp-service" => Page {
@@ -332,7 +332,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "automation" => Page {
             what: "documents that start work without a user: event-source or schedule, trigger, task (automation grant). Use it to run a behavior on new documents or on a timer.",
             commands: &["automation get|preview|edit KIND  target_id; options.behavior; KIND is event-source, trigger, task or schedule"],
-            notes: "preview and edit are upserts. A task belongs to the selected behavior and its triggers use only its tasks; each fire renders the task into a request of that behavior.\nfilter is a GraphQL object literal in a string, keys unquoted, as in the recipe. Template roots: doc (the source document; its fields must exist in the schema), event, args, session, request, group; a missing value fails the fire. Render the data the task needs apart from its instructions.\nTask.emit_outcome=true writes the standard FireOutcome run record; default false writes none.\nConcurrency: parallel (default); queued_serial runs one at a time in order, never skipping; serial skips a fire while work runs; latest_only supersedes. queued_serial, session_id_template (deliver into an existing session) and emit_outcome need an event source.\nPipelines: a stage's task writes its output through a datastore surface, and that collection's event source fires the next stage. Fan-in: an event source group waits for expected_count documents sharing correlation_field.",
+            notes: "preview and edit are upserts. A task belongs to the selected behavior and its triggers use only its tasks; each fire renders the task into a request of that behavior.\nfilter is a GraphQL object literal in a string, keys unquoted, as in the recipe. Template roots: doc (the source document; its fields must exist in the schema), event, args, session, request, group; a missing value fails the fire. Render the data the task needs apart from its instructions.\nTask.emit_outcome=true writes the standard FireOutcome run record; the source document must carry a nonempty String handoff_id. Default false writes none.\nConcurrency: parallel (default); queued_serial runs one at a time in order, never skipping; serial skips a fire while work runs; latest_only supersedes. queued_serial, session_id_template (deliver into an existing session) and emit_outcome need an event source.\nPipelines: a stage's task writes its output through a datastore surface, and that collection's event source fires the next stage. Fan-in: an event source group waits for expected_count documents sharing correlation_field.",
             next: "create one source document and read the resulting request and its output.",
         },
         "cleanup" => Page {
