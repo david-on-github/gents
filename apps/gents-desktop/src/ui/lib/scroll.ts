@@ -190,13 +190,32 @@ export function useOlderPages(
     const onWheel = (event: WheelEvent) => {
       if (event.deltaY < 0) void fetchOlder();
     };
+    let touchY: number | undefined;
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches[0]?.clientY;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const nextY = event.touches[0]?.clientY;
+      if (touchY !== undefined && nextY !== undefined && nextY > touchY)
+        void fetchOlder();
+      touchY = nextY;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (["ArrowUp", "PageUp", "Home"].includes(event.key)) void fetchOlder();
+    };
     viewport.addEventListener("scroll", onScroll, { passive: true });
     viewport.addEventListener("wheel", onWheel, { passive: true });
+    viewport.addEventListener("touchstart", onTouchStart, { passive: true });
+    viewport.addEventListener("touchmove", onTouchMove, { passive: true });
+    viewport.addEventListener("keydown", onKeyDown);
     return () => {
       disposed = true;
       if (frame !== null) cancelAnimationFrame(frame);
       viewport.removeEventListener("scroll", onScroll);
       viewport.removeEventListener("wheel", onWheel);
+      viewport.removeEventListener("touchstart", onTouchStart);
+      viewport.removeEventListener("touchmove", onTouchMove);
+      viewport.removeEventListener("keydown", onKeyDown);
     };
   }, [ownerRef, subject]);
   return loading;

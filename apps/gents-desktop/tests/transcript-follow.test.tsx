@@ -1,4 +1,4 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, fireEvent, renderHook } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { RefObject } from "react";
 
@@ -130,4 +130,28 @@ describe("older transcript pages", () => {
     expect(load).toHaveBeenCalledTimes(1);
     unmount();
   });
+});
+
+describe("short transcript upward intent", () => {
+  it.each(["touch", "keyboard"])(
+    "loads older content through %s at the top",
+    async (input) => {
+      const fixture = transcriptFixture();
+      const load = vi.fn(async () => false);
+      const { unmount } = renderHook(() =>
+        useOlderPages(fixture.ownerRef, "a", true, load),
+      );
+      expect(load).not.toHaveBeenCalled();
+      await act(async () => {
+        if (input === "touch") {
+          fireEvent.touchStart(fixture.viewport, { touches: [{ clientY: 50 }] });
+          fireEvent.touchMove(fixture.viewport, { touches: [{ clientY: 80 }] });
+        } else {
+          fireEvent.keyDown(fixture.viewport, { key: "PageUp" });
+        }
+      });
+      expect(load).toHaveBeenCalledTimes(1);
+      unmount();
+    },
+  );
 });

@@ -85,6 +85,7 @@ export function ChatTranscriptPanel({
   const pageFlight = useRef(false);
   const pageGeneration = useRef(0);
   const lastScrollTop = useRef(0);
+  const touchY = useRef<number | undefined>(undefined);
   const [retryingRequestId, setRetryingRequestId] = useState<string | null>(
     null,
   );
@@ -355,6 +356,27 @@ export function ChatTranscriptPanel({
       onScroll={handleTranscriptScroll}
       onWheel={(event) => {
         if (event.deltaY < 0 && event.currentTarget.scrollTop <= 160)
+          void loadOlderItems();
+      }}
+      onTouchStart={(event) => {
+        touchY.current = event.touches[0]?.clientY;
+      }}
+      onTouchMove={(event) => {
+        const nextY = event.touches[0]?.clientY;
+        if (
+          touchY.current !== undefined &&
+          nextY !== undefined &&
+          nextY > touchY.current &&
+          event.currentTarget.scrollTop <= 160
+        )
+          void loadOlderItems();
+        touchY.current = nextY;
+      }}
+      onKeyDown={(event) => {
+        if (
+          ["ArrowUp", "PageUp", "Home"].includes(event.key) &&
+          event.currentTarget.scrollTop <= 160
+        )
           void loadOlderItems();
       }}
       ref={transcriptPanelRef}
