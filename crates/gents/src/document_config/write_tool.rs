@@ -535,3 +535,21 @@ mod tests {
         );
     }
 }
+
+/// Refusal for a model-supplied value on a runtime-filled field. It names the
+/// declaring surface entry because the fix belongs to whoever configured it,
+/// not to the calling model.
+pub fn runtime_filled_refusal(
+    kind: &str,
+    field: &str,
+    tool_name: &str,
+    surface_id: Option<&str>,
+) -> String {
+    let declared = match surface_id {
+        Some(surface) => format!("surface {surface:?} entry {tool_name:?}"),
+        None => format!("the declaration of tool {tool_name:?}"),
+    };
+    format!(
+        "{kind} `{field}` is runtime-filled and must not be supplied to tool `{tool_name}`: omit it. It is declared runtime-filled by {declared}; if the caller should supply it, the Engineer can make it a model argument by removing its fill with datastore edit"
+    )
+}

@@ -37,6 +37,7 @@ pub struct BehaviorToolConfig {
     defra_query_collections: Vec<String>,
     write_tools: Vec<WriteToolDecl>,
     query_tools: Vec<QueryToolDecl>,
+    surface_of_tool: std::collections::BTreeMap<String, String>,
     eth_queries: Vec<crate::eth::ResolvedEthQuery>,
     eth_calls: Vec<crate::eth::ResolvedEthCall>,
     plugin_tools: Vec<crate::document_config::PluginToolRef>,
@@ -81,6 +82,7 @@ impl BehaviorToolConfig {
             defra_query_collections: Vec::new(),
             write_tools: Vec::new(),
             query_tools: Vec::new(),
+            surface_of_tool: Default::default(),
             eth_queries: Vec::new(),
             eth_calls: Vec::new(),
             plugin_tools: Vec::new(),
@@ -160,6 +162,7 @@ impl BehaviorToolConfig {
         let mut resolved = ResolvedToolSelection::from_document(tools)?;
         resolved.write_tools = merged.write_tools;
         resolved.query_tools = merged.query_tools;
+        resolved.surface_of_tool = merged.surface_of_tool;
         resolved.eth_queries = expanded.queries;
         resolved.eth_calls = expanded.calls;
         Self::from_selection_with_subagent_tools(
@@ -223,6 +226,7 @@ impl BehaviorToolConfig {
             defra_query_collections: _,
             write_tools,
             query_tools,
+            surface_of_tool,
             enable_self_config: _,
             self_config_categories: _,
             self_config_no_lockout,
@@ -362,6 +366,7 @@ impl BehaviorToolConfig {
             defra_query_collections: static_policy.defra_query_collections_for_runtime(),
             write_tools: static_policy.write_decls_for_runtime(&write_tools),
             query_tools: static_policy.query_decls_for_runtime(&query_tools),
+            surface_of_tool,
             eth_queries,
             eth_calls,
             plugin_tools: plugin_tools
@@ -538,6 +543,7 @@ impl BehaviorToolConfig {
             defra_query_scope: effective_policy.defra_query_collection_scope(),
             write_tools: effective_policy.write_decls_for_runtime(&self.write_tools),
             query_tools: effective_policy.query_decls_for_runtime(&self.query_tools),
+            surface_of_tool: self.surface_of_tool.clone(),
             eth_queries: if effective_policy.eth_query_methods.is_deny_all() {
                 Vec::new()
             } else {

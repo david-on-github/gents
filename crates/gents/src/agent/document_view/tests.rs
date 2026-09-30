@@ -2025,8 +2025,12 @@ fn merge_expands_query_entries_separately_from_creates() {
     );
     let selection = tools_selection(agent_did, Some(vec!["experiment-io".to_string()]), None);
     let merged = super::merge_surface_tools(&selection, &view).unwrap();
-    assert_eq!(merged.write_tools, vec![write]);
-    assert_eq!(merged.query_tools, vec![query]);
+    assert_eq!(merged.write_tools, vec![write.clone()]);
+    assert_eq!(merged.query_tools, vec![query.clone()]);
+    // Refusals name the declaring surface, so the merge keeps that mapping.
+    for tool in [&write.tool_name, &query.tool_name] {
+        assert_eq!(merged.surface_of_tool[tool.as_str()], "experiment-io");
+    }
 }
 
 #[tokio::test]

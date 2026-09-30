@@ -48,11 +48,22 @@ pub struct BoundedWriteParams(pub Map<String, Value>);
 pub struct BoundedWriteTool {
     node: Arc<EmbeddedNode>,
     decl: WriteToolDecl,
+    surface_id: Option<String>,
 }
 
 impl BoundedWriteTool {
     pub fn new(node: Arc<EmbeddedNode>, decl: WriteToolDecl) -> Self {
-        Self { node, decl }
+        Self {
+            node,
+            decl,
+            surface_id: None,
+        }
+    }
+
+    /// The DatastoreToolSurface that declared this tool, named by refusals.
+    pub fn declared_by(mut self, surface_id: Option<String>) -> Self {
+        self.surface_id = surface_id;
+        self
     }
 
     pub fn is_well_formed(&self) -> bool {
@@ -117,8 +128,13 @@ impl BoundedWriteTool {
             }
             if field.is_some_and(|field| field.fill.is_some()) {
                 bail!(
-                    "field `{key}` is runtime-filled and must not be supplied to tool `{}`",
-                    self.decl.tool_name
+                    "{}",
+                    crate::document_config::runtime_filled_refusal(
+                        "field",
+                        key,
+                        &self.decl.tool_name,
+                        self.surface_id.as_deref(),
+                    )
                 );
             }
         }

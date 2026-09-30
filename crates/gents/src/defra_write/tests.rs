@@ -310,6 +310,20 @@ async fn runtime_fills_are_hidden_rejected_from_model_input_and_stamped_at_call_
     )
     .await;
     assert!(supplied.unwrap_err().to_string().contains("runtime-filled"));
+    // The refusal names the declaring surface entry: the fix is the
+    // Engineer's, not the calling model's.
+    let declared = tool.clone().declared_by(Some("results".into()));
+    let refused = Tool::call(
+        &declared,
+        serde_json::from_value(json!({"summary": "done", "run_id": "model-value"})).unwrap(),
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        refused.contains(r#"field `run_id` is runtime-filled and must not be supplied to tool `write_result`: omit it. It is declared runtime-filled by surface "results" entry "write_result"; if the caller should supply it, the Engineer can make it a model argument by removing its fill with datastore edit"#),
+        "{refused}"
+    );
 
     let mut source_fields = std::collections::BTreeMap::new();
     source_fields.insert("expected_total".to_string(), "3".to_string());

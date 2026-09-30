@@ -2,6 +2,13 @@ use std::fmt::Write as _;
 
 use super::*;
 
+/// The mailbox identity choice, stated wherever a mailbox policy is written.
+macro_rules! mailbox_identity_choice {
+    () => {
+        "condition identity: one open item per stable finding, updated across requests; event identity: a new item for every request."
+    };
+}
+
 /// One recipe step: a native call and an optional note on what to carry into
 /// the next step. Placeholders are `<UPPER_CASE>`.
 type Step = (Value, Option<&'static str>);
@@ -164,6 +171,7 @@ fn command_help(resource: &str, page: &Page, command: &[&str]) -> Option<String>
     }
     if writes && resource == "datastore" {
         let _ = writeln!(out, "options.mailbox policy values: {}", mailbox_values());
+        let _ = writeln!(out, "{}", mailbox_identity_choice!());
     }
     let _ = write!(out, "Page and recipe: [\"help\",\"{resource}\"]");
     Some(out)
@@ -238,7 +246,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "skill [preview] import SKILL_ID PATH  PATH is a skill directory or its SKILL.md inside the invoking behavior's file root",
             ],
             notes: "Frontmatter supplies name and description, the body the instructions, optional agents/openai.yaml interface metadata and tool dependencies. Files are limited to 1 MiB. Import creates an unused ID and never overwrites. Skills grant no tools; supporting files are neither copied nor run.",
-            next: "attach it: behavior context edit with options.behavior and set.skill_ids = the current IDs plus this one; verify with load_skill in a fresh session.",
+            next: "attach it once imported: behavior context preview, then edit, with options.behavior and set.skill_ids = the current IDs plus this one (a context preview resolves only imported skills, so before import skill preview import is the whole preview); verify with load_skill in a fresh session.",
         },
         "discovery" => Page {
             what: "scan external Claude, Codex or Grok configuration read-only (tools grant and file read authority).",
@@ -252,7 +260,11 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "datastore get",
                 "datastore [preview] create|edit  set: surface fields, or options.mailbox",
             ],
-            notes: "A create entry writes one document; a query entry (kind query) matches filter_fields exactly. Give every entry a description; it is the tool's description. Runtime-filled fields must not be required. Writing the surface checks syntax only, selecting it checks tool-name collisions, and only a call proves the collection and fields.\nMailbox: for the existing MailboxItem collection set options.mailbox to a notification policy; the runtime supplies the canonical file_mailbox_item entry. It replaces entries, so keep other tools on another surface. Never create a replacement mailbox collection.",
+            notes: concat!(
+                "A create entry writes one document; a query entry (kind query) matches filter_fields exactly. Give every entry a description; it is the tool's description. fill: correlation makes the runtime write the trigger or request correlation ID and fill: {source_field: F} copies field F of the triggering document, so the calling model can never set a filled field: never fill a key the caller supplies. A caller-supplied key named correlation is {\"name\":\"correlation\",\"required\":true}; the runtime's ID is {\"name\":\"request_correlation\",\"fill\":\"correlation\"}. Filled fields must not be required. Writing the surface checks syntax only, selecting it checks tool-name collisions, and only a call proves the collection and fields.\nMailbox: for the existing MailboxItem collection set options.mailbox to a notification policy; the runtime supplies the canonical file_mailbox_item entry. It replaces entries, so keep other tools on another surface. Never create a replacement mailbox collection.\n",
+                mailbox_identity_choice!(),
+                " A monitor uses condition identity: {\"argv\":[\"datastore\",\"create\"],\"target_id\":\"monitor-mailbox\",\"options\":{\"mailbox\":{\"identity\":{\"mode\":\"condition\",\"key\":\"host-health\"},\"kind\":\"flag\",\"action\":\"ack\"}}}"
+            ),
             next: "call the new tool from a fresh session of the selected behavior.",
         },
         "subagent-target" => Page {

@@ -64,23 +64,35 @@ impl ConfigCommandParams {
             );
         }
         let mut argv = self.argv;
+        normalize_verbs(&mut argv);
         if let Some(id) = self.target_id {
             required_resource_id(Some(&id), "target_id")?;
             let words = argv.iter().map(String::as_str).collect::<Vec<_>>();
             let position = match words.as_slice() {
-                ["datastore" | "subagent-target" | "execution", "preview", "create" | "edit", ..] => 3,
+                ["datastore" | "subagent-target" | "execution", "preview", "create" | "edit", ..]
+                | ["behavior", "preview", "edit" | "default", ..]
+                | ["backend" | "profile", "preview", "create", ..]
+                | ["pack", "preview", "install" | "update", ..] => 3,
                 ["datastore" | "subagent-target" | "execution", "get" | "create" | "edit", ..]
-                | ["mcp-service", "get" | "preview" | "edit", ..] => 2,
+                | ["mcp-service", "get" | "preview" | "edit", ..]
+                | ["behavior", "get" | "edit" | "default", ..]
+                | ["backend", "get" | "create" | "discover", ..]
+                | ["profile", "create", ..]
+                | ["skill" | "schema", "get", ..]
+                | ["pack", "get" | "install" | "update" | "remove", ..] => 2,
                 ["automation", "get" | "preview" | "edit", _, ..] => 3,
                 _ => bail!(
-                    "target_id is supported for datastore, subagent-target, execution, automation and mcp-service document commands; see [\"help\"]"
+                    "target_id is not accepted by {:?}; put the ID in argv where [\"help\"] shows it",
+                    words.join(" ")
                 ),
             };
-            anyhow::ensure!(
-                argv.get(position).is_none_or(|arg| arg.starts_with('-')),
-                "target ID supplied in both argv and target_id; use only one"
-            );
-            argv.insert(position, id);
+            match argv.get(position).filter(|arg| !arg.starts_with('-')) {
+                None => argv.insert(position, id),
+                Some(given) if *given == id => {}
+                Some(given) => bail!(
+                    "target ID {given:?} in argv conflicts with target_id {id:?}; send one of them"
+                ),
+            }
         }
         for (name, value) in self.options {
             anyhow::ensure!(
@@ -243,12 +255,14 @@ Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.beha
             ..self.clone()
         };
         let mut previewing = false;
+        let mut planning = false;
         let mut help = false;
         let observed = observed_call(&args);
         let words = args.argv.clone();
         let result = async {
             let argv = args.into_argv()?;
             previewing = argv.iter().any(|word| word == "preview");
+            planning = argv.first().is_some_and(|word| word == "plan");
             help = config_help_resource(&argv).is_some();
             call.dispatch(&argv).await
         }
@@ -261,19 +275,30 @@ Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.beha
             Ok(text) if help => Ok(text),
             Ok(text) => append_receipt(&text, &receipt).map_err(Into::into),
             Err(error) => {
-                // A preview may name a behavior that is still only proposed;
-                // connected preview is the path for that, not for a typo.
-                let recovery = if previewing
-                    && error
-                        .downcast_ref::<super::ops::MissingBehavior>()
-                        .is_some()
-                {
+                // A preview may name a behavior or reference a document that
+                // is still only proposed; connected preview is the path for
+                // that, not for a typo.
+                let missing = error
+                    .downcast_ref::<crate::document_config::MissingReference>()
+                    .filter(|_| previewing);
+                let connectable = error
+                    .downcast_ref::<super::ops::MissingBehavior>()
+                    .is_some()
+                    || missing.is_some_and(|missing| plan::plan_category(missing.target).is_some());
+                let recovery = if previewing && !planning && connectable {
                     call.connected_preview_contract()
                 } else {
                     Value::Null
                 };
+                let message = match missing {
+                    Some(missing) => format!(
+                        "{} Cause: {error:#}",
+                        missing_reference_next_step(missing, planning, !recovery.is_null())
+                    ),
+                    None => format!("{error:#}"),
+                };
                 let failure = ordered! {
-                    "error": format!("{error:#}"),
+                    "error": message,
                     "recovery": recovery,
                     "config_execution": receipt,
                 };
@@ -367,6 +392,35 @@ fn log_config_call(
     );
 }
 
+/// A preview that references a document which does not exist yet names the
+/// call that can check it, or the order that makes the reference valid.
+fn missing_reference_next_step(
+    missing: &crate::document_config::MissingReference,
+    planning: bool,
+    connected_preview: bool,
+) -> String {
+    let target = missing.target.graphql_type();
+    let id = &missing.target_id;
+    if missing.target == crate::Collection::Skill {
+        return format!(
+            "Skill {id:?} does not exist yet, so no preview can attach it; [\"skill\",\"preview\",\"import\",{id:?},PATH] is the whole preview until it is imported. After approval: [\"skill\",\"import\",{id:?},PATH], then [\"behavior\",\"context\",\"preview\"] and [\"behavior\",\"context\",\"edit\"] with options.behavior and set.skill_ids."
+        );
+    }
+    if planning && plan::plan_category(missing.target).is_some() {
+        return format!(
+            "{target} {id:?} is neither an existing document nor in options.documents; add it to options.documents or reference an existing ID."
+        );
+    }
+    if connected_preview {
+        return format!(
+            "{target} {id:?} does not exist yet; to preview new documents that reference each other, use a connected plan preview: [\"help\",\"plan\"]; an existing document can reference it once it is created."
+        );
+    }
+    format!(
+        "{target} {id:?} does not exist yet; create it with its own resource command first, or reference an existing ID."
+    )
+}
+
 /// Every non-help result ends with the execution receipt, after the answer
 /// and its next step, without re-serializing (and so re-sorting) the answer.
 fn append_receipt(
@@ -432,6 +486,11 @@ impl ConfigCommandTool {
         let Some(command) = argv.first().map(String::as_str) else {
             bail!("missing config command; see [\"help\"]");
         };
+        if argv.get(1).is_some_and(|verb| verb == "apply") {
+            if let Some(refusal) = apply_refusal(command) {
+                bail!(refusal);
+            }
+        }
         match command {
             "help" => self.help(argv.get(1).map(String::as_str), Vec::new()),
             "get" => {
@@ -665,7 +724,13 @@ impl ConfigCommandTool {
                 ordered! {"resource": "AgentContext", "document": effective.get("context")}.pretty()
             }
             "preview" | "edit" => {
-                let patch = parse_patch(&rest, SelfConfigTarget::AgentContext)?;
+                let parsed = ParsedArgs::parse(&rest)?;
+                if let Some(word) = parsed.positionals.first() {
+                    bail!(
+                        "behavior context {verb} takes no positional argument {word:?}; name the behavior in options.behavior and the fields in set: {{\"argv\":[\"behavior\",\"context\",\"{verb}\"],\"options\":{{\"behavior\":\"BEHAVIOR_ID\"}},\"set\":{{\"FIELD\":VALUE}}}}"
+                    );
+                }
+                let patch = parse_patch_args(parsed, SelfConfigTarget::AgentContext)?;
                 self.patch(
                     &core,
                     verb,
@@ -688,7 +753,6 @@ impl ConfigCommandTool {
         let verb = argv.first().map(String::as_str).with_context(|| {
             format!("{resource} command is required; see [\"help\",\"{resource}\"]")
         })?;
-        reject_preview_verb(resource, argv)?;
         let target = match resource {
             "tools" => SelfConfigTarget::Tools,
             "backend" => SelfConfigTarget::InferenceBackend,
@@ -701,6 +765,9 @@ impl ConfigCommandTool {
                 self.inference_inventory(target, parse_limit(&parsed)?, parsed.one("cursor")?)
                     .await
             }
+            "list" => bail!(
+                "{resource} has no list: each behavior has one; read it with {{\"argv\":[\"{resource}\",\"get\"],\"options\":{{\"behavior\":\"BEHAVIOR_ID\"}}}} and find behaviors with [\"behavior\",\"list\"]"
+            ),
             "get" => {
                 let (behavior_id, rest) = extract_behavior_target(&argv[1..])?;
                 anyhow::ensure!(
@@ -712,6 +779,14 @@ impl ConfigCommandTool {
                     Some(id) => self.exact_read(target, id).await,
                     None => self.bound_read(&core, target).await,
                 }
+            }
+            "create" | "preview"
+                if target == SelfConfigTarget::Tools
+                    && (verb == "create" || argv.get(1).is_some_and(|word| word == "create")) =>
+            {
+                bail!(
+                "tools are created with their behavior (behavior create); change a behavior's tools with {{\"argv\":[\"tools\",\"edit\"],\"options\":{{\"behavior\":\"BEHAVIOR_ID\"}},\"set\":{{\"GROUP\":VALUE}}}}"
+                )
             }
             "preview" | "edit" => {
                 let (behavior_id, rest) = extract_behavior_target(&argv[1..])?;
@@ -864,7 +939,6 @@ impl ConfigCommandTool {
             .first()
             .map(String::as_str)
             .context("profile command is required; see [\"help\",\"profile\"]")?;
-        reject_preview_verb("profile", argv)?;
         if verb == "list" {
             let parsed = ParsedArgs::parse(&argv[1..])?;
             parsed.reject_mutation_flags()?;
@@ -1097,7 +1171,10 @@ impl ConfigCommandTool {
             .first()
             .map(String::as_str)
             .context("automation command is required; see [\"help\",\"automation\"]")?;
-        reject_preview_verb("automation", argv)?;
+        anyhow::ensure!(
+            verb != "list",
+            "automation has no list; a behavior's event sources, schedules, triggers and tasks are in {{\"argv\":[\"get\"],\"options\":{{\"behavior\":\"BEHAVIOR_ID\"}}}} under automation; read one with [\"automation\",\"get\",KIND,ID]"
+        );
         let kind = argv.get(1).context("automation requires KIND")?;
         let id = required_resource_id(argv.get(2), "automation ID")?;
         let target = automation_target(&kind.replace('-', "_"))?;
@@ -1426,6 +1503,10 @@ impl ConfigCommandTool {
         }
         let owner = self.agent_did.clone();
         let candidates = [id.to_owned(), format!("{owner}:{id}")];
+        let listing = format!(
+            "{{ AgentBehavior(filter: {{agent_did: {{_eq: \"{}\"}}}}) {{behavior_id display_name}} }}",
+            escape_graphql_string(&owner)
+        );
         let found = crate::config_client::ConfigAccess::transact_local(
             &self.node,
             Some(self.core.identity()?),
@@ -1433,6 +1514,7 @@ impl ConfigCommandTool {
             |txn| {
                 let owner = owner.clone();
                 let candidates = candidates.clone();
+                let listing = listing.clone();
                 Box::pin(async move {
                     for candidate in candidates {
                         if ops::read_owned_doc(
@@ -1444,17 +1526,35 @@ impl ConfigCommandTool {
                         .await?
                         .is_some()
                         {
-                            return Ok(Some(candidate));
+                            return Ok(Ok(candidate));
                         }
                     }
-                    Ok(None)
+                    Ok(Err(txn.execute(&listing).await?))
                 })
             },
         )
         .await?;
-        found.ok_or_else(|| {
+        found.map_err(|listing| {
+            let prefix = format!("{owner}:");
+            let mut suggestions =
+                gents_protocol::graphql::graphql_rows_from_response(&listing, "AgentBehavior")
+                    .into_iter()
+                    .filter_map(|row| {
+                        let behavior_id = row.get("behavior_id")?.as_str()?;
+                        let slug = behavior_id.strip_prefix(&prefix);
+                        let display_name = row.get("display_name").and_then(Value::as_str);
+                        [Some(behavior_id), slug, display_name]
+                            .into_iter()
+                            .flatten()
+                            .any(|name| name.eq_ignore_ascii_case(id))
+                            .then(|| slug.unwrap_or(behavior_id).to_owned())
+                    })
+                    .collect::<Vec<_>>();
+            suggestions.sort();
+            suggestions.dedup();
             ops::MissingBehavior {
                 behavior_id: id.to_owned(),
+                suggestions,
             }
             .into()
         })
@@ -1853,21 +1953,36 @@ impl ConfigCommandTool {
     }
 }
 
-/// Resources patched in place take "preview" instead of "edit"; the others
-/// take it before their verb. Name the right shape rather than misreading the
-/// verb as the next operand.
-fn reject_preview_verb(resource: &str, argv: &[String]) -> Result<()> {
-    if argv.first().is_some_and(|word| word == "preview")
-        && argv.get(1).is_some_and(|word| word == "edit")
-    {
-        let example = if resource == "automation" {
-            "[\"automation\",\"preview\",KIND]".to_owned()
-        } else {
-            format!("[\"{resource}\",\"preview\"]")
-        };
-        bail!("{resource} preview replaces edit: use {example} with the same options and set");
+/// Verbs a model reasonably guesses that mean an existing command: `preview
+/// edit` is `preview` where preview replaces edit, and automation `create` is
+/// its upsert through `edit`. Resources whose `preview edit ID` or `create`
+/// are distinct commands are left alone.
+fn normalize_verbs(argv: &mut Vec<String>) {
+    let words = argv.iter().map(String::as_str).collect::<Vec<_>>();
+    let drop = match words.as_slice() {
+        ["automation", "preview", "edit" | "create", ..]
+        | ["tools" | "backend" | "profile", "preview", "edit", ..] => Some(2),
+        ["behavior", "context", "preview", "edit", ..] => Some(3),
+        _ => None,
+    };
+    if let Some(index) = drop {
+        argv.remove(index);
+    } else if words.starts_with(&["automation", "create"]) {
+        argv[1] = "edit".to_owned();
     }
-    Ok(())
+}
+
+/// The exact call that applies a preview, for a model that guessed `apply`.
+fn apply_refusal(resource: &str) -> Option<String> {
+    let form = match resource {
+        "plan" => return None,
+        "schema" => "[\"schema\",\"install\"] with options.sdl and options.digest from [\"schema\",\"preview\",\"install\"]".to_owned(),
+        "pack" => "[\"pack\",\"install\",PACKAGE] with options.digest from [\"pack\",\"preview\",\"install\",PACKAGE]".to_owned(),
+        "cleanup" => "[\"cleanup\",\"remove\"] with options.target and options.digest from [\"cleanup\",\"preview\"]".to_owned(),
+        "skill" => "[\"skill\",\"import\",SKILL_ID,PATH]".to_owned(),
+        _ => "the previewed call with its target_id, options and set, removing \"preview\" from argv and putting \"edit\" in its place when no create or edit follows it".to_owned(),
+    };
+    Some(format!("{resource} has no apply verb; use {form}"))
 }
 
 fn cleanup_plan_digest(owner: &str, targets: &[Value]) -> Result<String> {
@@ -2038,7 +2153,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
             json!({
                 "display_name":"string|null",
                 "enabled":"boolean; default true",
-                "entries":"array<SurfaceToolDecl>|null (reads use {entries:[...]} envelope). Create: {tool_name:string,collection:string,description?:string,fields:[{name:string,required?:boolean,fill?:correlation|{source_field:string}}],output_obligation?:{scope:request|trigger,minimum_writes?:positive integer,expected_count_field?:string}}. Query: {kind:query,tool_name:string,collection:string,description?:string,fields:[string],filter_fields?:[same field objects]}. Runtime-filled fields must not be required; other fields are model arguments. Surface writes validate declaration syntax. Selecting the surface in Tools checks tool-name collisions; runtime invocation validates the target collection/fields. Register schemas first, then bind and exercise the tools to establish readiness.",
+                "entries":"array<SurfaceToolDecl>|null (reads use {entries:[...]} envelope). Create: {tool_name:string,collection:string,description?:string,fields:[{name:string,required?:boolean,fill?:correlation|{source_field:string}}],output_obligation?:{scope:request|trigger,minimum_writes?:positive integer,expected_count_field?:string}}. Query: {kind:query,tool_name:string,collection:string,description?:string,fields:[string],filter_fields?:[same field objects]}. fill fields are runtime-filled and never model arguments (what fill means: [\"help\",\"datastore\"]); other fields are model arguments. Surface writes validate declaration syntax. Selecting the surface in Tools checks tool-name collisions; runtime invocation validates the target collection/fields. Register schemas first, then bind and exercise the tools to establish readiness.",
                 "tags":"array<string>; default []"
             }),
         )],
@@ -2167,6 +2282,41 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
         _ => Vec::new(),
     };
     Value::Array(contracts)
+}
+
+/// The advertised field shape at a decode error path (`host.cli[0].name`), so
+/// a type error names what the field takes instead of an internal Rust type.
+pub(super) fn field_shape(collection: &str, path: &str) -> Option<Value> {
+    let contract = [
+        "behavior",
+        "tools",
+        "datastore",
+        "skill",
+        "profile",
+        "backend",
+        "mcp-service",
+        "automation",
+        "subagent-target",
+    ]
+    .into_iter()
+    .flat_map(|resource| match help_patch_contracts(Some(resource)) {
+        Value::Array(contracts) => contracts,
+        _ => Vec::new(),
+    })
+    .find(|contract| contract["collection"] == collection)?;
+    let mut shape = &contract["field_shapes"];
+    let path = path.replace('[', ".[");
+    for segment in path.split('.').filter(|segment| !segment.is_empty()) {
+        shape = if segment.starts_with('[') {
+            match shape {
+                Value::Array(items) => items.first()?,
+                other => other,
+            }
+        } else {
+            shape.get(segment)?
+        };
+    }
+    Some(shape.clone())
 }
 
 fn parse_pack_change(argv: &[String]) -> Result<PackInstallParams> {
