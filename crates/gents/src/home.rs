@@ -39,6 +39,10 @@ pub struct StoredInitConfig<ToolPackage = String, ToolCeiling = String> {
     pub tool_package: Option<ToolPackage>,
     pub tool_ceiling: ToolCeiling,
     pub tool_root: Option<String>,
+    /// The home store's at-rest encryption. An earlier home's absent record
+    /// is written only after its plaintext store has been upgraded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_encryption: Option<crate::store_key::StoreEncryption>,
 }
 
 /// The home gents uses when none is named: `GENTS_HOME` when set, otherwise
@@ -234,9 +238,12 @@ fn lock_path(home_dir: &Path, path: PathBuf) -> Result<StoreLock> {
 
 /// The default identity key path under a gents home, for the named agent.
 pub fn default_key_path(home_dir: &Path, agent_name: &str) -> PathBuf {
-    home_dir
-        .join(KEYS_DIR_NAME)
-        .join(format!("{agent_name}.key"))
+    keys_dir(home_dir).join(format!("{agent_name}.key"))
+}
+
+/// The directory a gents home keeps its file keys in.
+pub fn keys_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(KEYS_DIR_NAME)
 }
 
 /// The path `init.json` lives at under a gents home.
@@ -245,7 +252,8 @@ pub fn init_config_path(home_dir: &Path) -> PathBuf {
 }
 
 /// Writes `state` to `<home_dir>/init.json`, creating `home_dir` if it
-/// does not already exist.
+/// does not already exist. Publish and sync the complete record before any
+/// encrypted store write; interruption must not truncate the custody record.
 pub fn write_init_config<ToolPackage: Serialize, ToolCeiling: Serialize>(
     home_dir: &Path,
     state: &StoredInitConfig<ToolPackage, ToolCeiling>,
@@ -254,8 +262,16 @@ pub fn write_init_config<ToolPackage: Serialize, ToolCeiling: Serialize>(
         .with_context(|| format!("creating home directory {}", home_dir.display()))?;
     let path = init_config_path(home_dir);
     let contents = serde_json::to_vec_pretty(state).context("encoding local init config JSON")?;
-    fs::write(&path, contents)
+    let staged = tempfile::NamedTempFile::new_in(home_dir)
+        .with_context(|| format!("staging init config {}", path.display()))?;
+    use std::io::Write as _;
+    staged.as_file().write_all(&contents)?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist(&path)
         .with_context(|| format!("writing init config {}", path.display()))?;
+    #[cfg(unix)]
+    fs::File::open(home_dir)?.sync_all()?;
     Ok(())
 }
 
@@ -273,6 +289,29 @@ pub fn read_init_config<ToolPackage: DeserializeOwned, ToolCeiling: DeserializeO
     let state = serde_json::from_slice(&bytes)
         .with_context(|| format!("decoding init config {}", path.display()))?;
     Ok(Some(state))
+}
+
+/// Identity backend whose key never leaves the Secure Enclave.
+pub const SECURE_ENCLAVE_IDENTITY_BACKEND: &str = "macos-secure-enclave";
+
+/// Refuse to serve a home whose principal cannot own DefraDB node access
+/// control.
+///
+/// Node access control needs the node DID's private key bytes, which a
+/// Secure Enclave key never exports. Serving such a home without access
+/// control is undecided, so it is refused before any node is built.
+pub fn ensure_home_identity_can_serve(home_dir: &Path) -> Result<()> {
+    let Some(config) = read_init_config::<serde_json::Value, serde_json::Value>(home_dir)? else {
+        return Ok(());
+    };
+    if config.identity_backend.as_deref().map(str::trim) == Some(SECURE_ENCLAVE_IDENTITY_BACKEND) {
+        anyhow::bail!(
+            "home {} uses the {SECURE_ENCLAVE_IDENTITY_BACKEND} identity backend, whose key cannot own the served node's access control; re-initialize the home with a file or macos-keychain identity (`gents init --home {} --dangerously-overwrite --identity-backend file`) to serve it",
+            home_dir.display(),
+            home_dir.display()
+        );
+    }
+    Ok(())
 }
 
 /// The top-level entries of a gents home, split into those the home's
@@ -549,6 +588,36 @@ fn retire_entries_with(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn secure_enclave_homes_are_refused_before_serving() {
+        let home = tempfile::tempdir().unwrap();
+        super::ensure_home_identity_can_serve(home.path()).unwrap();
+        let init = |backend: serde_json::Value| {
+            std::fs::write(
+                super::init_config_path(home.path()),
+                serde_json::json!({
+                    "home": home.path(),
+                    "agent_name": "a",
+                    "agent_did": "did:key:z6Mk",
+                    "key_path": null,
+                    "identity_backend": backend,
+                    "tool_ceiling": "readonly",
+                    "tool_root": null,
+                })
+                .to_string(),
+            )
+            .unwrap();
+        };
+        init(serde_json::json!("macos-keychain"));
+        super::ensure_home_identity_can_serve(home.path()).unwrap();
+        init(serde_json::json!(super::SECURE_ENCLAVE_IDENTITY_BACKEND));
+        let refused = super::ensure_home_identity_can_serve(home.path())
+            .unwrap_err()
+            .to_string();
+        assert!(refused.contains("macos-secure-enclave"), "{refused}");
+        assert!(refused.contains("--identity-backend file"), "{refused}");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_lock_path_that_is_not_a_regular_file_is_refused() {
@@ -976,6 +1045,7 @@ mod tests {
             tool_package: Some("Readonly".to_string()),
             tool_ceiling: "Readonly".to_string(),
             tool_root: None,
+            store_encryption: None,
         }
     }
 

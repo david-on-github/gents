@@ -1,5 +1,8 @@
-//! Store locks exclude competing holders and release explicitly on drop,
-//! including while a forked child retains the inherited descriptor.
+//! Store lock lifetime: exclusion while held, release when dropped.
+//!
+//! A forked child shares its parent's open file descriptions until exec.
+//! The fork regression serializes with every other lock assertion under
+//! `FORK_EXCLUSION` so inherited descriptors belong to its controlled fixture.
 
 use std::fs;
 use std::sync::{Mutex, MutexGuard};
@@ -173,11 +176,11 @@ fn a_store_outside_the_home_does_not_exclude_the_home_default_store() {
     assert_ne!(held.path(), home_store.path());
 }
 
-/// A blocked child retains the inherited open file description, so a plain
-/// close cannot release its lock. Explicit unlock must release it before exec.
+/// A fork inherits the open file description. The runtime owner must unlock
+/// explicitly on drop so a child blocked before exec cannot retain its lock.
 #[cfg(unix)]
 #[test]
-fn dropping_the_store_lock_releases_it_before_a_forked_child_execs() {
+fn dropping_the_store_lock_releases_it_even_before_a_forked_child_execs() {
     use std::ffi::CString;
 
     let _exclusive = exclusive();
@@ -216,11 +219,17 @@ fn dropping_the_store_lock_releases_it_before_a_forked_child_execs() {
         release: go[1],
     };
 
+    let error = lock_store(temp.path(), &data)
+        .expect_err("the parent still holds the lock")
+        .to_string();
+    assert!(
+        error.contains(&format!("process {}", std::process::id())),
+        "the holder is recorded as this process: {error}"
+    );
+
     drop(held);
     let reacquired = lock_store(temp.path(), &data)
-        .expect("explicit unlock releases the store while the child retains its descriptor");
-    assert!(lock_store(temp.path(), &data).is_err());
-
+        .expect("the child cannot retain a lock its parent explicitly released");
     let status = child.release();
     assert!(
         libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
@@ -228,8 +237,8 @@ fn dropping_the_store_lock_releases_it_before_a_forked_child_execs() {
     );
     assert!(
         lock_store(temp.path(), &data).is_err(),
-        "exec closes the inherited descriptor without releasing the new holder's lock"
+        "child exec must not release the new owner's lock"
     );
     drop(reacquired);
-    lock_store(temp.path(), &data).expect("the new holder releases its own lock");
+    lock_store(temp.path(), &data).expect("the new owner released its lock");
 }

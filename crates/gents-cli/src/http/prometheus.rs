@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result};
@@ -189,7 +190,7 @@ pub(crate) struct P2pMetricsSnapshot {
 }
 
 pub(crate) async fn render_prometheus_metrics(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     local_agent_did: &str,
     measured_backend_health: &HashMap<String, gents::BackendHealthSnapshot>,
     p2p: Option<&P2pMetricsSnapshot>,
@@ -198,7 +199,7 @@ pub(crate) async fn render_prometheus_metrics(
     let data = with_local_native_executors(data);
     let inference_metrics = load_inference_metrics_query_data(graphql).await?;
     let background_completion = gents::load_background_completion_diagnostics(
-        &gents::config_client::ConfigAccess::Graphql(graphql.to_string()),
+        &gents::config_client::ConfigAccess::Graphql(graphql.clone()),
         local_agent_did,
     )
     .await
@@ -956,7 +957,9 @@ fn render_p2p_sync_metrics(lines: &mut Vec<String>, status: Option<&gents::P2pSy
     }
 }
 
-async fn load_inference_metrics_query_data(graphql: &str) -> Result<InferenceMetricsQueryData> {
+async fn load_inference_metrics_query_data(
+    graphql: &GraphqlEndpoint,
+) -> Result<InferenceMetricsQueryData> {
     let window_started_at = Utc::now() - Duration::seconds(INFERENCE_METRICS_WINDOW_SECS);
     let mut result = InferenceMetricsQueryData {
         principals: Vec::new(),
@@ -995,7 +998,7 @@ async fn load_inference_metrics_query_data(graphql: &str) -> Result<InferenceMet
 }
 
 async fn load_inference_metrics_page(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     query: &str,
 ) -> Result<InferenceMetricsPageData> {
     let response = post_graphql(graphql, query).await?;
@@ -1250,7 +1253,7 @@ pub(crate) struct MetricsCoreData {
 }
 
 pub(crate) async fn load_metrics_query_data(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     local_agent_did: &str,
 ) -> Result<MetricsQueryData> {
     let core = load_metrics_core_data(graphql, local_agent_did).await?;
@@ -1265,7 +1268,7 @@ pub(crate) async fn load_metrics_query_data(
 /// Reads core health only. Callers with their own deadline bound this read,
 /// then pass what remains to [`MetricsCoreData::with_liveness_activity`].
 pub(crate) async fn load_metrics_core_data(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     local_agent_did: &str,
 ) -> Result<MetricsCoreData> {
     let response = post_graphql(
@@ -1334,7 +1337,7 @@ impl MetricsCoreData {
     /// already passed skips them and progress falls back to `claimed_at`.
     pub(crate) async fn with_liveness_activity(
         self,
-        graphql: &str,
+        graphql: &GraphqlEndpoint,
         deadline: tokio::time::Instant,
     ) -> MetricsQueryData {
         let Self {
@@ -1369,7 +1372,7 @@ impl MetricsCoreData {
 /// to `claimed_at`) instead of failing `/healthz`, `/status`, `/metrics` or
 /// `/self`. All chunks share the caller's single `deadline`.
 async fn load_liveness_activity(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     local_agent_did: &str,
     requests: &[LivenessRequestRow],
     deadline: tokio::time::Instant,
@@ -1414,7 +1417,7 @@ async fn load_liveness_activity(
 }
 
 async fn load_liveness_activity_chunk(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     requests: &[(&str, &str)],
 ) -> Result<Vec<LivenessActivityRow>> {
     let response = post_graphql(graphql, &liveness_activity_query(requests)).await?;
@@ -1626,10 +1629,14 @@ mod tests {
             let _ = axum::serve(listener, router).await;
         });
 
-        let data =
-            load_metrics_query_data(&format!("http://{addr}/api/v0/graphql"), "did:test:local")
-                .await
-                .expect("an activity read failure must not fail the liveness owner");
+        let data = load_metrics_query_data(
+            &gents::config_client::GraphqlEndpoint::anonymous(format!(
+                "http://{addr}/api/v0/graphql"
+            )),
+            "did:test:local",
+        )
+        .await
+        .expect("an activity read failure must not fail the liveness owner");
         let request = &data.liveness.requests[0];
         assert_eq!(request.request_id, "req-1");
         assert!(

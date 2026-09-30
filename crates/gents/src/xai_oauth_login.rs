@@ -24,12 +24,24 @@ pub const XAI_OAUTH_SCOPES: &str = "openid profile email offline_access grok-cli
 pub const XAI_OAUTH_DEVICE_URL_OVERRIDE_ENV: &str = "GENTS_XAI_OAUTH_DEVICE_URL";
 pub const XAI_OAUTH_TOKEN_URL_OVERRIDE_ENV: &str = "GENTS_XAI_OAUTH_TOKEN_URL";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct XaiLoginTokens {
     pub access_token: String,
     pub refresh_token: String,
     pub id_token: Option<String>,
     pub expires_in: Option<i64>,
+}
+
+/// Token values never reach logs or error text through `Debug`.
+impl std::fmt::Debug for XaiLoginTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("XaiLoginTokens")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .field("id_token", &self.id_token.as_ref().map(|_| "[redacted]"))
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +292,19 @@ pub fn credential_from_login_tokens(
 mod tests {
     use super::*;
     use chrono::DateTime;
+
+    #[test]
+    fn login_tokens_debug_redacts_tokens() {
+        let tokens = XaiLoginTokens {
+            access_token: "secret-access".into(),
+            refresh_token: "secret-refresh".into(),
+            id_token: Some("secret-id".into()),
+            expires_in: Some(900),
+        };
+        let debug = format!("{tokens:?} {tokens:#?}");
+        assert!(!debug.contains("secret-"), "{debug}");
+        assert!(debug.contains("900"), "{debug}");
+    }
 
     #[test]
     fn credential_from_tokens_leaves_chatgpt_fields_unused() {

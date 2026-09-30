@@ -12,13 +12,15 @@ use crate::graphql::{graphql_response_with_transaction_retry, graphql_with_trans
 pub const DEFAULT_LIMIT: u32 = 50;
 pub const MAX_LIMIT: u32 = 1000;
 
-/// Sensitive `(collection, field)` pairs that `defra_query` must never expose,
-/// regardless of the configured collection scope. Selecting or filtering on one
-/// of these is rejected — this is an always-on guard against leaking
-/// credentials (e.g. inference backend API keys) through the read surface.
-const RESTRICTED_FIELDS: &[(&str, &str)] = &[
-    ("InferenceBackend", "api_key"),
-    ("InferenceBackend", "api_key_env_var"),
+/// Credential-bearing `(collection, field)` pairs that `defra_query` never
+/// selects, filters on or lists, whatever the collection scope.
+///
+/// This guards the node's own read surface, which the replication model does
+/// not cover: the node holds the store's at-rest key, so encryption protects
+/// the disk and its backups, never a query this node answers. Every pair names
+/// a field of a credential collection and of the current SDL.
+pub(crate) const RESTRICTED_FIELDS: &[(&str, &str)] = &[
+    ("InferenceBackend", "auth"),
     ("OAuthCredential", "access_token"),
     ("OAuthCredential", "refresh_token"),
     ("OAuthCredential", "id_token"),
@@ -402,7 +404,7 @@ mod tests {
     #[test]
     fn rejects_selecting_a_restricted_secret_field() {
         let err = build_query(
-            &params("InferenceBackend", &["backend_id", "api_key"]),
+            &params("InferenceBackend", &["backend_id", "auth"]),
             &CollectionScope::all(),
         )
         .unwrap_err();
@@ -434,7 +436,7 @@ mod tests {
     #[test]
     fn rejects_filtering_on_a_restricted_secret_field() {
         let mut p = params("InferenceBackend", &["backend_id"]);
-        p.filter = Some(json!({ "api_key": { "_like": "sk-%" } }));
+        p.filter = Some(json!({ "auth": { "_like": "%sk-%" } }));
         let err = build_query(&p, &CollectionScope::all()).unwrap_err();
         assert!(err.to_string().contains("restricted"), "{err}");
     }
@@ -442,9 +444,31 @@ mod tests {
     #[test]
     fn rejects_restricted_field_nested_in_filter_composition() {
         let mut p = params("InferenceBackend", &["backend_id"]);
-        p.filter = Some(json!({ "_or": [{ "api_key_env_var": { "_eq": "X" } }] }));
+        p.filter = Some(json!({ "_or": [{ "auth": { "_ne": null } }] }));
         let err = build_query(&p, &CollectionScope::all()).unwrap_err();
         assert!(err.to_string().contains("restricted"), "{err}");
+    }
+
+    /// A stale pair guards nothing: every restricted field must exist on its
+    /// credential collection in the registered SDL.
+    #[test]
+    fn every_restricted_field_names_a_current_sdl_field() {
+        for (collection, field) in RESTRICTED_FIELDS {
+            assert!(
+                gents_protocol::schemas::is_credential_collection(collection),
+                "{collection} is not a credential collection"
+            );
+            let sdl = match *collection {
+                "InferenceBackend" => gents_protocol::schemas::INFERENCE_BACKEND,
+                "OAuthCredential" => gents_protocol::schemas::OAUTH_CREDENTIAL,
+                other => panic!("restricted field on unexpected collection {other}"),
+            };
+            assert!(
+                sdl.lines()
+                    .any(|line| line.trim_start().starts_with(&format!("{field}:"))),
+                "{collection}.{field} is not a field of the current SDL"
+            );
+        }
     }
 
     #[test]

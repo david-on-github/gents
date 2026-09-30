@@ -1,12 +1,14 @@
 import Proofs.ConfigDefaults
 import Proofs.ManagedExec.State
 import Proofs.Request.State
+import Proofs.Recovery.Sweeps.Requests
 
 namespace TaskHooks
 /-! # Task hook-phase semantics (spec PR #1430)
 Executable model: phases `before`, `afterSuccess`, `afterFailure`, `finally`
 around one agent execution. Literal argv hooks, optional positive timeout
-(default 120); nonpositive/negative timeouts (`Option Int`) are rejected at
+(default 120, at most `maxHookTimeoutSecs`); nonpositive, negative and
+over-maximum timeouts (`Option Int`) are rejected at
 admission, as are empty argv and duplicate occurrence IDs, before any hook or
 agent step. Ordinary phases stop at their first error; `runFinally` attempts every cleanup hook and records each attempt, so
 cleanup errors are secondary while the primary error (hook id, agent, or
@@ -29,27 +31,47 @@ structure TaskHook where
   timeoutSecs : Option Int := none
   deriving DecidableEq, Repr
 def defaultHookTimeoutSecs : Nat := 120
+/-- Largest admitted explicit timeout (one day). Admission bounds the timeout
+from above so every admitted hook has a deadline the host can represent; the
+executor then never refuses a hook at launch for its timeout. -/
+def maxHookTimeoutSecs : Nat := 86400
 /-- Effective timeout: configured value, else the 120s executor default. -/
 def TaskHook.effectiveTimeout (h : TaskHook) : Nat :=
   match h.timeoutSecs with | none => defaultHookTimeoutSecs | some t => t.toNat
-/-- A command must contain an executable and its explicit timeout must be positive. -/
+/-- A command must contain an executable and its explicit timeout must be
+positive and at most `maxHookTimeoutSecs`. -/
 def hookAdmitted (h : TaskHook) : Bool :=
   !h.command.isEmpty &&
-    (ConfigDefaults.resolveNat defaultHookTimeoutSecs 1 h.timeoutSecs).isSome
+    (ConfigDefaults.resolveNat defaultHookTimeoutSecs 1 h.timeoutSecs).isSome &&
+    h.timeoutSecs.all (fun (t : Int) => decide (t ≤ (maxHookTimeoutSecs : Int)))
 theorem default_timeout_admitted (h : TaskHook) (hnone : h.timeoutSecs = none)
     (hc : h.command ≠ []) : hookAdmitted h = true := by
   simp [hookAdmitted, ConfigDefaults.resolveNat_positive, hnone, hc]
 theorem explicit_timeout_valid (h : TaskHook) (t : Int)
-    (hsome : h.timeoutSecs = some t) (ht : 0 < t) (hc : h.command ≠ []) :
-    hookAdmitted h = true := by
-  simp [hookAdmitted, ConfigDefaults.resolveNat_positive, hsome, hc, ht]
+    (hsome : h.timeoutSecs = some t) (ht : 0 < t) (hmax : t ≤ maxHookTimeoutSecs)
+    (hc : h.command ≠ []) : hookAdmitted h = true := by
+  simp [hookAdmitted, ConfigDefaults.resolveNat_positive, hsome, hc, ht, hmax]
+theorem explicit_timeout_above_maximum_rejected (h : TaskHook) (t : Int)
+    (hsome : h.timeoutSecs = some t) (ht : (maxHookTimeoutSecs : Int) < t) :
+    hookAdmitted h = false := by
+  simp [hookAdmitted, hsome, show ¬ (t ≤ maxHookTimeoutSecs) by omega]
+theorem admitted_timeout_bounded (h : TaskHook) (ha : hookAdmitted h = true) :
+    h.effectiveTimeout ≤ maxHookTimeoutSecs := by
+  cases ht : h.timeoutSecs with
+  | none => simp [TaskHook.effectiveTimeout, ht, defaultHookTimeoutSecs, maxHookTimeoutSecs]
+  | some t =>
+    have hle : t ≤ maxHookTimeoutSecs := by
+      simp only [hookAdmitted, ht, Option.all, Bool.and_eq_true, decide_eq_true_eq] at ha
+      exact ha.2
+    simp only [TaskHook.effectiveTimeout, ht]
+    omega
 theorem explicit_timeout_nonpositive_rejected (h : TaskHook) (t : Int)
     (hsome : h.timeoutSecs = some t) (ht : t ≤ 0) : hookAdmitted h = false := by
   simp [hookAdmitted, ConfigDefaults.resolveNat_positive, hsome, show ¬ (0 < t) by omega]
 theorem admitted_command_nonempty (h : TaskHook) (ha : hookAdmitted h = true) :
     h.command ≠ [] := by
   simp only [hookAdmitted, ConfigDefaults.resolveNat_positive, Bool.and_eq_true] at ha
-  simpa using ha.1
+  simpa using ha.1.1
 
 theorem admitted_timeout_positive (h : TaskHook) (ha : hookAdmitted h = true) :
     0 < h.effectiveTimeout := by
@@ -94,7 +116,14 @@ theorem admitHooks_unique_ids {hs admitted : List TaskHook}
 
 /-- Result of one external command attempt. `interrupted` means the attempt
 was cancelled or its outcome is unknown (e.g. after a crash); it is terminal
-and is reported, never retried or blindly replayed. -/
+and is reported, never retried or blindly replayed. An ordinary-phase command
+cancelled because its execution lost request ownership (a revocation such as
+LatestOnly supersession) is `interrupted` too: the owner that revoked it has
+written the terminal, which stands, and cleanup still runs. A command refused
+before launch for a reason that cannot change (recovery found its root no
+longer admitted) is
+`launchFailed` and counts as attempted, so recovery never selects it again;
+only a command shutdown kept from launching stays unattempted. -/
 inductive CommandResult where | exited (code : Int) | launchFailed | timedOut | interrupted
   deriving DecidableEq, Repr
 /-- Conservative mapping onto observed managed-process states, only where the
@@ -120,8 +149,33 @@ def CommandResult.succeeded : CommandResult → Bool
 are repeatable. Cwd/env, launch, capture, timeout, and process termination stay
 with the existing host owner; this function does not implement host execution. -/
 abbrev HookExec := TaskHook → CommandResult
+
+/-- Ordinary launches require a fresh observation from the request execution
+owner, not the last renewal poll. Cleanup survives ownership loss. The host
+cannot atomically combine a database read with process spawn: revocation after
+this read is handled by the existing renewal cancellation signal. -/
+def launchAllowed (phase : HookPhase) (ownsExecution : Bool) : Bool :=
+  phase == .finally || ownsExecution
+
+/-- Ownership is observed separately for each occurrence immediately before
+launch. It does not introduce another lease or a task lifecycle. -/
+def ownershipCheckedExec (owns : TaskHook → Bool) (exec : HookExec) : HookExec :=
+  fun h => if launchAllowed h.phase (owns h) then exec h else .interrupted
+
+theorem revoked_ordinary_launch_refused (h : TaskHook) (owns : TaskHook → Bool)
+    (exec : HookExec) (hp : h.phase ≠ .finally) (ho : owns h = false) :
+    ownershipCheckedExec owns exec h = .interrupted := by
+  simp [ownershipCheckedExec, launchAllowed, hp, ho]
+
+theorem cleanup_launch_survives_revocation (h : TaskHook) (owns : TaskHook → Bool)
+    (exec : HookExec) (hp : h.phase = .finally) :
+    ownershipCheckedExec owns exec h = exec h := by
+  simp [ownershipCheckedExec, launchAllowed, hp]
 /-- Outcome of a single agent execution; `interrupted` covers cancellation of
-active work with unknown completion state. -/
+active work with unknown completion state. An execution that loses request
+ownership mid-work is `interrupted` too: its result is unknown to this owner,
+so ordinary outcome phases are skipped while cleanup still runs, and whatever
+terminal the request's current owner records stands. -/
 inductive AgentResult where | success | failure | cancelled | interrupted
   deriving DecidableEq, Repr
 /-- Primary error identity: a failing hook (by id) or the agent itself. -/
@@ -167,7 +221,10 @@ theorem runPhase_prefix (hs : List TaskHook) (exec : HookExec) :
     · exact ⟨hs.map TaskHook.hookId, by simp [runPhase, hx]⟩
 
 /-- Finally attempts every cleanup hook in declared order, whatever each
-attempt's result is. -/
+attempt's result is. A user interrupt cancels ordinary-phase commands but never
+a cleanup command: cleanup is what the interrupted execution still owes, so only
+runtime shutdown may cancel it. A cleanup command that shutdown prevented from
+launching was never observed, and so remains for `recoveryCleanup`. -/
 def runFinally (hs : List TaskHook) (exec : HookExec) : List HookAttempt :=
   hs.map (fun h => ⟨h.hookId, exec h⟩)
 theorem runFinally_all (hs : List TaskHook) (exec : HookExec) :
@@ -225,7 +282,12 @@ theorem finalOutcome_cleanup (r : RunResult) (h : r.outcome = .success) :
 /-- The single orchestration: preparation selects whether the agent runs;
 its outcome selects one ordinary after-phase, then every finally hook is attempted.
 The agent result is an observation from the existing execution owner, just like
-HookExec. This model does not implement or retry either external execution. -/
+HookExec. This model does not implement or retry either external execution.
+That owner reports `success` only after its own completion effects, including
+workspace seal and integration, so `afterSuccess` gates the request's terminal
+but never those effects; how hooks relate to workspace integration is an open
+design question, and current workspace behavior is preserved until it is
+decided. Hook time also counts against the request deadline fixed at claim. -/
 def runTask (hooks : List TaskHook) (exec : HookExec) (agent : AgentResult) : RunResult :=
   let before := runPhase (hooksOfPhase hooks .before) exec
   let base : RunResult :=
@@ -313,14 +375,20 @@ def recoveryCleanup (hooks : List TaskHook) (observed : List HookAttempt) : List
     !(observed.any fun a => a.hookId == h.hookId)
 
 /-- `started` is observed by the existing execution owner: admission alone does
-not start work. A crash before the first before-hook/agent step runs no cleanup. -/
-def recoverInterrupted (started : Bool) (hooks : List TaskHook) (observed : List HookAttempt)
-    (exec : HookExec) : RequestState × List HookAttempt :=
-  (.interrupted, if started then runFinally (recoveryCleanup hooks observed) exec else [])
+not start work. A crash before the first before-hook/agent step runs no cleanup.
+The request's terminal state is not decided here: request recovery owns it
+(`Recovery.recoveredRequestState`, failed unless an interrupt was requested) and
+writes it before cleanup recovery runs. Reporting the owner's decision, rather
+than always `interrupted`, keeps one terminal writer after a crash; cleanup
+recovery cannot write a second, different outcome for the same request. -/
+def recoverInterrupted (interruptRequested started : Bool) (hooks : List TaskHook)
+    (observed : List HookAttempt) (exec : HookExec) : RequestState × List HookAttempt :=
+  (Recovery.recoveredRequestState interruptRequested,
+    if started then runFinally (recoveryCleanup hooks observed) exec else [])
 
-theorem recovery_before_start_no_cleanup (hooks : List TaskHook)
+theorem recovery_before_start_no_cleanup (interruptRequested : Bool) (hooks : List TaskHook)
     (observed : List HookAttempt) (exec : HookExec) :
-    (recoverInterrupted false hooks observed exec).2 = [] := rfl
+    (recoverInterrupted interruptRequested false hooks observed exec).2 = [] := rfl
 
 theorem recovery_only_cleanup (hooks : List TaskHook) (observed : List HookAttempt)
     (h : TaskHook) (hm : h ∈ recoveryCleanup hooks observed) : h.phase = .finally := by
@@ -333,9 +401,10 @@ theorem recovery_excludes_observed (hooks : List TaskHook) (observed : List Hook
   simp [recoveryCleanup] at hm
   exact hm.2.2
 
-theorem recovery_does_not_repeat_attempt (started : Bool) (hooks : List TaskHook)
-    (observed : List HookAttempt) (exec : HookExec) (attempt : HookAttempt)
-    (hm : attempt ∈ (recoverInterrupted started hooks observed exec).2) :
+theorem recovery_does_not_repeat_attempt (interruptRequested started : Bool)
+    (hooks : List TaskHook) (observed : List HookAttempt) (exec : HookExec)
+    (attempt : HookAttempt)
+    (hm : attempt ∈ (recoverInterrupted interruptRequested started hooks observed exec).2) :
     ∀ old ∈ observed, old.hookId ≠ attempt.hookId := by
   cases started with
   | false => simp [recoverInterrupted] at hm
@@ -348,9 +417,21 @@ theorem recovery_does_not_repeat_attempt (started : Bool) (hooks : List TaskHook
     intro old ho heq
     exact recovery_excludes_observed hooks observed h hh old ho (heq.trans he.symm)
 
-theorem recovery_reports_interruption (started : Bool) (hooks : List TaskHook)
+/-- Cleanup recovery reports exactly the request recovery owner's decision. -/
+theorem recovery_reports_request_owner_decision (interruptRequested started : Bool)
+    (hooks : List TaskHook) (observed : List HookAttempt) (exec : HookExec) :
+    (recoverInterrupted interruptRequested started hooks observed exec).1 =
+      Recovery.recoveredRequestState interruptRequested := rfl
+
+/-- Recovery without an interrupt request fails the request; it is not reported
+as an interruption the user never asked for. -/
+theorem recovery_without_interrupt_request_fails (started : Bool) (hooks : List TaskHook)
     (observed : List HookAttempt) (exec : HookExec) :
-    (recoverInterrupted started hooks observed exec).1 = .interrupted := rfl
+    (recoverInterrupted false started hooks observed exec).1 = .failed := rfl
+
+theorem recovery_with_interrupt_request_interrupts (started : Bool) (hooks : List TaskHook)
+    (observed : List HookAttempt) (exec : HookExec) :
+    (recoverInterrupted true started hooks observed exec).1 = .interrupted := rfl
 
 /-! ## Concrete checks -/
 def sampleBefore : TaskHook := { hookId := "prepare", phase := .before, command := ["bin/prepare"] }
@@ -421,7 +502,7 @@ theorem sample_first_cleanup_failure_preserved :
 
 /-- Started recovery skips an unknown observed command but attempts remaining cleanup. -/
 theorem sample_recovery_remaining_cleanup :
-    (recoverInterrupted true [sampleFinally, { sampleFinally with hookId := "second" }]
+    (recoverInterrupted false true [sampleFinally, { sampleFinally with hookId := "second" }]
       [{ hookId := "cleanup", result := .interrupted }] okExec).2.map HookAttempt.hookId =
         ["second"] := by
   decide

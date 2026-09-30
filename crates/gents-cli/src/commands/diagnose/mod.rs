@@ -133,7 +133,8 @@ pub(crate) async fn diagnose(args: DiagnoseArgs) -> Result<()> {
     });
     let p2p_status = match graphql.as_deref().filter(|_| graphql_reachable) {
         Some(endpoint) => {
-            crate::commands::p2p::load_live_http_p2p_status(args.home.as_deref(), endpoint).await
+            let endpoint = crate::resolve_graphql_endpoint(Some(endpoint), args.home.as_deref())?;
+            crate::commands::p2p::load_live_http_p2p_status(args.home.as_deref(), &endpoint).await
         }
         None => crate::commands::p2p::persisted_p2p_status(matching_runtime_state),
     };

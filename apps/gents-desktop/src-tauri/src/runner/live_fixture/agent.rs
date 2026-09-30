@@ -22,8 +22,6 @@ use super::DEFAULT_DEPLOYMENT_LABEL;
 pub(crate) struct LiveAgentDocs {
     pub(crate) behavior_id: String,
     pub(crate) subagent_behavior_id: String,
-    pub(crate) backend_id: String,
-    pub(crate) subagent_backend_id: String,
     pub(crate) tools_id: String,
     pub(crate) subagent_tools_id: String,
     pub(crate) inference_profile_id: String,
@@ -184,8 +182,6 @@ async fn seed_live_behavior_documents(
     Ok(LiveAgentDocs {
         behavior_id,
         subagent_behavior_id,
-        backend_id,
-        subagent_backend_id,
         tools_id,
         subagent_tools_id,
         inference_profile_id,

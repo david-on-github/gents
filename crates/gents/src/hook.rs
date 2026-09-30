@@ -150,6 +150,7 @@ pub struct BackgroundExecutionRegistry {
     inner: Arc<std::sync::Mutex<HashMap<String, BackgroundExecution>>>,
     live_outputs: BackgroundLiveOutputState,
     process_records: crate::managed_exec::ownership::ProcessRecordStore,
+    task_hook_records: crate::task_hooks::TaskHookRecordStore,
 }
 
 /// Bound on waiting for a signalled live worker to release its execution.
@@ -163,6 +164,18 @@ impl BackgroundExecutionRegistry {
     pub fn with_process_records(mut self, dir: PathBuf) -> Self {
         self.process_records = crate::managed_exec::ownership::ProcessRecordStore::Durable(dir);
         self
+    }
+
+    /// Keep durable records of task hook attempts in `dir`, under the same
+    /// store-lock condition as background process records, so a restarted
+    /// runtime can finish an interrupted execution's cleanup.
+    pub fn with_task_hook_records(mut self, dir: PathBuf) -> Self {
+        self.task_hook_records = crate::task_hooks::TaskHookRecordStore::durable(dir);
+        self
+    }
+
+    pub(crate) fn task_hook_records(&self) -> &crate::task_hooks::TaskHookRecordStore {
+        &self.task_hook_records
     }
 
     /// Recorder installed around one background execution. Each spawned

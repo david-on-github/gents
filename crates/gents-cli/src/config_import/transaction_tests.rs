@@ -127,7 +127,7 @@ async fn recording_graphql_handler(
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_apply_txn_round_trip_against_recorder() {
     let (graphql, recorder) = start_recording_graphql().await;
-    let access = ConfigAccess::Graphql(graphql);
+    let access = ConfigAccess::graphql(graphql);
     let recorder_in_tx = recorder.clone();
     access
         .transact("test.config_apply.round_trip", move |txn| {
@@ -154,7 +154,7 @@ async fn config_apply_txn_round_trip_against_recorder() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_apply_txn_discard_leaves_committed_empty() {
     let (graphql, recorder) = start_recording_graphql().await;
-    let access = ConfigAccess::Graphql(graphql);
+    let access = ConfigAccess::graphql(graphql);
     let result: Result<()> = access
         .transact("test.config_apply.discard", move |txn| {
             Box::pin(async move {

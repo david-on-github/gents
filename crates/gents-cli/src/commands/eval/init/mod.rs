@@ -797,7 +797,8 @@ mod tests {
         let state = crate::home_state::read_runtime_state(&home_dir)
             .unwrap()
             .expect("a runtime state written by `gents server`");
-        let access = gents::ConfigAccess::Graphql(state.graphql.clone());
+        let graphql = crate::home_graphql_endpoint(&home_dir, state.graphql.clone());
+        let access = gents::ConfigAccess::Graphql(graphql.clone());
         let owner = state.agent_did.clone();
 
         let subject_dir = PathBuf::from(SMOKE_SUBJECT);
@@ -828,7 +829,7 @@ mod tests {
             },
         };
         let mut turn = turn::LiveTurn {
-            graphql: state.graphql,
+            graphql,
             agent_did: owner,
             behavior_id: turn::AUTHOR_BEHAVIOR.to_owned(),
             session_id: uuid::Uuid::new_v4().to_string(),

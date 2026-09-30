@@ -35,7 +35,7 @@ pub struct WorkspaceRootPolicy {
 /// WorkspaceRoot rows and re-resolve this canonical persisted root. This
 /// narrows stale-policy races but holds no filesystem handle and makes no
 /// TOCTOU guarantee.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RootExecutionGuard {
     pub(crate) behavior_id: String,
     pub(crate) selected_root: Option<PathBuf>,

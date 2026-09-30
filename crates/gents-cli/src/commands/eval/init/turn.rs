@@ -28,7 +28,7 @@ pub(crate) trait Turn {
 /// progress and the reply print as they arrive, unless `quiet`: then the
 /// turn is followed without writing to stdout, as `gents chat --json` does.
 pub(crate) struct LiveTurn {
-    pub(crate) graphql: String,
+    pub(crate) graphql: gents::config_client::GraphqlEndpoint,
     pub(crate) agent_did: String,
     pub(crate) behavior_id: String,
     pub(crate) session_id: String,
@@ -131,7 +131,7 @@ mod tests {
 
     fn live(quiet: bool) -> LiveTurn {
         LiveTurn {
-            graphql: "http://localhost:0/graphql".to_owned(),
+            graphql: gents::config_client::GraphqlEndpoint::anonymous("http://localhost:0/graphql"),
             agent_did: "did:key:owner".to_owned(),
             behavior_id: "prompt-proposer".to_owned(),
             session_id: "session".to_owned(),

@@ -396,7 +396,7 @@ pub struct CompactionEntryRow {
     pub created_at: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub struct OAuthCredentialRow {
     #[serde(default, rename = "_docID")]
     pub doc_id: Option<String>,

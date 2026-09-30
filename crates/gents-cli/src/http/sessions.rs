@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Context, Result};
@@ -64,7 +65,7 @@ struct CompactionRow {
 }
 
 pub(crate) async fn load_session_history_snapshot(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     agent_did: &str,
     limit: Option<usize>,
 ) -> Result<SessionHistorySnapshot> {

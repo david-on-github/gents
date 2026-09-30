@@ -466,7 +466,7 @@ fn live_runtime() -> Result<Arc<Runtime>> {
 }
 
 async fn wait_for_operator_graphql(endpoint: &str, agent_did: &str) -> Result<()> {
-    let access = ConfigAccess::Graphql(endpoint.to_string());
+    let access = ConfigAccess::graphql(endpoint);
     let escaped_did = escape_graphql_string(agent_did);
     let query = format!(
         r#"{{ AgentPrincipal(filter: {{ agent_did: {{ _eq: "{escaped_did}" }} }}) {{ agent_did }} }}"#
@@ -736,14 +736,13 @@ mod tests {
     ) -> Result<()> {
         use gents::collection::Collection;
         use gents::config_client::{
-            apply_desired_state_plan, read_desired_state_record_in_txn, ConfigAccess,
-            DesiredStateApplyDocument, DesiredStateApplyPlan,
+            apply_desired_state_plan, read_desired_state_record_in_txn, DesiredStateApplyDocument,
+            DesiredStateApplyPlan,
         };
-        ConfigAccess::transact_local(
-            fixture.desktop_core().node(),
-            None,
-            "desktop.fixture.skill",
-            |txn| {
+        fixture
+            .desktop_core()
+            .operator_access(agent_did)?
+            .transact("desktop.fixture.skill", |txn| {
                 Box::pin(async move {
                     let (_, behavior) = read_desired_state_record_in_txn(
                         txn,
@@ -777,9 +776,8 @@ mod tests {
                     apply_desired_state_plan(txn, &plan).await?;
                     Ok(())
                 })
-            },
-        )
-        .await?;
+            })
+            .await?;
         fixture.desktop_core().refresh_store().await?;
         Ok(())
     }
@@ -1075,7 +1073,11 @@ mod tests {
             LiveBackendOverride {
                 inference_url: Some(self.endpoint.clone()),
                 model_name: Some(model_name.to_string()),
-                provider: Some("openai-compatible".to_string()),
+                provider: Some(
+                    gents::BackendProviderKind::OpenAiCompatible
+                        .as_str()
+                        .to_owned(),
+                ),
                 api_key: Some("desktop-live-test-key".to_string()),
                 api_key_env_var: None,
             }

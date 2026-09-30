@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,11 @@ const STATUS_PROBE_BUDGET: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub(crate) struct RuntimeHttpState {
-    pub(crate) graphql: String,
+    /// Anonymous, like the unauthenticated HTTP handlers reading through it.
+    pub(crate) graphql: GraphqlEndpoint,
+    /// The served principal, for the P2P status the node's access control
+    /// admits only from it.
+    pub(crate) p2p_graphql: GraphqlEndpoint,
     pub(crate) agent_name: String,
     pub(crate) agent_did: String,
     /// Live process ceiling advertised to desktop start/readiness checks.
@@ -50,7 +55,6 @@ pub(crate) struct RuntimeHttpState {
     pub(crate) backend_health: Option<gents::BackendHealthMap>,
     pub(crate) p2p_admission: Option<P2pAdmissionState>,
     pub(crate) p2p_metrics_cache: Arc<Mutex<Option<P2pMetricsSnapshot>>>,
-    pub(crate) p2p_http_client: reqwest::Client,
     /// The Codex shim's live binding. Shared because the shim may bind after the
     /// HTTP surface is already serving (#699). `None` when the host does not run
     /// a shim at all (embedders, desktop).
@@ -140,14 +144,9 @@ pub(crate) fn runtime_contract_router(
     serve_lifecycle: ServeLifecycleHandle,
 ) -> Router {
     let graphql_for_mcp = graphql.clone();
-    let p2p_http_client = crate::commands::p2p::p2p_http_client().unwrap_or_else(|_| {
-        reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
-            .build()
-            .expect("fallback P2P HTTP client")
-    });
     let state = RuntimeHttpState {
-        graphql,
+        p2p_graphql: GraphqlEndpoint::as_principal(graphql.clone(), agent_did.clone()),
+        graphql: GraphqlEndpoint::anonymous(graphql),
         agent_name,
         agent_did,
         tool_ceiling,
@@ -158,7 +157,6 @@ pub(crate) fn runtime_contract_router(
         backend_health,
         p2p_admission,
         p2p_metrics_cache: Arc::new(Mutex::new(None)),
-        p2p_http_client,
         codex_shim_health,
         enrollment_offer_issuer,
         enrollment_decisions,
@@ -371,11 +369,7 @@ async fn load_p2p_metrics_for_scrape(state: &RuntimeHttpState) -> P2pMetricsSnap
         .ok()
         .and_then(|guard| guard.clone());
 
-    let fetch = crate::commands::p2p::fetch_live_http_p2p_status_with_client(
-        None,
-        &state.graphql,
-        &state.p2p_http_client,
-    );
+    let fetch = crate::commands::p2p::fetch_live_http_p2p_status(None, &state.p2p_graphql);
     match tokio::time::timeout(P2P_METRICS_FETCH_BUDGET, fetch).await {
         Ok(Ok(status)) => {
             let mut snap = p2p_metrics_from_status(&status, state.p2p_admission.as_ref());
@@ -472,7 +466,7 @@ fn p2p_metrics_from_status(
 async fn status_handler(State(state): State<RuntimeHttpState>) -> Response {
     let mut p2p = match tokio::time::timeout(
         P2P_METRICS_FETCH_BUDGET,
-        crate::commands::p2p::load_live_http_p2p_status(None, &state.graphql),
+        crate::commands::p2p::load_live_http_p2p_status(None, &state.p2p_graphql),
     )
     .await
     {
@@ -844,7 +838,12 @@ mod tests {
     fn state() -> RuntimeHttpState {
         let (activation_runtime, activation_observation) = empty_activation_state();
         RuntimeHttpState {
-            graphql: "http://127.0.0.1:9181/api/v0/graphql".to_string(),
+            graphql: gents::config_client::GraphqlEndpoint::anonymous(
+                "http://127.0.0.1:9181/api/v0/graphql",
+            ),
+            p2p_graphql: gents::config_client::GraphqlEndpoint::anonymous(
+                "http://127.0.0.1:9181/api/v0/graphql",
+            ),
             agent_name: "amy".to_string(),
             agent_did: "did:key:zAgent".to_string(),
             tool_ceiling: "readwrite".to_string(),
@@ -855,7 +854,6 @@ mod tests {
             backend_health: None,
             p2p_admission: None,
             p2p_metrics_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            p2p_http_client: reqwest::Client::new(),
             codex_shim_health: None,
             enrollment_offer_issuer: crate::http::enrollment::empty_issuer_handle(),
             enrollment_decisions: crate::http::enrollment::empty_decision_service_handle(),
@@ -992,7 +990,8 @@ mod tests {
                 .clone()
         }
         let mut state = state();
-        state.graphql = "http://127.0.0.1:9/api/v0/graphql".to_string();
+        state.graphql = GraphqlEndpoint::anonymous("http://127.0.0.1:9/api/v0/graphql");
+        state.p2p_graphql = state.graphql.clone();
 
         assert_eq!(lifecycle(&state).await, json!("starting"));
         state.serve_lifecycle.mark_ready();
@@ -1046,7 +1045,8 @@ mod tests {
             let _ = axum::serve(listener, mock).await;
         });
         let mut state = state();
-        state.graphql = format!("http://{addr}/api/v0/graphql");
+        state.graphql = GraphqlEndpoint::anonymous(format!("http://{addr}/api/v0/graphql"));
+        state.p2p_graphql = state.graphql.clone();
         state
     }
 
@@ -1114,7 +1114,8 @@ mod tests {
     #[tokio::test]
     async fn disabled_p2p_metrics_skip_live_status_fetch() {
         let mut state = state();
-        state.graphql = "http://127.0.0.1:9/api/v0/graphql".to_string();
+        state.graphql = GraphqlEndpoint::anonymous("http://127.0.0.1:9/api/v0/graphql");
+        state.p2p_graphql = state.graphql.clone();
 
         let snapshot = load_p2p_metrics_for_scrape(&state).await;
 

@@ -13,8 +13,14 @@ use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 
+#[cfg(not(all(feature = "native-e2e", debug_assertions)))]
 pub const SERVICE_LABEL: &str = "ai.gents.runtime";
+#[cfg(all(feature = "native-e2e", debug_assertions))]
+pub const SERVICE_LABEL: &str = "ai.gents.runtime.native-e2e";
+#[cfg(not(all(feature = "native-e2e", debug_assertions)))]
 pub const SYSTEMD_UNIT: &str = "gents-runtime.service";
+#[cfg(all(feature = "native-e2e", debug_assertions))]
+pub const SYSTEMD_UNIT: &str = "gents-runtime-native-e2e.service";
 /// Exit status of `gents` when it refuses to open a store this build cannot
 /// read (`gents::storage_backend::IncompatibleStore`). Supervisors and the
 /// desktop read it from the exit record to tell that refusal apart from a
@@ -2388,7 +2394,7 @@ mod tests {
                 command_output(true, "501", ""),
                 command_output(false, "", "Could not find service"),
                 command_output(true, "501", ""),
-                command_output(true, "\"ai.gents.runtime\" => disabled", ""),
+                command_output(true, &format!("\"{SERVICE_LABEL}\" => disabled"), ""),
                 command_output(true, "501", ""),
                 command_output(true, "", ""),
                 command_output(true, "501", ""),

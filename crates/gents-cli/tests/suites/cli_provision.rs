@@ -27,6 +27,8 @@ async fn provision_initializes_home_binds_manifest_and_diff_exact() -> Result<()
         &target_home_env,
         &[
             "provision",
+            "--store-key-custody",
+            "file",
             "--home",
             target_home.to_str().expect("utf-8 home"),
             "--root",
@@ -105,6 +107,8 @@ async fn provision_rejects_initialized_home_without_loadable_identity() -> Resul
         &home_env,
         &[
             "provision",
+            "--store-key-custody",
+            "file",
             "--home",
             home.to_str().expect("utf-8 home"),
             "--root",
@@ -142,6 +146,8 @@ async fn provision_rejects_uninitialized_home_without_bootstrap_flag() -> Result
         &home_env,
         &[
             "provision",
+            "--store-key-custody",
+            "file",
             "--home",
             home.to_str().expect("utf-8 home"),
             "--root",

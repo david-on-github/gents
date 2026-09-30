@@ -31,6 +31,7 @@ pub use config::{
     TracingConfig,
 };
 pub use error::{BridgeError, BridgeErrorCode};
+pub use gents::store_key::StoreKeyCustodyChoice;
 pub use package_tools::{prefer_host_tools, prepare_host_command};
 pub use plugin::init;
 pub use runtime_setup::{init_tracing, install_runtime};

@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use defra_node::EmbeddedNode;
-use gents_protocol::schemas::{ALL_COLLECTION_NAMES, RUNTIME_COLLECTION_NAMES};
+use gents_protocol::schemas::ALL_COLLECTION_NAMES;
 
 pub async fn ensure_runtime_schemas(node: &EmbeddedNode) -> Result<()> {
     gents_migration::ensure_migrations(node)
@@ -45,15 +45,20 @@ pub(crate) async fn subscribe_runtime_collections(
 /// call onto the gossip channel, to a device class that includes iOS, for a
 /// collection nothing on the desktop reads.
 ///
+/// Credential collections are excluded too: the client route never carries
+/// them, and the desktop reads a hosted runtime's backends through that
+/// runtime's operator endpoint, so a subscription would only admit gossiped
+/// API keys and OAuth tokens into the client store.
+///
 /// This list is built from `ALL_COLLECTION_NAMES` verbatim, so a new collection
 /// otherwise joins the subscription set with no decision being taken about it.
-/// The same exclusion is applied to the desktop live-fixture runner.
+/// The desktop live-fixture runner replicates this same set.
 pub fn subscribed_collection_names() -> Vec<&'static str> {
-    RUNTIME_COLLECTION_NAMES
+    ALL_COLLECTION_NAMES
         .iter()
-        .chain(ALL_COLLECTION_NAMES.iter())
         .filter(|name| !gents_protocol::schemas::is_local_audit_collection(name))
         .filter(|name| !gents_protocol::schemas::is_local_only_collection(name))
+        .filter(|name| !gents_protocol::schemas::is_credential_collection(name))
         .copied()
         .collect()
 }
@@ -64,20 +69,24 @@ mod tests {
     use gents::agent::p2p_reconcile::templates::CLIENT_INDEX_COLLECTIONS;
 
     /// The subscription set is derived from a list that grows whenever a
-    /// collection is added, so the exclusion has to be asserted rather than
-    /// assumed. This mirrors the desktop live-fixture runner's test.
+    /// collection is added, so the exclusions have to be asserted rather than
+    /// assumed. The Lean scope model keeps credentials off every client route;
+    /// the broad subscription must not reintroduce them.
     #[test]
-    fn the_desktop_does_not_replicate_plaintext_provider_bodies() {
+    fn the_desktop_does_not_replicate_plaintext_provider_bodies_or_credentials() {
         let names = subscribed_collection_names();
-        for sensitive in gents_protocol::schemas::LOCAL_AUDIT_COLLECTION_NAMES {
+        for sensitive in gents_protocol::schemas::LOCAL_AUDIT_COLLECTION_NAMES
+            .iter()
+            .chain(gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES)
+        {
             assert!(
                 !names.contains(sensitive),
                 "{sensitive} must stay out of the desktop replication set: {names:?}"
             );
         }
         assert!(
-            names.iter().any(|name| *name == "AgentRequest"),
-            "the exclusion must not have emptied the set: {names:?}"
+            names.contains(&"AgentRequest") && names.contains(&"InferenceProfile"),
+            "the exclusions must not have emptied the set: {names:?}"
         );
     }
 

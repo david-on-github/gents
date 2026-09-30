@@ -5,6 +5,9 @@ use crate::template::{
 };
 use anyhow::{ensure, Context, Result};
 
+/// `TaskHooks.maxHookTimeoutSecs`.
+pub(crate) const MAX_TASK_HOOK_TIMEOUT_SECS: i64 = 86_400;
+
 impl Task {
     pub fn validate(&self) -> Result<()> {
         ensure!(
@@ -40,8 +43,9 @@ impl Task {
                 hook.hook_id
             );
             ensure!(
-                hook.timeout_secs.is_none_or(|timeout| timeout > 0),
-                "task {} hook {:?} timeout_secs must be positive",
+                hook.timeout_secs
+                    .is_none_or(|timeout| (1..=MAX_TASK_HOOK_TIMEOUT_SECS).contains(&timeout)),
+                "task {} hook {:?} timeout_secs must be between 1 and {MAX_TASK_HOOK_TIMEOUT_SECS}",
                 self.task_id,
                 hook.hook_id
             );

@@ -87,6 +87,27 @@ def sessionMessageRecoveryCase
     notificationReason := cause.notificationReason
   }
 
+/-- Task hook record witness. The native fixture builds the exact premise:
+    `parentTerminal` is whether the request is resolved, `executionRegistered`
+    whether a live executor holds the record. -/
+def taskHookRecordRecoveryCase
+    (name : String) (requestResolved liveExecution : Bool) : RecoverySweepCase :=
+  let row : TaskHookRecordRow :=
+    { recorded := true, requestResolved := requestResolved, liveExecution := liveExecution }
+  let recovered := taskHookRecordRecover row
+  let state := fun (row : TaskHookRecordRow) => if row.recorded then "running" else "released"
+  { (recoveryCase
+      taskHookRecoverySweep
+      name
+      (state row)
+      (state recovered)
+      "gents-1956-task-hook-cleanup-recovery"
+      (taskHookRecordMeasure row)
+      (taskHookRecordMeasure recovered)) with
+    parentTerminal := some requestResolved
+    executionRegistered := some liveExecution
+  }
+
 def recoverySweepCases : List RecoverySweepCase :=
   [ recoveryCase
       requestRecoverySweep
@@ -208,6 +229,12 @@ def recoverySweepCases : List RecoverySweepCase :=
       "running"
       "cancelled"
       "deadline-plumbing-audit-2026-05-12-follow-up-6-pr-e"
+  , taskHookRecordRecoveryCase
+      "task_hook_record_resolved_request_to_released" true false
+  , taskHookRecordRecoveryCase
+      "task_hook_record_owned_request_deferred" false false
+  , taskHookRecordRecoveryCase
+      "task_hook_record_live_execution_deferred" true true
   ]
 
 /-! ## Restart disposition witnesses (#937)

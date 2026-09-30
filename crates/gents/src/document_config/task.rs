@@ -83,7 +83,8 @@ pub struct TaskHook {
     /// explicitly invoke a shell, e.g. ["sh", "-c", "./prepare.sh && ./verify.sh"].
     pub command: Vec<String>,
     /// Per-command timeout in seconds. Absent/null uses 120; explicit values
-    /// must be positive. Launch failure, timeout, and nonzero exit are hook errors.
+    /// must be between 1 and 86400. Launch failure, timeout, and nonzero exit are
+    /// hook errors.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
     pub timeout_secs: Option<i64>,
