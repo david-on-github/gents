@@ -129,14 +129,16 @@ enum TerminalAuthority<'a> {
     },
 }
 
-impl RequestLifecycle {
+impl RequestExecutionLease {
     /// `decide` over this execution's generation and the current request
     /// row's lease, or `None` when the row is gone.
     async fn decide_lease(
         &self,
+        node: &EmbeddedNode,
+        request_doc_id: &str,
         decide: fn(super::execution_policy::LeaseObservation<'_>, &str, i64) -> bool,
     ) -> Result<Option<bool>> {
-        let Some(row) = self.request_view().await? else {
+        let Some(row) = super::query::request_view(node, request_doc_id).await? else {
             return Ok(None);
         };
         let expiry = row
@@ -153,9 +155,36 @@ impl RequestLifecycle {
         };
         Ok(Some(decide(
             observed,
-            self.execution_generation()?,
+            self.generation.as_str(),
             Utc::now().timestamp_millis(),
         )))
+    }
+
+    pub(crate) async fn owns_execution(
+        &self,
+        node: &EmbeddedNode,
+        request_doc_id: &str,
+    ) -> Result<bool> {
+        Ok(self
+            .decide_lease(node, request_doc_id, |observed, generation, now_ms| {
+                super::execution_policy::renewable_lifecycle(observed.request)
+                    && super::execution_policy::is_live(observed, generation, now_ms)
+            })
+            .await?
+            .unwrap_or(false))
+    }
+}
+
+impl RequestLifecycle {
+    async fn decide_lease(
+        &self,
+        decide: fn(super::execution_policy::LeaseObservation<'_>, &str, i64) -> bool,
+    ) -> Result<Option<bool>> {
+        self.execution_lease
+            .as_ref()
+            .context("request has no active execution generation")?
+            .decide_lease(&self.node, &self.request.doc_id, decide)
+            .await
     }
 
     pub(crate) async fn validate_owned_execution(&self) -> Result<()> {
@@ -182,13 +211,11 @@ impl RequestLifecycle {
     /// active request. A failure observed after the lease is lost belongs to
     /// the request's current owner, not to this execution.
     pub(crate) async fn owns_execution(&self) -> Result<bool> {
-        Ok(self
-            .decide_lease(|observed, generation, now_ms| {
-                super::execution_policy::renewable_lifecycle(observed.request)
-                    && super::execution_policy::is_live(observed, generation, now_ms)
-            })
-            .await?
-            .unwrap_or(false))
+        self.execution_lease
+            .as_ref()
+            .context("request has no active execution generation")?
+            .owns_execution(&self.node, &self.request.doc_id)
+            .await
     }
 
     pub async fn terminalize_owned(

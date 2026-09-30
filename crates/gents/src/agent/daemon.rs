@@ -762,7 +762,14 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
             )
         });
         let hook_exec = crate::task_hooks::ManagedTaskHookExec::new(hook_cwd, hook_cancellation)
-            .with_record(hook_record.clone());
+            .with_record(hook_record.clone())
+            .with_execution_lease(
+                self.node.clone(),
+                request.doc_id.clone(),
+                crate::lifecycle::RequestExecutionLease::new(
+                    lifecycle.execution_generation()?.to_owned(),
+                ),
+            );
 
         let mut owned_work = None;
         let run = crate::task_hooks::run_task_hooks(&hooks, &hook_exec, || async {

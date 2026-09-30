@@ -1065,3 +1065,56 @@ async fn revocation_during_an_after_success_hook_cancels_it_and_still_cleans_up(
         "the revoking owner keeps the terminal: {row}"
     );
 }
+
+#[tokio::test]
+async fn revocation_between_hooks_is_checked_before_the_next_renewal_poll() {
+    let mut harness = Harness::new().await;
+    Arc::get_mut(&mut harness.behavior)
+        .unwrap()
+        .stream_liveness_timeout = Duration::from_secs(120);
+    let gate = harness.mark("revoked");
+    let first = format!(
+        "sleep 0.3; {}; while [ ! -e {} ]; do sleep 0.01; done",
+        harness.touch("ready"),
+        gate.display()
+    );
+    harness.install_task(json!([
+        {"hook_id":"first", "phase":"before", "command":["sh","-c",first], "timeout_secs":10},
+        {"hook_id":"second", "phase":"before", "command":["sh","-c",harness.touch("second")], "timeout_secs":10},
+        {"hook_id":"cleanup", "phase":"finally", "command":["sh","-c",harness.touch("cleanup")], "timeout_secs":10}
+    ])).await;
+    let request = harness.create_request(Lineage::ManualFire, false).await;
+    let doc_id = request.doc_id.clone();
+    let mut daemon = harness.daemon(false);
+    let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let revoke = async {
+        while !harness.mark("ready").exists() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        ConfigAccess::write_local(harness.node.as_ref(), "test.revoke_between_task_hooks", &format!(
+            r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, input: {{ execution_generation: "replacement-generation" }}) {{ _docID }} }}"#,
+            crate::graphql::escape_graphql_string(&doc_id)
+        )).await.unwrap();
+        std::fs::write(gate, "revoked").unwrap();
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(15), async {
+        tokio::join!(daemon.process_request(request, shutdown_rx), revoke)
+    })
+    .await
+    .unwrap();
+    result.unwrap();
+    let modeled = crate::lean_vocab_test::lean_task_hook_run_cases()
+        .iter()
+        .find(|case| case.name == "revoked_between_before_hooks_refuses_the_next_launch")
+        .unwrap();
+    assert!(modeled
+        .refused_before_launch
+        .iter()
+        .any(|id| id == "second"));
+    assert_eq!(harness.calls() > 0, modeled.expected_agent_ran);
+    assert!(harness.mark("cleanup").exists());
+    assert!(
+        !harness.mark("second").exists(),
+        "second ordinary hook launched AFTER the revocation write committed"
+    );
+}

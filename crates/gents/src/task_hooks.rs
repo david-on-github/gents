@@ -373,6 +373,11 @@ pub(crate) struct ManagedTaskHookExec {
     cwd: PathBuf,
     cancellation: TaskHookCancellation,
     record: Option<TaskHookRecordHandle>,
+    execution: Option<(
+        std::sync::Arc<EmbeddedNode>,
+        String,
+        crate::lifecycle::RequestExecutionLease,
+    )>,
 }
 
 impl ManagedTaskHookExec {
@@ -381,7 +386,18 @@ impl ManagedTaskHookExec {
             cwd,
             cancellation,
             record: None,
+            execution: None,
         }
+    }
+
+    pub(crate) fn with_execution_lease(
+        mut self,
+        node: std::sync::Arc<EmbeddedNode>,
+        request_doc_id: String,
+        lease: crate::lifecycle::RequestExecutionLease,
+    ) -> Self {
+        self.execution = Some((node, request_doc_id, lease));
+        self
     }
 
     /// Records each attempt in `record` before its command launches.
@@ -435,6 +451,48 @@ impl TaskHookExec for ManagedTaskHookExec {
                     format!("could not record the attempt before launch: {error}"),
                 );
             }
+        }
+        // TaskHooks.ownershipCheckedExec: read after the durable attempt write,
+        // so that host I/O cannot age the launch's ownership observation.
+        let refusal = if hook.phase != TaskHookPhase::Finally {
+            match &self.execution {
+                Some((node, request_doc_id, lease)) => match lease
+                    .owns_execution(node, request_doc_id)
+                    .await
+                {
+                    Ok(true) => None,
+                    Ok(false) => {
+                        self.cancellation.interrupt();
+                        Some(refused(
+                            HookCommandResult::Interrupted,
+                            "execution ownership lost before launch".to_owned(),
+                        ))
+                    }
+                    Err(error) => Some(refused(
+                        HookCommandResult::LaunchFailed,
+                        format!("could not verify execution ownership before launch: {error:#}"),
+                    )),
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+        let refusal = refusal.or_else(|| {
+            cancellation.is_cancelled().then(|| {
+                refused(
+                    HookCommandResult::Interrupted,
+                    "cancelled before launch".to_owned(),
+                )
+            })
+        });
+        if let Some(attempt) = refusal {
+            if let Some(record) = &self.record {
+                record
+                    .attempt_finished(&hook.hook_id, &attempt.result)
+                    .await;
+            }
+            return attempt;
         }
         let execution = run_managed_exec(ManagedExecRequest {
             argv: hook.command.clone(),
