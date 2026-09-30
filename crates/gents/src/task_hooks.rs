@@ -22,8 +22,7 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use records::RecordedHookAttempt;
-use records::TaskHookRecordHandle;
-pub use records::TaskHookRecoveryReport;
+pub(crate) use records::TaskHookRecordHandle;
 pub(crate) use records::{recover_task_hook_records, TaskHookRecord, TaskHookRecordStore};
 
 /// `TaskHooks.defaultHookTimeoutSecs`: the executor's own bound for a hook that
@@ -180,14 +179,12 @@ impl TaskHookRun {
 }
 
 fn failure_reason_tail(detail: &str) -> String {
-    if detail.len() <= FAILURE_REASON_OUTPUT_CAP {
-        return detail.to_owned();
+    let tail = crate::streaming::tail_window(detail, FAILURE_REASON_OUTPUT_CAP);
+    if tail.len() == detail.len() {
+        tail.to_owned()
+    } else {
+        format!("…{tail}")
     }
-    let mut start = detail.len() - FAILURE_REASON_OUTPUT_CAP;
-    while !detail.is_char_boundary(start) {
-        start += 1;
-    }
-    format!("…{}", &detail[start..])
 }
 
 /// `TaskHooks.HookExec`: one attempt observation per configured occurrence.
@@ -347,37 +344,19 @@ impl TaskHookCancellation {
         }
         let cancellation = self.clone();
         tokio::spawn(async move {
-            let mut watch_interrupt = true;
-            let mut watch_shutdown = true;
-            loop {
-                if *shutdown.borrow() {
-                    cancellation.shutdown();
-                    return;
-                }
-                if interrupt.borrow().is_some() {
-                    cancellation.interrupt();
-                    watch_interrupt = false;
-                }
-                if !watch_interrupt && !watch_shutdown {
-                    return;
-                }
+            let ordinary = async {
                 tokio::select! {
-                    () = ownership_lost.cancelled(), if watch_interrupt => {
-                        cancellation.interrupt();
-                        watch_interrupt = false;
-                    }
-                    changed = interrupt.changed(), if watch_interrupt => {
-                        if changed.is_err() {
-                            watch_interrupt = false;
-                        }
-                    }
-                    changed = shutdown.changed(), if watch_shutdown => {
-                        if changed.is_err() {
-                            watch_shutdown = false;
-                        }
-                    }
+                    Ok(_) = interrupt.wait_for(Option::is_some) => {}
+                    () = ownership_lost.cancelled() => {}
                 }
-            }
+                cancellation.interrupt();
+            };
+            let all = async {
+                if shutdown.wait_for(|stopping| *stopping).await.is_ok() {
+                    cancellation.shutdown();
+                }
+            };
+            tokio::join!(ordinary, all);
         })
     }
 }

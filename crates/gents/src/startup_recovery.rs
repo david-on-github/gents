@@ -28,7 +28,8 @@ pub struct StartupRecoveryOutcome {
     pub tool_calls: anyhow::Result<ToolCallRecoveryReport>,
     pub requests: anyhow::Result<RecoveryReport>,
     pub inference_calls: anyhow::Result<InferenceCallRecoveryReport>,
-    pub task_hooks: anyhow::Result<crate::task_hooks::TaskHookRecoveryReport>,
+    /// Task hook records whose recovered cleanup started.
+    pub task_hooks: anyhow::Result<usize>,
 }
 
 /// Run the startup recovery sweeps in dependency order:

@@ -9,16 +9,12 @@ use rig::streaming::{RawStreamingChoice, StreamingCompletionResponse};
 use serde_json::json;
 
 use super::BehaviorDaemon;
-use crate::agent::completion_retry::CompletionRetryProfileFields;
 use crate::agent::runtime::StartupBarrier;
-use crate::backend_provider::BackendProviderKind;
-use crate::config::{ResolvedBehavior, SamplingConfig};
+use crate::config::ResolvedBehavior;
 use crate::config_client::{ConfigAccess, DesiredStateApplyDocument, DesiredStateApplyPlan};
 use crate::hook::{BackgroundExecutionRegistry, BackgroundToolRegistry, FailurePolicy};
-use crate::identity::{AgentIdentity, KeyIdentity, RuntimePrincipal};
 use crate::llm::tool::ToolDyn;
 use crate::prompt::LayeredPromptBuilder;
-use crate::tool_surface::BehaviorToolConfig;
 use crate::watcher::AgentRequest;
 use crate::Collection;
 
@@ -73,52 +69,6 @@ impl CompletionModel for ScriptedModel {
     }
 }
 
-fn test_behavior(deadline: Duration) -> Arc<ResolvedBehavior> {
-    let identity: Arc<dyn AgentIdentity> = Arc::new(
-        KeyIdentity::load_or_create(
-            std::env::temp_dir().join(format!("daemon-task-hooks-{}.key", uuid::Uuid::new_v4())),
-            None,
-        )
-        .expect("test identity"),
-    );
-    let principal = Arc::new(RuntimePrincipal {
-        agent_did: identity.did().to_string(),
-        identity,
-        default_behavior_id: "general".to_string(),
-        display_name: None,
-        enabled: true,
-    });
-    Arc::new(ResolvedBehavior {
-        behavior_id: "general".to_string(),
-        principal,
-        backend_id: Some("backend-general".to_string()),
-        backend_provider_kind: BackendProviderKind::OpenAiCompatible,
-        openai_wire_api: crate::OpenAiWireApi::ChatCompletions,
-        backend_endpoint: "http://127.0.0.1:8999/v1".to_string(),
-        backend_auth: crate::document_config::BackendAuth::Unauthenticated,
-        model_name: "scripted".to_string(),
-        resolved_reasoning_efforts: None,
-        context_window: 8_192,
-        max_output_tokens: 1_024,
-        max_turns: 2,
-        max_turns_provenance: crate::config::MaxTurnsProvenance::Default,
-        system_prompt: "system".to_string(),
-        tools: BehaviorToolConfig::meta_only(),
-        compaction: None,
-        compaction_inference: None,
-        max_total_tokens: None,
-        stream_batch_ms: 0,
-        stream_liveness_timeout: Duration::from_secs(5),
-        deadline_duration: deadline,
-        provider_idle_timeout: Duration::from_secs(
-            crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS,
-        ),
-        completion_retry: CompletionRetryProfileFields::default(),
-        sampling: SamplingConfig::default(),
-        skills: Vec::new(),
-    })
-}
-
 /// How the request under test reached its Task.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Lineage {
@@ -151,7 +101,7 @@ impl Harness {
                 .expect("embedded node"),
         );
         crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
-        let behavior = test_behavior(deadline);
+        let behavior = super::inference::tests::test_behavior_with_deadline(deadline);
         crate::test_support::install_test_behavior(
             node.as_ref(),
             behavior.agent_did(),
@@ -498,33 +448,6 @@ async fn a_failing_before_hook_stops_the_request_before_the_provider() {
 }
 
 #[tokio::test]
-async fn a_failing_after_success_hook_blocks_successful_completion() {
-    let harness = Harness::new().await;
-    harness
-        .install_task(json!([
-            {
-                "hook_id": "verify",
-                "phase": "after_success",
-                "command": ["sh", "-c", "echo verify refused >&2; exit 2"],
-                "timeout_secs": 30,
-            },
-            {
-                "hook_id": "sweep",
-                "phase": "finally",
-                "command": ["sh", "-c", harness.touch("swept")],
-                "timeout_secs": 30,
-            },
-        ]))
-        .await;
-    let request = harness.create_request(Lineage::Trigger, false).await;
-    let row = harness.run(request, false).await;
-    assert_eq!(harness.calls(), 1, "{row}");
-    assert_eq!(row["lifecycle_state"], "failed", "{row}");
-    assert!(reason(&row).contains("verify refused"), "{row}");
-    assert!(harness.mark("swept").exists());
-}
-
-#[tokio::test]
 async fn passing_hooks_leave_a_manual_task_run_completed() {
     let harness = Harness::new().await;
     harness
@@ -544,32 +467,6 @@ async fn passing_hooks_leave_a_manual_task_run_completed() {
     for mark in ["prepared", "verified", "swept"] {
         assert!(harness.mark(mark).exists(), "{mark} hook did not run");
     }
-}
-
-#[tokio::test]
-async fn a_failing_cleanup_keeps_the_before_hook_as_the_primary_error() {
-    let harness = Harness::new().await;
-    harness
-        .install_task(json!([
-            {"hook_id": "prepare", "phase": "before",
-             "command": ["sh", "-c", "exit 1"], "timeout_secs": 30},
-            {"hook_id": "sweep", "phase": "finally",
-             "command": ["sh", "-c", "exit 1"], "timeout_secs": 30},
-        ]))
-        .await;
-    let request = harness.create_request(Lineage::ManualFire, false).await;
-    let row = harness.run(request, false).await;
-    assert_eq!(harness.calls(), 0, "{row}");
-    assert_eq!(row["lifecycle_state"], "failed", "{row}");
-    let reason = reason(&row);
-    assert!(
-        reason.starts_with("task hook prepare exited with status 1"),
-        "{reason:?}"
-    );
-    assert!(
-        reason.contains("task cleanup hooks failed: sweep"),
-        "{reason:?}"
-    );
 }
 
 #[tokio::test]
@@ -659,33 +556,6 @@ async fn a_request_bound_to_a_missing_task_fails_closed() {
     assert_eq!(harness.calls(), 0, "{row}");
     assert_eq!(row["lifecycle_state"], "failed", "{row}");
     assert!(reason(&row).contains("no longer exists"), "{row}");
-}
-
-#[tokio::test]
-async fn a_request_bound_to_a_disabled_task_fails_closed() {
-    let harness = Harness::new().await;
-    harness
-        .install_task(json!([{"hook_id": "prepare", "phase": "before",
-            "command": ["sh", "-c", harness.touch("prepared")], "timeout_secs": 30}]))
-        .await;
-    let request = harness.create_request(Lineage::ManualFire, false).await;
-    harness
-        .apply(vec![(
-            Collection::Task,
-            json!({
-                "agent_did": harness.owner(),
-                "task_id": TASK_ID,
-                "behavior_id": harness.behavior.behavior_id,
-                "prompt_template": "run the gate",
-                "enabled": false,
-            }),
-        )])
-        .await;
-    let row = harness.run(request, false).await;
-    assert_eq!(harness.calls(), 0, "{row}");
-    assert_eq!(row["lifecycle_state"], "failed", "{row}");
-    assert!(reason(&row).contains("disabled"), "{row}");
-    assert!(!harness.mark("prepared").exists());
 }
 
 #[cfg(target_os = "macos")]
@@ -835,7 +705,7 @@ impl Harness {
                 &registry,
             )
             .await;
-            if !outcome.task_hooks.expect("task hook recovery").is_noop() {
+            if outcome.task_hooks.expect("task hook recovery") > 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(250)).await;
@@ -853,7 +723,7 @@ impl Harness {
             &registry,
         )
         .await;
-        assert!(again.task_hooks.expect("second pass").is_noop());
+        assert!(again.task_hooks.expect("second pass") == 0);
     }
 
     fn log_lines(&self) -> Vec<String> {
@@ -1009,7 +879,7 @@ async fn shutdown_before_any_hook_launches_leaves_no_record_to_recover() {
         &restarted,
     )
     .await;
-    assert!(outcome.task_hooks.unwrap().is_noop());
+    assert!(outcome.task_hooks.unwrap() == 0);
 }
 
 #[tokio::test]

@@ -159,8 +159,9 @@ source consistency checks, not a separate runtime compatibility version.
   block those; hook time counts against the request deadline. Hooks apply
   to scheduled, event-fired and manual (`gents task run`, desktop) runs; a
   goal-backed Task's hooks wrap only its opening request. A user interrupt
-  cancels a running `before`/`after_*` hook and interrupts the request, but
-  never cancels cleanup. A request whose Task was deleted or disabled after it
+  cancels a running `before`/`after_*` hook and interrupts the request, and a
+  revocation such as LatestOnly supersession cancels it too; neither cancels
+  cleanup. A hook's `timeout_secs` must be between 1 and 86400. A request whose Task was deleted or disabled after it
   was fired fails instead of running without its hooks. Each attempt is
   recorded on the host under `task-hooks/` in the data directory, so after a
   crash or restart the remaining cleanup runs once, a surviving hook command

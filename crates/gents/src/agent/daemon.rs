@@ -721,52 +721,24 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
             }
         }
 
-        let hooks =
-            match crate::task_hooks::resolve_request_task_hooks(self.node.as_ref(), &request).await
-            {
-                Ok(hooks) => hooks,
-                Err(error) => {
-                    record_current_request_outcome("task_hooks_unresolved");
-                    record_current_failure_class(&error);
-                    tracing::error!(
-                        behavior_id = %self.behavior.behavior_id,
-                        request_id = %request.request_id,
-                        error = %error,
-                        "refusing to run a request whose task hooks cannot be resolved"
-                    );
-                    self.finalize_failure_before_work(
-                        &mut lifecycle,
-                        &stream_writer,
-                        &format!("{error:#}"),
-                        &request,
-                    )
-                    .await;
-                    return Ok(());
-                }
-            };
-        let hook_cwd = if hooks.is_empty() {
-            PathBuf::new()
-        } else {
-            match self.task_hook_cwd().await {
-                Ok(cwd) => cwd,
-                Err(error) => {
-                    record_current_request_outcome("task_hook_root_unavailable");
-                    record_current_failure_class(&error);
-                    tracing::error!(
-                        behavior_id = %self.behavior.behavior_id,
-                        request_id = %request.request_id,
-                        error = %error,
-                        "refusing to run task hooks without an admitted host-tools root"
-                    );
-                    self.finalize_failure_before_work(
-                        &mut lifecycle,
-                        &stream_writer,
-                        &format!("{error:#}"),
-                        &request,
-                    )
-                    .await;
-                    return Ok(());
-                }
+        let (hooks, hook_cwd, hook_record) = match self.prepare_task_hooks(&request).await {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                record_current_failure_class(&error);
+                tracing::error!(
+                    behavior_id = %self.behavior.behavior_id,
+                    request_id = %request.request_id,
+                    error = %format!("{error:#}"),
+                    "refusing to run a request whose task hooks cannot be prepared"
+                );
+                self.finalize_failure_before_work(
+                    &mut lifecycle,
+                    &stream_writer,
+                    &format!("{error:#}"),
+                    &request,
+                )
+                .await;
+                return Ok(());
             }
         };
 
@@ -789,43 +761,6 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 ownership_lost.clone(),
             )
         });
-        let hook_record = if hooks.is_empty() {
-            None
-        } else {
-            let record = crate::task_hooks::TaskHookRecord {
-                request_doc_id: request.doc_id.clone(),
-                request_id: request.request_id.clone(),
-                agent_did: request.agent_did.clone(),
-                cwd: hook_cwd.clone(),
-                root_guard: self.root_execution_guard.clone(),
-                hooks: hooks.clone(),
-                attempts: Vec::new(),
-            };
-            match self
-                .background_execution_registry
-                .task_hook_records()
-                .begin(record)
-            {
-                Ok(handle) => Some(handle),
-                Err(error) => {
-                    observer.abort();
-                    if let Some(follower) = hook_cancellation_follower {
-                        follower.abort();
-                    }
-                    let error = anyhow::anyhow!("could not record task hook state: {error}");
-                    record_current_request_outcome("task_hook_record_failed");
-                    record_current_failure_class(&error);
-                    self.finalize_failure_before_work(
-                        &mut lifecycle,
-                        &stream_writer,
-                        &error.to_string(),
-                        &request,
-                    )
-                    .await;
-                    return Ok(());
-                }
-            }
-        };
         let hook_exec = crate::task_hooks::ManagedTaskHookExec::new(hook_cwd, hook_cancellation)
             .with_record(hook_record.clone());
 
@@ -838,7 +773,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                         Some(format!("could not record task hook state: {error}")),
                         true,
                     );
-                    let observation = outcome.observation;
+                    let observation = outcome.observation();
                     owned_work = Some(outcome);
                     return observation;
                 }
@@ -852,7 +787,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     interrupt_rx,
                 )
                 .await;
-            let observation = outcome.observation;
+            let observation = outcome.observation();
             owned_work = Some(outcome);
             observation
         })
@@ -876,23 +811,16 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
             // No work ran, so nothing else can hold the writer binding the
             // request was materialized with.
             None => (None, true),
-            Some(OwnedWorkOutcome {
-                ownership_lost: true,
+            Some(OwnedWorkOutcome::OwnershipLost) => return Ok(()),
+            Some(OwnedWorkOutcome::DrainFailed(error)) => return Err(error),
+            Some(OwnedWorkOutcome::Observed {
+                reason,
+                release_writer_binding,
                 ..
-            }) => return Ok(()),
-            Some(OwnedWorkOutcome {
-                propagate: Some(error),
-                ..
-            }) => return Err(error),
-            Some(outcome) => (outcome.reason, outcome.release_writer_binding),
+            }) => (reason, release_writer_binding),
         };
 
         let final_outcome = run.final_outcome();
-        if run.agent_result == Some(crate::task_hooks::TaskAgentResult::Success)
-            && final_outcome != crate::task_hooks::TaskHookOutcome::Success
-        {
-            record_current_request_outcome("task_hook_gate_failed");
-        }
         let mut reason = match &final_outcome {
             crate::task_hooks::TaskHookOutcome::Failure(
                 crate::task_hooks::HookPrimaryError::Hook(hook_id),
@@ -1002,6 +930,37 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
         }
     }
 
+    /// The request's Task hooks, the admitted cwd they run from and the claim
+    /// on their host record; no cwd or record when the Task has no hooks.
+    async fn prepare_task_hooks(
+        &self,
+        request: &AgentRequest,
+    ) -> Result<(
+        Vec<crate::document_config::TaskHook>,
+        PathBuf,
+        Option<crate::task_hooks::TaskHookRecordHandle>,
+    )> {
+        let hooks =
+            crate::task_hooks::resolve_request_task_hooks(self.node.as_ref(), request).await?;
+        if hooks.is_empty() {
+            return Ok((hooks, PathBuf::new(), None));
+        }
+        let cwd = self.task_hook_cwd().await?;
+        let record = self
+            .background_execution_registry
+            .task_hook_records()
+            .begin(crate::task_hooks::TaskHookRecord {
+                request_doc_id: request.doc_id.clone(),
+                request_id: request.request_id.clone(),
+                agent_did: request.agent_did.clone(),
+                cwd: cwd.clone(),
+                root_guard: self.root_execution_guard.clone(),
+                hooks: hooks.clone(),
+                attempts: Vec::new(),
+            })?;
+        Ok((hooks, cwd, Some(record)))
+    }
+
     /// Task hooks run from the behavior's host-tools root, revalidated through
     /// its admission owner, or the runtime cwd when the behavior has none.
     /// Workspace association for hooks remains an open design question, so a
@@ -1039,7 +998,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 record_current_request_outcome("completed");
                 if let Err(error) = lifecycle.validate_owned_execution().await {
                     tracing::warn!(request_id = %request.request_id, %error, "stopping workspace completion after execution ownership loss");
-                    return OwnedWorkOutcome::ownership_lost();
+                    return OwnedWorkOutcome::OwnershipLost;
                 }
                 if let Err(error) = crate::workspace::seal_on_writer_success(
                     self.node.as_ref(),
@@ -1062,7 +1021,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 }
                 if let Err(error) = lifecycle.validate_owned_execution().await {
                     tracing::warn!(request_id = %request.request_id, %error, "stopping workspace integration after execution ownership loss");
-                    return OwnedWorkOutcome::ownership_lost();
+                    return OwnedWorkOutcome::OwnershipLost;
                 }
                 if let Err(error) = crate::workspace::integrate_on_integrator_success(
                     self.node.as_ref(),
@@ -1096,7 +1055,7 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                 if lost_execution_ownership(lifecycle, &error).await =>
             {
                 tracing::warn!(request_id = %request.request_id, %error, "request work stopped after execution ownership loss");
-                OwnedWorkOutcome::ownership_lost()
+                OwnedWorkOutcome::OwnershipLost
             }
             Ok(HandleRequestOutcome::FailedAfterResponse(error)) => {
                 record_current_request_outcome("failed_after_response");
@@ -1118,14 +1077,11 @@ impl<M: CompletionModel + 'static> BehaviorDaemon<M> {
                     error = %error,
                     "graceful shutdown could not confirm provider output retention; leaving durable execution for recovery"
                 );
-                OwnedWorkOutcome {
-                    propagate: Some(error),
-                    ..OwnedWorkOutcome::observed(TaskAgentResult::Interrupted, None, false)
-                }
+                OwnedWorkOutcome::DrainFailed(error)
             }
             Err(error) if lost_execution_ownership(lifecycle, &error).await => {
                 tracing::warn!(request_id = %request.request_id, %error, "request work stopped after execution ownership loss");
-                OwnedWorkOutcome::ownership_lost()
+                OwnedWorkOutcome::OwnershipLost
             }
             Err(error) => {
                 record_current_request_outcome("failed");
@@ -1158,12 +1114,14 @@ async fn lost_execution_ownership(lifecycle: &RequestLifecycle, error: &anyhow::
 /// commit-tree. Lost ownership is observed as an interruption so cleanup still
 /// runs, and the request's current owner keeps its terminal. A drain failure
 /// leaves the durable execution to recovery and its error to the runtime.
-struct OwnedWorkOutcome {
-    observation: crate::task_hooks::TaskAgentResult,
-    reason: Option<String>,
-    release_writer_binding: bool,
-    ownership_lost: bool,
-    propagate: Option<anyhow::Error>,
+enum OwnedWorkOutcome {
+    Observed {
+        observation: crate::task_hooks::TaskAgentResult,
+        reason: Option<String>,
+        release_writer_binding: bool,
+    },
+    OwnershipLost,
+    DrainFailed(anyhow::Error),
 }
 
 impl OwnedWorkOutcome {
@@ -1172,19 +1130,19 @@ impl OwnedWorkOutcome {
         reason: Option<String>,
         release_writer_binding: bool,
     ) -> Self {
-        Self {
+        Self::Observed {
             observation,
             reason,
             release_writer_binding,
-            ownership_lost: false,
-            propagate: None,
         }
     }
 
-    fn ownership_lost() -> Self {
-        Self {
-            ownership_lost: true,
-            ..Self::observed(crate::task_hooks::TaskAgentResult::Interrupted, None, false)
+    fn observation(&self) -> crate::task_hooks::TaskAgentResult {
+        match self {
+            Self::Observed { observation, .. } => *observation,
+            Self::OwnershipLost | Self::DrainFailed(_) => {
+                crate::task_hooks::TaskAgentResult::Interrupted
+            }
         }
     }
 }

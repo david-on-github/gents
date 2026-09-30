@@ -43,7 +43,8 @@ pub enum PeriodicRecoverySweepOutcome {
     InferenceCalls(InferenceCallRecoveryReport),
     /// Session-message rows settled from their caused requests.
     SessionMessageRows(usize),
-    TaskHookRecords(crate::task_hooks::TaskHookRecoveryReport),
+    /// Task hook records whose recovered cleanup started.
+    TaskHookRecords(usize),
 }
 
 impl PeriodicRecoverySweepOutcome {
@@ -55,7 +56,7 @@ impl PeriodicRecoverySweepOutcome {
             Self::BackgroundCompletionSideEffects(report) => report.is_noop(),
             Self::InferenceCalls(report) => report.calls_recovered == 0,
             Self::SessionMessageRows(settled) => *settled == 0,
-            Self::TaskHookRecords(report) => report.is_noop(),
+            Self::TaskHookRecords(started) => *started == 0,
         }
     }
 }

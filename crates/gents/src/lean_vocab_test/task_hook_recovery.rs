@@ -230,7 +230,7 @@ async fn generated_task_hook_recovery_cases_drive_startup_recovery_and_host_reco
         .await;
         let report = outcome.task_hooks.expect("task hook recovery");
         restarted.task_hook_records().wait_for_recoveries().await;
-        assert_eq!(report.recoveries_started, usize::from(case.started));
+        assert_eq!(report, usize::from(case.started));
         assert_eq!(
             fixture.request_state(&doc_id).await,
             case.expected_request_state,
@@ -264,7 +264,7 @@ async fn generated_task_hook_recovery_cases_drive_startup_recovery_and_host_reco
             &restarted,
         )
         .await;
-        assert!(again.task_hooks.expect("second pass").is_noop());
+        assert!(again.task_hooks.expect("second pass") == 0);
         restarted.task_hook_records().wait_for_recoveries().await;
         assert_eq!(
             log_lines(&log),
@@ -327,17 +327,12 @@ async fn generated_task_hook_sweep_cases_drive_the_record_sweep() {
             case.name
         );
         assert_eq!(
-            report.recoveries_started,
+            report,
             case.measure_before - case.measure_after,
             "{}",
             case.name
         );
-        assert_eq!(
-            log_lines(&log).len(),
-            report.recoveries_started,
-            "{}",
-            case.name
-        );
+        assert_eq!(log_lines(&log).len(), report, "{}", case.name);
         drop(held);
         drop(owner);
     }
@@ -395,7 +390,7 @@ async fn recovery_stops_a_surviving_hook_command_before_cleanup() {
         &restarted,
     )
     .await;
-    assert_eq!(outcome.task_hooks.unwrap().recoveries_started, 1);
+    assert_eq!(outcome.task_hooks.unwrap(), 1);
     restarted.task_hook_records().wait_for_recoveries().await;
     assert_ne!(survivor.identity.observe(), ProcessObservation::Running);
     assert_eq!(log_lines(&log), vec!["sweep".to_string()]);
@@ -443,7 +438,7 @@ async fn shutdown_during_recovered_cleanup_keeps_only_the_unlaunched_cleanup() {
         &running,
     )
     .await;
-    assert_eq!(outcome.task_hooks.unwrap().recoveries_started, 1);
+    assert_eq!(outcome.task_hooks.unwrap(), 1);
     tokio::time::timeout(Duration::from_secs(20), async {
         while !started.exists() {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -531,7 +526,7 @@ async fn recovered_cleanup_outside_an_admitted_root_is_refused() {
         let report = recover_task_hook_records(&fixture.node, fixture.did(), &store)
             .await
             .unwrap();
-        assert_eq!(report.recoveries_started, 1, "{name}");
+        assert_eq!(report, 1, "{name}");
         store.wait_for_recoveries().await;
         assert!(
             log_lines(&log).is_empty(),

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
@@ -12,7 +12,7 @@ use super::{run_finally, HookCommandResult, ManagedTaskHookExec, TaskHookCancell
 use crate::document_config::{TaskHook, TaskHookPhase};
 use crate::graphql::{escape_graphql_string, graphql_with_transaction_retry};
 use crate::managed_exec::ownership::{
-    durable_record_path, write_durable_record, ProcessIdentity, ProcessRecorder,
+    HostRecord, HostRecordStore, ProcessIdentity, ProcessRecorder,
 };
 
 /// The host's observations of one execution's hook attempts, the input
@@ -63,10 +63,10 @@ impl TaskHookRecord {
     }
 }
 
-#[derive(Clone)]
-enum Storage {
-    Volatile(Arc<Mutex<HashMap<String, TaskHookRecord>>>),
-    Durable(PathBuf),
+impl HostRecord for TaskHookRecord {
+    fn key(&self) -> &str {
+        &self.request_doc_id
+    }
 }
 
 /// Host store of task hook records. Like background process records, durable
@@ -78,7 +78,7 @@ enum Storage {
 /// would.
 #[derive(Clone)]
 pub(crate) struct TaskHookRecordStore {
-    storage: Storage,
+    storage: HostRecordStore<TaskHookRecord>,
     live: Arc<Mutex<HashSet<String>>>,
     recoveries: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
     shutdown: CancellationToken,
@@ -86,7 +86,7 @@ pub(crate) struct TaskHookRecordStore {
 
 impl Default for TaskHookRecordStore {
     fn default() -> Self {
-        Self::with_storage(Storage::Volatile(Arc::default()))
+        Self::with_storage(HostRecordStore::default())
     }
 }
 
@@ -95,7 +95,7 @@ fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl TaskHookRecordStore {
-    fn with_storage(storage: Storage) -> Self {
+    fn with_storage(storage: HostRecordStore<TaskHookRecord>) -> Self {
         Self {
             storage,
             live: Arc::default(),
@@ -105,7 +105,7 @@ impl TaskHookRecordStore {
     }
 
     pub(crate) fn durable(dir: PathBuf) -> Self {
-        Self::with_storage(Storage::Durable(dir))
+        Self::with_storage(HostRecordStore::Durable(dir))
     }
 
     /// Awaits every recovered cleanup started so far.
@@ -130,58 +130,15 @@ impl TaskHookRecordStore {
     }
 
     fn write(&self, record: &TaskHookRecord) -> std::io::Result<()> {
-        match &self.storage {
-            Storage::Volatile(records) => {
-                locked(records).insert(record.request_doc_id.clone(), record.clone());
-                Ok(())
-            }
-            Storage::Durable(dir) => {
-                let bytes = serde_json::to_vec(record).map_err(std::io::Error::other)?;
-                write_durable_record(dir, &record.request_doc_id, &bytes)
-            }
-        }
+        self.storage.write(record)
     }
 
     fn remove(&self, request_doc_id: &str) {
-        match &self.storage {
-            Storage::Volatile(records) => {
-                locked(records).remove(request_doc_id);
-            }
-            Storage::Durable(dir) => {
-                match std::fs::remove_file(durable_record_path(dir, request_doc_id)) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => {
-                        tracing::warn!(request_doc_id, %error, "failed to remove task hook record");
-                    }
-                }
-            }
-        }
+        self.storage.remove(request_doc_id);
     }
 
     pub(crate) fn list(&self) -> Vec<TaskHookRecord> {
-        let dir = match &self.storage {
-            Storage::Volatile(records) => return locked(records).values().cloned().collect(),
-            Storage::Durable(dir) => dir,
-        };
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        entries
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .filter(|path| path.extension().is_some_and(|extension| extension == "json"))
-            .filter_map(|path| {
-                let bytes = std::fs::read(&path).ok()?;
-                match serde_json::from_slice::<TaskHookRecord>(&bytes) {
-                    Ok(record) => Some(record),
-                    Err(error) => {
-                        tracing::warn!(path = %path.display(), %error, "ignoring unreadable task hook record");
-                        None
-                    }
-                }
-            })
-            .collect()
+        self.storage.list()
     }
 
     /// Claims `record` for one executor, or `None` while another holds it.
@@ -337,23 +294,6 @@ impl TaskHookRecordHandle {
     }
 }
 
-/// Result of one task hook recovery pass.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct TaskHookRecoveryReport {
-    /// Records whose request is resolved and whose recovery started; the
-    /// cleanup itself runs in a tracked task.
-    pub recoveries_started: usize,
-    /// Records left for a later pass: their request is still owned, or an
-    /// executor in this runtime holds them.
-    pub deferred: usize,
-}
-
-impl TaskHookRecoveryReport {
-    pub fn is_noop(&self) -> bool {
-        self.recoveries_started == 0
-    }
-}
-
 /// A request is resolved once request recovery (or its live owner) has
 /// written its terminal, or the request is gone.
 async fn request_resolved(node: &EmbeddedNode, request_doc_id: &str) -> Result<bool> {
@@ -376,31 +316,6 @@ async fn request_resolved(node: &EmbeddedNode, request_doc_id: &str) -> Result<b
             Some(row) => row.lifecycle_state.is_some_and(|state| state.is_terminal()),
         },
     )
-}
-
-/// The recorded cwd must still be admitted by the owner that admitted it: the
-/// behavior's root guard against current WorkspaceRoot policy, or, for a
-/// behavior without host tools, an existing runtime directory.
-async fn admit_recorded_root(node: &EmbeddedNode, record: &TaskHookRecord) -> Result<()> {
-    match &record.root_guard {
-        Some(guard) => {
-            guard.validate(node).await?;
-            if let Some(root) = &guard.selected_root {
-                anyhow::ensure!(
-                    root == &record.cwd,
-                    "recorded cwd {} is not the admitted root {}",
-                    record.cwd.display(),
-                    root.display()
-                );
-            }
-        }
-        None => anyhow::ensure!(
-            record.cwd.is_dir(),
-            "recorded cwd {} is no longer a directory",
-            record.cwd.display()
-        ),
-    }
-    Ok(())
 }
 
 async fn recover_record(
@@ -429,7 +344,11 @@ async fn recover_record(
         handle.release().await;
         return;
     }
-    if let Err(error) = admit_recorded_root(node.as_ref(), &record).await {
+    let admitted = match &record.root_guard {
+        Some(guard) => guard.validate(node.as_ref()).await,
+        None => Ok(()),
+    };
+    if let Err(error) = admitted {
         tracing::error!(
             request_id = %record.request_id,
             cwd = %record.cwd.display(),
@@ -466,38 +385,33 @@ async fn recover_record(
 /// the lost execution is stopped only when its recorded identity proves this
 /// host owns it; no ordinary phase is rerun and no recorded attempt is
 /// repeated; every unattempted cleanup occurrence runs once from the recorded,
-/// still-admitted cwd; then the record is forgotten. Cleanup runs in tracked
+/// cwd while its root guard still admits it; then the record is forgotten. Cleanup runs in tracked
 /// tasks, off the caller's reconcile tick.
 pub(crate) async fn recover_task_hook_records(
     node: &Arc<EmbeddedNode>,
     agent_did: &str,
     store: &TaskHookRecordStore,
-) -> Result<TaskHookRecoveryReport> {
-    let mut report = TaskHookRecoveryReport::default();
+) -> Result<usize> {
+    let mut started = 0;
     if store.shutdown.is_cancelled() {
-        return Ok(report);
+        return Ok(started);
     }
     for record in store.list() {
         if record.agent_did != agent_did {
             continue;
         }
         let Some(handle) = store.claim(record.clone()) else {
-            report.deferred += 1;
             continue;
         };
         match request_resolved(node, &record.request_doc_id).await {
             Ok(true) => {}
-            Ok(false) => {
-                report.deferred += 1;
-                continue;
-            }
+            Ok(false) => continue,
             Err(error) => {
                 tracing::warn!(request_id = %record.request_id, %error, "task hook recovery could not read its request; retrying next pass");
-                report.deferred += 1;
                 continue;
             }
         }
-        report.recoveries_started += 1;
+        started += 1;
         let recovery = tokio::spawn(recover_record(
             node.clone(),
             record,
@@ -508,5 +422,5 @@ pub(crate) async fn recover_task_hook_records(
         recoveries.retain(|recovery| !recovery.is_finished());
         recoveries.push(recovery);
     }
-    Ok(report)
+    Ok(started)
 }

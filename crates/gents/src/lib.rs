@@ -474,7 +474,6 @@ pub use schema::{
 pub use session::load_history;
 pub use session::{fork, fork_via_http, ForkError, ForkOutcome, ForkParams};
 pub use streaming::{DefraStreamWriter, StreamWriter, MAX_LIVE_REASONING_BYTES};
-pub use task_hooks::TaskHookRecoveryReport;
 pub use template::{
     check_template_vocabulary, parse_template_for_validation, render_template, TemplateError,
     TemplateScope, VariableRef,

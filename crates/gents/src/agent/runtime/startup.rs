@@ -1134,11 +1134,11 @@ async fn log_recovery(
 
     match outcome.task_hooks {
         Ok(report) => {
-            if !report.is_noop() {
+            if report > 0 {
                 recovered_any = true;
                 tracing::info!(
                     agent_did = %agent_did,
-                    records = report.recoveries_started,
+                    records = report,
                     "recovering interrupted task hook cleanup"
                 );
             }

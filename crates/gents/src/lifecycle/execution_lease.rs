@@ -130,28 +130,40 @@ enum TerminalAuthority<'a> {
 }
 
 impl RequestLifecycle {
-    pub(crate) async fn validate_owned_execution(&self) -> Result<()> {
-        let row = self
-            .request_view()
-            .await?
-            .context("execution request disappeared")?;
+    /// `decide` over this execution's generation and the current request
+    /// row's lease, or `None` when the row is gone.
+    async fn decide_lease(
+        &self,
+        decide: fn(super::execution_policy::LeaseObservation<'_>, &str, i64) -> bool,
+    ) -> Result<Option<bool>> {
+        let Some(row) = self.request_view().await? else {
+            return Ok(None);
+        };
         let expiry = row
             .execution_lease_expires_at
             .as_deref()
             .context("missing execution expiry")?;
-        let deadline = DateTime::parse_from_rfc3339(expiry)?;
-        if !super::execution_policy::authorize_producer_decision(
-            super::execution_policy::LeaseObservation {
-                request: row.lifecycle_state.context("missing execution state")?,
-                generation: row
-                    .execution_generation
-                    .as_deref()
-                    .context("missing execution generation")?,
-                deadline_ms: deadline.timestamp_millis(),
-            },
+        let observed = super::execution_policy::LeaseObservation {
+            request: row.lifecycle_state.context("missing execution state")?,
+            generation: row
+                .execution_generation
+                .as_deref()
+                .context("missing execution generation")?,
+            deadline_ms: DateTime::parse_from_rfc3339(expiry)?.timestamp_millis(),
+        };
+        Ok(Some(decide(
+            observed,
             self.execution_generation()?,
             Utc::now().timestamp_millis(),
-        ) {
+        )))
+    }
+
+    pub(crate) async fn validate_owned_execution(&self) -> Result<()> {
+        if !self
+            .decide_lease(super::execution_policy::authorize_producer_decision)
+            .await?
+            .context("execution request disappeared")?
+        {
             return Err(ExecutionOwnershipLost.into());
         }
         Ok(())
@@ -170,27 +182,13 @@ impl RequestLifecycle {
     /// active request. A failure observed after the lease is lost belongs to
     /// the request's current owner, not to this execution.
     pub(crate) async fn owns_execution(&self) -> Result<bool> {
-        let Some(row) = self.request_view().await? else {
-            return Ok(false);
-        };
-        let (Some(state), Some(generation), Some(expiry)) = (
-            row.lifecycle_state,
-            row.execution_generation.as_deref(),
-            row.execution_lease_expires_at.as_deref(),
-        ) else {
-            return Ok(false);
-        };
-        let observed = super::execution_policy::LeaseObservation {
-            request: state,
-            generation,
-            deadline_ms: DateTime::parse_from_rfc3339(expiry)?.timestamp_millis(),
-        };
-        Ok(super::execution_policy::renewable_lifecycle(state)
-            && super::execution_policy::is_live(
-                observed,
-                self.execution_generation()?,
-                Utc::now().timestamp_millis(),
-            ))
+        Ok(self
+            .decide_lease(|observed, generation, now_ms| {
+                super::execution_policy::renewable_lifecycle(observed.request)
+                    && super::execution_policy::is_live(observed, generation, now_ms)
+            })
+            .await?
+            .unwrap_or(false))
     }
 
     pub async fn terminalize_owned(
