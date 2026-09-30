@@ -149,6 +149,28 @@ def CommandResult.succeeded : CommandResult → Bool
 are repeatable. Cwd/env, launch, capture, timeout, and process termination stay
 with the existing host owner; this function does not implement host execution. -/
 abbrev HookExec := TaskHook → CommandResult
+
+/-- Ordinary launches require a fresh observation from the request execution
+owner, not the last renewal poll. Cleanup survives ownership loss. The host
+cannot atomically combine a database read with process spawn: revocation after
+this read is handled by the existing renewal cancellation signal. -/
+def launchAllowed (phase : HookPhase) (ownsExecution : Bool) : Bool :=
+  phase == .finally || ownsExecution
+
+/-- Ownership is observed separately for each occurrence immediately before
+launch. It does not introduce another lease or a task lifecycle. -/
+def ownershipCheckedExec (owns : TaskHook → Bool) (exec : HookExec) : HookExec :=
+  fun h => if launchAllowed h.phase (owns h) then exec h else .interrupted
+
+theorem revoked_ordinary_launch_refused (h : TaskHook) (owns : TaskHook → Bool)
+    (exec : HookExec) (hp : h.phase ≠ .finally) (ho : owns h = false) :
+    ownershipCheckedExec owns exec h = .interrupted := by
+  simp [ownershipCheckedExec, launchAllowed, hp, ho]
+
+theorem cleanup_launch_survives_revocation (h : TaskHook) (owns : TaskHook → Bool)
+    (exec : HookExec) (hp : h.phase = .finally) :
+    ownershipCheckedExec owns exec h = exec h := by
+  simp [ownershipCheckedExec, launchAllowed, hp]
 /-- Outcome of a single agent execution; `interrupted` covers cancellation of
 active work with unknown completion state. An execution that loses request
 ownership mid-work is `interrupted` too: its result is unknown to this owner,
