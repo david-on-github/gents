@@ -11,7 +11,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "The EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"AutomationSurface\" scoped to both the EvalAutomationInput and EvalAutomationOutput collections, with a create entry and a query entry for each collection (four entries total) \u2014 no unscoped defra_query \u2014 and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Nothing else.",
+      "prompt": "Callers supply their own correlation value, the input message, and the output result. Queries must find each collection’s rows by correlation alone.\n\nThe EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"AutomationSurface\" scoped to both the EvalAutomationInput and EvalAutomationOutput collections, with a create entry and a query entry for each collection (four entries total) — no unscoped defra_query — and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Nothing else.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -139,7 +139,7 @@
     },
     {
       "stage_id": "confirm_input_row",
-      "prompt": "Report what is stored under correlation \"val-charlie-004\" in EvalAutomationInput \u2014 read-only, change nothing.",
+      "prompt": "Report what is stored under correlation \"val-charlie-004\" in EvalAutomationInput — read-only, change nothing.",
       "deadline_secs": 600,
       "checks": [
         {

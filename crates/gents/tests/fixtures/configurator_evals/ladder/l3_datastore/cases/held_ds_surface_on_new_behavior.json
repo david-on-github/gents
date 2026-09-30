@@ -11,7 +11,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "The EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"HeldOutWriter\" for the EvalAutomationOutput collection with only a create entry (no query entry, no unscoped defra_query). Then create a new behavior named \"held-out-writer\" whose Tools select that surface under datastore.datastore_tool_surface_ids, and also select the same surface on The Engineer's own Tools. Change nothing else.",
+      "prompt": "Callers supply their own correlation value and result when creating an output document.\n\nThe EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"HeldOutWriter\" for the EvalAutomationOutput collection with only a create entry (no query entry, no unscoped defra_query). Then create a new behavior named \"held-out-writer\" whose Tools select that surface under datastore.datastore_tool_surface_ids, and also select the same surface on The Engineer's own Tools. Change nothing else.",
       "deadline_secs": 600,
       "checks": [
         {
