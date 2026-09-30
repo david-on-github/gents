@@ -22,7 +22,7 @@ fn journal(states: &[String]) -> Vec<ActionJournalEntry> {
 #[test]
 fn generated_retry_decisions_match_runtime_owner() {
     let cases = lean_callback_retry_cases();
-    assert_eq!(cases.len(), 192, "Lean must emit the whole retry matrix");
+    assert_eq!(cases.len(), 224, "Lean must emit the whole retry matrix");
     assert!(cases.iter().any(|case| case.allowed));
     for case in cases {
         assert_eq!(

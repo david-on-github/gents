@@ -749,13 +749,18 @@ def caseCoverage : List CoverageEntry :=
       "task_hook_run_cases"
       "TaskHookRunCases"
       "lean_vocab_test::task_hooks_policy::generated_task_hook_cases_fence_the_modeled_phase_vocabulary"
-      "The consumer binds the emitted phase vocabulary to the production TaskHookPhase encoding and replays admission over every trace. Native timeout resolution is deferred with sequencing: the model-resolved effective timeout is emitted for the future executor and enforced by nothing here. Phase ordering, the before-hook gate on claim-to-processing, after_success gating of successful completion and interrupted-recovery selection are equally unbound, because no host executor consumes these traces yet (#1600).")
+      "The consumer binds the emitted phase vocabulary to the production TaskHookPhase encoding and replays admission over every trace; the executor consumer below drives the traces.")
       "task-hooks" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
+      "task_hook_run_cases"
+      "TaskHookRunCases"
+      "lean_vocab_test::task_hook_executor::generated_task_hook_run_cases_drive_real_host_commands"
+      "Every generated trace runs through the production orchestration and managed host execution with real commands: each scripted result is produced by a real process (an exit status, a nonexistent executable, a command outliving its model-resolved timeout, or a held command cancelled through the interrupt or shutdown source its phase uses). The processes' own invocation log, with the owned work's entry, is compared against the emitted invocationTrace, excluding only occurrences that could not launch; attempts, outcomes and the terminal request state are compared too. The daemon placement of the before gate at claim and the after phases ahead of terminalization is fenced by daemon tests, not these traces.")
+      "task-hooks" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
       "task_hook_recovery_cases"
       "TaskHookRecoveryCases"
-      "lean_vocab_test::task_hooks_policy::generated_task_hook_cases_fence_the_modeled_phase_vocabulary"
-      "Recovery selection of remaining cleanup from observed attempts has no native owner. Binding it needs the host executor's durable attempt observations, not a test-local replay of recoveryCleanup.")
+      "lean_vocab_test::task_hook_recovery::generated_task_hook_recovery_cases_drive_startup_recovery_and_host_records")
       "task-hooks" [Surface.runtimeInternal]
   , tagged (consumerCoverage
       "request_progress_cases"
@@ -1250,6 +1255,11 @@ def caseCoverage : List CoverageEntry :=
       "tool_call_lifecycle::recovery_closeout_conformance::generated_background_completion_recovery_uses_accepted_native_call")
       "recovery" [Surface.runtimeInternal]
   , tagged (consumerCoverage
+      "recovery_sweep_cases"
+      "RecoverySweepCases"
+      "lean_vocab_test::task_hook_recovery::generated_task_hook_sweep_cases_drive_the_record_sweep")
+      "recovery" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
       "r6_background_cases"
       "R6BackgroundingCases"
       "tool_call_lifecycle::completion_owner_conformance::generated_r6_notification_precedes_continuation_claim")
@@ -1570,6 +1580,12 @@ def caseCoverage : List CoverageEntry :=
       "prompt-assembly" [Surface.runtimeInternal]
   , tagged (consumerWithFollowUp
       "prompt_assembly_cases"
+      "PromptAssemblyClaudeReplayCases"
+      "agent::loop_stream::tests::claude_messages_redacted_and_signed_tool_round_trip_through_owned_loop"
+      "Drives only the ordered-signed-redacted-tool case through the owned loop: its replay blocks become turn-1 SSE (thinking and signature as deltas, redacted data at block start) and the turn-2 capture must equal the modeled replay. The persisted canonical grouping of streamed reasoning is not modeled, so it is not compared to the case's blocks. Other replay cases and the thinking-stream family remain unbound through the owned loop.")
+      "prompt-assembly" [Surface.runtimeInternal]
+  , tagged (consumerWithFollowUp
+      "prompt_assembly_cases"
       "PromptAssemblyReasoningSuffixCases"
       "conformance::prompt_assembly::generated_reasoning_suffix_cases_bind_native_selection"
       "Binds native two-phase selection (provenance suffix, stage assembly, turn location and capture-derived admissible suffix) over the model's row cases and every step of the replay scenarios (compaction, repair, strip-and-retry, tool and issuer changes, interruption, restart, Claude signatures and redaction, Responses ciphertext). Native flattening of real provider bodies is bound by gents-loop replay_frontier tests, not by these cases.")
@@ -1742,6 +1758,11 @@ def caseCoverage : List CoverageEntry :=
       "CallbackRetryCases"
       "conformance::callback_lifecycle::generated_retry_decisions_match_runtime_owner")
       "isolated-workspaces" [Surface.runtimeInternal]
+  , tagged (consumerCoverage
+      "callback_recovery_cases"
+      "CallbackRecoveryCases"
+      "callback::tests::generated_recovery_and_denial_match_runtime_owners")
+      "isolated-workspaces" [Surface.runtimeInternal]
 
   , tagged (consumerWithFollowUp "runtime_cases" "RuntimeReconcileCases"
       "agent::runtime::tests::behavior_resolution::explicit_behavior_resolution_matches_lean_binding_cases"
@@ -1770,7 +1791,7 @@ def caseCoverage : List CoverageEntry :=
       "Drive captured ordered input and typed origin through the callback capture owner; quiesced groups must reject capture.")
       "triggers" [Surface.runtimeInternal]
   , tagged (followUpCoverage "callback_transition_cases" "CallbackTransitionCases"
-      "Drive the callback executor's claim/run/succeed/fail/denial operations and observe exact input/origin/journal/emission; journal-prefix-only checks cannot establish lifecycle coverage.")
+      "Drive the callback executor's claim/run/succeed/fail/denial operations and observe exact input/origin/journal/emission; journal-prefix-only checks cannot establish lifecycle coverage. The interrupt case's journal and retry refusal are executed through callback_recovery_cases.")
       "triggers" [Surface.runtimeInternal]
 
   ]

@@ -628,6 +628,8 @@ async fn start_managed_server<'a, R: Runtime>(
         stored.as_ref(),
     )?;
     refuse_renaming_home(&agent_home, agent_name).await?;
+    gents::home::ensure_home_identity_can_serve(&agent_home)
+        .map_err(|error| BridgeError::untyped(format!("{error:#}")))?;
 
     let mut carried_wait = None;
     let mut replace_loaded_job = false;

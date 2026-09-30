@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use gents::defra_node::{EmbeddedNode, NodeBuilder, StorageBackend};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
 
 mod caused_sessions;
 mod cli;
@@ -498,76 +497,37 @@ pub(crate) fn expand_nonempty_values(values: &[String], flag_name: &str) -> Resu
 }
 
 pub(crate) async fn http_get_json<T: DeserializeOwned>(
-    client: &reqwest::Client,
-    url: &str,
+    request: reqwest::RequestBuilder,
 ) -> Result<T> {
+    let (url, body) = http_send_bytes(request).await?;
+    serde_json::from_slice(&body).with_context(|| format!("decoding JSON response from {url}"))
+}
+
+pub(crate) async fn http_send(request: reqwest::RequestBuilder) -> Result<()> {
+    http_send_bytes(request).await.map(|_| ())
+}
+
+async fn http_send_bytes(request: reqwest::RequestBuilder) -> Result<(reqwest::Url, Vec<u8>)> {
+    let (client, request) = request.build_split();
+    let request = request.context("building HTTP request")?;
+    let method = request.method().clone();
+    let url = request.url().clone();
     let response = client
-        .get(url)
-        .send()
+        .execute(request)
         .await
-        .with_context(|| format!("sending GET request to {url}"))?;
+        .with_context(|| format!("sending {method} request to {url}"))?;
     let status = response.status();
     let body = response
         .bytes()
         .await
-        .with_context(|| format!("reading GET response body from {url}"))?;
+        .with_context(|| format!("reading {method} response body from {url}"))?;
     if !status.is_success() {
         anyhow::bail!(
-            "GET {url} failed with {status}: {}",
+            "{method} {url} failed with {status}: {}",
             String::from_utf8_lossy(&body)
         );
     }
-    serde_json::from_slice(&body).with_context(|| format!("decoding JSON response from {url}"))
-}
-
-pub(crate) async fn http_post_json<B: Serialize>(
-    client: &reqwest::Client,
-    url: &str,
-    body: &B,
-) -> Result<()> {
-    let response = client
-        .post(url)
-        .json(body)
-        .send()
-        .await
-        .with_context(|| format!("sending POST request to {url}"))?;
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("reading POST response body from {url}"))?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "POST {url} failed with {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-    }
-    Ok(())
-}
-
-pub(crate) async fn http_delete_json<B: Serialize>(
-    client: &reqwest::Client,
-    url: &str,
-    body: &B,
-) -> Result<()> {
-    let response = client
-        .delete(url)
-        .json(body)
-        .send()
-        .await
-        .with_context(|| format!("sending DELETE request to {url}"))?;
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("reading DELETE response body from {url}"))?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "DELETE {url} failed with {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-    }
-    Ok(())
+    Ok((url, body.to_vec()))
 }
 
 /// The control plane a command reads and writes, holding the claim on the
@@ -612,14 +572,13 @@ pub(crate) async fn resolve_config_access(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Ok((ConfigAccess::Graphql(graphql.to_string()).into(), home_dir));
+        let endpoint = resolve_graphql_endpoint(Some(graphql), home)?;
+        return Ok((ConfigAccess::Graphql(endpoint).into(), home_dir));
     }
     if let Some(runtime_state) = read_runtime_state(&home_dir)? {
         if graphql_endpoint_available(&runtime_state.graphql).await {
-            return Ok((
-                ConfigAccess::Graphql(runtime_state.graphql).into(),
-                home_dir,
-            ));
+            let endpoint = home_graphql_endpoint(&home_dir, runtime_state.graphql);
+            return Ok((ConfigAccess::Graphql(endpoint).into(), home_dir));
         }
     }
 

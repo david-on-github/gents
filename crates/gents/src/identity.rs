@@ -160,6 +160,63 @@ pub fn commit_signer_identity_for_did(did: &str) -> Result<String> {
     Ok(lowercase_hex(&public_key_bytes))
 }
 
+/// Lifetime of one minted DefraDB HTTP bearer. Every request mints its own,
+/// and DefraDB tolerates a further 60s of clock skew, so a bearer replayed by
+/// the host it was sent to stays usable for at most two minutes. DefraDB
+/// bearers carry no nonce.
+const DEFRADB_BEARER_LIFETIME: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Mint an `Authorization` header value that authenticates one DefraDB HTTP
+/// request as `did`.
+///
+/// DefraDB verifies the JWT against the request's `Host` header, so
+/// `audience` must be the `host[:port]` the request is sent to. Only a DID
+/// whose private key bytes this process registered can mint one; a
+/// hardware-backed key without exportable bytes is refused rather than
+/// silently falling back to an anonymous request.
+pub fn defradb_bearer_authorization(did: &str, audience: &str) -> Result<String> {
+    let config = defra_core::signing::get_identity(did)
+        .ok_or_else(|| anyhow!("no signing identity is loaded for {did}"))?;
+    let identity = raw_identity_from_signing_config(&config)
+        .with_context(|| format!("loading signing identity {did}"))?;
+    let token = identity::new_token(
+        &identity,
+        DEFRADB_BEARER_LIFETIME,
+        Some(audience.to_string()),
+        None,
+    )
+    .map_err(anyhow::Error::from)
+    .with_context(|| format!("minting DefraDB bearer token for {did}"))?;
+    let token = String::from_utf8(token).context("DefraDB bearer token is not UTF-8")?;
+    Ok(format!("Bearer {token}"))
+}
+
+/// Whether [`defradb_bearer_authorization`] can mint for `did` in this process.
+pub fn can_mint_defradb_bearer(did: &str) -> bool {
+    defra_core::signing::get_identity(did).is_some_and(|config| config.has_local_private_key())
+}
+
+/// Run `operation` with the node's own DID as the acting identity.
+///
+/// Mirrors DefraDB's private `EmbeddedNode::as_node_identity` until DefraDB
+/// installs the node identity on its P2P operations handle itself.
+///
+/// DefraDB node access control resolves the actor from the ambient request
+/// identity. `EmbeddedNode` installs it for queries, transactions and schema
+/// changes, but not for its P2P operations handle, so a node with access
+/// control enabled denies in-process P2P administration as anonymous unless
+/// it runs under this scope. Spawned tasks do not inherit the scope.
+pub async fn as_node_identity<F: std::future::Future>(
+    node: &defra_node::EmbeddedNode,
+    operation: F,
+) -> F::Output {
+    defra_core::current_identity::with_scoped_identity(
+        node.node_identity_did().map(ToOwned::to_owned),
+        operation,
+    )
+    .await
+}
+
 #[async_trait]
 impl AgentIdentity for KeyIdentity {
     fn did(&self) -> &str {

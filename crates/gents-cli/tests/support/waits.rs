@@ -465,7 +465,7 @@ pub async fn canonical_tool_result_text(graphql: &str, call: &Value) -> Result<S
     let session_id = required("session_id")?;
     required("request_doc_id")?;
     let requester_did = call.get("requester_did").and_then(Value::as_str);
-    let access = ConfigAccess::Graphql(graphql.to_owned());
+    let access = ConfigAccess::Graphql(super::graphql::served_endpoint(graphql));
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         match load_tool_call_result(&access, tool_doc_id, agent_did, session_id, requester_did)

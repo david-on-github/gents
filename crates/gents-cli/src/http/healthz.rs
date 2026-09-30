@@ -194,7 +194,12 @@ mod tests {
         let (activation_runtime, activation_observation) =
             crate::http::router::empty_activation_state();
         RuntimeHttpState {
-            graphql: "http://localhost:9181/api/v0/graphql".to_string(),
+            graphql: gents::config_client::GraphqlEndpoint::anonymous(
+                "http://localhost:9181/api/v0/graphql",
+            ),
+            p2p_graphql: gents::config_client::GraphqlEndpoint::anonymous(
+                "http://localhost:9181/api/v0/graphql",
+            ),
             agent_name: "test-agent".to_string(),
             agent_did: "did:test:test".to_string(),
             tool_ceiling: "readwrite".to_string(),
@@ -205,7 +210,6 @@ mod tests {
             backend_health: None,
             p2p_admission: None,
             p2p_metrics_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            p2p_http_client: reqwest::Client::new(),
             codex_shim_health: None,
             enrollment_offer_issuer: crate::http::enrollment::empty_issuer_handle(),
             enrollment_decisions: crate::http::enrollment::empty_decision_service_handle(),

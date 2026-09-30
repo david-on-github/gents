@@ -258,8 +258,8 @@ mod tests {
             P2pCollectionProfile::Discovery,
             P2pCollectionProfile::ChatRequests,
         ] {
-            for secret in ["InferenceBackend", "OAuthCredential"] {
-                assert!(!profile.collection_names().contains(&secret));
+            for secret in gents_protocol::schemas::CREDENTIAL_COLLECTION_NAMES {
+                assert!(!profile.collection_names().contains(secret));
             }
         }
         let operator = super::super::templates::resolve_template("agent-config").unwrap();

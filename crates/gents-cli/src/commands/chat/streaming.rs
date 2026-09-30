@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::hash::{Hash, Hasher};
 use std::io::{self, IsTerminal, Write};
 use std::time::Duration;
@@ -107,7 +108,7 @@ pub(super) fn chat_progress_query(request: &SubmittedRequest) -> String {
 }
 
 pub(crate) async fn load_existing_tool_call_keys(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     session_id: &str,
 ) -> Result<std::collections::BTreeMap<String, String>> {
     let query = format!(
@@ -239,7 +240,7 @@ async fn clear_indicator(indicator: &mut Option<WorkingIndicator>) {
 }
 
 pub(crate) async fn stream_turn_progress(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     submitted: &SubmittedRequest,
     mut known_tool_calls: std::collections::BTreeMap<String, String>,
     timeout_secs: u64,

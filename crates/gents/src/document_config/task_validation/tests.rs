@@ -56,12 +56,12 @@ fn task_hook_admission_matches_existing_lean_guards() {
     let hook = json!({"hook_id":"prepare", "phase":"before", "command":["printf", ""]});
     task(json!([])).validate().unwrap();
     task(json!([hook.clone()])).validate().unwrap();
-    for timeout in [1, 120, i64::MAX] {
+    for timeout in [1, 120, 86_400] {
         let mut valid = hook.clone();
         valid["timeout_secs"] = json!(timeout);
         task(json!([valid])).validate().unwrap();
     }
-    for timeout in [0, -1, i64::MIN] {
+    for timeout in [0, -1, i64::MIN, 86_401, i64::MAX] {
         let mut invalid = hook.clone();
         invalid["timeout_secs"] = json!(timeout);
         assert!(task(json!([invalid])).validate().is_err());

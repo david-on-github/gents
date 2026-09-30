@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use gents::config_client::GraphqlEndpoint;
 use gents::defra_query::{
     build_query, diagnose_failed_query, discovery_payload, introspection_query,
     parse_collection_schema, unknown_collection_message, CollectionSchema, CollectionScope,
@@ -12,7 +13,7 @@ use crate::{post_graphql, print_json, resolve_graphql_endpoint};
 /// Introspect a collection's field set over GraphQL-over-HTTP. `Ok(None)`
 /// means the collection (GraphQL type) does not exist on the node.
 async fn fetch_collection_schema(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     collection: &str,
 ) -> Result<Option<CollectionSchema>> {
     let query = introspection_query(collection)?;
@@ -28,7 +29,7 @@ async fn fetch_collection_schema(
 }
 
 async fn enriched_query_failure(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     params: &DefraQueryParams,
     raw: String,
 ) -> anyhow::Error {
@@ -43,7 +44,7 @@ async fn enriched_query_failure(
 }
 
 pub(crate) async fn run_defra_query(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     params: &DefraQueryParams,
     scope: &CollectionScope,
 ) -> Result<Value> {
@@ -152,9 +153,13 @@ mod tests {
         let (params, scope) = params_from_args(&args).expect("args parse");
         assert!(scope.is_unrestricted(), "no --allow-collection means all");
 
-        let error = run_defra_query("http://127.0.0.1:1/api/v0/graphql", &params, &scope)
-            .await
-            .expect_err("EvalVerdict must never be readable through `gents query`");
+        let error = run_defra_query(
+            &gents::config_client::GraphqlEndpoint::anonymous("http://127.0.0.1:1/api/v0/graphql"),
+            &params,
+            &scope,
+        )
+        .await
+        .expect_err("EvalVerdict must never be readable through `gents query`");
         let message = format!("{error:#}");
         assert!(message.contains(EVAL_VERDICT_NAME), "{message}");
         assert!(message.contains("protected"), "{message}");
@@ -166,9 +171,13 @@ mod tests {
         let (params, scope) = params_from_args(&args).expect("args parse");
         assert!(params.is_discovery(), "a lone `*` is the discovery request");
 
-        let error = run_defra_query("http://127.0.0.1:1/api/v0/graphql", &params, &scope)
-            .await
-            .expect_err("a protected collection's field inventory must stay unlisted");
+        let error = run_defra_query(
+            &gents::config_client::GraphqlEndpoint::anonymous("http://127.0.0.1:1/api/v0/graphql"),
+            &params,
+            &scope,
+        )
+        .await
+        .expect_err("a protected collection's field inventory must stay unlisted");
         let message = format!("{error:#}");
         assert!(message.contains(EVAL_VERDICT_NAME), "{message}");
         assert!(message.contains("protected"), "{message}");

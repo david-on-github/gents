@@ -76,6 +76,72 @@ struct StoredInitConfig {
     secure_enclave_label: Option<String>,
 }
 
+/// The operator GraphQL endpoint of a co-hosted runtime, acting as that
+/// runtime's principal.
+///
+/// The runtime's node access control admits operator writes only from its own
+/// principal. The desktop is that principal's same-user host, so it loads the
+/// key from the recorded runtime home. When the key cannot be loaded the
+/// endpoint is anonymous: reads still work and writes fail with the node's
+/// authorization error.
+pub fn operator_endpoint(
+    record: &crate::client::PeerRecord,
+) -> Option<gents::config_client::GraphqlEndpoint> {
+    let url = record.operator_graphql()?;
+    Some(match load_operator_principal(record) {
+        Ok(()) => gents::config_client::GraphqlEndpoint::as_principal(url, &record.agent_did),
+        Err(error) => {
+            tracing::warn!(
+                agent_did = %record.agent_did,
+                error = %format!("{error:#}"),
+                "runtime principal key unavailable; using anonymous operator access"
+            );
+            gents::config_client::GraphqlEndpoint::anonymous(url)
+        }
+    })
+}
+
+/// Loads a co-hosted runtime's signing key so this process can act as its
+/// principal toward that runtime's own endpoint.
+///
+/// Only a record for a runtime this desktop hosts qualifies, and only when
+/// its home's live `runtime.json` names both the record's endpoint and
+/// agent, so a bearer is never sent to a remote or re-pointed endpoint.
+fn load_operator_principal(record: &crate::client::PeerRecord) -> Result<()> {
+    let endpoint = record
+        .operator_graphql()
+        .context("runtime record is not a runtime this desktop hosts")?;
+    let home = record
+        .local_agent_home
+        .as_deref()
+        .map(str::trim)
+        .filter(|home| !home.is_empty())
+        .context("runtime record has no local agent home")?;
+    let home = Path::new(home);
+    let runtime = read_json::<StoredRuntimeState>(&home.join(RUNTIME_STATE_FILE_NAME))
+        .context("reading the co-hosted runtime's state")?;
+    anyhow::ensure!(
+        runtime.graphql.trim() == endpoint && runtime.agent_did.trim() == record.agent_did,
+        "runtime home {} does not serve {endpoint} for {}",
+        home.display(),
+        record.agent_did
+    );
+    if gents::identity::can_mint_defradb_bearer(&record.agent_did) {
+        return Ok(());
+    }
+    let identity = load_standard_runtime_identity(home)?;
+    anyhow::ensure!(
+        identity.did() == record.agent_did,
+        "runtime home identity does not match the recorded agent"
+    );
+    anyhow::ensure!(
+        gents::identity::can_mint_defradb_bearer(identity.did()),
+        "runtime identity {} has no exportable signing key",
+        identity.did()
+    );
+    Ok(())
+}
+
 pub(crate) fn load_standard_runtime_identity(
     agent_home: &Path,
 ) -> Result<Arc<dyn gents::identity::AgentIdentity>> {

@@ -1,3 +1,4 @@
+use gents::config_client::GraphqlEndpoint;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -262,7 +263,7 @@ struct ChildRequestView {
 }
 
 async fn load_request_show_snapshot(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     request_id: &str,
 ) -> Result<RequestShowSnapshot> {
     let schema = load_request_show_schema(graphql).await;
@@ -292,7 +293,7 @@ async fn load_request_show_snapshot(
     .with_context(|| format!("loading AgentToolCall rows for {request_id}"))?;
     let tool_rows = value_array(&tool_response, "/data/AgentToolCall");
 
-    let access = ConfigAccess::Graphql(graphql.to_string());
+    let access = ConfigAccess::Graphql(graphql.clone());
     let child_requests = crate::caused_sessions::started_by_request(&access, &canonical_request)
         .await
         .with_context(|| format!("loading sessions started by {request_id}"))?
@@ -375,14 +376,14 @@ async fn load_request_show_snapshot(
     })
 }
 
-async fn load_request_show_schema(graphql: &str) -> RequestShowSchema {
+async fn load_request_show_schema(graphql: &GraphqlEndpoint) -> RequestShowSchema {
     RequestShowSchema {
         agent_request: load_graphql_type_fields(graphql, "AgentRequest").await,
         agent_tool_call: load_graphql_type_fields(graphql, "AgentToolCall").await,
     }
 }
 
-async fn load_graphql_type_fields(graphql: &str, type_name: &str) -> BTreeSet<String> {
+async fn load_graphql_type_fields(graphql: &GraphqlEndpoint, type_name: &str) -> BTreeSet<String> {
     let query = format!(
         r#"{{
             __type(name: "{type_name}") {{
@@ -1174,7 +1175,10 @@ async fn request_interrupt(args: RequestInterruptArgs) -> Result<()> {
     Ok(())
 }
 
-async fn fetch_interrupt_request_row(graphql: &str, request_id: &str) -> Result<AgentRequestRow> {
+async fn fetch_interrupt_request_row(
+    graphql: &GraphqlEndpoint,
+    request_id: &str,
+) -> Result<AgentRequestRow> {
     let query = format!(
         r#"{{
             AgentRequest(
@@ -1210,7 +1214,7 @@ async fn fetch_interrupt_request_row(graphql: &str, request_id: &str) -> Result<
 }
 
 async fn wait_for_terminal_request_state(
-    graphql: &str,
+    graphql: &GraphqlEndpoint,
     request_id: &str,
     timeout: Duration,
     mut last_row: AgentRequestRow,

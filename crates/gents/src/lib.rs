@@ -184,6 +184,30 @@ pub(crate) mod test_support {
         Ok(())
     }
 
+    /// Sets a process environment variable and restores its previous value on
+    /// drop, including when the test panics.
+    pub(crate) struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        pub(crate) fn set(key: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+            let previous = std::env::var(key).ok();
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(previous) => std::env::set_var(self.key, previous),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     /// Install an explicit, inert inference/context/tools chain for a named test behavior.
     /// Schemas must already be registered. The principal's default is never changed.
     pub(crate) async fn install_test_behavior(
@@ -326,6 +350,7 @@ pub mod session_message;
 pub mod session_origin;
 pub mod skills;
 pub mod streaming;
+pub(crate) mod task_hooks;
 pub mod template;
 pub mod tool_call_lifecycle;
 pub mod tool_control;

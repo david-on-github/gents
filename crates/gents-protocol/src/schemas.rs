@@ -242,6 +242,15 @@ pub const ALL_COLLECTION_NAMES: &[&str] = &[
 
 pub const BRANCHABLE_COLLECTION_NAMES: &[&str] = BRANCHABLE_AGENT_COLLECTION_NAMES;
 
+/// Credential-bearing collections: `ScopeTemplates.credentialCollections`,
+/// bound by the scope-template conformance suite. Broad client subscription
+/// sets exclude them; they stay on their operator/runtime route.
+pub const CREDENTIAL_COLLECTION_NAMES: &[&str] = &[INFERENCE_BACKEND_NAME, OAUTH_CREDENTIAL_NAME];
+
+pub fn is_credential_collection(name: &str) -> bool {
+    CREDENTIAL_COLLECTION_NAMES.contains(&name)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;

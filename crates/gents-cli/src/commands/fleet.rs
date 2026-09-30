@@ -12,12 +12,12 @@ pub(crate) async fn dispatch(command: FleetCommand) -> Result<()> {
 
 async fn fleet_slots(args: FleetSlotsArgs) -> Result<()> {
     let graphql = resolve_graphql_endpoint(args.graphql.as_deref(), args.home.as_deref())?;
-    let url = runtime_fleet_slots_url(&graphql)?;
+    let url = runtime_fleet_slots_url(graphql.url())?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
         .context("building HTTP client")?;
-    let snapshot: Value = http_get_json(&client, &url).await?;
+    let snapshot: Value = http_get_json(client.get(&url)).await?;
     print_json(&snapshot)?;
     Ok(())
 }

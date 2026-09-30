@@ -1015,6 +1015,11 @@ async fn run_agent_owned(
 
     runtime_shutdown_tx.send_replace(true);
     cancel.cancel();
+    let task_hook_records = agent
+        .background_execution_registry
+        .task_hook_records()
+        .clone();
+    let task_hook_recoveries = tokio::spawn(async move { task_hook_records.shutdown().await });
     while let Some(joined) = background_tasks.join_next().await {
         let task_result = match joined {
             Ok(task) => task.into_result(),
@@ -1031,6 +1036,7 @@ async fn run_agent_owned(
     }
 
     for (name, joined) in [
+        ("task hook recovery", task_hook_recoveries.await),
         ("readiness", readiness_handle.await),
         ("trigger engine", trigger_engine_handle.await),
         ("callback engine", callback_engine_handle.await),
@@ -1123,6 +1129,22 @@ async fn log_recovery(
                 error = %error,
                 "startup inference-call recovery failed"
             );
+        }
+    }
+
+    match outcome.task_hooks {
+        Ok(report) => {
+            if report > 0 {
+                recovered_any = true;
+                tracing::info!(
+                    agent_did = %agent_did,
+                    records = report,
+                    "recovering interrupted task hook cleanup"
+                );
+            }
+        }
+        Err(error) => {
+            tracing::warn!(agent_did = %agent_did, error = %error, "startup task hook recovery failed");
         }
     }
 
