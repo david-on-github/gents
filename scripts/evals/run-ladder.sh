@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run native onboarding evals with a live terminal view.
+# Run native onboarding evals with a live browser or terminal view.
 #
 #   scripts/evals/run-ladder.sh [all|l1..l6|factory-setup|list] [TRIALS] [CONCURRENCY]
 #
@@ -13,7 +13,8 @@
 # GENTS_EVAL_HOME / GENTS_EVAL_PORT: isolated home / optional fixed port.
 # GENTS_EVAL_PER_TRIAL: concurrent calls per trial (default 1).
 # GENTS_EVAL_REASONING / GENTS_EVAL_TEMPERATURE / GENTS_EVAL_TOP_P: high / 1 / .95.
-# GENTS_EVAL_WATCH: auto, 1 or 0. Auto uses the native TUI in a terminal.
+# GENTS_EVAL_WATCH: auto, 1/web, tui or 0. Auto opens the browser in a terminal.
+# GENTS_EVAL_WEB_PORT: local dashboard port (default 9495).
 # GENTS_BIN: existing gents binary; otherwise builds this checkout.
 set -euo pipefail
 
@@ -205,6 +206,14 @@ STAMP=$(date +%Y%m%d-%H%M%S)
 MATRIX_STATUS=0
 WATCH=${GENTS_EVAL_WATCH:-auto}
 if [ "$WATCH" = auto ]; then WATCH=0; [ ! -t 1 ] || WATCH=1; fi
+if [ "$WATCH" = 1 ] || [ "$WATCH" = web ]; then
+  WATCH=web
+  WEB_PORT=${GENTS_EVAL_WEB_PORT:-9495}
+  if ! python3 "$ROOT/scripts/evals/watch-web.py" --root "$(dirname "$EVAL_HOME")" --port "$WEB_PORT" --ensure --open; then
+    echo "web viewer unavailable; opening the terminal watcher instead" >&2
+    WATCH=tui
+  fi
+fi
 for level in "${SELECTED[@]}"; do
   SUITE_PATH=$(python3 -c 'import json,sys; print(next(s["path"] for s in json.load(open(sys.argv[1]))["suites"] if s["id"]==sys.argv[2]))' "$MATRIX" "$level")
   DEFINITION_ID=$(python3 -c 'import json,sys; print(next(s["definition_id"] for s in json.load(open(sys.argv[1]))["suites"] if s["id"]==sys.argv[2]))' "$MATRIX" "$level")
@@ -243,8 +252,10 @@ EOF
       --split "$split" --trials "$TRIALS" --concurrency "$TRIAL_CONCURRENCY" \
       --run-id "$RUN_ID" --home "$EVAL_HOME") >"$RUN_LOG" 2>&1 &
     RUN_PID=$!
-    trap 'echo "Eval continues in process $RUN_PID. Watch: $GENTS eval watch $RUN_ID --home $EVAL_HOME" >&2; disown "$RUN_PID" 2>/dev/null || true; exit 130' INT
-    if [ "$WATCH" = 1 ]; then
+    WATCH_COMMAND="$GENTS eval watch $RUN_ID --home $EVAL_HOME"
+    if [ "$WATCH" = web ]; then WATCH_COMMAND="http://127.0.0.1:$WEB_PORT"; fi
+    trap 'echo "Eval continues in process $RUN_PID. Watch: $WATCH_COMMAND" >&2; disown "$RUN_PID" 2>/dev/null || true; exit 130' INT
+    if [ "$WATCH" = tui ]; then
       while kill -0 "$RUN_PID" 2>/dev/null; do
         if [ -f "$EVAL_HOME/eval/runs/$RUN_ID/progress.json" ] || [ -f "$EVAL_HOME/eval/runs/$RUN_ID/report.json" ]; then
           "$GENTS" eval watch "$RUN_ID" --home "$EVAL_HOME" || true
