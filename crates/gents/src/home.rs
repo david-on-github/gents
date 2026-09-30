@@ -39,6 +39,10 @@ pub struct StoredInitConfig<ToolPackage = String, ToolCeiling = String> {
     pub tool_package: Option<ToolPackage>,
     pub tool_ceiling: ToolCeiling,
     pub tool_root: Option<String>,
+    /// The home store's at-rest encryption. An earlier home's absent record
+    /// is written only after its plaintext store has been upgraded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub store_encryption: Option<crate::store_key::StoreEncryption>,
 }
 
 /// The home gents uses when none is named: `GENTS_HOME` when set, otherwise
@@ -234,9 +238,12 @@ fn lock_path(home_dir: &Path, path: PathBuf) -> Result<StoreLock> {
 
 /// The default identity key path under a gents home, for the named agent.
 pub fn default_key_path(home_dir: &Path, agent_name: &str) -> PathBuf {
-    home_dir
-        .join(KEYS_DIR_NAME)
-        .join(format!("{agent_name}.key"))
+    keys_dir(home_dir).join(format!("{agent_name}.key"))
+}
+
+/// The directory a gents home keeps its file keys in.
+pub fn keys_dir(home_dir: &Path) -> PathBuf {
+    home_dir.join(KEYS_DIR_NAME)
 }
 
 /// The path `init.json` lives at under a gents home.
@@ -245,7 +252,8 @@ pub fn init_config_path(home_dir: &Path) -> PathBuf {
 }
 
 /// Writes `state` to `<home_dir>/init.json`, creating `home_dir` if it
-/// does not already exist.
+/// does not already exist. Publish and sync the complete record before any
+/// encrypted store write; interruption must not truncate the custody record.
 pub fn write_init_config<ToolPackage: Serialize, ToolCeiling: Serialize>(
     home_dir: &Path,
     state: &StoredInitConfig<ToolPackage, ToolCeiling>,
@@ -254,8 +262,16 @@ pub fn write_init_config<ToolPackage: Serialize, ToolCeiling: Serialize>(
         .with_context(|| format!("creating home directory {}", home_dir.display()))?;
     let path = init_config_path(home_dir);
     let contents = serde_json::to_vec_pretty(state).context("encoding local init config JSON")?;
-    fs::write(&path, contents)
+    let staged = tempfile::NamedTempFile::new_in(home_dir)
+        .with_context(|| format!("staging init config {}", path.display()))?;
+    use std::io::Write as _;
+    staged.as_file().write_all(&contents)?;
+    staged.as_file().sync_all()?;
+    staged
+        .persist(&path)
         .with_context(|| format!("writing init config {}", path.display()))?;
+    #[cfg(unix)]
+    fs::File::open(home_dir)?.sync_all()?;
     Ok(())
 }
 
@@ -1029,6 +1045,7 @@ mod tests {
             tool_package: Some("Readonly".to_string()),
             tool_ceiling: "Readonly".to_string(),
             tool_root: None,
+            store_encryption: None,
         }
     }
 

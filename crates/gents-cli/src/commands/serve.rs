@@ -744,7 +744,8 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
             "identity {node_identity_did} has no exportable private key, so it cannot own the served node's access control; re-initialize the home with a file or macos-keychain identity to serve it"
         );
     }
-    let mut node_builder = crate::persistent_node_builder(&data_dir)?
+    let mut node_builder = crate::persistent_node_builder(&home_dir, &data_dir)
+        .await?
         .with_http(defra_node::HttpConfig::with_addr(http_addr).with_extra_routes(extra_routes));
     if let Some(node_identity_did) = server_identity.node_identity_did.as_ref() {
         // The served home's principal owns node access control, so its HTTP
@@ -777,6 +778,7 @@ async fn serve_foreground(mut args: ServeArgs) -> Result<()> {
             error, &data_dir,
         ));
     }
+    gents::store_key::upgrade::finish(&data_dir)?;
     let schema = gents::agent::p2p_reconcile::read_client_replicated_schema(node.clone())
         .await
         .context("reading client route collection versions after migrations")?;

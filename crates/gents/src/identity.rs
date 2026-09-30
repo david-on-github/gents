@@ -11,6 +11,7 @@ use identity::{FullIdentity as _, Identity as _, RawIdentity};
 mod file_key;
 
 pub use file_key::{load_file_identity, load_or_create_file_identity, InsecureKeyPermissions};
+pub(crate) use file_key::{publish_private_key_file, read_private_key_file};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceAccount {
@@ -375,8 +376,10 @@ fn register_public_key(did: &str, key_type: crypto::KeyType, public_key: Vec<u8>
         );
 }
 
-#[cfg(target_os = "macos")]
-const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+/// `errSecItemNotFound`: the only Keychain status that proves an item is
+/// absent. Every other failure (locked keychain, denied access, cancelled
+/// prompt) leaves the item possibly intact.
+pub(crate) const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 #[cfg(target_os = "macos")]
 const ERR_SEC_MISSING_ENTITLEMENT: i32 = -34018;
 
@@ -451,27 +454,72 @@ fn load_or_create_macos_keychain_raw_identity(
     label: &str,
     create_if_missing: bool,
 ) -> Result<RawIdentity> {
-    let keychain = security_framework::os::macos::keychain::SecKeychain::default()
-        .context("loading default macOS keychain")?;
-    match keychain.find_generic_password(MACOS_KEYCHAIN_SERVICE, label) {
-        Ok((password, _)) => RawIdentity::from_bytes(crypto::KeyType::Ed25519, password.as_ref())
+    match macos_keychain_find(MACOS_KEYCHAIN_SERVICE, label)? {
+        Ok(password) => RawIdentity::from_bytes(crypto::KeyType::Ed25519, &password)
             .map_err(anyhow::Error::from)
             .with_context(|| format!("loading macOS keychain identity {label}")),
-        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {
+        Err(ERR_SEC_ITEM_NOT_FOUND) => {
             if !create_if_missing {
                 anyhow::bail!("macOS keychain identity not found for label {label}");
             }
             let private_key = crypto::generate_ed25519().map_err(anyhow::Error::from)?;
             let bytes = private_key.raw();
-            keychain
-                .set_generic_password(MACOS_KEYCHAIN_SERVICE, label, bytes)
+            macos_keychain_set(MACOS_KEYCHAIN_SERVICE, label, bytes)
                 .with_context(|| format!("storing macOS keychain identity {label}"))?;
             RawIdentity::from_private_key(private_key)
                 .map_err(anyhow::Error::from)
                 .with_context(|| format!("constructing macOS keychain identity {label}"))
         }
-        Err(error) => Err(anyhow::Error::from(error))
+        Err(code) => Err(anyhow!("macOS Keychain error {code}"))
             .with_context(|| format!("reading macOS keychain identity {label}")),
+    }
+}
+
+/// A login-keychain generic password, or the Keychain status that refused it.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_keychain_find(
+    service: &str,
+    label: &str,
+) -> Result<std::result::Result<k256::elliptic_curve::zeroize::Zeroizing<Vec<u8>>, i32>> {
+    let keychain = security_framework::os::macos::keychain::SecKeychain::default()
+        .context("loading default macOS keychain")?;
+    Ok(match keychain.find_generic_password(service, label) {
+        Ok((password, _)) => Ok(k256::elliptic_curve::zeroize::Zeroizing::new(
+            password.as_ref().to_vec(),
+        )),
+        Err(error) => Err(error.code()),
+    })
+}
+
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_keychain_set(service: &str, label: &str, secret: &[u8]) -> Result<()> {
+    security_framework::os::macos::keychain::SecKeychain::default()
+        .context("loading default macOS keychain")?
+        .set_generic_password(service, label, secret)
+        .map_err(anyhow::Error::from)
+}
+
+/// Removes a login-keychain generic password; an absent one is not an error.
+/// `security-framework` discards `SecKeychainItemDelete`'s status, so deletion
+/// is complete only after a fresh lookup returns `errSecItemNotFound`.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_keychain_delete(service: &str, label: &str) -> Result<()> {
+    let keychain = security_framework::os::macos::keychain::SecKeychain::default()
+        .context("loading default macOS keychain")?;
+    match keychain.find_generic_password(service, label) {
+        Ok((_, item)) => {
+            item.delete();
+            match macos_keychain_find(service, label)? {
+                Err(ERR_SEC_ITEM_NOT_FOUND) => Ok(()),
+                Err(code) => Err(anyhow!("macOS Keychain error {code}"))
+                    .with_context(|| format!("verifying deletion of Keychain item {label}")),
+                Ok(_) => anyhow::bail!(
+                    "Keychain item {label} is still present after deletion; its custody record must be retained"
+                ),
+            }
+        }
+        Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
+        Err(error) => Err(anyhow::Error::from(error)),
     }
 }
 

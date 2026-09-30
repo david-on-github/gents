@@ -141,7 +141,8 @@ pub fn run_desktop_init_json(agent_home: &Path, desktop_home: &Path, label: &str
 }
 
 pub fn run_init_json(home_dir: &Path, args: &[&str]) -> Result<Value> {
-    let mut command_args = vec!["init"];
+    // Test homes keep their store key in a file, never the login keychain.
+    let mut command_args = vec!["init", "--store-key-custody", "file"];
     command_args.extend_from_slice(args);
     run_cli_json(home_dir, &command_args)
 }

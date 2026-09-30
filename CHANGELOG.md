@@ -8,6 +8,24 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- Every persistent store is encrypted at rest (DefraDB's AES-256-GCM value
+  encryption): a gents home's data directory and the desktop client's store.
+  `gents init` (including `--identity-only` and `gents provision`) creates a
+  per-store key and records its custody in `init.json`; the desktop records
+  its client store's key in `store-encryption.json`. On macOS the key is a
+  login-keychain item; elsewhere it is an owner-only `keys/store.aes256` file.
+  Existing plaintext stores upgrade in place, preserving identity, documents,
+  history, and host recovery journals. Interrupted upgrades resume from durable
+  intent; the original remains until the encrypted store opens successfully.
+  Initialization records key custody before writing encrypted data, so a failed
+  setup can retry with the same key. A store whose recorded key no longer exists
+  is refused (exit status 65 and the desktop's existing reset flow). Reset retires
+  the store and its recorded key together. A locked or denied Keychain is a
+  retryable error and never offers a reset. `gents server` on a home that was
+  never initialized is refused; run `gents init` first. Encryption protects
+  the disk and backups, not reads through a running node. Indexed field values
+  remain plaintext on disk.
+
 - `gents server` (and the desktop's managed runtime) turns on DefraDB node
   access control owned by the home's principal. Anonymous HTTP writes, schema
   changes and P2P administration are refused; HTTP reads are still anonymous.

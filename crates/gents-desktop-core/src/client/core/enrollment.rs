@@ -831,17 +831,19 @@ pub(super) async fn reconcile_status_enrollment_approvals(
 ) -> Result<BTreeMap<String, EnrollmentAuthorizationGeneration>> {
     let outcomes =
         load_status_enrollment_approvals(node.as_ref(), principal.as_ref(), local_peer_id).await?;
-    let known_peers = sync_state
+    let known_records = sync_state
         .records()
         .into_iter()
-        .map(|record| record.peer_id)
-        .collect::<BTreeSet<_>>();
+        .map(|record| (record.peer_id.clone(), record))
+        .collect::<BTreeMap<_, _>>();
+    let known_peers = known_records.keys().cloned().collect();
     let approvals = prioritized_current_approvals(&outcomes, &known_peers);
     let mut authentications = stream::iter(approvals)
         .map(|(peer_id, approval)| {
             let p2p = Arc::clone(p2p);
+            let known = known_records.get(&peer_id).cloned();
             async move {
-                let result = authenticate_enrolled_server(&p2p, &approval).await;
+                let result = authenticate_enrolled_server(&p2p, &approval, known.as_ref()).await;
                 (peer_id, approval, result)
             }
         })
@@ -874,11 +876,14 @@ pub(super) async fn reconcile_status_enrollment_approvals(
 
     let mut current_authority = BTreeMap::new();
     while let Some((peer_id, approval, authentication)) = authentications.next().await {
-        if let Err(error) = authentication {
-            tracing::warn!(peer_id, request_id = %approval.request_digest, error = %error, "enrollment peer is temporarily unavailable");
-            demote_enrollment_peer(sync_state, &peer_id).await;
-            continue;
-        }
+        let address = match authentication {
+            Ok(address) => address,
+            Err(error) => {
+                tracing::warn!(peer_id, request_id = %approval.request_digest, error = %error, "enrollment peer is temporarily unavailable");
+                demote_enrollment_peer(sync_state, &peer_id).await;
+                continue;
+            }
+        };
         let generation = EnrollmentAuthorizationGeneration {
             request_digest: approval.request_digest.clone(),
             sequence: approval.authorization_sequence,
@@ -896,7 +901,7 @@ pub(super) async fn reconcile_status_enrollment_approvals(
                 .upsert_enrollment_peer(
                     &approval.server_peer,
                     &label,
-                    &approval.server_ticket,
+                    &address,
                     &approval.owner_agent,
                     &approval.network_id,
                     &approval.request_id,
@@ -928,21 +933,49 @@ pub(super) async fn reconcile_status_enrollment_approvals(
 async fn authenticate_enrolled_server(
     p2p: &Arc<dyn defra_p2p_adapter::P2POperations>,
     approval: &ApprovedStatusEnrollment,
-) -> Result<()> {
+    known: Option<&super::super::peer_directory::PeerRecord>,
+) -> Result<String> {
     timeout(P2P_OPERATION_TIMEOUT, async {
-        p2p.connect_peer(&approval.server_ticket)
-            .await
-            .map_err(map_p2p_error)?;
+        let address = enrolled_server_address(approval, known).await?;
+        p2p.connect_peer(&address).await.map_err(map_p2p_error)?;
         let peer = TransportPeerId::new(approval.server_peer.clone()).map_err(map_p2p_error)?;
         let resolved = p2p
             .resolve_peer_identity(&peer)
             .await
             .map_err(map_p2p_error)?
             .context("enrolled server has no authenticated transport identity")?;
-        validate_authenticated_server_did(&approval.admin_did, &resolved.to_string())
+        validate_authenticated_server_did(&approval.admin_did, &resolved.to_string())?;
+        Ok(address)
     })
     .await
     .context("timed out re-authenticating enrolled server")?
+}
+
+/// A co-hosted runtime can change its socket address while retaining its
+/// approved transport identity. Discovery supplies location only: the ticket
+/// must name the approved peer, and authentication still checks the signed admin.
+async fn enrolled_server_address(
+    approval: &ApprovedStatusEnrollment,
+    known: Option<&super::super::peer_directory::PeerRecord>,
+) -> Result<String> {
+    let Some(known) = known.filter(|record| record.is_enrollment() && record.is_managed_runtime())
+    else {
+        return Ok(approval.server_ticket.clone());
+    };
+    let home = known
+        .local_agent_home
+        .as_deref()
+        .context("managed enrollment has no local home")?;
+    let live = crate::local_runtime::discover_standard_runtime(std::path::Path::new(home)).await?;
+    let (ticket_peer, _) = parse_public_peer_addr(&live.p2p_listen_address)
+        .map_err(|error| anyhow::anyhow!("managed runtime has an invalid P2P address: {error}"))?;
+    anyhow::ensure!(
+        live.agent_did == approval.owner_agent
+            && live.p2p_peer_id == approval.server_peer
+            && ticket_peer.to_string() == approval.server_peer,
+        "discovered managed runtime identity does not match approved enrollment"
+    );
+    Ok(live.p2p_listen_address)
 }
 
 async fn demote_enrollment_peer(sync_state: &ClientSyncStateOwner, peer_id: &str) {
@@ -1976,6 +2009,141 @@ mod tests {
             authorization_sequence: 1,
             authorization_expires_at: "2026-09-29T00:00:00Z".into(),
             decided_at: "2026-08-29T00:00:00Z".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn managed_enrollment_discovers_restarted_endpoint_without_changing_authority() {
+        use crate::client::PeerDirectory;
+        use wiremock::{matchers::path, Mock, MockServer, ResponseTemplate};
+
+        let peer = "6fe391e1c69d66de633034ca40cda6d39ca1a3c94792f2f510add7d1421ea7bb";
+        let other = "352aec0771cb90685b41d6f7fd7d89b8586d38a3ed7fe1d08f98f5592b453365";
+        let owner = "did:key:managed-owner";
+        for (live_owner, live_peer, address_peer, accepted) in [
+            (owner, peer, peer, true),
+            ("did:key:another-owner", peer, peer, false),
+            (owner, other, other, false),
+            (owner, peer, other, false),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let home = temp.path().join("runtime");
+            std::fs::create_dir(&home).unwrap();
+            let server = MockServer::start().await;
+            let graphql = format!("{}/api/v0/graphql", server.uri());
+            let new_address = format!("127.0.0.1:56001/p2p/{address_peer}");
+            for (route, body) in [
+                (
+                    "/status",
+                    json!({"agent_did": live_owner, "lifecycle": "ready"}),
+                ),
+                (
+                    "/api/v0/p2p/shareable-address",
+                    json!({"address": new_address}),
+                ),
+                ("/api/v0/node/identity", json!({"peer_id": live_peer})),
+            ] {
+                Mock::given(path(route))
+                    .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                    .mount(&server)
+                    .await;
+            }
+            std::fs::write(
+                home.join("init.json"),
+                json!({
+                    "agent_name": "managed", "agent_did": live_owner,
+                })
+                .to_string(),
+            )
+            .unwrap();
+            std::fs::write(
+                home.join(gents::home::RUNTIME_STATE_FILE_NAME),
+                json!({
+                    "agent_name": "managed", "agent_did": live_owner,
+                    "graphql": graphql, "p2p_transport": "iroh", "p2p_peer_id": live_peer,
+                })
+                .to_string(),
+            )
+            .unwrap();
+
+            let mut approval = approval(peer, owner);
+            approval.server_ticket = format!("127.0.0.1:56000/p2p/{peer}");
+            let unchanged = approval.clone();
+            let mut directory = PeerDirectory::open_writer(temp.path().join("peers.json"))
+                .await
+                .unwrap();
+            directory
+                .upsert_local_standard_peer(
+                    "Managed",
+                    &approval.server_ticket,
+                    owner,
+                    &graphql,
+                    home.to_str().unwrap(),
+                )
+                .await
+                .unwrap();
+            let known = directory
+                .upsert_enrollment_peer(
+                    peer,
+                    "Managed",
+                    &approval.server_ticket,
+                    owner,
+                    &approval.network_id,
+                    &approval.request_id,
+                    &approval.request_digest,
+                    &approval.admin_did,
+                    approval.authorization_sequence,
+                    &approval.authorization_expires_at,
+                )
+                .await
+                .unwrap();
+            let resolved = enrolled_server_address(&approval, Some(&known)).await;
+            if accepted {
+                let address = resolved.unwrap();
+                assert_eq!(address, new_address);
+                let updated = directory
+                    .upsert_enrollment_peer(
+                        peer,
+                        "Managed",
+                        &address,
+                        owner,
+                        &approval.network_id,
+                        &approval.request_id,
+                        &approval.request_digest,
+                        &approval.admin_did,
+                        approval.authorization_sequence,
+                        &approval.authorization_expires_at,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(updated.addr, new_address);
+                assert_eq!(
+                    updated.enrollment_request_digest,
+                    known.enrollment_request_digest
+                );
+                assert_eq!(
+                    updated.enrollment_authorization_sequence,
+                    known.enrollment_authorization_sequence
+                );
+                assert_eq!(updated.enrollment_admin_did, known.enrollment_admin_did);
+                assert!(!updated.pairing_ready);
+            } else {
+                assert!(resolved.is_err());
+                assert_eq!(directory.records()[0], known);
+            }
+            assert_eq!(approval, unchanged);
+            let mut remote = known.clone();
+            remote.local_agent_home = None;
+            assert_eq!(
+                enrolled_server_address(&approval, Some(&remote))
+                    .await
+                    .unwrap(),
+                approval.server_ticket
+            );
+            assert_eq!(
+                enrolled_server_address(&approval, None).await.unwrap(),
+                approval.server_ticket
+            );
         }
     }
 

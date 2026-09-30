@@ -21,6 +21,7 @@ pub struct ResolvedBridgePolicy {
     pub app_meta: AppMeta,
     pub snapshot_grants: SnapshotGrants,
     pub managed_server: ManagedServerPolicy,
+    pub store_key_custody: gents::store_key::StoreKeyCustodyChoice,
 }
 
 /// Outcome of a single-flight `desktop_client_start`.
@@ -340,6 +341,7 @@ pub fn resolve_policy(
         app_meta: config.app_meta.clone(),
         snapshot_grants: config.snapshot_grants,
         managed_server: config.managed_server,
+        store_key_custody: config.store_key_custody,
     })
 }
 

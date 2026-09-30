@@ -247,6 +247,7 @@ pub(crate) struct LeanContractSnapshot {
     pub(crate) capture_order_cases: Vec<LeanCaptureOrderCase>,
     pub(crate) aggregate_token_budget_cases: Vec<LeanAggregateTokenBudgetCase>,
     pub(crate) task_hook_admission_cases: Vec<LeanTaskHookAdmissionCase>,
+    pub(crate) store_encryption_upgrade_cases: Vec<serde_json::Value>,
     pub(crate) task_hook_run_cases: Vec<LeanTaskHookRunCase>,
     pub(crate) task_hook_recovery_cases: Vec<LeanTaskHookRecoveryCase>,
     pub(crate) follow_up_hooks: Vec<String>,
