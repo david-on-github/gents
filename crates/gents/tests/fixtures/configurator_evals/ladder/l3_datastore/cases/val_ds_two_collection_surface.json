@@ -11,7 +11,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "The EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"AutomationSurface\" scoped to both the EvalAutomationInput and EvalAutomationOutput collections, with a create entry and a query entry \u2014 no unscoped defra_query \u2014 and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Nothing else.",
+      "prompt": "The EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"AutomationSurface\" scoped to both the EvalAutomationInput and EvalAutomationOutput collections, with a create entry and a query entry for each collection (four entries total) \u2014 no unscoped defra_query \u2014 and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Nothing else.",
       "deadline_secs": 600,
       "checks": [
         {
