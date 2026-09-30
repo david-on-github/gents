@@ -325,10 +325,13 @@ fn read_distribution_manifest(root: &Path) -> Result<gents::pack::PackManifest> 
     .with_context(|| format!("parsing {}", path.display()))
 }
 
-/// Resolve an explicitly selected source directory or a bundled pack name.
-/// The returned file is a shared cache lease and must live for the operation.
-fn resolve_scenario_dir(
+/// Resolve an explicitly selected source directory, or a pack spec resolved
+/// the way `gents pack install` resolves one (local, installed, the home's
+/// store, then the registry). The returned file is a shared cache lease and
+/// must live for the operation.
+async fn resolve_scenario_dir(
     target: &str,
+    registry: Option<&str>,
 ) -> Result<(
     PathBuf,
     Option<gents::file_lock::FileLock>,
@@ -340,19 +343,26 @@ fn resolve_scenario_dir(
         let distribution = read_distribution_manifest(&direct)?;
         return Ok((direct, None, distribution));
     }
-    if gents::pack::is_valid_pack_name(target) {
-        let under_packs = PathBuf::from("packs").join(target);
-        if under_packs.join("experiment.json").is_file() {
-            let distribution = read_distribution_manifest(&under_packs)?;
-            return Ok((under_packs, None, distribution));
-        }
-    }
-    let (bundled, lease, distribution) = crate::commands::pack::materialize_named_pack(target)?;
+    let home = crate::home_state::resolve_home_dir(None);
+    let pack = super::resolve_pack_source(target, registry, &home).await?;
     anyhow::ensure!(
-        bundled.join("experiment.json").is_file(),
+        gents::pack::declared_paths(pack.manifest())
+            .iter()
+            .any(|path| path == "experiment.json"),
         "pack {target} has no scenario; use graph run for installed graphs"
     );
-    Ok((bundled, Some(lease), distribution))
+    let (root, lease) = super::materialize_cached_pack(&home, &pack)?;
+    Ok((root, Some(lease), pack.manifest().clone()))
+}
+
+/// `gents pack check`'s scenario validation: `experiment.json` loads and
+/// validates at its declared defaults (environment not read), the same
+/// loader `gents pack scenario run` uses, so a pack that fails this fails
+/// the same way a scenario run against it would.
+pub(super) fn validate_scenario_defaults(dir: &Path) -> Result<()> {
+    let distribution = read_distribution_manifest(dir)?;
+    load_manifest_with(dir, &distribution, &|_| None)?;
+    Ok(())
 }
 
 fn load_manifest(
@@ -879,43 +889,77 @@ fn validate_manifest(manifest: &ScenarioManifest) -> Result<()> {
     Ok(())
 }
 
-async fn install_bundled_graph_dependencies(
-    bin: &Path,
-    home: &Path,
-    graphql: &GraphqlEndpoint,
-    agent_did: &str,
-    inference_profile_id: &str,
+/// What [`install_graph_dependencies`] needs beyond the packages themselves,
+/// grouped so the function stays under the argument-count lint: the spawned
+/// home, the running node it installs into, and the identity it installs as.
+struct GraphDependencyInstall<'a> {
+    bin: &'a Path,
+    home: &'a Path,
+    registry: Option<&'a str>,
+    graphql: &'a GraphqlEndpoint,
+    agent_did: &'a str,
+    inference_profile_id: &'a str,
+}
+
+/// Installs every graph dependency the scenario's distribution manifest
+/// declares, resolving each the way `gents pack install` resolves one (a
+/// `--with-pack` pre-store lets this run entirely offline).
+async fn install_graph_dependencies(
+    ctx: &GraphDependencyInstall<'_>,
     packages: &[String],
     environments: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<()> {
     for package in packages {
-        tracing::info!(%package, "installing bundled graph dependency");
+        tracing::info!(%package, "installing graph dependency");
         let mut args = vec![
             "pack".to_owned(),
             "install".to_owned(),
             package.clone(),
             "--home".to_owned(),
-            path_arg(home),
+            path_arg(ctx.home),
             "--graphql".to_owned(),
-            graphql.url().to_owned(),
+            ctx.graphql.url().to_owned(),
             "--agent-did".to_owned(),
-            agent_did.to_owned(),
+            ctx.agent_did.to_owned(),
             "--output".to_owned(),
             "json".to_owned(),
         ];
-        let graph_pack = gents::pack::resolve_pack(package)?;
-        for slot in &graph_pack.manifest.metadata.inference_slots {
+        if let Some(registry) = ctx.registry {
+            args.push("--registry".to_owned());
+            args.push(registry.to_owned());
+        }
+        let graph_pack = super::resolve_pack_source(package, ctx.registry, ctx.home).await?;
+        for slot in &graph_pack.manifest().metadata.inference_slots {
             args.push("--inference-slot".to_owned());
-            args.push(format!("{}={inference_profile_id}", slot.name));
+            args.push(format!("{}={}", slot.name, ctx.inference_profile_id));
         }
         super::cli_process::run_cli_json_with_env(
-            bin,
+            ctx.bin,
             &args,
             environments.get(package).cloned().unwrap_or_default(),
         )
         .await
-        .with_context(|| format!("installing bundled graph dependency {package}"))?;
-        tracing::info!(%package, "installed bundled graph dependency");
+        .with_context(|| format!("installing graph dependency {package}"))?;
+        tracing::info!(%package, "installed graph dependency");
+    }
+    Ok(())
+}
+
+/// Admits every `--with-pack` directory or `.pack` file into `home`'s store
+/// before any dependency resolves, so `gents pack scenario run --with-pack`
+/// can install an offline graph dependency without a registry.
+fn pre_store_with_packs(home: &Path, with_pack: &[PathBuf]) -> Result<()> {
+    let store = gents::pack_store::PackStore::new(home);
+    for path in with_pack {
+        if path.is_dir() {
+            let (bytes, header) = gents::pack_archive::pack_dir(path)
+                .with_context(|| format!("packing {}", path.display()))?;
+            store.import(bytes.as_slice(), Some(&header.digest))?;
+        } else {
+            store
+                .import_file(path, None)
+                .with_context(|| format!("storing {}", path.display()))?;
+        }
     }
     Ok(())
 }
@@ -3085,7 +3129,7 @@ fn resolve_prepare_within(pack: &Path, manifest: &ScenarioManifest) -> Result<Op
 
 pub(crate) async fn init_pack(args: PackInitArgs) -> Result<()> {
     let bin = std::env::current_exe().context("resolving the gents binary path")?;
-    let (pack, _cache_lease, distribution) = resolve_scenario_dir(&args.pack)?;
+    let (pack, _cache_lease, distribution) = resolve_scenario_dir(&args.pack, None).await?;
     let manifest = load_manifest(&pack, &distribution)?;
     tracing::info!(pack = %manifest.name, description = %manifest.description, "initializing pack scenario");
     let home = args.home;
@@ -3116,7 +3160,7 @@ pub(crate) async fn init_pack(args: PackInitArgs) -> Result<()> {
 }
 
 pub(crate) async fn seed(args: PackSeedArgs) -> Result<()> {
-    let (pack, _cache_lease, distribution) = resolve_scenario_dir(&args.pack)?;
+    let (pack, _cache_lease, distribution) = resolve_scenario_dir(&args.pack, None).await?;
     let manifest = load_manifest(&pack, &distribution)?;
 
     let port = args.http_port;
@@ -3197,7 +3241,8 @@ pub(crate) async fn seed(args: PackSeedArgs) -> Result<()> {
 
 pub(crate) async fn run(args: PackRunArgs) -> Result<()> {
     let bin = std::env::current_exe().context("resolving the gents binary path")?;
-    let (pack, _cache_lease, distribution) = resolve_scenario_dir(&args.pack)?;
+    let (pack, _cache_lease, distribution) =
+        resolve_scenario_dir(&args.pack, args.registry.as_deref()).await?;
     let mut manifest = load_manifest(&pack, &distribution)?;
     let observed_collections = trigger_source_collections(&manifest, &manifest.expect.trigger_ids)?;
     let job_id = args.job_id.clone().unwrap_or_else(default_job_id);
@@ -3224,6 +3269,7 @@ pub(crate) async fn run(args: PackRunArgs) -> Result<()> {
     }
     std::fs::create_dir_all(&home)
         .with_context(|| format!("creating pack home {}", home.display()))?;
+    pre_store_with_packs(&home, &args.with_pack)?;
 
     println!("pack     {} ({})", manifest.name, pack.display());
     println!("job_id   {job_id}");
@@ -3299,12 +3345,15 @@ pub(crate) async fn run(args: PackRunArgs) -> Result<()> {
         )
         .await?;
         wait_runtime_ready(&graphql, &agent_did, &mut server).await?;
-        install_bundled_graph_dependencies(
-            &bin,
-            &home,
-            &graphql,
-            &agent_did,
-            &inference_profile_id,
+        install_graph_dependencies(
+            &GraphDependencyInstall {
+                bin: &bin,
+                home: &home,
+                registry: args.registry.as_deref(),
+                graphql: &graphql,
+                agent_did: &agent_did,
+                inference_profile_id: &inference_profile_id,
+            },
             &manifest.graph_dependencies,
             &manifest.graph_dependency_environment,
         )
