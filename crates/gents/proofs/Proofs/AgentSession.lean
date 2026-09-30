@@ -279,6 +279,26 @@ def refresh (s : Document) (rows : List RequestFact) (event : RequestObservation
     | none => s
   | none => s
 
+/-- Only a newly published tool terminal emits activity, in the same transaction.
+Replays and losing publications emit no notification. Request lifecycle state
+need not change; identity is resolved through the authoritative request row. -/
+def toolActivity (s : Document) (rows : List RequestFact) (event : RequestObservation)
+    (now : Time) (published : Bool) : Document :=
+  if published then refresh s rows event now else s
+
+theorem unpublished_tool_activity_noop (s : Document) (rows : List RequestFact)
+    (event : RequestObservation) (now : Time) :
+    toolActivity s rows event now false = s := by simp [toolActivity]
+
+theorem published_tool_activity (s : Document) (o : Observation)
+    (r : RequestFact) (now : Time)
+    (ho : s.observation = some o) (hl : o.latest = some r.observed)
+    (hs : r.scope = s.scope) (hb : r.behavior = s.behavior)
+    (hp : r.purpose = .normal) :
+    toolActivity s [r] r.observed now true =
+      { s with observation := some { o with latest := some r.observed, activity := max now o.activity } } := by
+  simp [toolActivity, refresh, ho, hl, observedRequest, hp, hs, hb]
+
 /-- Stale event lifecycle payloads have no influence on the projection. -/
 theorem refresh_ignores_event_state (s : Document) (rows : List RequestFact)
     (event : RequestObservation) (state : RequestState) (now : Time) :

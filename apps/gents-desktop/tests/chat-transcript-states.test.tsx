@@ -813,7 +813,7 @@ describe("ChatTranscriptPanel states", () => {
     expect(screen.getByText("message-89")).toBeInTheDocument();
     const retainedMessage = screen.getByText("message-50");
 
-    fireEvent.click(screen.getByTestId("transcript-load-older"));
+    fireEvent.wheel(screen.getByTestId("transcript-panel"), { deltaY: -20 });
 
     await waitFor(() => expect(screen.getByText("message-10")).toBeInTheDocument());
     expect(screen.queryByText("message-9")).not.toBeInTheDocument();
@@ -898,13 +898,13 @@ describe("ChatTranscriptPanel states", () => {
 
     render(<RemotePageFixture />);
     const retainedMessage = screen.getByText("remote-message-40");
-    fireEvent.click(screen.getByTestId("transcript-load-older"));
+    fireEvent.wheel(screen.getByTestId("transcript-panel"), { deltaY: -20 });
 
     await waitFor(() =>
       expect(screen.getByText("remote-message-0")).toBeInTheDocument(),
     );
     expect(onLoad).toHaveBeenCalledTimes(1);
     expect(screen.getByText("remote-message-40")).toBe(retainedMessage);
-    expect(screen.queryByTestId("transcript-load-older")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("transcript-older-status")).not.toBeInTheDocument();
   });
 });

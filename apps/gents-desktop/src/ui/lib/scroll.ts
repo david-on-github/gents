@@ -126,3 +126,97 @@ export function useFollowTail(
 
   return { atBottom, toBottom };
 }
+
+/** Upward navigation loads one page at a time; mounting at the tip never does.
+ * The visible row anchors prepends even if live output grows during the read. */
+export function useOlderPages(
+  ownerRef: RefObject<HTMLDivElement | null>,
+  subject: string | null,
+  hasOlder: boolean,
+  load: () => Promise<boolean>,
+) {
+  const latest = useRef({ hasOlder, load });
+  latest.current = { hasOlder, load };
+  const [loading, setLoading] = useState(false);
+  useEffect(() => {
+    const viewport = scrollViewport(ownerRef.current);
+    if (!viewport || !subject) return;
+    let disposed = false;
+    let busy = false;
+    let lastTop = viewport.scrollTop;
+    let frame: number | null = null;
+    setLoading(false);
+    const fetchOlder = async () => {
+      if (disposed || busy || !latest.current.hasOlder || viewport.scrollTop > 160)
+        return;
+      busy = true;
+      const viewportTop = viewport.getBoundingClientRect().top;
+      const row = Array.from(
+        viewport.querySelectorAll<HTMLElement>("[data-timeline-key]"),
+      ).find((node) => node.getBoundingClientRect().bottom > viewportTop);
+      const top = row?.getBoundingClientRect().top;
+      const height = viewport.scrollHeight;
+      const scrollTop = viewport.scrollTop;
+      let accepted = false;
+      setLoading(true);
+      try {
+        accepted = await latest.current.load();
+      } catch {
+        // The paging owner reports read errors; leave scroll and retry intent intact.
+      } finally {
+        if (!disposed) {
+          frame = requestAnimationFrame(() => {
+            if (disposed) return;
+            if (accepted) {
+              if (row?.isConnected && top !== undefined) {
+                const movement = viewport.scrollTop - scrollTop;
+                viewport.scrollTop += row.getBoundingClientRect().top - top + movement;
+              } else {
+                viewport.scrollTop += viewport.scrollHeight - height;
+              }
+            }
+            lastTop = viewport.scrollTop;
+            busy = false;
+            setLoading(false);
+          });
+        }
+      }
+    };
+    const onScroll = () => {
+      const upward = viewport.scrollTop < lastTop;
+      lastTop = viewport.scrollTop;
+      if (upward) void fetchOlder();
+    };
+    const onWheel = (event: WheelEvent) => {
+      if (event.deltaY < 0) void fetchOlder();
+    };
+    let touchY: number | undefined;
+    const onTouchStart = (event: TouchEvent) => {
+      touchY = event.touches[0]?.clientY;
+    };
+    const onTouchMove = (event: TouchEvent) => {
+      const nextY = event.touches[0]?.clientY;
+      if (touchY !== undefined && nextY !== undefined && nextY > touchY)
+        void fetchOlder();
+      touchY = nextY;
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (["ArrowUp", "PageUp", "Home"].includes(event.key)) void fetchOlder();
+    };
+    viewport.addEventListener("scroll", onScroll, { passive: true });
+    viewport.addEventListener("wheel", onWheel, { passive: true });
+    viewport.addEventListener("touchstart", onTouchStart, { passive: true });
+    viewport.addEventListener("touchmove", onTouchMove, { passive: true });
+    viewport.addEventListener("keydown", onKeyDown);
+    return () => {
+      disposed = true;
+      if (frame !== null) cancelAnimationFrame(frame);
+      viewport.removeEventListener("scroll", onScroll);
+      viewport.removeEventListener("wheel", onWheel);
+      viewport.removeEventListener("touchstart", onTouchStart);
+      viewport.removeEventListener("touchmove", onTouchMove);
+      viewport.removeEventListener("keydown", onKeyDown);
+    };
+  }, [ownerRef, subject]);
+  return loading;
+}

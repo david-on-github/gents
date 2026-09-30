@@ -32,6 +32,24 @@ shell re-implements and can get wrong.
 
 namespace ClientShell.Timeline
 
+/-- A page's accounting coverage and an exact prompt-owner lookup are independent.
+A missing prompt in a visible page alone is not evidence that it is pending. -/
+structure ReadCoverage where
+  sessionComplete : Bool
+  promptOwnerKnown : Bool
+  deriving DecidableEq, Repr
+
+def pendingOwnerAbsent (coverage : ReadCoverage) (materialized : Bool) : Bool :=
+  coverage.promptOwnerKnown && !materialized
+
+theorem page_absence_is_not_pending (complete materialized : Bool) :
+    pendingOwnerAbsent ⟨complete, false⟩ materialized = false := by
+  simp [pendingOwnerAbsent]
+
+theorem exact_prompt_independent_of_history (complete materialized : Bool) :
+    pendingOwnerAbsent ⟨complete, true⟩ materialized = !materialized := by
+  simp [pendingOwnerAbsent]
+
 inductive Role
   | user
   | assistant

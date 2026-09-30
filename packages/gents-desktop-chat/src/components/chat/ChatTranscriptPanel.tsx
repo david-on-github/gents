@@ -82,6 +82,10 @@ export function ChatTranscriptPanel({
     visibleCount: TRANSCRIPT_PAGE_SIZE,
   });
   const prependScrollHeightRef = useRef<number | null>(null);
+  const pageFlight = useRef(false);
+  const pageGeneration = useRef(0);
+  const lastScrollTop = useRef(0);
+  const touchY = useRef<number | undefined>(undefined);
   const [retryingRequestId, setRetryingRequestId] = useState<string | null>(
     null,
   );
@@ -184,6 +188,10 @@ export function ChatTranscriptPanel({
       visibleCount: TRANSCRIPT_PAGE_SIZE,
     });
     prependScrollHeightRef.current = null;
+    pageGeneration.current += 1;
+    pageFlight.current = false;
+    setLoadingOlder(false);
+    lastScrollTop.current = 0;
     setAutoFollowTranscript(true);
     const panel = transcriptPanelRef.current;
     if (panel) scrollPanelToTip(panel);
@@ -233,6 +241,7 @@ export function ChatTranscriptPanel({
 
     prependScrollHeightRef.current = null;
     panel.scrollTop += panel.scrollHeight - previousScrollHeight;
+    lastScrollTop.current = panel.scrollTop;
   }, [firstVisibleIndex, timelineItems.length]);
 
   async function loadOlderItems() {
@@ -240,12 +249,13 @@ export function ChatTranscriptPanel({
     if (
       !panel ||
       !hasOlderItems ||
-      loadingOlder ||
+      pageFlight.current ||
       prependScrollHeightRef.current != null
     ) {
       return;
     }
 
+    const generation = pageGeneration.current;
     prependScrollHeightRef.current = panel.scrollHeight;
     setAutoFollowTranscript(false);
     setTranscriptWindow({
@@ -254,12 +264,20 @@ export function ChatTranscriptPanel({
       visibleCount: visibleCount + TRANSCRIPT_PAGE_SIZE,
     });
     if (!hasLocalOlderItems && onLoadOlder) {
+      pageFlight.current = true;
       setLoadingOlder(true);
       try {
         const loaded = await onLoadOlder();
-        if (!loaded) prependScrollHeightRef.current = null;
+        if (generation === pageGeneration.current && !loaded)
+          prependScrollHeightRef.current = null;
+      } catch {
+        if (generation === pageGeneration.current)
+          prependScrollHeightRef.current = null;
       } finally {
-        setLoadingOlder(false);
+        if (generation === pageGeneration.current) {
+          pageFlight.current = false;
+          setLoadingOlder(false);
+        }
       }
     }
   }
@@ -287,6 +305,8 @@ export function ChatTranscriptPanel({
       return;
     }
 
+    const upward = panel.scrollTop < lastScrollTop.current;
+    lastScrollTop.current = panel.scrollTop;
     const remaining = panel.scrollHeight - panel.scrollTop - panel.clientHeight;
     const atTip = remaining < 64;
     setAutoFollowTranscript(atTip);
@@ -312,10 +332,7 @@ export function ChatTranscriptPanel({
         visibleCount: nextVisibleCount,
       };
     });
-    // The explicit button owns pagination. Triggering another page from the
-    // same scroll event can recursively prepend several expensive pages while
-    // layout restores the reading position (observed in the mobile browser
-    // harness as 199 mounted turns after one request).
+    if (upward && panel.scrollTop <= 160) void loadOlderItems();
   }
 
   // Animated placeholder between send and the assistant's first visible
@@ -337,6 +354,31 @@ export function ChatTranscriptPanel({
       data-scroll-owner="transcript"
       data-testid="transcript-panel"
       onScroll={handleTranscriptScroll}
+      onWheel={(event) => {
+        if (event.deltaY < 0 && event.currentTarget.scrollTop <= 160)
+          void loadOlderItems();
+      }}
+      onTouchStart={(event) => {
+        touchY.current = event.touches[0]?.clientY;
+      }}
+      onTouchMove={(event) => {
+        const nextY = event.touches[0]?.clientY;
+        if (
+          touchY.current !== undefined &&
+          nextY !== undefined &&
+          nextY > touchY.current &&
+          event.currentTarget.scrollTop <= 160
+        )
+          void loadOlderItems();
+        touchY.current = nextY;
+      }}
+      onKeyDown={(event) => {
+        if (
+          ["ArrowUp", "PageUp", "Home"].includes(event.key) &&
+          event.currentTarget.scrollTop <= 160
+        )
+          void loadOlderItems();
+      }}
       ref={transcriptPanelRef}
     >
       {selectedSessionId && (session || timelineItems.length > 0) ? (
@@ -359,15 +401,13 @@ export function ChatTranscriptPanel({
             </article>
           ) : null}
           {hasOlderItems ? (
-            <button
-              className="ghost-button transcript-load-older"
-              data-testid="transcript-load-older"
-              type="button"
-              disabled={loadingOlder}
-              onClick={() => void loadOlderItems()}
+            <div
+              role="status"
+              aria-live="polite"
+              data-testid="transcript-older-status"
             >
-              {loadingOlder ? "Loading older messages…" : "Load older messages"}
-            </button>
+              {loadingOlder ? "Loading older messages…" : null}
+            </div>
           ) : null}
           <MessageList
             timelineItems={visibleTimelineItems}

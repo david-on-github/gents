@@ -293,6 +293,7 @@ pub(super) fn build_session_snapshot_from_store_for_agent_with_transcript(
     canonical_dependencies: Option<&gents_desktop_core::client::CanonicalTranscriptDependencies>,
     transcript_is_bounded: bool,
     context_totals_exact: bool,
+    pending_owner_known: bool,
     include_live_tail: bool,
     agent_did: Option<&str>,
     session_id: &str,
@@ -455,7 +456,7 @@ pub(super) fn build_session_snapshot_from_store_for_agent_with_transcript(
         (None, observed) => observed,
     };
     let turn_state_label = turn_state.map(turn_state_label).map(str::to_owned);
-    let pending_turn = (include_live_tail && context_totals_exact)
+    let pending_turn = (include_live_tail && pending_owner_known)
         .then_some(latest_request_id.as_deref())
         .flatten()
         .as_deref()

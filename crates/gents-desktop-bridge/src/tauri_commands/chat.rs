@@ -134,37 +134,43 @@ pub async fn desktop_session_snapshot(
     };
     let (transcript_page, context_store) = if timeline_before_item_key.is_none() {
         let context_read = async {
+            let request = {
+                let store = core.store().snapshot();
+                store
+                    .requests
+                    .iter()
+                    .find(|row| {
+                        Some(row.request_id.as_str()) == request_id.as_deref()
+                            && row.session_id.as_deref() == Some(session_id.as_str())
+                            && row.agent_did.as_deref() == agent_did.as_deref()
+                            && row.requester_did.as_deref() == requester_scope.as_deref()
+                    })
+                    .cloned()
+            };
+            let Some(request) = request else {
+                return Ok(None);
+            };
             match operator_access.as_ref() {
                 Some(access) => {
-                    gents_desktop_core::client::load_session_context_store_on(
-                        access,
-                        &session_id,
-                        agent_did.as_deref(),
-                        requester_scope.as_deref(),
-                    )
-                    .await
+                    gents_desktop_core::client::load_session_tip_store_on(access, &request)
+                        .await
+                        .map(Some)
                 }
-                None => {
-                    gents_desktop_core::client::load_session_context_store(
-                        core.node(),
-                        &session_id,
-                        agent_did.as_deref(),
-                        requester_scope.as_deref(),
-                    )
+                None => gents_desktop_core::client::load_session_tip_store(core.node(), &request)
                     .await
-                }
+                    .map(Some),
             }
         };
         let (page, context) = tokio::join!(page_read, context_read);
         let page = page.map_err(|error| BridgeError::untyped(error.to_string()))?;
         let context = match context {
-            Ok(store) => Some(store),
+            Ok(store) => store,
             Err(error) => {
                 tracing::warn!(
                     target: "gents_desktop::chat",
                     session_id,
                     error = %error,
-                    "session context query failed; returning the bounded transcript with inexact totals"
+                    "session tip query failed; returning the bounded transcript without live ownership evidence"
                 );
                 None
             }
@@ -178,6 +184,7 @@ pub async fn desktop_session_snapshot(
             None,
         )
     };
+    let context_store = context_store.map(|tip| transcript_page.store.merge_snapshot(tip));
     let mut snapshot = build_session_snapshot_for_agent_with_transcript(
         core.as_ref(),
         agent_did.as_deref(),
@@ -186,7 +193,7 @@ pub async fn desktop_session_snapshot(
         Some(&transcript_page.store),
         Some(&transcript_page.canonical_dependencies),
         context_store.as_ref(),
-        context_store.is_some(),
+        false,
         timeline_before_item_key.is_none(),
     )
     .await;
