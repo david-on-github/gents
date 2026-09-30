@@ -1,13 +1,5 @@
-//! Store lock lifetime: exclusion while held, release when dropped.
-//!
-//! These tests live in their own binary because the store lock is a `flock`
-//! on an open file description, and a child forked while it is held shares
-//! that description until it execs. The unit binary's tests spawn children
-//! through fork (`managed_exec`'s `pre_exec` setsid), so a lock dropped there
-//! can stay held by another test's not-yet-exec'd child, and a reacquire
-//! after the drop intermittently fails (#1780). Nothing in this binary forks
-//! except `a_forked_child_holds_the_store_lock_until_it_execs`, which runs
-//! under `FORK_EXCLUSION` with every other test here.
+//! Store locks exclude competing holders and release explicitly on drop,
+//! including while a forked child retains the inherited descriptor.
 
 use std::fs;
 use std::sync::{Mutex, MutexGuard};
@@ -181,12 +173,11 @@ fn a_store_outside_the_home_does_not_exclude_the_home_default_store() {
     assert_ne!(held.path(), home_store.path());
 }
 
-/// The premise the binary split rests on: a child forked while the lock is
-/// held keeps the store excluded after the parent drops its `StoreLock`,
-/// until the child execs.
+/// A blocked child retains the inherited open file description, so a plain
+/// close cannot release its lock. Explicit unlock must release it before exec.
 #[cfg(unix)]
 #[test]
-fn a_forked_child_holds_the_store_lock_until_it_execs() {
+fn dropping_the_store_lock_releases_it_before_a_forked_child_execs() {
     use std::ffi::CString;
 
     let _exclusive = exclusive();
@@ -226,18 +217,19 @@ fn a_forked_child_holds_the_store_lock_until_it_execs() {
     };
 
     drop(held);
-    let error = lock_store(temp.path(), &data)
-        .expect_err("the forked child still holds the dropped lock")
-        .to_string();
-    assert!(
-        error.contains(&format!("process {}", std::process::id())),
-        "the holder is recorded as this process: {error}"
-    );
+    let reacquired = lock_store(temp.path(), &data)
+        .expect("explicit unlock releases the store while the child retains its descriptor");
+    assert!(lock_store(temp.path(), &data).is_err());
 
     let status = child.release();
     assert!(
         libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
         "the child exec'd: {status}"
     );
-    lock_store(temp.path(), &data).expect("the lock is released once the child execs");
+    assert!(
+        lock_store(temp.path(), &data).is_err(),
+        "exec closes the inherited descriptor without releasing the new holder's lock"
+    );
+    drop(reacquired);
+    lock_store(temp.path(), &data).expect("the new holder releases its own lock");
 }
