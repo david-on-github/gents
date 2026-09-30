@@ -44,7 +44,10 @@ const DEFAULT_OLLAMA_ENDPOINT: &str = "http://localhost:11434/v1";
 const DEFAULT_OLLAMA_MODEL_NAME: &str = "hf.co/google/gemma-4-12B-it-qat-q4_0-gguf";
 const DEFAULT_CHATGPT_CODEX_MODEL_NAME: &str = "gpt-6-astra";
 const DEFAULT_XAI_GROK_OAUTH_MODEL_NAME: &str = "grok-4.7";
+#[cfg(not(all(debug_assertions, feature = "native-e2e")))]
 const DEFAULT_HTTP_PORT: u16 = 9191;
+#[cfg(all(debug_assertions, feature = "native-e2e"))]
+const DEFAULT_HTTP_PORT: u16 = 21919;
 const DEFAULT_CODEX_SHIM_PORT: u16 = 9292;
 const DEFAULT_CODEX_REMOTE: &str = "ws://127.0.0.1:9292/";
 const DEFAULT_INTERACTIVE_WAIT_TIMEOUT_SECS: u64 = 86_400;
@@ -589,7 +592,8 @@ pub(crate) async fn resolve_config_access(
     let node = {
         use std::sync::Arc;
         let node_arc = Arc::new(
-            persistent_node_builder_with_stored_identity(&home_dir, &data_dir)?
+            persistent_node_builder_with_stored_identity(&home_dir, &data_dir)
+                .await?
                 .build()
                 .await
                 .with_context(|| {
@@ -599,6 +603,7 @@ pub(crate) async fn resolve_config_access(
         gents::migration::ensure_all_runtime_migrations(node_arc.clone())
             .await
             .map_err(|error| gents::storage_backend::classify_store_error(error, &data_dir))?;
+        gents::store_key::upgrade::finish(&data_dir)?;
         Arc::try_unwrap(node_arc).unwrap_or_else(|_| {
             unreachable!("node_arc had exactly one strong reference at this point")
         })
@@ -614,13 +619,16 @@ pub(crate) async fn resolve_config_access(
 
 /// The builder for an initialized home's store at `data_dir`, encrypted with
 /// the key the home recorded.
-pub(crate) fn persistent_node_builder(home_dir: &Path, data_dir: &Path) -> Result<NodeBuilder> {
+pub(crate) async fn persistent_node_builder(
+    home_dir: &Path,
+    data_dir: &Path,
+) -> Result<NodeBuilder> {
     gents::storage_backend::reject_legacy_store(data_dir)?;
-    let key = gents::store_key::open_home_store_key(home_dir, data_dir)?;
+    let key = gents::store_key::open_home_store_key(home_dir, data_dir).await?;
     gents::store_key::persistent_builder(data_dir, &key)
 }
 
-pub(crate) fn persistent_node_builder_with_stored_identity(
+pub(crate) async fn persistent_node_builder_with_stored_identity(
     home_dir: &Path,
     data_dir: &Path,
 ) -> Result<NodeBuilder> {
@@ -632,7 +640,8 @@ pub(crate) fn persistent_node_builder_with_stored_identity(
         )
     })?;
     let identity = load_initialized_home_identity(home_dir, &config)?;
-    Ok(persistent_node_builder(home_dir, data_dir)?
+    Ok(persistent_node_builder(home_dir, data_dir)
+        .await?
         .with_node_identity_did(identity.did().to_string()))
 }
 
@@ -765,18 +774,19 @@ mod tests {
                 tool_ceiling: ToolCeilingArg::Readonly,
                 tool_root: None,
                 store_encryption: Some(
-                    gents::store_key::StoreEncryption::create(
+                    gents::store_key::StoreEncryption::prepare(
                         gents::store_key::StoreKeyCustodyChoice::File,
                         &gents::store_key::home_key_file(&home),
+                        &default_data_dir(&home),
                     )
-                    .unwrap()
-                    .0,
+                    .unwrap(),
                 ),
             },
         )
         .unwrap();
 
         let node = persistent_node_builder_with_stored_identity(&home, &data)
+            .await
             .unwrap()
             .build()
             .await
@@ -784,31 +794,23 @@ mod tests {
         assert_eq!(node.node_identity_did(), Some(did.as_str()));
     }
 
-    /// Every embedded open of a home goes through the recorded store key, so a
-    /// home an earlier release initialized is refused before its store opens.
-    #[test]
-    fn a_home_initialized_before_store_encryption_is_refused_as_unencrypted() {
+    #[tokio::test]
+    async fn an_unrecorded_key_is_not_adopted_when_opening_an_older_home() {
         let temp = tempfile::tempdir().unwrap();
         let home = initialized_home(temp.path());
         let mut config = read_init_config(&home).unwrap().unwrap();
         config.store_encryption = None;
         write_init_config(&home, &config).unwrap();
         let data = default_data_dir(&home);
+        let key_file = gents::store_key::home_key_file(&home);
+        let before = std::fs::read(&key_file).unwrap();
 
-        let error = match persistent_node_builder_with_stored_identity(&home, &data) {
-            Ok(_) => panic!("an unencrypted home must not open"),
+        let error = match persistent_node_builder_with_stored_identity(&home, &data).await {
+            Ok(_) => panic!("an unrecorded key must not be adopted"),
             Err(error) => error,
         };
-        assert_eq!(
-            gents::storage_backend::incompatible_store(&error, &data).map(|store| store.kind),
-            Some(gents::storage_backend::IncompatibleStoreKind::UnencryptedStore)
-        );
-        assert_eq!(
-            crate::native_service::incompatible_store_exit_code(
-                gents::storage_backend::IncompatibleStoreKind::UnencryptedStore
-            ),
-            crate::native_service::INCOMPATIBLE_STORE_EXIT_CODE
-        );
+        assert!(error.to_string().contains("unrecorded file"), "{error:#}");
+        assert_eq!(std::fs::read(key_file).unwrap(), before);
         assert!(!data.join("MANIFEST").exists(), "the store is never opened");
     }
 
@@ -833,16 +835,26 @@ mod tests {
                 tool_ceiling: ToolCeilingArg::Readonly,
                 tool_root: None,
                 store_encryption: Some(
-                    gents::store_key::StoreEncryption::create(
+                    gents::store_key::StoreEncryption::prepare(
                         gents::store_key::StoreKeyCustodyChoice::File,
                         &gents::store_key::home_key_file(&home),
+                        &default_data_dir(&home),
                     )
-                    .unwrap()
-                    .0,
+                    .unwrap(),
                 ),
             },
         )
         .unwrap();
+        read_init_config(&home)
+            .unwrap()
+            .unwrap()
+            .store_encryption
+            .unwrap()
+            .initialize(
+                &gents::store_key::home_key_file(&home),
+                &default_data_dir(&home),
+            )
+            .unwrap();
         home
     }
 
@@ -891,13 +903,13 @@ mod tests {
         );
     }
 
-    #[test]
-    fn uninitialized_offline_home_requires_init() {
+    #[tokio::test]
+    async fn uninitialized_offline_home_requires_init() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let data = default_data_dir(&home);
 
-        let error = match persistent_node_builder_with_stored_identity(&home, &data) {
+        let error = match persistent_node_builder_with_stored_identity(&home, &data).await {
             Ok(_) => panic!("uninitialized home should not produce an unsigned node builder"),
             Err(error) => error,
         };

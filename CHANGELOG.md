@@ -14,10 +14,13 @@ source consistency checks, not a separate runtime compatibility version.
   per-store key and records its custody in `init.json`; the desktop records
   its client store's key in `store-encryption.json`. On macOS the key is a
   login-keychain item; elsewhere it is an owner-only `keys/store.aes256` file.
-  There is no conversion: a store created by an earlier release, or one whose
-  recorded key no longer exists, is refused (exit status 65, and the desktop's
-  existing reset flow) with a message to re-initialize the home
-  (`gents init --dangerously-overwrite`). A locked or denied Keychain is a
+  Existing plaintext stores upgrade in place, preserving identity, documents,
+  history, and host recovery journals. Interrupted upgrades resume from durable
+  intent; the original remains until the encrypted store opens successfully.
+  Initialization records key custody before writing encrypted data, so a failed
+  setup can retry with the same key. A store whose recorded key no longer exists
+  is refused (exit status 65 and the desktop's existing reset flow). Reset retires
+  the store and its recorded key together. A locked or denied Keychain is a
   retryable error and never offers a reset. `gents server` on a home that was
   never initialized is refused; run `gents init` first. Encryption protects
   the disk and backups, not reads through a running node. Indexed field values

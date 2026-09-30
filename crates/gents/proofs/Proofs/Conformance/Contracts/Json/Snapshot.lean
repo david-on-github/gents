@@ -11,6 +11,7 @@ import Proofs.Conformance.MailboxHandoff
 import Proofs.Conformance.ArtifactAuthority
 import Proofs.Conformance.WorkspacePathCapability
 import Proofs.Conformance.TaskHooks
+import Proofs.Conformance.StoreEncryptionUpgrade
 import Proofs.Conformance.Contracts.Json.Core
 import Proofs.Conformance.Contracts.Json.Runtime
 import Proofs.Conformance.Contracts.Json.Scheduling
@@ -466,6 +467,8 @@ def snapshotJson : String :=
       ++ aggregateTokenBudgetCasesJson ++ ","
     ++ "\"task_hook_admission_cases\":"
       ++ Conformance.TaskHooksContracts.admissionCasesJson ++ ","
+    ++ "\"store_encryption_upgrade_cases\":"
+      ++ Conformance.StoreEncryptionUpgrade.casesJson ++ ","
     ++ "\"task_hook_run_cases\":"
       ++ Conformance.TaskHooksContracts.runCasesJson ++ ","
     ++ "\"task_hook_recovery_cases\":"

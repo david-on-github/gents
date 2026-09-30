@@ -70,7 +70,7 @@ Use --write for sandboxed writes scoped to the tool root.";
 /// Takes the store lock for the rest of init. An overwrite wipes the home
 /// under that same lock, keeping the lock file itself, so no runtime can open
 /// the store while it is removed or hold a second lock afterwards.
-fn lock_init_store(
+pub(crate) fn lock_init_store(
     home_dir: &Path,
     data_dir: &Path,
     overwrite: bool,
@@ -100,7 +100,22 @@ pub(crate) fn lock_init_store_for_user(
     fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data directory {}", data_dir.display()))?;
     let lock = gents::home::lock_store(home_dir, &data_dir)?;
+    let overwritten_encryption = read_init_config(&home)
+        .ok()
+        .flatten()
+        .and_then(|config| config.store_encryption)
+        .or_else(|| {
+            gents::store_key::upgrade::pending_record(&data_dir)
+                .ok()
+                .flatten()
+        });
     dangerously_overwrite_home(&home, lock.path())?;
+    if let Some(record) = overwritten_encryption {
+        if let Err(error) = record.delete_key(&gents::store_key::home_key_file(&home)) {
+            tracing::warn!(home = %home.display(), error = %format!("{error:#}"),
+                "could not remove the overwritten home's store key");
+        }
+    }
     fs::create_dir_all(&data_dir)
         .with_context(|| format!("creating data directory {}", data_dir.display()))?;
     Ok(lock)
@@ -152,24 +167,7 @@ pub(crate) async fn init(mut args: InitArgs) -> Result<()> {
         .data_dir
         .clone()
         .unwrap_or_else(|| default_data_dir(&home_dir));
-    // An overwrite wipes the home, and with it any file key; a Keychain key
-    // lives outside the home, so the one the wiped home recorded is removed
-    // after the wipe instead of being orphaned.
-    let overwritten_encryption = args
-        .dangerously_overwrite
-        .then(|| read_init_config(&home_dir).ok().flatten())
-        .flatten()
-        .and_then(|config| config.store_encryption);
     let _store_lock = lock_init_store(&home_dir, &data_dir, args.dangerously_overwrite)?;
-    if let Some(record) = overwritten_encryption {
-        if let Err(error) = record.delete_key(&gents::store_key::home_key_file(&home_dir)) {
-            tracing::warn!(
-                home = %home_dir.display(),
-                error = %format!("{error:#}"),
-                "could not remove the overwritten home's store key"
-            );
-        }
-    }
 
     if args.identity_only {
         if args.identity_backend != IdentityBackendArg::File && args.key_path.is_some() {
@@ -236,15 +234,28 @@ pub(crate) async fn init(mut args: InitArgs) -> Result<()> {
         .await
         .context("creating or loading agent identity key")?;
 
-    // The key is created and recorded before the store exists: the store is
-    // encrypted from its first write, and `init.json` (written last) records
-    // the key that store needs.
     gents::storage_backend::reject_legacy_store(&data_dir)?;
-    let (store_encryption, store_key) = gents::store_key::open_or_create_home_store_key(
+    let mut stored = StoredInitConfig {
+        home: home_dir.to_string_lossy().to_string(),
+        agent_name: args.agent_name.clone(),
+        agent_did: initialized_identity.identity.did().to_string(),
+        key_path: initialized_identity.key_path.clone(),
+        identity_backend: initialized_identity.identity_backend.clone(),
+        keychain_label: initialized_identity.keychain_label.clone(),
+        secure_enclave_label: initialized_identity.secure_enclave_label.clone(),
+        tool_package: Some(tool_package),
+        tool_ceiling: tool_ceiling_for_package(tool_package),
+        tool_root: resolve_tool_root_for_package(tool_package, args.tool_root.as_deref())?
+            .map(|path| path.to_string_lossy().to_string()),
+        store_encryption: None,
+    };
+    let store_key = initialize_home_store(
         &home_dir,
         &data_dir,
         crate::cli::args::store_key_custody(args.store_key_custody),
-    )?;
+        &mut stored,
+    )
+    .await?;
     let mut node_builder = gents::store_key::persistent_builder(&data_dir, &store_key)?;
     if let Some(node_identity_did) = initialized_identity.node_identity_did.as_ref() {
         node_builder = node_builder.with_node_identity_did(node_identity_did.clone());
@@ -256,6 +267,7 @@ pub(crate) async fn init(mut args: InitArgs) -> Result<()> {
             .context("building embedded DefraDB node for init")?,
     );
     gents::migration::ensure_all_runtime_migrations(node_arc.clone()).await?;
+    gents::store_key::upgrade::finish(&data_dir)?;
     let node = std::sync::Arc::try_unwrap(node_arc).unwrap_or_else(|_| {
         unreachable!("node_arc had exactly one strong reference at this point")
     });
@@ -268,19 +280,6 @@ pub(crate) async fn init(mut args: InitArgs) -> Result<()> {
         tool_package,
     )
     .await?;
-    let stored = StoredInitConfig {
-        home: home_dir.to_string_lossy().to_string(),
-        agent_name: args.agent_name.clone(),
-        agent_did: initialized_identity.identity.did().to_string(),
-        key_path: initialized_identity.key_path.clone(),
-        identity_backend: initialized_identity.identity_backend.clone(),
-        keychain_label: initialized_identity.keychain_label.clone(),
-        secure_enclave_label: initialized_identity.secure_enclave_label.clone(),
-        tool_package: Some(tool_package),
-        tool_ceiling: summary.tool_ceiling,
-        tool_root: summary.tool_root.clone(),
-        store_encryption: Some(store_encryption),
-    };
     write_init_config(&home_dir, &stored)?;
     let runtime_state_reset = if args.reset {
         clear_runtime_state(&home_dir)?
@@ -608,12 +607,7 @@ pub(crate) async fn write_identity_only_home_metadata(
     let tool_root = resolve_tool_root_for_package(options.tool_package, options.tool_root)?
         .map(|path| path.to_string_lossy().to_string());
     gents::storage_backend::reject_legacy_store(&data_dir)?;
-    let (store_encryption, _store_key) = gents::store_key::open_or_create_home_store_key(
-        options.home,
-        &data_dir,
-        options.store_key_custody,
-    )?;
-    let stored = StoredInitConfig {
+    let mut stored = StoredInitConfig {
         home: options.home.to_string_lossy().to_string(),
         agent_name: options.agent_name.to_string(),
         agent_did: initialized_identity.identity.did().to_string(),
@@ -624,8 +618,15 @@ pub(crate) async fn write_identity_only_home_metadata(
         tool_package: Some(options.tool_package),
         tool_ceiling,
         tool_root: tool_root.clone(),
-        store_encryption: Some(store_encryption),
+        store_encryption: None,
     };
+    initialize_home_store(
+        options.home,
+        &data_dir,
+        options.store_key_custody,
+        &mut stored,
+    )
+    .await?;
     write_init_config(options.home, &stored)?;
     let runtime_state_reset = if options.reset {
         clear_runtime_state(options.home)?
@@ -648,7 +649,43 @@ pub(crate) async fn write_identity_only_home_metadata(
     })
 }
 
+/// Identity and key custody must survive an error or interruption before
+/// runtime configuration finishes. The caller holds the home's store lock.
+async fn initialize_home_store(
+    home: &Path,
+    data_path: &Path,
+    choice: gents::store_key::StoreKeyCustodyChoice,
+    stored: &mut StoredInitConfig,
+) -> Result<gents::store_key::StoreKey> {
+    let key_file = gents::store_key::home_key_file(home);
+    let record = match read_init_config(home)? {
+        Some(_) => {
+            let key =
+                gents::store_key::open_home_store_key_with_custody(home, data_path, choice).await?;
+            stored.store_encryption =
+                read_init_config(home)?.and_then(|config| config.store_encryption);
+            return Ok(key);
+        }
+        None => gents::store_key::StoreEncryption::prepare(choice, &key_file, data_path)?,
+    };
+    stored.store_encryption = Some(record.clone());
+    write_init_config(home, stored)?;
+    record.initialize(&key_file, data_path)
+}
+
 fn load_or_create_home_identity(options: HomeIdentityOptions<'_>) -> Result<HomeIdentity> {
+    if let Some(stored) = read_init_config(options.home)? {
+        let identity = crate::home_state::load_initialized_home_identity(options.home, &stored)?;
+        let node_identity_did = Some(identity.did().to_string());
+        return Ok(HomeIdentity {
+            identity,
+            key_path: stored.key_path,
+            identity_backend: stored.identity_backend,
+            keychain_label: stored.keychain_label,
+            secure_enclave_label: stored.secure_enclave_label,
+            node_identity_did,
+        });
+    }
     match options.identity_backend {
         IdentityBackendArg::File => {
             let key_path = options

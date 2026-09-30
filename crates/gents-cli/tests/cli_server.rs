@@ -273,7 +273,8 @@ async fn server_error_after_runtime_spawn_drains_the_runtime() -> Result<()> {
     );
 
     let data_dir = home_dir.join(".gents").join("data");
-    let node = gents::store_key::open_home_store_key(&home_dir.join(".gents"), &data_dir)?
+    let node = gents::store_key::open_home_store_key(&home_dir.join(".gents"), &data_dir)
+        .await?
         .encrypt(
             EmbeddedNode::builder()
                 .data_path(&data_dir)

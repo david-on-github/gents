@@ -78,7 +78,8 @@ pub async fn initialized_agent_node(
         .context("loading initialized agent identity")?;
 
     let data = agent_home.join("data");
-    gents::store_key::open_home_store_key(agent_home, &data)?
+    gents::store_key::open_home_store_key(agent_home, &data)
+        .await?
         .encrypt(
             gents::defra_node::EmbeddedNode::builder()
                 .data_path(&data)

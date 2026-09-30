@@ -74,7 +74,11 @@ pub(crate) fn publish_private_key_file(path: &Path, bytes: &[u8]) -> Result<bool
         .with_context(|| format!("syncing staged key for {}", path.display()))?;
 
     match staged.persist_noclobber(path) {
-        Ok(_) => Ok(true),
+        Ok(_) => {
+            #[cfg(unix)]
+            fs::File::open(parent.unwrap_or_else(|| Path::new(".")))?.sync_all()?;
+            Ok(true)
+        }
         Err(error) if error.error.kind() == ErrorKind::AlreadyExists => Ok(false),
         Err(error) => {
             Err(error.error).with_context(|| format!("persisting key to {}", path.display()))
@@ -140,11 +144,24 @@ fn validate_opened_key(file: &File, path: &Path) -> Result<()> {
 #[cfg(unix)]
 fn create_private_parent(parent: &Path) -> Result<()> {
     use std::os::unix::fs::DirBuilderExt;
+    let missing: Vec<_> = parent
+        .ancestors()
+        .take_while(|path| !path.as_os_str().is_empty() && !path.exists())
+        .map(Path::to_path_buf)
+        .collect();
     fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(parent)
-        .with_context(|| format!("creating key directory {}", parent.display()))
+        .with_context(|| format!("creating key directory {}", parent.display()))?;
+    for created in missing {
+        let containing = created
+            .parent()
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        fs::File::open(containing)?.sync_all()?;
+    }
+    Ok(())
 }
 
 #[cfg(not(unix))]

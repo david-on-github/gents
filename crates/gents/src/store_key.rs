@@ -3,9 +3,9 @@
 //! Every persistent Gents store (a gents home's data directory and the
 //! desktop client's store) is opened through DefraDB's `EncryptedStore`
 //! (AES-256-GCM over values; keys stay plaintext) with the 32-byte key this
-//! module owns. Encryption, once on, must stay on, so a store is created
-//! encrypted and a store without a recorded key is refused rather than
-//! converted.
+//! module owns. New stores start encrypted. An existing plaintext store is
+//! copied and verified before replacement; a recorded encrypted store is
+//! never reopened without its key.
 //!
 //! At-rest encryption protects the disk and its backups. The process that
 //! opens the store holds the key, so it never protects a query that node
@@ -32,6 +32,8 @@ use k256::elliptic_curve::zeroize::Zeroizing;
 use serde::{Deserialize, Serialize};
 
 use crate::storage_backend::{IncompatibleStore, IncompatibleStoreKind};
+
+pub mod upgrade;
 
 /// The only store encryption record version this build writes and reads.
 pub const STORE_ENCRYPTION_VERSION: u32 = 1;
@@ -114,33 +116,56 @@ pub struct StoreKeyUnavailable {
 }
 
 impl StoreEncryption {
-    /// Creates a new key under `choice` custody. A file key is published at
-    /// `key_file` and never replaces an existing file.
-    pub fn create(choice: StoreKeyCustodyChoice, key_file: &Path) -> Result<(Self, StoreKey)> {
-        let key = StoreKey::generate();
-        let custody = match choice {
-            StoreKeyCustodyChoice::Keychain => {
-                let keychain_label = new_keychain_label();
-                keychain::store(&keychain_label, key.0.as_ref())?;
-                StoreKeyCustody::MacosKeychain { keychain_label }
-            }
-            StoreKeyCustodyChoice::File => {
-                if !crate::identity::publish_private_key_file(key_file, key.0.as_ref())? {
-                    bail!(
-                        "a store key already exists at {}; it belongs to a store this home no longer records. Re-initialize the home with --dangerously-overwrite to start fresh",
-                        key_file.display()
-                    );
-                }
-                StoreKeyCustody::File
-            }
-        };
-        Ok((
-            Self {
-                version: STORE_ENCRYPTION_VERSION,
-                custody,
+    /// Allocates custody without creating a secret. The owner must durably
+    /// persist this record before calling [`Self::initialize`], while holding
+    /// its store lock, so an interrupted initialization keeps the same key.
+    pub fn prepare(
+        choice: StoreKeyCustodyChoice,
+        key_file: &Path,
+        data_path: &Path,
+    ) -> Result<Self> {
+        reject_unrecorded_store(data_path)?;
+        require_unoccupied_key_file(key_file)?;
+        Ok(Self {
+            version: STORE_ENCRYPTION_VERSION,
+            custody: match choice {
+                StoreKeyCustodyChoice::Keychain => StoreKeyCustody::MacosKeychain {
+                    keychain_label: new_keychain_label(),
+                },
+                StoreKeyCustodyChoice::File => StoreKeyCustody::File,
             },
-            key,
-        ))
+        })
+    }
+
+    /// Materializes a durably recorded key-creation intent, or loads its key.
+    /// Only a definitely absent key with no store may be created. Once a
+    /// MANIFEST exists, a lost key must never be replaced.
+    pub fn initialize(&self, key_file: &Path, data_path: &Path) -> Result<StoreKey> {
+        match self.load(key_file, data_path) {
+            Ok(key) => return Ok(key),
+            Err(error)
+                if error
+                    .downcast_ref::<IncompatibleStore>()
+                    .is_some_and(|store| store.kind == IncompatibleStoreKind::MissingStoreKey) =>
+            {
+                if data_path.join("MANIFEST").exists() {
+                    return Err(error);
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        let key = StoreKey::generate();
+        match &self.custody {
+            StoreKeyCustody::MacosKeychain { keychain_label } => {
+                keychain::store(keychain_label, key.0.as_ref())?;
+            }
+            StoreKeyCustody::File => {
+                if !crate::identity::publish_private_key_file(key_file, key.0.as_ref())? {
+                    return self.load(key_file, data_path);
+                }
+            }
+        }
+        Ok(key)
     }
 
     /// Loads the recorded key for the store at `data_path`. A definitely
@@ -197,21 +222,7 @@ pub fn reject_unrecorded_store(data_path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The key for the store at `data_path` given its owner's `record`: the
-/// recorded key, or a new one under `choice` for a store that does not exist
-/// yet. A store with data and no record is refused. An unrecorded file may
-/// belong to an identity or another store, so it must never be removed or
-/// adopted as an encryption key, including when creating a Keychain key.
-pub fn open_or_create_store_key(
-    record: Option<&StoreEncryption>,
-    choice: StoreKeyCustodyChoice,
-    key_file: &Path,
-    data_path: &Path,
-) -> Result<(StoreEncryption, StoreKey)> {
-    if let Some(record) = record {
-        return Ok((record.clone(), record.load(key_file, data_path)?));
-    }
-    reject_unrecorded_store(data_path)?;
+fn require_unoccupied_key_file(key_file: &Path) -> Result<()> {
     match std::fs::symlink_metadata(key_file) {
         Ok(_) => bail!(
             "unrecorded file at {}; refusing to replace it with a store key",
@@ -223,27 +234,7 @@ pub fn open_or_create_store_key(
                 .with_context(|| format!("inspecting store key {}", key_file.display()))
         }
     }
-    StoreEncryption::create(choice, key_file)
-}
-
-/// [`open_or_create_store_key`] for a gents home, whose record lives in its
-/// `init.json`. A home initialized before at-rest encryption is refused.
-pub fn open_or_create_home_store_key(
-    home_dir: &Path,
-    data_path: &Path,
-    choice: StoreKeyCustodyChoice,
-) -> Result<(StoreEncryption, StoreKey)> {
-    let config = crate::home::read_init_config::<serde_json::Value, serde_json::Value>(home_dir)?;
-    let record = match &config {
-        Some(config) => Some(
-            config
-                .store_encryption
-                .as_ref()
-                .ok_or_else(|| unencrypted(data_path))?,
-        ),
-        None => None,
-    };
-    open_or_create_store_key(record, choice, &home_key_file(home_dir), data_path)
+    Ok(())
 }
 
 /// A gents home's store key file. Agent identity names always end in `.key`,
@@ -252,22 +243,62 @@ pub fn home_key_file(home_dir: &Path) -> PathBuf {
     crate::home::keys_dir(home_dir).join("store.aes256")
 }
 
-/// Loads the key recorded in an initialized home's `init.json` for its store
-/// at `data_path`. A home initialized before at-rest encryption is refused as
-/// [`IncompatibleStoreKind::UnencryptedStore`].
-pub fn open_home_store_key(home_dir: &Path, data_path: &Path) -> Result<StoreKey> {
-    let config = crate::home::read_init_config::<serde_json::Value, serde_json::Value>(home_dir)?
-        .ok_or_else(|| {
-        anyhow::anyhow!(
-            "gents home {} is not initialized; run `gents init --home {}` first",
-            home_dir.display(),
-            home_dir.display()
-        )
-    })?;
-    match config.store_encryption {
-        Some(record) => record.load(&home_key_file(home_dir), data_path),
-        None => Err(unencrypted(data_path)),
+/// Opens a home's store key, upgrading an earlier plaintext store without
+/// changing its documents or identity. The caller must hold the store lock,
+/// then call [`upgrade::finish`] only after its node opens and validates the
+/// encrypted store. Until then, the original plaintext store remains intact.
+pub async fn open_home_store_key(home_dir: &Path, data_path: &Path) -> Result<StoreKey> {
+    open_home_store_key_with_custody(home_dir, data_path, StoreKeyCustodyChoice::default()).await
+}
+
+/// As [`open_home_store_key`], selecting custody only when the home has never
+/// recorded a store key. An interrupted upgrade keeps its recorded choice.
+pub async fn open_home_store_key_with_custody(
+    home_dir: &Path,
+    data_path: &Path,
+    choice: StoreKeyCustodyChoice,
+) -> Result<StoreKey> {
+    let mut config =
+        crate::home::read_init_config::<serde_json::Value, serde_json::Value>(home_dir)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "gents home {} is not initialized; run `gents init --home {}` first",
+                    home_dir.display(),
+                    home_dir.display()
+                )
+            })?;
+    let key_file = home_key_file(home_dir);
+    let pending = upgrade::pending_record(data_path)?;
+    if let Some(record) = config.store_encryption.as_ref() {
+        if let Some(pending) = pending.as_ref() {
+            anyhow::ensure!(
+                pending == record,
+                "store upgrade custody does not match init.json"
+            );
+        }
+        let key = record.initialize(&key_file, data_path)?;
+        return Ok(key);
     }
+    if pending.is_none() && !data_path.join("MANIFEST").exists() {
+        let record = StoreEncryption::prepare(choice, &key_file, data_path)?;
+        config.store_encryption = Some(record.clone());
+        crate::home::write_init_config(home_dir, &config)?;
+        return record.initialize(&key_file, data_path);
+    }
+    let record = match pending {
+        Some(record) => record,
+        None => {
+            let record =
+                StoreEncryption::prepare(choice, &key_file, &upgrade::staging_path(data_path))?;
+            upgrade::begin(data_path, &record)?;
+            record
+        }
+    };
+    let key = record.initialize(&key_file, &upgrade::key_store_path(data_path)?)?;
+    upgrade::encrypt_existing(data_path, &record, &key).await?;
+    config.store_encryption = Some(record);
+    crate::home::write_init_config(home_dir, &config)?;
+    Ok(key)
 }
 
 /// The DefraDB builder for a persistent store at `data_path` encrypted with

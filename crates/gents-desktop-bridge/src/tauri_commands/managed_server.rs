@@ -1300,13 +1300,75 @@ struct HomeResetPlan {
     desktop_root: PathBuf,
     runtime_entries: gents::home::HomeEntries,
     /// The runtime entries a Delete removes: the owned entries, except that
-    /// `keys/` is narrowed to the managed home's own key file (other homes
+    /// `keys/` is narrowed to the managed home's identity and recorded store key (other homes
     /// may keep keys there). Archive moves all of `keys/`: it is recoverable.
     delete_home_entries: Vec<PathBuf>,
     /// `keys/`, removed after a Delete only if nothing else is left in it.
     delete_prunes_keys: Option<PathBuf>,
     /// Present client-state entries in scope.
     client_entries: Vec<PathBuf>,
+    store_keys: Vec<RetiredStoreKey>,
+}
+
+/// Keychain custody outlives filesystem retirement. Its record stays until
+/// deletion succeeds, so a denied Keychain operation can be retried. Archives
+/// retain both the key and its record so the archived store remains readable.
+#[derive(Debug)]
+struct RetiredStoreKey {
+    record: gents::store_key::StoreEncryption,
+    key_file: PathBuf,
+    record_files: Vec<PathBuf>,
+}
+
+fn recorded_store_key(
+    record_file: PathBuf,
+    key_file: PathBuf,
+    home: bool,
+) -> Option<RetiredStoreKey> {
+    let value: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&record_file).ok()?).ok()?;
+    let value = if home {
+        value.get("store_encryption")?.clone()
+    } else {
+        value
+    };
+    Some(RetiredStoreKey {
+        record: serde_json::from_value(value).ok()?,
+        key_file,
+        record_files: vec![record_file],
+    })
+}
+
+fn add_store_key(keys: &mut Vec<RetiredStoreKey>, key: RetiredStoreKey) {
+    if let Some(existing) = keys
+        .iter_mut()
+        .find(|existing| existing.record == key.record && existing.key_file == key.key_file)
+    {
+        existing.record_files.extend(key.record_files);
+    } else {
+        keys.push(key);
+    }
+}
+
+fn upgrade_retirement(
+    data: &Path,
+    key_file: PathBuf,
+) -> Result<(Vec<PathBuf>, Option<RetiredStoreKey>), BridgeError> {
+    let read = || -> anyhow::Result<_> {
+        let entries = gents::store_key::upgrade::retirement_entries(data)?;
+        let key = gents::store_key::upgrade::pending_record(data)?.map(|record| RetiredStoreKey {
+            record,
+            key_file,
+            record_files: vec![gents::store_key::upgrade::journal_path(data)],
+        });
+        Ok((entries, key))
+    };
+    read().map_err(|error| {
+        BridgeError::new(
+            BridgeErrorCode::Backend,
+            format!("Inspecting store upgrade: {error:#}"),
+        )
+    })
 }
 
 /// The managed home's own key file inside its `keys/` directory, as its
@@ -1440,7 +1502,7 @@ fn plan_home_reset(
     if retires_client_state {
         ensure_retirable_root(&desktop_root, "desktop client state", user_home)?;
     }
-    let runtime_entries = match runtime.as_ref() {
+    let mut runtime_entries = match runtime.as_ref() {
         Some((home, _)) => {
             gents::home::home_entries(home, &[desktop_root.clone()]).map_err(|error| {
                 BridgeError::new(
@@ -1468,7 +1530,56 @@ fn plan_home_reset(
     }
     let mut delete_home_entries = Vec::new();
     let mut delete_prunes_keys = None;
+    let mut store_keys = Vec::new();
+    if retires_client_state {
+        let canonical = gents_desktop_core::client::DesktopPaths::from_root(&desktop_root);
+        if let Some(key) = recorded_store_key(
+            canonical.store_encryption_path().to_path_buf(),
+            canonical.store_key_path().to_path_buf(),
+            false,
+        ) {
+            add_store_key(&mut store_keys, key);
+        }
+        let (entries, key) = upgrade_retirement(
+            canonical.node_data_dir(),
+            canonical.store_key_path().to_path_buf(),
+        )?;
+        client_entries.extend(entries);
+        if let Some(key) = key {
+            add_store_key(&mut store_keys, key);
+        }
+    }
     if let Some((home, _)) = runtime.as_ref() {
+        let (entries, upgrade_key) = upgrade_retirement(
+            &gents::home::default_data_dir(home),
+            gents::store_key::home_key_file(home),
+        )?;
+        runtime_entries
+            .retained
+            .retain(|path| !entries.contains(path));
+        runtime_entries.owned.extend(entries);
+        if let Some(key) = recorded_store_key(
+            gents::home::init_config_path(home),
+            gents::store_key::home_key_file(home),
+            true,
+        ) {
+            add_store_key(&mut store_keys, key);
+        }
+        if let Some(key) = upgrade_key {
+            add_store_key(&mut store_keys, key);
+        }
+        for key in store_keys
+            .iter()
+            .filter(|key| key.key_file == gents::store_key::home_key_file(home))
+        {
+            if matches!(key.record.custody, gents::store_key::StoreKeyCustody::File)
+                && std::fs::canonicalize(home.join("keys"))
+                    .is_ok_and(|keys| keys == home.join("keys"))
+                && present(&key.key_file)?
+            {
+                delete_home_entries.push(key.key_file.clone());
+            }
+        }
         let keys = home.join("keys");
         for entry in &runtime_entries.owned {
             if *entry != keys {
@@ -1492,6 +1603,7 @@ fn plan_home_reset(
         delete_home_entries,
         delete_prunes_keys,
         client_entries,
+        store_keys,
     })
 }
 
@@ -1566,6 +1678,9 @@ impl HomeResetPlan {
             .filter(|path| !is_store_lock(path))
         {
             line("retained", path);
+        }
+        for key in &self.store_keys {
+            hasher.update(&serde_json::to_vec(&key.record).expect("store encryption serializes"));
         }
         hasher.finalize().to_hex()[..12].to_string()
     }
@@ -1700,6 +1815,17 @@ impl HomeResetPlan {
         disposition: HomeResetDisposition,
         backup: Option<&Path>,
     ) -> Result<ManagedServerResetResult, BridgeError> {
+        self.retire_with_key_cleanup(disposition, backup, |record, key_file| {
+            record.delete_key(key_file)
+        })
+    }
+
+    fn retire_with_key_cleanup(
+        &self,
+        disposition: HomeResetDisposition,
+        backup: Option<&Path>,
+        mut delete_key: impl FnMut(&gents::store_key::StoreEncryption, &Path) -> anyhow::Result<()>,
+    ) -> Result<ManagedServerResetResult, BridgeError> {
         let retire_as = match (disposition, backup) {
             (HomeResetDisposition::Archive, Some(backup)) => {
                 self.preflight(backup)?;
@@ -1713,8 +1839,66 @@ impl HomeResetPlan {
                 ))
             }
         };
-        let mut retired = gents::home::retire_entries(&self.groups(disposition), retire_as)
+        let keychain_keys: Vec<_> = self
+            .store_keys
+            .iter()
+            .filter(|key| {
+                disposition == HomeResetDisposition::Delete
+                    && matches!(
+                        key.record.custody,
+                        gents::store_key::StoreKeyCustody::MacosKeychain { .. }
+                    )
+            })
+            .collect();
+        let keep_record = |path: &&PathBuf| {
+            !keychain_keys
+                .iter()
+                .any(|key| key.record_files.contains(*path))
+        };
+        let home_entries: Vec<_> = self
+            .home_entries(disposition)
+            .iter()
+            .filter(keep_record)
+            .cloned()
+            .collect();
+        let client_entries: Vec<_> = self
+            .client_entries
+            .iter()
+            .filter(keep_record)
+            .cloned()
+            .collect();
+        let groups = [
+            gents::home::RetireGroup {
+                name: "home",
+                entries: &home_entries,
+            },
+            gents::home::RetireGroup {
+                name: "desktop",
+                entries: &client_entries,
+            },
+        ];
+        let mut retired = gents::home::retire_entries(&groups, retire_as)
             .map_err(|error| BridgeError::new(BridgeErrorCode::Backend, format!("{error:#}")))?;
+        for key in keychain_keys {
+            delete_key(&key.record, &key.key_file).map_err(|error| {
+                BridgeError::new(
+                    BridgeErrorCode::Backend,
+                    format!("Removing retired store key: {error:#}"),
+                )
+            })?;
+            retired.extend(
+                gents::home::retire_entries(
+                    &[gents::home::RetireGroup {
+                        name: "key_record",
+                        entries: &key.record_files,
+                    }],
+                    gents::home::RetireDisposition::Delete,
+                )
+                .map_err(|error| {
+                    BridgeError::new(BridgeErrorCode::Backend, format!("{error:#}"))
+                })?,
+            );
+        }
         if disposition == HomeResetDisposition::Delete {
             if let Some(keys) = self.delete_prunes_keys.as_ref() {
                 // Only an empty directory is removed; another home's key
@@ -4710,6 +4894,267 @@ mod tests {
             std::fs::read_to_string(home.join("keys/other-agent.key")).unwrap(),
             "another home's identity"
         );
+    }
+
+    fn record_reset_store_key(
+        home: &Path,
+        desktop: &gents_desktop_core::client::DesktopPaths,
+        record: &gents::store_key::StoreEncryption,
+    ) {
+        let mut init: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(home.join("init.json")).unwrap()).unwrap();
+        init["store_encryption"] = serde_json::to_value(record).unwrap();
+        write(&home.join("init.json"), &init.to_string());
+        write(
+            desktop.store_encryption_path(),
+            &serde_json::to_string(record).unwrap(),
+        );
+    }
+
+    #[test]
+    fn reset_file_store_keys_allow_fresh_setup_and_archives_remain_readable() {
+        for disposition in [HomeResetDisposition::Delete, HomeResetDisposition::Archive] {
+            let temp = tempfile::tempdir().unwrap();
+            let temp = std::fs::canonicalize(temp.path()).unwrap();
+            let (home, desktop) = dirty_home(&temp);
+            let key_file = gents::store_key::home_key_file(&home);
+            std::fs::remove_file(home.join("data/MANIFEST")).unwrap();
+            std::fs::remove_file(desktop.node_data_dir().join("MANIFEST")).unwrap();
+            let record = gents::store_key::StoreEncryption::prepare(
+                gents::store_key::StoreKeyCustodyChoice::File,
+                &key_file,
+                &home.join("data"),
+            )
+            .unwrap();
+            record_reset_store_key(&home, &desktop, &record);
+            record.initialize(&key_file, &home.join("data")).unwrap();
+            record
+                .initialize(desktop.store_key_path(), desktop.node_data_dir())
+                .unwrap();
+            write(&home.join("data/MANIFEST"), "REGOMAN old lineage");
+            write(
+                &desktop.node_data_dir().join("MANIFEST"),
+                "REGOMAN old client",
+            );
+            write(&home.join("keys/other.key"), "other identity");
+            let plan = plan_home_reset(
+                Some(&home),
+                Some(lineage_refusal(home.join("data"))),
+                None,
+                &desktop,
+                not_the_user_home(),
+                ClientBinding::Unbound,
+            )
+            .unwrap();
+            assert!(plan
+                .preview()
+                .delete_paths
+                .contains(&key_file.to_string_lossy().into_owned()));
+            let backup = plan.backup_path("store-keys").unwrap();
+            plan.retire_with_key_cleanup(
+                disposition,
+                (disposition == HomeResetDisposition::Archive).then_some(backup.as_path()),
+                |_, _| panic!("file custody never calls Keychain cleanup"),
+            )
+            .unwrap();
+            if disposition == HomeResetDisposition::Archive {
+                record
+                    .load(
+                        &backup.join("home/keys/store.aes256"),
+                        &backup.join("home/data"),
+                    )
+                    .unwrap();
+                record
+                    .load(
+                        &backup.join("desktop/store.key"),
+                        &backup.join("desktop/node"),
+                    )
+                    .unwrap();
+            } else {
+                assert_eq!(
+                    std::fs::read_to_string(home.join("keys/other.key")).unwrap(),
+                    "other identity"
+                );
+            }
+            let fresh = gents::store_key::StoreEncryption::prepare(
+                gents::store_key::StoreKeyCustodyChoice::File,
+                &key_file,
+                &home.join("data"),
+            )
+            .expect("fresh setup after retirement");
+            write(&home.join("init.json"), r#"{"agent_name":"fresh"}"#);
+            record_reset_store_key(&home, &desktop, &fresh);
+            for (key_file, data) in [
+                (key_file, home.join("data")),
+                (
+                    desktop.store_key_path().to_path_buf(),
+                    desktop.node_data_dir().to_path_buf(),
+                ),
+            ] {
+                fresh
+                    .initialize(&key_file, &data)
+                    .expect("fresh setup after retirement");
+            }
+        }
+    }
+
+    #[test]
+    fn reset_keychain_custody_keeps_archives_and_retryable_deletion_records() {
+        for disposition in [HomeResetDisposition::Delete, HomeResetDisposition::Archive] {
+            let temp = tempfile::tempdir().unwrap();
+            let temp = std::fs::canonicalize(temp.path()).unwrap();
+            let (home, desktop) = dirty_home(&temp);
+            let record = gents::store_key::StoreEncryption {
+                version: gents::store_key::STORE_ENCRYPTION_VERSION,
+                custody: gents::store_key::StoreKeyCustody::MacosKeychain {
+                    keychain_label: "test-only-label".into(),
+                },
+            };
+            record_reset_store_key(&home, &desktop, &record);
+            let plan = plan_home_reset(
+                Some(&home),
+                Some(lineage_refusal(home.join("data"))),
+                None,
+                &desktop,
+                not_the_user_home(),
+                ClientBinding::Unbound,
+            )
+            .unwrap();
+            let backup = plan.backup_path("keychain").unwrap();
+            if disposition == HomeResetDisposition::Archive {
+                plan.retire_with_key_cleanup(disposition, Some(&backup), |_, _| {
+                    panic!("archive must keep Keychain keys")
+                })
+                .unwrap();
+                assert!(backup.join("home/init.json").exists());
+                assert!(backup.join("desktop/store-encryption.json").exists());
+                continue;
+            }
+            assert!(plan
+                .retire_with_key_cleanup(disposition, None, |_, _| anyhow::bail!("Keychain locked"))
+                .is_err());
+            assert!(!home.join("data").exists());
+            assert!(!desktop.node_data_dir().exists());
+            assert!(home.join("init.json").exists());
+            assert!(desktop.store_encryption_path().exists());
+            let retry = plan_home_reset(
+                Some(&home),
+                Some(lineage_refusal(home.join("data"))),
+                Some(lineage_refusal(desktop.node_data_dir().to_path_buf())),
+                &desktop,
+                not_the_user_home(),
+                ClientBinding::Unbound,
+            )
+            .unwrap();
+            let mut deleted = Vec::new();
+            retry
+                .retire_with_key_cleanup(disposition, None, |record, path| {
+                    deleted.push((record.clone(), path.to_path_buf()));
+                    Ok(())
+                })
+                .unwrap();
+            assert_eq!(deleted.len(), 2);
+            assert!(deleted.iter().all(|(deleted, _)| deleted == &record));
+            assert!(!home.join("init.json").exists());
+            assert!(!desktop.store_encryption_path().exists());
+        }
+    }
+
+    #[test]
+    fn reset_pending_upgrade_retires_its_artifacts_and_recorded_custody_together() {
+        use gents::store_key::{upgrade, StoreEncryption, StoreKeyCustodyChoice};
+        for choice in [StoreKeyCustodyChoice::File, StoreKeyCustodyChoice::Keychain] {
+            for disposition in [HomeResetDisposition::Delete, HomeResetDisposition::Archive] {
+                let temp = tempfile::tempdir().unwrap();
+                let temp = std::fs::canonicalize(temp.path()).unwrap();
+                let (home, desktop) = dirty_home(&temp);
+                write(&home.join("keys/other.key"), "keep");
+                let stores = [
+                    (home.join("data"), gents::store_key::home_key_file(&home)),
+                    (
+                        desktop.node_data_dir().to_path_buf(),
+                        desktop.store_key_path().to_path_buf(),
+                    ),
+                ];
+                for (data, key_file) in &stores {
+                    let record =
+                        StoreEncryption::prepare(choice, key_file, &upgrade::staging_path(data))
+                            .unwrap();
+                    upgrade::begin(data, &record).unwrap();
+                    if choice == StoreKeyCustodyChoice::File {
+                        record
+                            .initialize(key_file, &upgrade::key_store_path(data).unwrap())
+                            .unwrap();
+                    }
+                    write(&upgrade::staging_path(data).join("partial-copy"), "staged");
+                }
+                let plan = plan_home_reset(
+                    Some(&home),
+                    Some(lineage_refusal(home.join("data"))),
+                    None,
+                    &desktop,
+                    not_the_user_home(),
+                    ClientBinding::Unbound,
+                )
+                .unwrap();
+                let preview = plan.preview();
+                for (data, _) in &stores {
+                    for entry in upgrade::retirement_entries(data).unwrap() {
+                        let path = entry.to_string_lossy().into_owned();
+                        assert!(preview.planned_paths.contains(&path));
+                        assert!(preview.delete_paths.contains(&path));
+                        assert!(!preview.retained_paths.contains(&path));
+                    }
+                }
+                let backup = plan.backup_path("pending-upgrade").unwrap();
+                let mut deleted_keys = 0;
+                plan.retire_with_key_cleanup(
+                    disposition,
+                    (disposition == HomeResetDisposition::Archive).then_some(backup.as_path()),
+                    |_, _| {
+                        deleted_keys += 1;
+                        Ok(())
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    deleted_keys,
+                    if choice == StoreKeyCustodyChoice::Keychain
+                        && disposition == HomeResetDisposition::Delete
+                    {
+                        2
+                    } else {
+                        0
+                    }
+                );
+                for (data, _) in &stores {
+                    assert!(upgrade::pending_record(data).unwrap().is_none());
+                    assert!(!upgrade::staging_path(data).exists());
+                }
+                if disposition == HomeResetDisposition::Archive {
+                    for (group, name) in [("home", "data"), ("desktop", "node")] {
+                        let archived = backup.join(group).join(name);
+                        let record = upgrade::pending_record(&archived).unwrap().unwrap();
+                        assert!(upgrade::staging_path(&archived)
+                            .join("partial-copy")
+                            .exists());
+                        if choice == StoreKeyCustodyChoice::File {
+                            let key = if group == "home" {
+                                backup.join("home/keys/store.aes256")
+                            } else {
+                                backup.join("desktop/store.key")
+                            };
+                            record.load(&key, &archived).unwrap();
+                        }
+                    }
+                } else {
+                    assert_eq!(
+                        std::fs::read_to_string(home.join("keys/other.key")).unwrap(),
+                        "keep"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

@@ -500,6 +500,8 @@ pub(crate) fn macos_keychain_set(service: &str, label: &str, secret: &[u8]) -> R
 }
 
 /// Removes a login-keychain generic password; an absent one is not an error.
+/// `security-framework` discards `SecKeychainItemDelete`'s status, so deletion
+/// is complete only after a fresh lookup returns `errSecItemNotFound`.
 #[cfg(target_os = "macos")]
 pub(crate) fn macos_keychain_delete(service: &str, label: &str) -> Result<()> {
     let keychain = security_framework::os::macos::keychain::SecKeychain::default()
@@ -507,7 +509,14 @@ pub(crate) fn macos_keychain_delete(service: &str, label: &str) -> Result<()> {
     match keychain.find_generic_password(service, label) {
         Ok((_, item)) => {
             item.delete();
-            Ok(())
+            match macos_keychain_find(service, label)? {
+                Err(ERR_SEC_ITEM_NOT_FOUND) => Ok(()),
+                Err(code) => Err(anyhow!("macOS Keychain error {code}"))
+                    .with_context(|| format!("verifying deletion of Keychain item {label}")),
+                Ok(_) => anyhow::bail!(
+                    "Keychain item {label} is still present after deletion; its custody record must be retained"
+                ),
+            }
         }
         Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
         Err(error) => Err(anyhow::Error::from(error)),

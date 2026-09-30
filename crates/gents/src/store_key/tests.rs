@@ -46,8 +46,15 @@ fn files_containing(root: &Path, needle: &[u8]) -> Vec<PathBuf> {
 
 fn file_key(temp: &tempfile::TempDir) -> (StoreEncryption, StoreKey, PathBuf) {
     let key_file = home_key_file(temp.path());
-    let (record, key) =
-        StoreEncryption::create(StoreKeyCustodyChoice::File, &key_file).expect("file store key");
+    let data = temp.path().join("data");
+    let record = StoreEncryption::prepare(StoreKeyCustodyChoice::File, &key_file, &data).unwrap();
+    let record_path = temp.path().join("store-encryption.json");
+    std::fs::write(&record_path, serde_json::to_vec(&record).unwrap()).unwrap();
+    std::fs::File::open(record_path)
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    let key = record.initialize(&key_file, &data).expect("file store key");
     (record, key, key_file)
 }
 
@@ -124,7 +131,12 @@ fn a_new_file_key_never_replaces_an_existing_one() {
     let temp = tempfile::tempdir().unwrap();
     let (_record, _key, key_file) = file_key(&temp);
     let original = std::fs::read(&key_file).unwrap();
-    assert!(StoreEncryption::create(StoreKeyCustodyChoice::File, &key_file).is_err());
+    assert!(StoreEncryption::prepare(
+        StoreKeyCustodyChoice::File,
+        &key_file,
+        &temp.path().join("data")
+    )
+    .is_err());
     assert_eq!(std::fs::read(&key_file).unwrap(), original);
     #[cfg(unix)]
     {
@@ -132,6 +144,32 @@ fn a_new_file_key_never_replaces_an_existing_one() {
         let mode = std::fs::metadata(&key_file).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }
+}
+
+#[test]
+fn recorded_creation_intent_resumes_without_replacing_a_stores_missing_key() {
+    let temp = tempfile::tempdir().unwrap();
+    let key_file = home_key_file(temp.path());
+    let data = temp.path().join("data");
+    let record = StoreEncryption::prepare(StoreKeyCustodyChoice::File, &key_file, &data)
+        .expect("prepare custody without creating a key");
+    assert!(!key_file.exists());
+    let bytes = serde_json::to_vec(&record).unwrap();
+    let restored: StoreEncryption = serde_json::from_slice(&bytes).unwrap();
+    restored.initialize(&key_file, &data).unwrap();
+    let key_bytes = std::fs::read(&key_file).unwrap();
+    restored.initialize(&key_file, &data).unwrap();
+    assert_eq!(std::fs::read(&key_file).unwrap(), key_bytes);
+
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("MANIFEST"), b"store exists").unwrap();
+    std::fs::remove_file(&key_file).unwrap();
+    let error = restored.initialize(&key_file, &data).unwrap_err();
+    assert_eq!(
+        incompatible_store(&error, &data).unwrap().kind,
+        IncompatibleStoreKind::MissingStoreKey
+    );
+    assert!(!key_file.exists());
 }
 
 /// Only `errSecItemNotFound` proves the key is gone. A locked keychain or a
@@ -160,8 +198,8 @@ fn only_a_definitely_absent_keychain_item_is_a_missing_key() {
     }
 }
 
-#[test]
-fn a_home_initialized_without_store_encryption_is_refused_as_unencrypted() {
+#[tokio::test]
+async fn a_plaintext_home_upgrades_without_changing_identity_or_documents() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");
     std::fs::create_dir_all(&home).unwrap();
@@ -169,21 +207,49 @@ fn a_home_initialized_without_store_encryption_is_refused_as_unencrypted() {
         crate::home::init_config_path(&home),
         serde_json::to_vec(&serde_json::json!({
             "home": home, "agent_name": "a", "agent_did": "did:key:zA",
-            "key_path": null, "tool_ceiling": "readonly", "tool_root": null
+            "key_path": "identity.key", "tool_ceiling": "readonly", "tool_root": null
         }))
         .unwrap(),
     )
     .unwrap();
     let data = crate::home::default_data_dir(&home);
+    let plain = defra_node::EmbeddedNode::builder()
+        .data_path(&data)
+        .with_storage_backend(defra_node::StorageBackend::Regolith)
+        .build()
+        .await
+        .unwrap();
+    write_credential(&plain).await;
+    plain.shutdown().await;
+    drop(plain);
 
-    let error = open_home_store_key(&home, &data).unwrap_err();
-    let store = incompatible_store(&error, &data).expect("typed refusal");
-    assert_eq!(store.kind, IncompatibleStoreKind::UnencryptedStore);
-    assert!(store.kind.is_older());
-    assert!(
-        error.to_string().contains("--dangerously-overwrite"),
-        "{error}"
+    let key = open_home_store_key_with_custody(&home, &data, StoreKeyCustodyChoice::File)
+        .await
+        .unwrap();
+    let config = crate::home::read_init_config::<String, String>(&home)
+        .unwrap()
+        .unwrap();
+    assert_eq!(config.agent_did, "did:key:zA");
+    assert_eq!(config.key_path.as_deref(), Some("identity.key"));
+    assert!(config.store_encryption.is_some());
+    assert!(files_containing(&data, REFRESH_TOKEN.as_bytes()).is_empty());
+    let encrypted = persistent_builder(&data, &key)
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    assert_eq!(
+        read_refresh_token(&encrypted).await.as_deref(),
+        Some(REFRESH_TOKEN)
     );
+    assert!(upgrade::pending_record(&data).unwrap().is_some());
+    upgrade::finish(&data).unwrap();
+    assert!(upgrade::pending_record(&data).unwrap().is_none());
+    encrypted.shutdown().await;
+    drop(encrypted);
+    open_home_store_key(&home, &data)
+        .await
+        .expect("recorded custody survives reopening");
 }
 
 #[tokio::test]
@@ -263,8 +329,8 @@ fn an_unrecorded_identity_file_is_preserved_for_every_custody_choice() {
     crate::identity::load_or_create_file_identity(&key_file).unwrap();
     let original = std::fs::read(&key_file).unwrap();
     for choice in [StoreKeyCustodyChoice::File, StoreKeyCustodyChoice::Keychain] {
-        let error = open_or_create_store_key(None, choice, &key_file, &temp.path().join("data"))
-            .unwrap_err();
+        let error =
+            StoreEncryption::prepare(choice, &key_file, &temp.path().join("data")).unwrap_err();
         assert!(error.to_string().contains("refusing to replace"), "{error}");
         assert_eq!(std::fs::read(&key_file).unwrap(), original);
         crate::identity::load_file_identity(&key_file).unwrap();

@@ -865,15 +865,8 @@ mod tests {
         assert!(opened.load(std::sync::atomic::Ordering::SeqCst));
     }
 
-    /// A desktop state whose principal key an older build wrote with ambient
-    /// (0644) permissions fails start as an incompatible local store, before
-    /// any node or peer directory is opened, and the key is left as it was.
-    /// An earlier release's desktop client store is plaintext and may hold
-    /// credential collections it subscribed to. It is refused as unencrypted
-    /// through the same typed refusal the reset flow retires, and no key is
-    /// created for it.
     #[tokio::test]
-    async fn an_unencrypted_old_client_store_fails_start_as_an_incompatible_local_store() {
+    async fn a_plaintext_client_upgrade_returns_a_started_core_with_lifecycle_exclusion() {
         let temp = tempfile::tempdir().expect("tempdir");
         let paths = gents_desktop_core::client::DesktopPaths::from_root(temp.path());
         let legacy = gents::defra_node::EmbeddedNode::builder()
@@ -885,26 +878,26 @@ mod tests {
         legacy.shutdown().await;
         drop(legacy);
 
-        let lifecycle = Arc::new(tokio::sync::Mutex::new(())).lock_owned().await;
-        let Err((error, store)) = start_client_core_async(
+        let lifecycle_owner = Arc::new(tokio::sync::Mutex::new(()));
+        let lifecycle = Arc::clone(&lifecycle_owner).lock_owned().await;
+        let (core, lifecycle) = start_client_core_async(
             paths.clone(),
             gents::store_key::StoreKeyCustodyChoice::File,
             lifecycle,
         )
         .await
-        else {
-            panic!("an unencrypted store must not start the client");
-        };
-        assert_eq!(error.code, BridgeErrorCode::IncompatibleLocalStore);
-        let store = store.expect("typed refusal");
-        assert_eq!(
-            store.kind,
-            gents::storage_backend::IncompatibleStoreKind::UnencryptedStore
+        .expect("plaintext upgrade must complete through the native startup boundary");
+        assert!(
+            lifecycle_owner.try_lock().is_err(),
+            "successful startup transfers lifecycle exclusion with the core"
         );
-        assert!(store.kind.is_older(), "the reset may offer deletion");
-        assert_eq!(store.data_path, paths.node_data_dir());
-        assert!(!paths.store_encryption_path().exists());
-        assert!(!paths.store_key_path().exists());
+        assert!(paths.store_encryption_path().is_file());
+        assert!(paths.store_key_path().is_file());
+        assert!(
+            gents::store_key::upgrade::pending_record(paths.node_data_dir())
+                .unwrap()
+                .is_none()
+        );
         for entry in [paths.store_encryption_path(), paths.store_key_path()] {
             assert!(
                 paths
@@ -915,8 +908,15 @@ mod tests {
                 entry.display()
             );
         }
+        core.shutdown().await.expect("shutdown upgraded client");
+        drop(core);
+        drop(lifecycle);
+        assert!(lifecycle_owner.try_lock().is_ok());
     }
 
+    /// A desktop state whose principal key an older build wrote with ambient
+    /// (0644) permissions fails start as an incompatible local store, before
+    /// any node or peer directory is opened, and the key is left as it was.
     #[cfg(unix)]
     #[tokio::test]
     async fn an_insecure_old_client_key_fails_start_as_an_incompatible_local_store() {

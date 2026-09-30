@@ -339,6 +339,7 @@ enum P2PSupervisorCommand {
 }
 
 pub struct ClientCore {
+    store_lock: Mutex<Option<gents::home::StoreLock>>,
     paths: DesktopPaths,
     options: ClientCoreOptions,
     principal: PrincipalIdentity,
@@ -661,6 +662,7 @@ impl ClientCore {
         }
         tracing::info!("client core shutdown: stopping embedded node");
         self.node.shutdown().await;
+        self.store_lock.lock().await.take();
         tracing::info!("client core shutdown: complete");
         Ok(())
     }

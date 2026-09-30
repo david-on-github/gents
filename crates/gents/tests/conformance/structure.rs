@@ -127,6 +127,10 @@ fn model_homes() -> BTreeMap<&'static str, Home> {
             WorkspaceTest("crates/gents/src/admission/stream_guard/conformance.rs"),
         ),
         (
+            "StoreEncryptionUpgrade",
+            WorkspaceTest("crates/gents/src/store_key/upgrade/tests.rs"),
+        ),
+        (
             "StreamingResponse",
             Module("conformance/streaming_compaction.rs"),
         ),

@@ -130,8 +130,11 @@ pub fn run() {
                 }
             }
         });
+    let context = tauri::generate_context!();
+    #[cfg(all(feature = "native-e2e", debug_assertions, desktop))]
+    let context = native_local_e2e_context(context);
     builder
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building tauri application")
         .run(|app, event| {
             #[cfg(target_os = "macos")]
@@ -147,6 +150,29 @@ pub fn run() {
         });
 }
 
+#[cfg(all(feature = "native-e2e", debug_assertions, desktop))]
+fn native_local_e2e_context(mut context: tauri::Context<tauri::Wry>) -> tauri::Context<tauri::Wry> {
+    if std::env::var("GENTS_NATIVE_E2E").ok().as_deref() == Some("1")
+        && std::env::var("GENTS_E2E_LOCAL_MODEL").is_ok()
+    {
+        let value = std::env::var("GENTS_E2E_WEBVIEW_STORE_ID")
+            .expect("GENTS_E2E_WEBVIEW_STORE_ID is required for isolated native local E2E");
+        assert!(
+            value.len() == 32 && value.is_ascii(),
+            "WebView store ID must contain 32 hex digits"
+        );
+        let mut identifier = [0; 16];
+        for (index, byte) in identifier.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&value[index * 2..index * 2 + 2], 16)
+                .expect("WebView store ID must contain 32 hex digits");
+        }
+        for window in &mut context.config_mut().app.windows {
+            window.data_store_identifier = Some(identifier);
+        }
+    }
+    context
+}
+
 /// A second copy of the app would share this one's service label, service
 /// definition and data. Launching it again focuses the running app instead.
 #[cfg(desktop)]
@@ -155,7 +181,7 @@ fn single_instance<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
 }
 
 fn platform_bridge_config() -> BridgeConfig {
-    BridgeConfig {
+    let config = BridgeConfig {
         home: HomePolicy::Default,
         bootstrap: platform_bootstrap_policy(),
         app_meta: AppMeta {
@@ -165,6 +191,39 @@ fn platform_bridge_config() -> BridgeConfig {
         snapshot_grants: SnapshotGrants::all(),
         managed_server: platform_managed_server_policy(),
         store_key_custody: gents::store_key::StoreKeyCustodyChoice::default(),
+    };
+    #[cfg(all(feature = "native-e2e", debug_assertions, desktop))]
+    let config = native_local_e2e_config(config);
+    config
+}
+
+#[cfg(all(feature = "native-e2e", debug_assertions, desktop))]
+fn native_local_e2e_config(config: BridgeConfig) -> BridgeConfig {
+    if std::env::var("GENTS_NATIVE_E2E").ok().as_deref() != Some("1")
+        || std::env::var("GENTS_E2E_LOCAL_MODEL").is_err()
+    {
+        return config;
+    }
+    let path = |name| {
+        let value = std::env::var_os(name)
+            .unwrap_or_else(|| panic!("{name} is required for local native E2E"));
+        let path = std::path::PathBuf::from(value);
+        assert!(path.is_absolute(), "{name} must be absolute");
+        path
+    };
+    BridgeConfig {
+        home: HomePolicy::FixedRoot(path("GENTS_E2E_DESKTOP_HOME")),
+        bootstrap: BootstrapPolicy::LocalRuntimeAllowed {
+            agent_home: AgentHomePolicy::Fixed(path("GENTS_E2E_AGENT_HOME")),
+        },
+        store_key_custody: if std::env::var("GENTS_E2E_FILE_STORE_KEYS").ok().as_deref()
+            == Some("1")
+        {
+            gents::store_key::StoreKeyCustodyChoice::File
+        } else {
+            config.store_key_custody
+        },
+        ..config
     }
 }
 

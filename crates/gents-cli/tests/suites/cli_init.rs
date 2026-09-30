@@ -577,7 +577,7 @@ async fn init_openrouter_preset_applies_hosted_defaults() -> Result<()> {
 }
 
 #[test]
-fn init_hosted_preset_without_default_requires_model_name() -> Result<()> {
+fn init_hosted_preset_error_can_retry_with_the_same_identity_and_store_key() -> Result<()> {
     let tempdir = tempfile::tempdir().context("creating tempdir")?;
     let home_dir = tempdir.path().join("home");
     fs::create_dir_all(&home_dir)?;
@@ -587,6 +587,7 @@ fn init_hosted_preset_without_default_requires_model_name() -> Result<()> {
         .env("RUST_LOG", "error")
         .arg("init")
         .args(["--store-key-custody", "file"])
+        .args(["--agent-name", "retry-original-identity"])
         .arg("--backend-preset")
         .arg("openai")
         .output()
@@ -598,6 +599,20 @@ fn init_hosted_preset_without_default_requires_model_name() -> Result<()> {
         stderr.contains("--model-name is required for --backend-preset openai"),
         "expected missing model error, got:\n{stderr}"
     );
+
+    let runtime_home = home_dir.join(".gents");
+    let stored = read_json_file(&runtime_home.join("init.json"))?;
+    let agent_did = stored["agent_did"].as_str().context("recorded identity")?;
+    let identity_path = stored["key_path"].as_str().context("recorded key path")?;
+    let identity_bytes = fs::read(identity_path)?;
+    let store_key_path = gents::store_key::home_key_file(&runtime_home);
+    let store_key_bytes = fs::read(&store_key_path)?;
+    assert!(runtime_home.join("data/MANIFEST").exists());
+
+    let retried = run_init_json(&home_dir, &["--model-name", "retry-model"])?;
+    assert_eq!(retried["agent_did"], agent_did);
+    assert_eq!(fs::read(identity_path)?, identity_bytes);
+    assert_eq!(fs::read(store_key_path)?, store_key_bytes);
 
     Ok(())
 }
@@ -987,11 +1002,8 @@ async fn readiness_wait_survives_preflight_listener_closing_before_server_start(
     result
 }
 
-/// `gents init` records the store key it created, re-init reuses it, and a
-/// home an earlier release initialized (no recorded key) is refused with the
-/// store-refusal exit status rather than opened or converted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn init_records_store_encryption_and_a_legacy_home_is_refused() -> Result<()> {
+async fn init_reuses_recorded_store_custody_and_refuses_an_unrecorded_key() -> Result<()> {
     let tempdir = tempfile::tempdir().context("creating tempdir")?;
     let home_dir = tempdir.path().join("home");
     fs::create_dir_all(&home_dir)?;
@@ -1023,14 +1035,13 @@ async fn init_records_store_encryption_and_a_legacy_home_is_refused() -> Result<
         .args(["config", "export", "--root"])
         .arg(tempdir.path().join("export"))
         .output()
-        .context("opening a legacy home")?;
+        .context("opening a home with unrecorded store custody")?;
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(
-        output.status.code(),
-        Some(gents_server::native_service::INCOMPATIBLE_STORE_EXIT_CODE),
-        "{stderr}"
-    );
-    assert!(stderr.contains("not encrypted at rest"), "{stderr}");
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("unrecorded file"), "{stderr}");
+    assert!(stderr.contains("refusing to replace"), "{stderr}");
+    assert_eq!(fs::read(&key_file)?, key);
+    assert_eq!(read_json_file(&config_path)?, legacy);
     assert!(
         !home.join("data/MANIFEST").exists(),
         "the store is never opened"
