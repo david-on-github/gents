@@ -719,9 +719,16 @@ async fn target_id_fills_a_positional_id() {
     );
     let unsupported = refused(&tools, json!({"argv":["tools","get"],"target_id":"x"})).await;
     assert!(
-        unsupported.contains(r#"target_id is not accepted by \"tools get\"; put the ID in argv"#),
+        unsupported.contains("target_id is not accepted by tools")
+            && unsupported.contains("options.behavior"),
         "{unsupported}"
     );
+    let recovered = ok(
+        &tools,
+        json!({"argv":["tools","get"],"options":{"behavior":"beh-test"}}),
+    )
+    .await;
+    assert_eq!(recovered["document"]["tools_id"], "beh-test:tools");
 }
 
 /// Ladder finding: an unknown plan collection is named and classified.
