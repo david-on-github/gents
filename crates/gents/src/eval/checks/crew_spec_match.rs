@@ -37,10 +37,14 @@ use crate::eval::runner::executor::{CaptureResult, StageEvidence};
 ///   and each expectation holds on it, on the Context it selects and on the
 ///   Tools that Context selects. Optional `datastore` follows selected surfaces,
 ///   comparing exact create/query collection sets. `caller_fields` requires model-
-///   supplied required create fields; `lookup_by` requires queries usable with
+///   supplied required create fields; `query_fields` requires returned columns;
+///   `lookup_by` requires queries usable with
 ///   that key alone. `called_create`/`called_query` require successful calls to
 ///   the selected tools. Optional `delegates` checks the exact local behavior set
 ///   reached through selected subagent targets. Both reject unresolved references.
+///   With `source_match`, `behavior_id` names a role rather than a stored ID:
+///   the selector must identify one behavior, distinct from other named roles.
+///   Delegate expectations resolve those role names to the selected stored IDs.
 /// - `templates`: `[{capture, key, id, fields: [field], allowed: [name],
 ///   category?}]`: every `{{ doc.NAME }}` in each present template field of
 ///   that row names an allowed field (one requirement per field present).
@@ -158,6 +162,8 @@ struct Agents {
 struct AgentSpec {
     behavior_id: String,
     #[serde(default)]
+    source_match: Option<Expectation>,
+    #[serde(default)]
     category: Option<String>,
     #[serde(default)]
     behavior: Vec<Expectation>,
@@ -181,6 +187,8 @@ struct DatastoreSpec {
     query: BTreeSet<String>,
     #[serde(default)]
     caller_fields: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    query_fields: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     lookup_by: Option<String>,
     #[serde(default)]
@@ -342,7 +350,7 @@ impl Check for CrewSpecMatch {
     }
 
     fn version(&self) -> &'static str {
-        "5"
+        "6"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -411,10 +419,11 @@ impl Check for CrewSpecMatch {
                                 "type": "object",
                                 "properties": {
                                     "behavior_id": {"type": "string"}, "category": category,
+                                    "source_match": expectation,
                                     "behavior": expectations, "context": expectations,
                                     "tools": expectations,
                                     "datastore": {"type":"object", "properties": {
-                                        "surfaces":{"type":"string"}, "create":strings, "query":strings, "caller_fields":{"type":"object", "additionalProperties":strings}, "lookup_by":{"type":"string"}, "called_create":strings, "called_query":strings
+                                        "surfaces":{"type":"string"}, "create":strings, "query":strings, "caller_fields":{"type":"object", "additionalProperties":strings}, "query_fields":{"type":"object", "additionalProperties":strings}, "lookup_by":{"type":"string"}, "called_create":strings, "called_query":strings
                                     }, "required":["surfaces","create","query"], "additionalProperties":false},
                                     "delegates": {"type":"object", "properties": {
                                         "targets":{"type":"string"}, "behaviors":strings
@@ -574,7 +583,47 @@ impl Check for CrewSpecMatch {
             let behaviors = rows(&agents.behaviors).unwrap_or_default();
             let contexts = rows(&agents.contexts).unwrap_or_default();
             let tools = rows(&agents.tools).unwrap_or_default();
-            for spec in agents.expect {
+            let mut roles = BTreeMap::new();
+            let mut selected = Vec::new();
+            for mut spec in agents.expect {
+                let behavior = if let Some(selector) = spec.source_match.take() {
+                    let (field, matcher) = match test(selector) {
+                        Ok(test) => test,
+                        Err(detail) => return grader("bad_params", detail),
+                    };
+                    let mut matches = behaviors
+                        .iter()
+                        .filter(|row| matcher.holds(&lookup(row, &field)));
+                    let first = matches.next();
+                    let unique = if matches.next().is_none() {
+                        first
+                    } else {
+                        None
+                    };
+                    let id = unique
+                        .and_then(|row| row.get("behavior_id"))
+                        .and_then(Value::as_str);
+                    if roles.insert(spec.behavior_id.clone(), id).is_some() {
+                        return grader("bad_params", "duplicate named behavior role");
+                    }
+                    unique
+                } else {
+                    find(behaviors, "behavior_id", &spec.behavior_id)
+                };
+                selected.push((spec, behavior));
+            }
+            let mut counts = BTreeMap::new();
+            for id in roles.values().flatten() {
+                *counts.entry(*id).or_insert(0) += 1;
+            }
+            for id in roles.values_mut() {
+                if id.is_some_and(|id| counts[&id] != 1) {
+                    *id = None;
+                }
+            }
+            for (spec, behavior) in selected {
+                let behavior =
+                    behavior.filter(|_| roles.get(&spec.behavior_id).is_none_or(Option::is_some));
                 let category = spec.category.as_deref();
                 let (behavior_tests, context_tests, tools_tests) =
                     match (tests(spec.behavior), tests(spec.context), tests(spec.tools)) {
@@ -583,7 +632,6 @@ impl Check for CrewSpecMatch {
                             return grader("bad_params", detail)
                         }
                     };
-                let behavior = find(behaviors, "behavior_id", &spec.behavior_id);
                 let context = behavior
                     .and_then(|row| row.get("context_id").and_then(Value::as_str))
                     .and_then(|id| find(contexts, "context_id", id));
@@ -658,6 +706,13 @@ impl Check for CrewSpecMatch {
                                             creates.insert(d.collection);
                                         }
                                         SurfaceToolDecl::Query(d) => {
+                                            if let Some(fields) =
+                                                expected.query_fields.get(&d.collection)
+                                            {
+                                                valid &= fields
+                                                    .iter()
+                                                    .all(|field| d.fields.contains(field));
+                                            }
                                             if let Some(key) = &expected.lookup_by {
                                                 valid &= d.fields.contains(key)
                                                     && d.filter_fields.iter().any(|f| {
@@ -691,7 +746,11 @@ impl Check for CrewSpecMatch {
                     let enabled =
                         tools_row.map(|t| lookup(t, "subagents.enabled")) == Some(json!(true));
                     let mut actual = BTreeSet::new();
-                    let mut valid = enabled;
+                    let mut valid = enabled
+                        && expected
+                            .behaviors
+                            .iter()
+                            .all(|name| roles.get(name).is_none_or(Option::is_some));
                     if let Some(Value::Array(ids)) = selected {
                         for reference in ids {
                             let target = reference.as_str().and_then(|reference| {
@@ -707,10 +766,18 @@ impl Check for CrewSpecMatch {
                                 .and_then(Value::as_str)
                             {
                                 if let Some(name) =
-                                    expected.behaviors.iter().find(|name| is_id(behavior, name))
+                                    expected
+                                        .behaviors
+                                        .iter()
+                                        .find(|name| match roles.get(*name) {
+                                            Some(Some(id)) => behavior == *id,
+                                            Some(None) => false,
+                                            None => is_id(behavior, name),
+                                        })
                                 {
                                     actual.insert(name.clone());
                                 } else {
+                                    valid = false;
                                     actual.insert(behavior.to_string());
                                 }
                             } else {
@@ -980,7 +1047,7 @@ mod tests {
 
     #[test]
     fn selected_datastore_contract_rejects_runtime_keys_decoys_and_missing_calls() {
-        let params = json!({"agents":{"behaviors":"behaviors","contexts":"contexts","tools":"tools","expect":[{"behavior_id":"worker-a","datastore":{"surfaces":"surfaces","create":["Result"],"query":["Result"],"caller_fields":{"Result":["correlation","result"]},"lookup_by":"correlation","called_create":["Result"],"called_query":["Result"]}}]}});
+        let params = json!({"agents":{"behaviors":"behaviors","contexts":"contexts","tools":"tools","expect":[{"behavior_id":"worker-a","datastore":{"surfaces":"surfaces","create":["Result"],"query":["Result"],"caller_fields":{"Result":["correlation","result"]},"query_fields":{"Result":["correlation","result"]},"lookup_by":"correlation","called_create":["Result"],"called_query":["Result"]}}]}});
         let mut e = home();
         let tool =
             json!({"tools_id":"t1","datastore":{"datastore_tool_surface_ids":["arbitrary-id"]}});
@@ -1017,7 +1084,7 @@ mod tests {
         );
         let good = CrewSpecMatch.evaluate(&params, &e);
         assert_eq!(good.score_bp, Some(10000), "{}", good.raw);
-        for mutation in 0..5 {
+        for mutation in 0..6 {
             let mut bad = e.clone();
             match mutation {
                 0 => {
@@ -1047,8 +1114,16 @@ mod tests {
                         CaptureResult::Documents { rows: vec![s] },
                     );
                 }
-                _ => {
+                4 => {
                     bad.tool_calls[0].status = Some("failed".into());
+                }
+                _ => {
+                    let mut s = surface.clone();
+                    s["entries"][1]["fields"] = json!(["correlation"]);
+                    bad.captures.insert(
+                        "surfaces".into(),
+                        CaptureResult::Documents { rows: vec![s] },
+                    );
                 }
             }
             let v = CrewSpecMatch.evaluate(&params, &bad);
@@ -1056,6 +1131,82 @@ mod tests {
                 v.score_bp.unwrap() < 10000,
                 "mutation {mutation}: {}",
                 v.raw
+            );
+        }
+    }
+
+    #[test]
+    fn named_roles_follow_actual_ids_and_reject_ambiguous_or_wrong_grants() {
+        let params = json!({"agents":{"behaviors":"behaviors","contexts":"contexts","tools":"tools","expect":[
+            {"behavior_id":"coordinator","source_match":{"field":"display_name","matches":"(?i)\\bcoordinator\\b"},"delegates":{"targets":"targets","behaviors":["reviewer"]}},
+            {"behavior_id":"reviewer","source_match":{"field":"display_name","matches":"(?i)\\breviewer\\b"},"tools":[{"field":"host.bash.mode","equals":"Off"}]}
+        ]}});
+        assert!(
+            jsonschema::validator_for(&CrewSpecMatch.describe().params_schema)
+                .unwrap()
+                .is_valid(&params)
+        );
+        let good = stage(&[
+            (
+                "behaviors",
+                vec![
+                    json!({"behavior_id":"did:x:desk-coordinator","display_name":"Research desk Coordinator","context_id":"c"}),
+                    json!({"behavior_id":"did:x:random-42","display_name":"Research desk Reviewer","context_id":"r"}),
+                ],
+            ),
+            (
+                "contexts",
+                vec![
+                    json!({"context_id":"c","tools_id":"ct"}),
+                    json!({"context_id":"r","tools_id":"rt"}),
+                ],
+            ),
+            (
+                "tools",
+                vec![
+                    json!({"tools_id":"ct","subagents":{"enabled":true,"target_ids":["review-route"]}}),
+                    json!({"tools_id":"rt","host":{"bash":{"mode":"Off"}}}),
+                ],
+            ),
+            (
+                "targets",
+                vec![
+                    json!({"target_id":"review-route","agent_did":"did:x","target_agent_did":"did:x","behavior_id":"did:x:random-42"}),
+                ],
+            ),
+        ]);
+        assert_eq!(CrewSpecMatch.evaluate(&params, &good).score_bp, Some(10000));
+        for mutation in 0..7 {
+            let mut bad = good.clone();
+            let capture = match mutation {
+                0..=2 => "targets",
+                3..=5 => "behaviors",
+                _ => "tools",
+            };
+            let CaptureResult::Documents { rows } = bad.captures.get_mut(capture).unwrap() else {
+                unreachable!()
+            };
+            match mutation {
+                0 => rows[0]["behavior_id"] = json!("reviewer"),
+                1 => rows[0]["target_agent_did"] = json!("did:foreign"),
+                2 => rows[0]["behavior_id"] = json!("did:x:desk-coordinator"),
+                3 => rows.push(
+                    json!({"behavior_id":"another","display_name":"Reviewer","context_id":"r"}),
+                ),
+                4 => {
+                    rows.pop();
+                }
+                5 => {
+                    rows.pop();
+                    rows[0]["display_name"] = json!("Coordinator Reviewer");
+                }
+                _ => rows[1]["host"]["bash"]["mode"] = json!("On"),
+            }
+            let result = CrewSpecMatch.evaluate(&params, &bad);
+            assert!(
+                result.score_bp.unwrap() < 10000,
+                "mutation {mutation}: {}",
+                result.raw
             );
         }
     }

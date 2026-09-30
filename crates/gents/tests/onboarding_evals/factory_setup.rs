@@ -208,3 +208,156 @@ fn the_definition_validates_and_every_check_accepts_its_params() {
         );
     }
 }
+
+#[test]
+fn capstone_role_checks_follow_generated_ids_through_automation() {
+    use gents::eval::runner::CaptureResult;
+    use serde_json::json;
+    let definition = definition();
+    let params = &definition.cases[0].stages[0]
+        .checks
+        .iter()
+        .find(|check| check.check == "crew_spec_match")
+        .unwrap()
+        .params;
+    let planner = params["agents"]["expect"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|agent| agent["behavior_id"] == "planner")
+        .unwrap();
+    let wiring = params["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|link| {
+            link["id"] == "BriefRequest"
+                && link["via"]
+                    .as_array()
+                    .is_some_and(|hops| hops.last().unwrap()["target_capture"] == "behaviors")
+        })
+        .unwrap();
+    let permission = json!({"agents":{"behaviors":"behaviors","contexts":"contexts","tools":"tools","expect":[{
+        "behavior_id":"planner","source_match":planner["source_match"],"tools":[{"field":"host.bash.mode","equals":"Off"}]
+    }]},"links":[wiring]});
+    let mut evidence = ScriptedExecutor::passed_evidence(OWNER, "setup", "unused", vec![])
+        .stages
+        .remove(0);
+    evidence.captures.clear();
+    for (name, rows) in [
+        (
+            "behaviors",
+            vec![
+                json!({"behavior_id":"did:x:research-desk-planner","display_name":"Research desk Planner","context_id":"c"}),
+                json!({"behavior_id":"wrong","display_name":"Researcher"}),
+            ],
+        ),
+        ("contexts", vec![json!({"context_id":"c","tools_id":"t"})]),
+        (
+            "tools",
+            vec![json!({"tools_id":"t","host":{"bash":{"mode":"Off"}}})],
+        ),
+        (
+            "sources",
+            vec![json!({"source_collection":"BriefRequest","event_source_id":"generated-source"})],
+        ),
+        (
+            "triggers",
+            vec![
+                json!({"source":{"event_source_id":"generated-source"},"task_id":"generated-task"}),
+            ],
+        ),
+        (
+            "tasks",
+            vec![json!({"task_id":"generated-task","behavior_id":"did:x:research-desk-planner"})],
+        ),
+    ] {
+        evidence
+            .captures
+            .insert(name.into(), CaptureResult::Documents { rows });
+    }
+    let registry = CheckRegistry::builtin();
+    let check = registry.get("crew_spec_match").unwrap();
+    assert_eq!(check.evaluate(&permission, &evidence).score_bp, Some(10000));
+    let CaptureResult::Documents { rows } = evidence.captures.get_mut("tasks").unwrap() else {
+        unreachable!()
+    };
+    rows[0]["behavior_id"] = json!("wrong");
+    assert!(check.evaluate(&permission, &evidence).score_bp.unwrap() < 10000);
+}
+
+#[test]
+fn capstone_accepts_default_events_and_passes_keys_for_tool_backed_reads() {
+    use gents::eval::runner::CaptureResult;
+    use serde_json::json;
+    let definition = definition();
+    let params = &definition.cases[0].stages[0]
+        .checks
+        .iter()
+        .find(|check| check.check == "crew_spec_match")
+        .unwrap()
+        .params;
+    let rows: Vec<_> = params["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["id"] == "BriefRequest")
+        .collect();
+    let links: Vec<_> = params["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| {
+            r["id"] == "BriefRequest" && r["via"].as_array().is_none_or(|hops| hops.len() < 2)
+        })
+        .collect();
+    let subset = json!({"rows":rows,"links":links});
+    let mut evidence = ScriptedExecutor::passed_evidence(OWNER, "setup", "unused", vec![])
+        .stages
+        .remove(0);
+    evidence.captures.clear();
+    for (name, rows) in [
+        (
+            "sources",
+            vec![
+                json!({"source_collection":"BriefRequest","event_source_id":"s","event_kind":null}),
+            ],
+        ),
+        (
+            "triggers",
+            vec![
+                json!({"source":{"event_source_id":"s"},"task_id":"t","enabled":true,"concurrency":null}),
+            ],
+        ),
+        (
+            "tasks",
+            vec![
+                json!({"task_id":"t","enabled":true,"emit_outcome":true,"prompt_template":"Read the request for batch {{ doc.batch }} with your record tool."}),
+            ],
+        ),
+    ] {
+        evidence
+            .captures
+            .insert(name.into(), CaptureResult::Documents { rows });
+    }
+    let registry = CheckRegistry::builtin();
+    let check = registry.get("crew_spec_match").unwrap();
+    assert_eq!(check.evaluate(&subset, &evidence).score_bp, Some(10000));
+    for mutation in 0..3 {
+        let mut bad = evidence.clone();
+        let (capture, field, value) = match mutation {
+            0 => ("sources", "event_kind", json!("updated")),
+            1 => ("triggers", "concurrency", json!("queued_serial")),
+            _ => (
+                "tasks",
+                "prompt_template",
+                json!("Read some request without a batch key"),
+            ),
+        };
+        let CaptureResult::Documents { rows } = bad.captures.get_mut(capture).unwrap() else {
+            unreachable!()
+        };
+        rows[0][field] = value;
+        assert!(check.evaluate(&subset, &bad).score_bp.unwrap() < 10000);
+    }
+}

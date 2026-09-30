@@ -429,7 +429,14 @@
                         "expected_count"
                       ]
                     },
-                    "lookup_by": "batch"
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "BriefRequest": [
+                        "batch",
+                        "topic",
+                        "question_count"
+                      ]
+                    }
                   },
                   "tools": [
                     {
@@ -465,7 +472,11 @@
                       "field": "system_prompt",
                       "matches": "(?i)(question|plan)"
                     }
-                  ]
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bplanner\\b"
+                  }
                 },
                 {
                   "behavior_id": "researcher",
@@ -486,7 +497,15 @@
                         "expected_count"
                       ]
                     },
-                    "lookup_by": "batch"
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "ResearchAssignment": [
+                        "batch",
+                        "assignment",
+                        "question",
+                        "expected_count"
+                      ]
+                    }
                   },
                   "tools": [
                     {
@@ -522,7 +541,11 @@
                       "field": "system_prompt",
                       "matches": "(?i)(research|evidence|source)"
                     }
-                  ]
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bresearcher\\b"
+                  }
                 },
                 {
                   "behavior_id": "analyst",
@@ -542,7 +565,26 @@
                         "text"
                       ]
                     },
-                    "lookup_by": "batch"
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "ResearchAssignment": [
+                        "batch",
+                        "assignment",
+                        "question",
+                        "expected_count"
+                      ],
+                      "ResearchFinding": [
+                        "batch",
+                        "assignment",
+                        "finding",
+                        "sources",
+                        "expected_count"
+                      ],
+                      "DraftBrief": [
+                        "batch",
+                        "text"
+                      ]
+                    }
                   },
                   "tools": [
                     {
@@ -578,7 +620,11 @@
                       "field": "system_prompt",
                       "matches": "(?i)(finding|gather|draft)"
                     }
-                  ]
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\banalyst\\b"
+                  }
                 },
                 {
                   "behavior_id": "reviewer",
@@ -598,7 +644,20 @@
                         "feedback"
                       ]
                     },
-                    "lookup_by": "batch"
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "DraftBrief": [
+                        "batch",
+                        "text"
+                      ],
+                      "ResearchFinding": [
+                        "batch",
+                        "assignment",
+                        "finding",
+                        "sources",
+                        "expected_count"
+                      ]
+                    }
                   },
                   "tools": [
                     {
@@ -634,7 +693,11 @@
                       "field": "system_prompt",
                       "matches": "(?i)(review|support|check)"
                     }
-                  ]
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\breviewer\\b"
+                  }
                 },
                 {
                   "behavior_id": "publisher",
@@ -654,7 +717,22 @@
                         "text"
                       ]
                     },
-                    "lookup_by": "batch"
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "DraftBrief": [
+                        "batch",
+                        "text"
+                      ],
+                      "ReviewDecision": [
+                        "batch",
+                        "approved",
+                        "feedback"
+                      ],
+                      "PublishedBrief": [
+                        "batch",
+                        "text"
+                      ]
+                    }
                   },
                   "tools": [
                     {
@@ -690,7 +768,11 @@
                       "field": "system_prompt",
                       "matches": "(?i)(publish|approv)"
                     }
-                  ]
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bpublisher\\b"
+                  }
                 },
                 {
                   "behavior_id": "coordinator",
@@ -712,7 +794,25 @@
                         "expected_count"
                       ]
                     },
-                    "lookup_by": "batch"
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "ResearchFinding": [
+                        "batch",
+                        "assignment",
+                        "finding",
+                        "sources",
+                        "expected_count"
+                      ],
+                      "DraftBrief": [
+                        "batch",
+                        "text"
+                      ],
+                      "ReviewDecision": [
+                        "batch",
+                        "approved",
+                        "feedback"
+                      ]
+                    }
                   },
                   "tools": [
                     {
@@ -751,6 +851,10 @@
                       "researcher",
                       "reviewer"
                     ]
+                  },
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bcoordinator\\b"
                   }
                 },
                 {
@@ -773,8 +877,6 @@
             "links": [
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "planner",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -784,12 +886,14 @@
                     "equals": "high"
                   }
                 ],
-                "category": "inference"
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bplanner\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "planner",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -814,12 +918,14 @@
                     "target_key": "execution_id"
                   }
                 ],
-                "category": "limits"
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bplanner\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "researcher",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -829,12 +935,14 @@
                     "equals": "high"
                   }
                 ],
-                "category": "inference"
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bresearcher\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "researcher",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -859,12 +967,14 @@
                     "target_key": "execution_id"
                   }
                 ],
-                "category": "limits"
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bresearcher\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "analyst",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -874,12 +984,14 @@
                     "equals": "high"
                   }
                 ],
-                "category": "inference"
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\banalyst\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "analyst",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -904,12 +1016,14 @@
                     "target_key": "execution_id"
                   }
                 ],
-                "category": "limits"
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\banalyst\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "reviewer",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -919,12 +1033,14 @@
                     "equals": "high"
                   }
                 ],
-                "category": "inference"
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\breviewer\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "reviewer",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -949,12 +1065,14 @@
                     "target_key": "execution_id"
                   }
                 ],
-                "category": "limits"
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\breviewer\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "publisher",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -964,12 +1082,14 @@
                     "equals": "high"
                   }
                 ],
-                "category": "inference"
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bpublisher\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "publisher",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -994,12 +1114,14 @@
                     "target_key": "execution_id"
                   }
                 ],
-                "category": "limits"
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bpublisher\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "coordinator",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -1009,12 +1131,14 @@
                     "equals": "high"
                   }
                 ],
-                "category": "inference"
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bcoordinator\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "coordinator",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -1039,7 +1163,11 @@
                     "target_key": "execution_id"
                   }
                 ],
-                "category": "limits"
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bcoordinator\\b"
+                }
               },
               {
                 "capture": "sources",
@@ -1055,7 +1183,7 @@
                   },
                   {
                     "field": "concurrency",
-                    "equals": "parallel"
+                    "matches": "^(null|parallel)$"
                   }
                 ],
                 "category": "automation"
@@ -1077,20 +1205,8 @@
                     "equals": true
                   },
                   {
-                    "field": "behavior_id",
-                    "matches": "(^|:)planner$"
-                  },
-                  {
                     "field": "prompt_template",
                     "contains": "doc.batch"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.topic"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.question_count"
                   }
                 ],
                 "via": [
@@ -1116,7 +1232,7 @@
                   },
                   {
                     "field": "concurrency",
-                    "equals": "parallel"
+                    "matches": "^(null|parallel)$"
                   }
                 ],
                 "category": "automation"
@@ -1138,24 +1254,12 @@
                     "equals": true
                   },
                   {
-                    "field": "behavior_id",
-                    "matches": "(^|:)researcher$"
-                  },
-                  {
                     "field": "prompt_template",
                     "contains": "doc.batch"
                   },
                   {
                     "field": "prompt_template",
                     "contains": "doc.assignment"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.question"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.expected_count"
                   }
                 ],
                 "via": [
@@ -1203,28 +1307,8 @@
                     "equals": true
                   },
                   {
-                    "field": "behavior_id",
-                    "matches": "(^|:)analyst$"
-                  },
-                  {
                     "field": "prompt_template",
                     "contains": "doc.batch"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.assignment"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.finding"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.sources"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.expected_count"
                   }
                 ],
                 "via": [
@@ -1250,7 +1334,7 @@
                   },
                   {
                     "field": "concurrency",
-                    "equals": "parallel"
+                    "matches": "^(null|parallel)$"
                   }
                 ],
                 "category": "automation"
@@ -1272,16 +1356,8 @@
                     "equals": true
                   },
                   {
-                    "field": "behavior_id",
-                    "matches": "(^|:)reviewer$"
-                  },
-                  {
                     "field": "prompt_template",
                     "contains": "doc.batch"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.text"
                   }
                 ],
                 "via": [
@@ -1329,20 +1405,8 @@
                     "equals": true
                   },
                   {
-                    "field": "behavior_id",
-                    "matches": "(^|:)publisher$"
-                  },
-                  {
                     "field": "prompt_template",
                     "contains": "doc.batch"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.approved"
-                  },
-                  {
-                    "field": "prompt_template",
-                    "contains": "doc.feedback"
                   }
                 ],
                 "via": [
@@ -1356,8 +1420,6 @@
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "planner",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -1378,12 +1440,14 @@
                     "target_capture": "sampling",
                     "target_key": "sampling_id"
                   }
-                ]
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bplanner\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "researcher",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -1404,12 +1468,14 @@
                     "target_capture": "sampling",
                     "target_key": "sampling_id"
                   }
-                ]
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bresearcher\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "analyst",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -1430,12 +1496,14 @@
                     "target_capture": "sampling",
                     "target_key": "sampling_id"
                   }
-                ]
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\banalyst\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "reviewer",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -1456,12 +1524,14 @@
                     "target_capture": "sampling",
                     "target_key": "sampling_id"
                   }
-                ]
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\breviewer\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "publisher",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -1482,12 +1552,14 @@
                     "target_capture": "sampling",
                     "target_key": "sampling_id"
                   }
-                ]
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bpublisher\\b"
+                }
               },
               {
                 "capture": "behaviors",
-                "key": "behavior_id",
-                "id": "coordinator",
                 "field": "inference_profile_id",
                 "target_capture": "profiles",
                 "target_key": "profile_id",
@@ -1508,7 +1580,146 @@
                     "target_capture": "sampling",
                     "target_key": "sampling_id"
                   }
-                ]
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bcoordinator\\b"
+                }
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "BriefRequest",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\bplanner\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchAssignment",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\bresearcher\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchFinding",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\banalyst\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "DraftBrief",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\breviewer\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ReviewDecision",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\bpublisher\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
               }
             ],
             "rows": [
@@ -1520,7 +1731,7 @@
                 "expect": [
                   {
                     "field": "event_kind",
-                    "equals": "created"
+                    "matches": "^(null|created)$"
                   }
                 ]
               },
@@ -1532,7 +1743,7 @@
                 "expect": [
                   {
                     "field": "event_kind",
-                    "equals": "created"
+                    "matches": "^(null|created)$"
                   }
                 ]
               },
@@ -1544,7 +1755,7 @@
                 "expect": [
                   {
                     "field": "event_kind",
-                    "equals": "created"
+                    "matches": "^(null|created)$"
                   }
                 ]
               },
@@ -1556,7 +1767,7 @@
                 "expect": [
                   {
                     "field": "event_kind",
-                    "equals": "created"
+                    "matches": "^(null|created)$"
                   }
                 ]
               },
@@ -1568,7 +1779,7 @@
                 "expect": [
                   {
                     "field": "event_kind",
-                    "equals": "created"
+                    "matches": "^(null|created)$"
                   }
                 ]
               }
