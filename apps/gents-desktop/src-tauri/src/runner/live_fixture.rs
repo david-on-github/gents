@@ -736,14 +736,13 @@ mod tests {
     ) -> Result<()> {
         use gents::collection::Collection;
         use gents::config_client::{
-            apply_desired_state_plan, read_desired_state_record_in_txn, ConfigAccess,
-            DesiredStateApplyDocument, DesiredStateApplyPlan,
+            apply_desired_state_plan, read_desired_state_record_in_txn, DesiredStateApplyDocument,
+            DesiredStateApplyPlan,
         };
-        ConfigAccess::transact_local(
-            fixture.desktop_core().node(),
-            None,
-            "desktop.fixture.skill",
-            |txn| {
+        fixture
+            .desktop_core()
+            .operator_access(agent_did)?
+            .transact("desktop.fixture.skill", |txn| {
                 Box::pin(async move {
                     let (_, behavior) = read_desired_state_record_in_txn(
                         txn,
@@ -777,9 +776,8 @@ mod tests {
                     apply_desired_state_plan(txn, &plan).await?;
                     Ok(())
                 })
-            },
-        )
-        .await?;
+            })
+            .await?;
         fixture.desktop_core().refresh_store().await?;
         Ok(())
     }
