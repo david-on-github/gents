@@ -89,9 +89,9 @@ if ! served; then
   served || { echo "the eval home did not come up; see $EVAL_HOME/server.log" >&2; exit 1; }
 fi
 
-# The trial copies the backend and profile the run freezes. The profile carries
-# no execution_id: `gents eval run` does not copy the InferenceExecution a
-# profile names into the trial (#2095), so a bound one fails every trial.
+# The trial copies the backend, sampling, profile and the profile's bound
+# InferenceExecution the run freezes; the ladder profile reuses the execution
+# `gents init` created for the home's default profile.
 PROFILE_ID="$DID:ladder-$TARGET"
 INFERENCE="$EVAL_HOME/inference-$TARGET"
 python3 - "$TARGET_FILE" "$DID" "$PER_TRIAL" "$INFERENCE" "$REASONING" "$TEMPERATURE" "$TOP_P" <<'PY'
@@ -105,7 +105,8 @@ sampling = {"sampling_id": f"{did}:ladder-{name}-sampling", "agent_did": did,
             "display_name": f"Ladder {name}", "temperature": float(temperature), "top_p": float(top_p)}
 profile = {"profile_id": f"{did}:ladder-{name}", "agent_did": did, "display_name": f"Ladder {name}",
            "backend_id": backend["backend_id"], "model_name": t["inference_profiles"][0]["model_name"],
-           "reasoning_effort": reasoning, "sampling_id": sampling["sampling_id"]}
+           "reasoning_effort": reasoning, "sampling_id": sampling["sampling_id"],
+           "execution_id": f"{did}:default-profile-execution"}
 os.makedirs(root, exist_ok=True)
 json.dump({"manifest_version": 1, "name": "ladder_inference", "version": "0.1.0",
            "description": "The ladder's trial inference binding", "authors": ["gents-ai contributors"],
