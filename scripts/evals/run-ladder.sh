@@ -9,6 +9,7 @@
 # Held-out cases run only with GENTS_EVAL_SPLITS=held_out.
 #
 # GENTS_EVAL_TARGET: target file name (default workstation-1).
+# GENTS_EVAL_SHARD: 1/2 or 2/2 splits the selected suites across two launchers.
 # GENTS_EVAL_HOME / GENTS_EVAL_PORT: isolated home / optional fixed port.
 # GENTS_EVAL_PER_TRIAL: concurrent calls per trial (default 1).
 # GENTS_EVAL_REASONING / GENTS_EVAL_TEMPERATURE / GENTS_EVAL_TOP_P: high / 1 / .95.
@@ -16,7 +17,7 @@
 # GENTS_BIN: existing gents binary; otherwise builds this checkout.
 set -euo pipefail
 
-usage() { sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 [ $# -le 3 ] || usage
 SELECTION=${1:-all}
 
@@ -30,12 +31,12 @@ CONCURRENCY=${3:-4}
 PER_TRIAL=${GENTS_EVAL_PER_TRIAL:-1}
 TARGET=${GENTS_EVAL_TARGET:-workstation-1}
 SPLITS=${GENTS_EVAL_SPLITS:-train validation}
-EVAL_HOME=${GENTS_EVAL_HOME:-$HOME/gents-eval-homes/ladder-$SHA}
+EVAL_HOME=${GENTS_EVAL_HOME:-$HOME/gents-eval-homes/ladder-$SHA-$TARGET}
 PORT_OVERRIDE=${GENTS_EVAL_PORT:-}
-PORT=$(python3 - "$EVAL_HOME/runtime.json" "$PORT_OVERRIDE" <<'PYPORT'
+PORT=$(python3 - "$EVAL_HOME/runtime.json" "$PORT_OVERRIDE" "$TARGET" <<'PYPORT'
 import json, pathlib, sys, urllib.parse
-path, override = sys.argv[1:]
-port = 9493
+path, override, target = sys.argv[1:]
+port = 9494 if target == "workstation-2" else 9493
 try:
     url = urllib.parse.urlparse(json.loads(pathlib.Path(path).read_text())["graphql"])
     if url.hostname == "127.0.0.1" and url.port:
@@ -74,16 +75,24 @@ PYLIST
   exit 0
 fi
 SELECTED=()
-while IFS= read -r level; do SELECTED+=("$level"); done < <(python3 - "$MATRIX" "$SELECTION" <<'PYSELECT'
+while IFS= read -r level; do SELECTED+=("$level"); done < <(python3 - "$MATRIX" "$SELECTION" "${GENTS_EVAL_SHARD:-1/1}" <<'PYSELECT'
 import json,sys
 m=json.load(open(sys.argv[1])); selection=sys.argv[2]
-if selection=='all': print('\n'.join(m['default']))
+try:
+    shard, total = map(int, sys.argv[3].split('/'))
+    if not 1 <= shard <= total: raise ValueError()
+except ValueError:
+    sys.exit('GENTS_EVAL_SHARD must be INDEX/COUNT with 1 <= INDEX <= COUNT')
+if selection=='all': matches=m['default']
 else:
     matches=[s['id'] for s in m['suites'] if selection in [s['id'],s['id'].split('-')[0]]]
-    if len(matches)==1: print(matches[0])
+    if len(matches)!=1: sys.exit('unknown or ambiguous suite: '+selection)
+selected=matches[shard-1::total]
+if not selected: sys.exit('this shard selects no suites')
+print('\n'.join(selected))
 PYSELECT
 )
-[ ${#SELECTED[@]} -gt 0 ] || { echo "unknown suite $SELECTION; use list" >&2; exit 2; }
+[ ${#SELECTED[@]} -gt 0 ] || { echo "no suites selected for $SELECTION and shard ${GENTS_EVAL_SHARD:-1/1}; use list" >&2; exit 2; }
 [[ "$TRIALS" =~ ^[1-9][0-9]*$ && "$CONCURRENCY" =~ ^[1-9][0-9]*$ && "$PER_TRIAL" =~ ^[1-9][0-9]*$ ]] || usage
 [ -f "$TARGET_FILE" ] || { echo "no target $TARGET_FILE" >&2; exit 2; }
 [ "$PORT" != 9191 ] || { echo "port 9191 belongs to the desktop node; pick another GENTS_EVAL_PORT" >&2; exit 2; }
@@ -221,7 +230,7 @@ root=pathlib.Path(sys.argv[1]); definition=json.load(open(root/'pack_config.json
 sys.exit(0 if any(json.load(open(root/p))['split']==sys.argv[2] for p in definition['cases']) else 1)
 PYSPLIT
     then continue; fi
-    RUN_ID="ladder-$level-$SHA-$split-$STAMP"
+    RUN_ID="ladder-$level-$SHA-$TARGET-$split-$STAMP"
     cat >&2 <<EOF
 
 == $level ($split): $TRIALS trials per case, $TRIAL_CONCURRENCY trials at once, $PER_TRIAL call(s) per trial, $MODEL at $ENDPOINT

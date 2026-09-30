@@ -355,7 +355,7 @@ async fn build_registers_gated_family() {
     for core in [
         "native API",
         "\"<DID>:<slug>\"",
-        "preview, apply, then read back",
+        "Preview writes nothing; apply, then read back.",
         "[\"help\"] lists resources",
     ] {
         assert!(definition.description.contains(core), "missing {core}");
