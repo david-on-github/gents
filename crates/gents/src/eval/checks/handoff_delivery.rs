@@ -482,6 +482,9 @@ mod tests {
             ("fires", vec![]),
             ("outcomes", vec![]),
             ("triggers", vec![]),
+            ("results", vec![]),
+            ("goals", vec![]),
+            ("runtime", vec![]),
         ]);
         let verdict = HandoffDelivery.evaluate(&params(), &quiet);
         assert_eq!(verdict.kind, OutcomeKind::Inconclusive);
@@ -498,6 +501,18 @@ mod tests {
         );
         let verdict = HandoffDelivery.evaluate(&params(), &rejected);
         assert_eq!(verdict.raw["by_gate"]["runtime_rejected_config"], 1);
+    }
+
+    #[test]
+    fn a_named_optional_capture_is_required_once_named() {
+        let mut evidence = home("lead", "lead", "completed");
+        evidence.captures.remove("goals");
+        let verdict = HandoffDelivery.evaluate(&params(), &evidence);
+        assert_eq!(
+            verdict.raw["reason_code"], "missing_capture",
+            "{}",
+            verdict.raw
+        );
     }
 
     #[test]
