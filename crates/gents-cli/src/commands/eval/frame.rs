@@ -247,6 +247,8 @@ pub(crate) fn frame(
     }
     lines.push(String::new());
     lines.extend(finished);
+    // A frame taller than the screen would scroll its header away.
+    lines.truncate(screen.height.saturating_sub(1));
     lines
 }
 

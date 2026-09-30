@@ -63,9 +63,10 @@ impl<'a> LiveObserver<'a> {
                 ..
             } = capture
             {
-                if !captures.iter().any(|(named, ..)| named == name) {
-                    captures.push((name, collection, filter));
-                }
+                // The last stage to declare a name wins, as it does for the
+                // goal (`crate::eval::runner::goal::case_goal`).
+                captures.retain(|(named, ..)| named != name);
+                captures.push((name, collection, filter));
             }
         }
         Self {

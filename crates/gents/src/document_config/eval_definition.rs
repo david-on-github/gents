@@ -218,7 +218,10 @@ pub struct EvalCase {
     /// How many rows each collection should hold when the case is done,
     /// for a watcher to measure a trial's progress against; `schemas` counts
     /// the collections the subject registers. Never graded: an entry replaces
-    /// the goal a `captured_rows_count` check of that collection implies.
+    /// the goal a `captured_rows_count` check of that collection implies. A
+    /// trial observes the configuration collections, its captures'
+    /// collections and the collections the subject registers; an entry for
+    /// any other collection reads as unobserved.
     #[serde(
         default,
         deserialize_with = "super::serde_helpers::deserialize_default_on_null",

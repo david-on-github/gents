@@ -235,15 +235,25 @@ where
             ),
         }
     };
-    tokio::pin!(stages);
-    let mut every = tokio::time::interval(LIVE_EVERY);
-    every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let stages = loop {
-        tokio::select! {
-            stages = &mut stages => break stages,
-            _ = every.tick() => report().await,
+    // Joined, not selected: a slow read must never hold up the stages'
+    // deadline and cancellation handling.
+    let done = CancellationToken::new();
+    let stages = async {
+        let stages = stages.await;
+        done.cancel();
+        stages
+    };
+    let observe = async {
+        let mut every = tokio::time::interval(LIVE_EVERY);
+        every.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                () = done.cancelled() => break,
+                _ = every.tick() => report().await,
+            }
         }
     };
+    let (stages, ()) = tokio::join!(stages, observe);
     report().await;
     stages
 }
