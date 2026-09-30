@@ -1628,14 +1628,12 @@
     }
   ],
   "goal": {
-    "AgentBehavior": 10,
-    "InferenceProfile": 6,
-    "DatastoreToolSurface": 11,
-    "SubagentTarget": 4,
-    "EventSource": 24,
-    "Task": 23,
-    "Trigger": 25,
-    "Schedule": 1,
-    "schemas": 9
+    "AgentBehavior": 7,
+    "InferenceProfile": 3,
+    "SubagentTarget": 6,
+    "EventSource": 5,
+    "Task": 5,
+    "Trigger": 5,
+    "schemas": 6
   }
 }
