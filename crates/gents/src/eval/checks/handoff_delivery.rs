@@ -28,7 +28,7 @@ use crate::eval::OutcomeKind;
 /// - `outcomes`: `FireOutcome` rows with `fire_key`, `request_id`,
 ///   `session_id`, `terminal_state`;
 /// - `triggers`: `Trigger` rows with `trigger_id`, `session_id_template`,
-///   `last_error`;
+///   `last_status`, `last_error`;
 /// - `sources`: captures of the source collections, with `_docID`, whose
 ///   fields a `session_id_template` of the form `{{ doc.FIELD }}` names;
 /// - `goals` (optional): `Goal` rows with `goal_id`, `status`;
@@ -105,7 +105,7 @@ impl Check for HandoffDelivery {
     }
 
     fn version(&self) -> &'static str {
-        "1"
+        "2"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -279,7 +279,12 @@ impl Check for HandoffDelivery {
                 None => {}
             }
         }
+        // `last_error` also carries an ordinary skip (a serial trigger busy
+        // with prior work); only an `error` status is a rejection.
         for row in triggers {
+            if str_field(row, "last_status") != Some("error") {
+                continue;
+            }
             if let Some(error) = str_field(row, "last_error") {
                 violations.push(
                     "runtime_rejected_config",
@@ -478,7 +483,8 @@ mod tests {
             "triggers".into(),
             CaptureResult::Documents {
                 rows: vec![
-                    json!({"trigger_id": "t", "last_error": "template renders doc.missing"}),
+                    json!({"trigger_id": "t", "last_status": "error", "last_error": "template renders doc.missing"}),
+                    json!({"trigger_id": "s", "last_status": "skipped", "last_error": "serial trigger busy"}),
                 ],
             },
         );
