@@ -1,13 +1,8 @@
 //! Store lock lifetime: exclusion while held, release when dropped.
 //!
-//! These tests live in their own binary because the store lock is a `flock`
-//! on an open file description, and a child forked while it is held shares
-//! that description until it execs. The unit binary's tests spawn children
-//! through fork (`managed_exec`'s `pre_exec` setsid), so a lock dropped there
-//! can stay held by another test's not-yet-exec'd child, and a reacquire
-//! after the drop intermittently fails (#1780). Nothing in this binary forks
-//! except `a_forked_child_holds_the_store_lock_until_it_execs`, which runs
-//! under `FORK_EXCLUSION` with every other test here.
+//! A forked child shares its parent's open file descriptions until exec.
+//! The fork regression serializes with every other lock assertion under
+//! `FORK_EXCLUSION` so inherited descriptors belong to its controlled fixture.
 
 use std::fs;
 use std::sync::{Mutex, MutexGuard};
@@ -181,12 +176,11 @@ fn a_store_outside_the_home_does_not_exclude_the_home_default_store() {
     assert_ne!(held.path(), home_store.path());
 }
 
-/// The premise the binary split rests on: a child forked while the lock is
-/// held keeps the store excluded after the parent drops its `StoreLock`,
-/// until the child execs.
+/// A fork inherits the open file description. The runtime owner must unlock
+/// explicitly on drop so a child blocked before exec cannot retain its lock.
 #[cfg(unix)]
 #[test]
-fn a_forked_child_holds_the_store_lock_until_it_execs() {
+fn dropping_the_store_lock_releases_it_even_before_a_forked_child_execs() {
     use std::ffi::CString;
 
     let _exclusive = exclusive();
@@ -225,19 +219,26 @@ fn a_forked_child_holds_the_store_lock_until_it_execs() {
         release: go[1],
     };
 
-    drop(held);
     let error = lock_store(temp.path(), &data)
-        .expect_err("the forked child still holds the dropped lock")
+        .expect_err("the parent still holds the lock")
         .to_string();
     assert!(
         error.contains(&format!("process {}", std::process::id())),
         "the holder is recorded as this process: {error}"
     );
 
+    drop(held);
+    let reacquired = lock_store(temp.path(), &data)
+        .expect("the child cannot retain a lock its parent explicitly released");
     let status = child.release();
     assert!(
         libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
         "the child exec'd: {status}"
     );
-    lock_store(temp.path(), &data).expect("the lock is released once the child execs");
+    assert!(
+        lock_store(temp.path(), &data).is_err(),
+        "child exec must not release the new owner's lock"
+    );
+    drop(reacquired);
+    lock_store(temp.path(), &data).expect("the new owner released its lock");
 }
