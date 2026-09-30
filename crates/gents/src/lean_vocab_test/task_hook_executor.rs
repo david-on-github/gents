@@ -8,7 +8,7 @@ use crate::lean_vocab_test::{
 };
 use crate::task_hooks::{
     effective_timeout_secs, run_task_hooks, HookAttempt, HookPrimaryError, ManagedTaskHookExec,
-    TaskAgentResult, TaskHookCancellation, TaskHookOutcome,
+    TaskAgentResult, TaskHookCancellation, TaskHookOutcome, TaskHookExec,
 };
 
 fn outcome(generated: &LeanTaskOutcome) -> TaskHookOutcome {
@@ -124,8 +124,33 @@ fn assert_attempts(case: &str, phase: &str, actual: &[HookAttempt], expected: &[
     }
 }
 
+struct RevokingExec<'a> {
+    managed: ManagedTaskHookExec,
+    node: &'a defra_node::EmbeddedNode,
+    request_doc_id: &'a str,
+    revoked: &'a [String],
+}
+
+#[async_trait::async_trait]
+impl TaskHookExec for RevokingExec<'_> {
+    async fn attempt(&self, hook: &crate::document_config::TaskHook) -> HookAttempt {
+        if self.revoked.contains(&hook.hook_id) {
+            crate::config_client::ConfigAccess::write_local(
+                self.node,
+                "test.task_hook_launch_revocation",
+                &format!(
+                    r#"mutation {{ update_AgentRequest(filter: {{ _docID: {{ _eq: "{}" }} }}, input: {{ execution_generation: "revoked-generation" }}) {{ _docID }} }}"#,
+                    crate::graphql::escape_graphql_string(self.request_doc_id),
+                ),
+            ).await.unwrap();
+        }
+        self.managed.attempt(hook).await
+    }
+}
+
 #[tokio::test]
 async fn generated_task_hook_run_cases_drive_real_host_commands() {
+    let fixture = super::task_hook_recovery::Fixture::new().await;
     let cases = lean_task_hook_run_cases();
     assert!(!cases.is_empty(), "task hook run cases must not be empty");
     for case in cases {
@@ -133,7 +158,7 @@ async fn generated_task_hook_run_cases_drive_real_host_commands() {
         let log = dir.path().join("invocations.log");
         let mut hooks = Vec::new();
         let mut held = Vec::new();
-        let mut unlaunchable = Vec::new();
+        let mut unlaunchable = case.refused_before_launch.clone();
         for generated in &case.hooks {
             let mut configured = generated.to_task_hook();
             assert_eq!(
@@ -166,7 +191,18 @@ async fn generated_task_hook_run_cases_drive_real_host_commands() {
             held,
             cancellation.clone(),
         ));
-        let exec = ManagedTaskHookExec::new(dir.path().to_path_buf(), cancellation);
+        let lifecycle = fixture.claimed(Duration::from_secs(120)).await;
+        let exec = RevokingExec {
+            managed: ManagedTaskHookExec::new(dir.path().to_path_buf(), cancellation)
+                .with_execution_lease(
+                    fixture.node.clone(),
+                    lifecycle.request().doc_id.clone(),
+                    crate::lifecycle::RequestExecutionLease::new(lifecycle.execution_generation().unwrap().to_owned()),
+                ),
+            node: fixture.node.as_ref(),
+            request_doc_id: &lifecycle.request().doc_id,
+            revoked: &case.revoked,
+        };
         let agent = agent_result(&case.agent);
         let work_log = log.clone();
         let run = tokio::time::timeout(

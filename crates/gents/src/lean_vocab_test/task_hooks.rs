@@ -73,6 +73,8 @@ pub(crate) struct LeanTaskHookRunCase {
     pub(crate) name: String,
     pub(crate) hooks: Vec<LeanTaskHook>,
     pub(crate) script: Vec<LeanScriptedHookResult>,
+    pub(crate) revoked: Vec<String>,
+    pub(crate) refused_before_launch: Vec<String>,
     pub(crate) agent: String,
     pub(crate) expected_agent_ran: bool,
     pub(crate) before_attempted: Vec<LeanHookAttempt>,

@@ -16,14 +16,14 @@ use crate::task_hooks::{
 
 const BEHAVIOR_ID: &str = "general";
 
-struct Fixture {
-    node: Arc<defra_node::EmbeddedNode>,
+pub(super) struct Fixture {
+    pub(super) node: Arc<defra_node::EmbeddedNode>,
     identity: Arc<dyn AgentIdentity>,
     _data: tempfile::TempDir,
 }
 
 impl Fixture {
-    async fn new() -> Self {
+    pub(super) async fn new() -> Self {
         let data = tempfile::tempdir().expect("node data directory");
         let node = Arc::new(
             defra_node::EmbeddedNode::builder()
@@ -49,7 +49,7 @@ impl Fixture {
         self.identity.did()
     }
 
-    async fn claimed(&self, lease: Duration) -> RequestLifecycle {
+    pub(super) async fn claimed(&self, lease: Duration) -> RequestLifecycle {
         let mut lifecycle = RequestLifecycle::materialize_pending_with_execution_binding(
             self.node.clone(),
             BEHAVIOR_ID,

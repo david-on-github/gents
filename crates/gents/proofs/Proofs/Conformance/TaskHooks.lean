@@ -143,6 +143,7 @@ structure RunCase where
   name : String
   hooks : List TaskHook
   script : List ScriptedResult
+  revoked : List String := []
   agent : AgentResult
   expectedOutcome : TaskOutcome
   expectedFinalOutcome : TaskOutcome
@@ -150,7 +151,9 @@ structure RunCase where
   deriving Repr
 
 private def runOf (c : RunCase) : RunResult :=
-  runTask c.hooks (scriptedExec c.script) c.agent
+  runTask c.hooks
+    (ownershipCheckedExec (fun h => !c.revoked.contains h.hookId) (scriptedExec c.script))
+    c.agent
 
 private def failed (hookId : String) : ScriptedResult := ⟨hookId, .exited 1⟩
 private def interruptedAt (hookId : String) : ScriptedResult := ⟨hookId, .interrupted⟩
@@ -162,6 +165,21 @@ def runCases : List RunCase :=
   [ { name := "agent_success_runs_after_success_then_cleanup"
     , hooks := fullTask, script := [], agent := .success
     , expectedOutcome := .success, expectedFinalOutcome := .success
+    , expectedAgentRan := true }
+  , { name := "revoked_between_before_hooks_refuses_the_next_launch"
+    , hooks := [before "prepare", before "second", cleanup "sweep"]
+    , script := [], revoked := ["second", "sweep"], agent := .success
+    , expectedOutcome := .interrupted, expectedFinalOutcome := .interrupted
+    , expectedAgentRan := false }
+  , { name := "revoked_between_after_success_hooks_refuses_the_next_launch"
+    , hooks := [afterSuccess "verify", afterSuccess "second", cleanup "sweep"]
+    , script := [], revoked := ["second", "sweep"], agent := .success
+    , expectedOutcome := .interrupted, expectedFinalOutcome := .interrupted
+    , expectedAgentRan := true }
+  , { name := "revoked_before_after_failure_refuses_launch_and_keeps_primary_error"
+    , hooks := [afterFailure "report", cleanup "sweep"]
+    , script := [], revoked := ["report", "sweep"], agent := .failure
+    , expectedOutcome := .failure .agent, expectedFinalOutcome := .failure .agent
     , expectedAgentRan := true }
   , { name := "after_success_failure_blocks_successful_completion"
     , hooks := fullTask, script := [failed "verify"], agent := .success
@@ -282,6 +300,10 @@ private def runCaseJson (c : RunCase) : String :=
     ",\"script\":" ++ jsonArray (c.script.map (fun s =>
       "{\"hook_id\":" ++ jsonString s.hookId ++
         ",\"result\":" ++ commandResultJson s.result ++ "}")) ++
+    ",\"revoked\":" ++ jsonStringArray c.revoked ++
+    ",\"refused_before_launch\":" ++ jsonStringArray
+      ((c.hooks.filter (fun h => !launchAllowed h.phase (!c.revoked.contains h.hookId))).map
+        TaskHook.hookId) ++
     ",\"agent\":" ++ jsonString (agentResultString c.agent) ++
     ",\"expected_agent_ran\":" ++ boolJson c.expectedAgentRan ++
     ",\"before_attempted\":" ++ jsonArray (result.beforeAttempted.map attemptJson) ++
