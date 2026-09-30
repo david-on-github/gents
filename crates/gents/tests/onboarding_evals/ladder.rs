@@ -332,3 +332,45 @@ fn parallel_automation_accepts_default_concurrency_and_still_checks_its_task() {
         assert_eq!(all_pass, accepted);
     }
 }
+
+#[test]
+fn seeded_outcome_cases_supply_the_source_handoff_contract() {
+    let types = regex::Regex::new(r"type\s+(\w+)[^{]*\{([^}]+)\}").unwrap();
+    let handoff = regex::Regex::new(r"\bhandoff_id\s*:\s*String\b").unwrap();
+    let mut covered_clerk = false;
+    for definition in definitions() {
+        for case in definition.cases {
+            for stage in &case.stages {
+                let Some(seed) = &stage.seed else { continue };
+                if !stage.capture.iter().any(|capture| {
+                    matches!(capture,
+                        EvalCapture::Documents { collection, .. } if collection == "FireOutcome"
+                    )
+                }) {
+                    continue;
+                }
+                assert!(
+                    seed.document
+                        .get("handoff_id")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|id| !id.is_empty()),
+                    "{} / {}: outcome input needs a nonempty handoff_id",
+                    case.case_id,
+                    stage.stage_id
+                );
+                assert!(
+                    case.fixtures.schemas.iter().any(|sdl| {
+                        types.captures_iter(sdl).any(|schema| {
+                            schema[1] == seed.collection && handoff.is_match(&schema[2])
+                        })
+                    }),
+                    "{}: {} must declare handoff_id as String",
+                    case.case_id,
+                    seed.collection
+                );
+                covered_clerk |= case.case_id == "clerk-automation-seed-fire";
+            }
+        }
+    }
+    assert!(covered_clerk, "the Clerk outcome fixture remains covered");
+}
