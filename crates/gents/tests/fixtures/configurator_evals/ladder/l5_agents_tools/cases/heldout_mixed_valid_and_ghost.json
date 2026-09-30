@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure-mixed",
-      "prompt": "Set up two subagents on this node. First: create a helper behavior with the display name 'beh-ho-01' (minimal is fine), a SubagentTarget with id 'tgt-ho-a', name 'ho-valid', target_agent_did set to this node's own DID, behavior 'beh-ho-01', and select 'tgt-ho-a' in your own Tools.subagents. Second: create a SubagentTarget with id 'tgt-ho-b', name 'ho-ghost', target_agent_did set to this node's own DID, behavior 'beh-ghost-000', and select it too. If any part cannot be done correctly, do not work around it \u2014 leave the configuration in a correct state and tell me exactly how each target turned out.",
+      "prompt": "Create Available Helper for short questions, using our current model, and make it available for you to delegate to. Also connect the existing assistant Missing Assistant. If that assistant does not exist, do not create a replacement or a broken connection; explain the problem and finish the part that works.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -22,74 +22,103 @@
           "weight": 1
         },
         {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "valid-target",
-            "expect": [
-              {
-                "field": "name",
-                "equals": "ho-valid"
-              },
-              {
-                "field": "behavior_id",
-                "matches": ":beh\\-ho\\-01$"
-              }
-            ],
-            "max_rows": 1
-          },
-          "tier": "acceptance",
-          "weight": 2
-        },
-        {
           "check": "captured_rows_count",
           "params": {
-            "name": "ghost-targets",
-            "min": 0,
-            "max": 0
+            "name": "targets",
+            "min": 1,
+            "max": 1
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "available-helper"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
         {
           "kind": "documents",
-          "name": "valid-target",
-          "collection": "SubagentTarget",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "target_id": {
-              "_eq": "tgt-ho-a"
-            },
-            "target_agent_did": {
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
               "_eq": "$trial"
             }
           },
           "fields": [
             "target_id",
             "agent_did",
-            "target_agent_did",
-            "behavior_id",
-            "name"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "ghost-targets",
-          "collection": "SubagentTarget",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "behavior_id": {
-              "_like": "%:beh-ghost-000"
-            }
-          },
-          "fields": [
-            "target_id",
             "name",
+            "target_agent_did",
             "behavior_id"
           ]
         }
@@ -97,7 +126,7 @@
     },
     {
       "stage_id": "delegate-to-valid",
-      "prompt": "Delegate a task to subagent 'ho-valid': have the helper reply with exactly HO-999 and nothing else. End your turn after dispatch; report the reply when it arrives.",
+      "prompt": "Ask Available Helper to reply with exactly HO-999 and report its reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -107,7 +136,8 @@
               "agent_new"
             ],
             "forbidden": [
-              "bash"
+              "bash",
+              "config"
             ]
           },
           "tier": "acceptance",
@@ -152,7 +182,7 @@
               {
                 "capture": "ho-request",
                 "key": "behavior_id",
-                "id": "beh-ho-01",
+                "id": "available-helper",
                 "field": "caused_by_parent_tool_call_doc_id",
                 "target_capture": "delegation_calls",
                 "target_key": "_docID",
@@ -193,7 +223,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-ho-01"
+              "_like": "%:available-helper"
             }
           },
           "fields": [
@@ -211,7 +241,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-ho-01"
+              "_like": "%:available-helper"
             }
           },
           "fields": [
@@ -247,75 +277,6 @@
         }
       ],
       "settle": true
-    },
-    {
-      "stage_id": "verify-ghost-absent",
-      "prompt": "Report what you configured; change nothing.",
-      "deadline_secs": 600,
-      "checks": [
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "tools-row",
-            "expect": [
-              {
-                "field": "subagents",
-                "contains": "tgt-ho-a"
-              }
-            ]
-          },
-          "tier": "acceptance",
-          "weight": 2
-        },
-        {
-          "check": "captured_rows_count",
-          "params": {
-            "name": "ghost-sessions",
-            "min": 0,
-            "max": 0
-          },
-          "tier": "acceptance",
-          "weight": 1
-        }
-      ],
-      "capture": [
-        {
-          "kind": "documents",
-          "name": "tools-row",
-          "collection": "Tools",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "tools_id": {
-              "_eq": "engineer-tools"
-            }
-          },
-          "fields": [
-            "tools_id",
-            "display_name",
-            "subagents"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "ghost-sessions",
-          "collection": "AgentSession",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "behavior_id": {
-              "_like": "%:beh-ghost-000"
-            }
-          },
-          "fields": [
-            "session_id",
-            "behavior_id",
-            "agent_did"
-          ]
-        }
-      ]
     }
   ]
 }

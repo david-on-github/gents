@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Set up subagent delegation: create a helper behavior with the display name 'beh-fix2-01' (minimal is fine), a SubagentTarget with id 'tgt-fix2-01', name 'fix-target-2', target_agent_did set to this node's own DID, behavior 'beh-fix2-01', and select 'tgt-fix2-01' in your own Tools.subagents.",
+      "prompt": "Create a review-helper assistant for short reviews, using our current model, and make it available for you to delegate to.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -22,54 +22,111 @@
           "weight": 1
         },
         {
-          "check": "captured_fields_match",
+          "check": "captured_rows_count",
           "params": {
-            "name": "fix-target-2",
-            "expect": [
-              {
-                "field": "name",
-                "equals": "fix-target-2"
-              },
-              {
-                "field": "behavior_id",
-                "matches": ":beh\\-fix2\\-01$"
-              }
-            ],
-            "max_rows": 1
+            "name": "targets",
+            "min": 1,
+            "max": 1
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "review-helper"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
         {
           "kind": "documents",
-          "name": "fix-target-2",
-          "collection": "SubagentTarget",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "target_id": {
-              "_eq": "tgt-fix2-01"
-            },
-            "target_agent_did": {
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
               "_eq": "$trial"
             }
           },
           "fields": [
             "target_id",
             "agent_did",
+            "name",
             "target_agent_did",
-            "behavior_id",
-            "name"
+            "behavior_id"
           ]
         }
       ]
     },
     {
       "stage_id": "verify-and-delegate",
-      "prompt": "First verify the subagent wiring is correct \u2014 fix anything wrong, but do not create additional target documents beyond 'tgt-fix2-01'. Then delegate a task to subagent 'fix-target-2': have the helper reply with exactly FIX2-888 and nothing else, and keep the selection in your Tools working.",
+      "prompt": "I am back. Check whether the review-helper setup is complete and fix anything missing, without duplicating it. Ask it to reply with exactly FIX2-888 and report its reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -86,76 +143,6 @@
           "tier": "acceptance",
           "weight": 1
         },
-        {
-          "check": "captured_rows_count",
-          "params": {
-            "name": "fix-target-2-rows",
-            "min": 1,
-            "max": 1
-          },
-          "tier": "acceptance",
-          "weight": 2
-        },
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "tools-row",
-            "expect": [
-              {
-                "field": "subagents",
-                "contains": "tgt-fix2-01"
-              }
-            ]
-          },
-          "tier": "acceptance",
-          "weight": 1
-        }
-      ],
-      "capture": [
-        {
-          "kind": "documents",
-          "name": "fix-target-2-rows",
-          "collection": "SubagentTarget",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "name": {
-              "_eq": "fix-target-2"
-            }
-          },
-          "fields": [
-            "target_id",
-            "name",
-            "behavior_id"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "tools-row",
-          "collection": "Tools",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "tools_id": {
-              "_eq": "engineer-tools"
-            }
-          },
-          "fields": [
-            "tools_id",
-            "display_name",
-            "subagents"
-          ]
-        }
-      ],
-      "settle": true
-    },
-    {
-      "stage_id": "report-delegation",
-      "prompt": "Report the helper's actual reply from the delegation you just sent. Change nothing.",
-      "deadline_secs": 600,
-      "checks": [
         {
           "check": "captured_fields_match",
           "params": {
@@ -182,8 +169,9 @@
         {
           "check": "captured_rows_count",
           "params": {
-            "name": "helper-session",
-            "min": 1
+            "name": "targets",
+            "min": 1,
+            "max": 1
           },
           "tier": "acceptance",
           "weight": 2
@@ -195,7 +183,7 @@
               {
                 "capture": "helper-request",
                 "key": "behavior_id",
-                "id": "beh-fix2-01",
+                "id": "review-helper",
                 "field": "caused_by_parent_tool_call_doc_id",
                 "target_capture": "delegation_calls",
                 "target_key": "_docID",
@@ -210,7 +198,23 @@
                   }
                 ]
               }
-            ]
+            ],
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "review-helper"
+                    ]
+                  }
+                }
+              ]
+            }
           },
           "tier": "acceptance",
           "weight": 2
@@ -236,7 +240,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-fix2-01"
+              "_like": "%:review-helper"
             }
           },
           "fields": [
@@ -258,7 +262,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-fix2-01"
+              "_like": "%:review-helper"
             }
           },
           "fields": [
@@ -287,8 +291,75 @@
             "lifecycle_state",
             "completion_notification_delivered_at"
           ]
+        },
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "name",
+            "target_agent_did",
+            "behavior_id"
+          ]
         }
-      ]
+      ],
+      "settle": true
     }
   ]
 }

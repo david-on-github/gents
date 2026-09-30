@@ -2,7 +2,7 @@
   "manifest_version": 1,
   "name": "factory_setup_kspec",
   "version": "1.0.0",
-  "description": "The Engineer (the desktop Setup behavior) on an eval node, with its factory kickoff: an objective, facts about this node and success criteria over the declarative crew spec.",
+  "description": "The shipped Engineer with a user brief for a six-role research desk; configuration only.",
   "authors": [
     "gents-ai contributors"
   ],
@@ -13,10 +13,7 @@
   "assets": [
     "README.md",
     "engineer/system_prompt.md",
-    "factory/crew_prompts.md",
-    "factory/crew_spec.json",
     "factory/kickoff.md",
-    "factory/task_templates.md",
     "pack_config.json"
   ],
   "config": "pack_config.json",

@@ -175,7 +175,7 @@ fn delegation_requires_delivery_of_the_matching_child_reply() {
             .stages
             .remove(0);
     evidence.captures.insert("helper-request".into(), CaptureResult::Documents { rows: vec![
-        serde_json::json!({"behavior_id":"scope:beh-helper-01", "caused_by_parent_tool_call_doc_id":"matching-call"})
+        serde_json::json!({"behavior_id":"scope:research-helper", "caused_by_parent_tool_call_doc_id":"matching-call"})
     ]});
     let delivered = serde_json::json!({"_docID":"matching-call", "lifecycle_state":"completed", "completion_notification_delivered_at":"2026-09-30T00:00:00Z"});
     evidence.captures.insert(

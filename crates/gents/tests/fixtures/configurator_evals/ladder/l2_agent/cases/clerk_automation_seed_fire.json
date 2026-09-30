@@ -11,7 +11,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Create an enabled behavior named \"clerk\" with its own Context and Tools. Set its system prompt exactly to: You are Clerk, a restock note clerk. Acknowledge each restock note by sku.\nGrant files ReadOnly and bash Off; no other tools. Reuse the existing inference profile. Leave your own behavior, Context and Tools unchanged. Apply the configuration. Create EventSource clerk-source watching RestockNote, Trigger clerk-trigger, and Task clerk-task for clerk. Render the source document sku into the task prompt. Enable the Task and Trigger and set emit_outcome true.",
+      "prompt": "Create an assistant named Clerk for restock notes. Give it its own instructions and tool permissions, appropriate for its role: acknowledge incoming restock notes by SKU. It must not modify files or run shell commands. Use our existing model settings. Keep your own role and permissions unchanged. Let it read files but do not grant other capabilities. When a new RestockNote arrives, have Clerk acknowledge its sku and retain a completion record. Do not submit a restock note yet.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -27,7 +27,7 @@
                   "behavior": [
                     {
                       "field": "display_name",
-                      "equals": "clerk"
+                      "matches": "(?i)^clerk$"
                     },
                     {
                       "field": "enabled",
@@ -37,7 +37,7 @@
                   "context": [
                     {
                       "field": "system_prompt",
-                      "equals": "You are Clerk, a restock note clerk. Acknowledge each restock note by sku."
+                      "matches": "(?i)(restock|sku)"
                     }
                   ],
                   "tools": [
@@ -248,7 +248,11 @@
               },
               {
                 "field": "caused_by_trigger_id",
-                "equals": "clerk-trigger"
+                "matches": ".+"
+              },
+              {
+                "field": "content",
+                "contains": "A-100"
               }
             ]
           },
@@ -264,6 +268,29 @@
           },
           "tier": "acceptance",
           "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "links": [
+              {
+                "capture": "clerk_fires",
+                "key": "source_collection",
+                "id": "RestockNote",
+                "field": "request_id",
+                "target_capture": "clerk_requests",
+                "target_key": "request_id",
+                "expect": [
+                  {
+                    "field": "lifecycle_state",
+                    "equals": "completed"
+                  }
+                ]
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
@@ -274,9 +301,6 @@
           "filter": {
             "owner_did": {
               "_eq": "$trial"
-            },
-            "trigger_id": {
-              "_eq": "clerk-trigger"
             },
             "source_collection": {
               "_eq": "RestockNote"
@@ -296,9 +320,6 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "trigger_id": {
-              "_eq": "clerk-trigger"
             }
           },
           "fields": [
@@ -325,7 +346,7 @@
             "caused_by_trigger_id",
             "caused_by_source_doc_id",
             "lifecycle_state",
-            "input"
+            "content"
           ]
         },
         {
@@ -336,15 +357,16 @@
             "owner_did": {
               "_eq": "$trial"
             },
-            "trigger_id": {
-              "_eq": "clerk-trigger"
+            "source_collection": {
+              "_eq": "RestockNote"
             }
           },
           "fields": [
             "fire_key",
             "trigger_id",
             "terminal_state",
-            "reason"
+            "reason",
+            "source_collection"
           ]
         }
       ],

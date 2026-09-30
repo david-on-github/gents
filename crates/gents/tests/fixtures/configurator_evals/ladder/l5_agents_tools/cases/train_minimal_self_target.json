@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Set up subagent delegation on this node. Create a helper behavior with the display name 'beh-helper-01' (a minimal behavior is fine). Then create a SubagentTarget with id 'tgt-train-01', name 'train-target', target_agent_did set to this node's own DID, and behavior 'beh-helper-01'. Select 'tgt-train-01' in your own Tools.subagents.",
+      "prompt": "Create a research-helper assistant for short research questions, using our current model. Make it available for you to delegate to. Set this up now; we will try it next.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -22,122 +22,111 @@
           "weight": 1
         },
         {
-          "check": "captured_fields_match",
+          "check": "captured_rows_count",
           "params": {
-            "name": "train-target",
-            "expect": [
-              {
-                "field": "name",
-                "equals": "train-target"
-              },
-              {
-                "field": "behavior_id",
-                "matches": ":beh\\-helper\\-01$"
-              }
-            ],
-            "max_rows": 1
+            "name": "targets",
+            "min": 1,
+            "max": 1
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "research-helper"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
         {
           "kind": "documents",
-          "name": "train-target",
-          "collection": "SubagentTarget",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "target_id": {
-              "_eq": "tgt-train-01"
-            },
-            "target_agent_did": {
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
               "_eq": "$trial"
             }
           },
           "fields": [
             "target_id",
             "agent_did",
+            "name",
             "target_agent_did",
-            "behavior_id",
-            "name"
-          ]
-        }
-      ]
-    },
-    {
-      "stage_id": "verify-selection",
-      "prompt": "Report what you configured; change nothing.",
-      "deadline_secs": 600,
-      "checks": [
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "tools-row",
-            "expect": [
-              {
-                "field": "subagents",
-                "contains": "tgt-train-01"
-              }
-            ]
-          },
-          "tier": "acceptance",
-          "weight": 2
-        },
-        {
-          "check": "captured_rows_count",
-          "params": {
-            "name": "helper-behavior",
-            "min": 1
-          },
-          "tier": "acceptance",
-          "weight": 2
-        }
-      ],
-      "capture": [
-        {
-          "kind": "documents",
-          "name": "tools-row",
-          "collection": "Tools",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "tools_id": {
-              "_eq": "engineer-tools"
-            }
-          },
-          "fields": [
-            "tools_id",
-            "display_name",
-            "subagents"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "helper-behavior",
-          "collection": "AgentBehavior",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "behavior_id": {
-              "_like": "%:beh-helper-01"
-            }
-          },
-          "fields": [
-            "behavior_id",
-            "display_name",
-            "enabled"
+            "behavior_id"
           ]
         }
       ]
     },
     {
       "stage_id": "delegate",
-      "prompt": "Delegate a task to subagent 'train-target': have the helper reply with exactly TRAIN-111 and nothing else. End your turn after dispatch; report the reply when it arrives.",
+      "prompt": "Ask Research Helper to reply with exactly TRAIN-111 and report its reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -147,7 +136,8 @@
               "agent_new"
             ],
             "forbidden": [
-              "bash"
+              "bash",
+              "config"
             ]
           },
           "tier": "acceptance",
@@ -192,7 +182,7 @@
               {
                 "capture": "helper-request",
                 "key": "behavior_id",
-                "id": "beh-helper-01",
+                "id": "research-helper",
                 "field": "caused_by_parent_tool_call_doc_id",
                 "target_capture": "delegation_calls",
                 "target_key": "_docID",
@@ -233,7 +223,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-helper-01"
+              "_like": "%:research-helper"
             }
           },
           "fields": [
@@ -251,7 +241,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-helper-01"
+              "_like": "%:research-helper"
             }
           },
           "fields": [
@@ -290,7 +280,7 @@
     },
     {
       "stage_id": "follow_up",
-      "prompt": "Send a follow-up to the same helper session: reply with exactly FOLLOW-222 and nothing else. Reuse that session; do not start another. End your turn after dispatch; report the reply when it arrives.",
+      "prompt": "Ask the same helper to reply with exactly FOLLOW-222. Keep using that conversation and report its reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -300,7 +290,8 @@
               "agent_message"
             ],
             "forbidden": [
-              "agent_new"
+              "agent_new",
+              "config"
             ]
           },
           "tier": "acceptance",
@@ -346,7 +337,7 @@
               {
                 "capture": "helper-request",
                 "key": "behavior_id",
-                "id": "beh-helper-01",
+                "id": "research-helper",
                 "field": "caused_by_parent_tool_call_doc_id",
                 "target_capture": "delegation_calls",
                 "target_key": "_docID",
@@ -387,7 +378,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-helper-01"
+              "_like": "%:research-helper"
             }
           },
           "fields": [
@@ -405,7 +396,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-helper-01"
+              "_like": "%:research-helper"
             },
             "content": {
               "_like": "%FOLLOW-222%"

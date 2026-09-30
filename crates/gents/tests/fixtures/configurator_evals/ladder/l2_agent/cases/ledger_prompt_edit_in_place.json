@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Create an enabled behavior named \"ledger\" with its own Context and Tools. Set its system prompt exactly to: You are Ledger, a read-only file assistant.\nGrant files ReadOnly and bash Off; no other tools. Reuse the existing inference profile. Leave your own behavior, Context and Tools unchanged. Apply the configuration.",
+      "prompt": "Create an assistant named Ledger for checking records. Give it its own instructions and tool permissions, appropriate for its role: read and summarize local records. It must not modify files or run shell commands. Use our existing model settings. Keep your own role and permissions unchanged.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -21,7 +21,7 @@
                   "behavior": [
                     {
                       "field": "display_name",
-                      "equals": "ledger"
+                      "matches": "(?i)^ledger$"
                     },
                     {
                       "field": "enabled",
@@ -31,7 +31,7 @@
                   "context": [
                     {
                       "field": "system_prompt",
-                      "equals": "You are Ledger, a read-only file assistant."
+                      "matches": "(?i)(record|ledger)"
                     }
                   ],
                   "tools": [
@@ -221,7 +221,7 @@
     },
     {
       "stage_id": "edit_prompt",
-      "prompt": "Edit ledger's existing Context in place. Append one new line to its system prompt: Always cite the file path you read. Keep its Tools and behavior bindings unchanged.",
+      "prompt": "One change for Ledger: require it to cite the file path for every finding. Update its existing instructions and keep the same permissions.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -237,7 +237,7 @@
                   "behavior": [
                     {
                       "field": "display_name",
-                      "equals": "ledger"
+                      "matches": "(?i)^ledger$"
                     },
                     {
                       "field": "enabled",
@@ -247,7 +247,11 @@
                   "context": [
                     {
                       "field": "system_prompt",
-                      "equals": "You are Ledger, a read-only file assistant.\nAlways cite the file path you read."
+                      "matches": "(?i)(record|ledger)"
+                    },
+                    {
+                      "field": "system_prompt",
+                      "matches": "(?i)(file.?path|cite|citation)"
                     }
                   ],
                   "tools": [

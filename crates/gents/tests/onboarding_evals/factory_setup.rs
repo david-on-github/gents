@@ -1,4 +1,4 @@
-//! The factory-setup eval (#1786): a definition pack and one subject pack per
+//! The configuration-only research desk capstone: a definition pack and one subject pack per
 //! kickoff variant, run with `gents eval run factory-setup`. These tests keep
 //! the packs loadable, the definition valid against the shipped check
 //! registry, and each subject's Engineer the Engineer the desktop first run

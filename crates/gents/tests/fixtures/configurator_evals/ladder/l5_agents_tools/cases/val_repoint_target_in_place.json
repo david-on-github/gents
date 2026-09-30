@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "initial-config",
-      "prompt": "Create a SubagentTarget with id 'tgt-fix-01', name 'fix-target', target_agent_did set to this node's own DID, and behavior set to the existing engineer behavior. Select 'tgt-fix-01' in your own Tools.subagents.",
+      "prompt": "I want you to be able to delegate work to another conversation running your same role and settings. Make that available under the name helper; reuse your existing role.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -22,129 +22,232 @@
           "weight": 1
         },
         {
-          "check": "captured_fields_match",
+          "check": "captured_rows_count",
           "params": {
-            "name": "fix-target",
-            "expect": [
-              {
-                "field": "name",
-                "equals": "fix-target"
-              },
-              {
-                "field": "behavior_id",
-                "matches": "."
-              }
-            ],
-            "max_rows": 1
+            "name": "targets",
+            "min": 1,
+            "max": 1
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "engineer"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
         {
           "kind": "documents",
-          "name": "fix-target",
-          "collection": "SubagentTarget",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "target_id": {
-              "_eq": "tgt-fix-01"
-            },
-            "target_agent_did": {
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
               "_eq": "$trial"
             }
           },
           "fields": [
             "target_id",
             "agent_did",
+            "name",
             "target_agent_did",
-            "behavior_id",
-            "name"
+            "behavior_id"
           ]
         }
       ]
     },
     {
       "stage_id": "repoint",
-      "prompt": "Change of plan: create a helper behavior with the display name 'beh-repoint-01' (minimal is fine). Then update the existing SubagentTarget 'tgt-fix-01' in place so its behavior is 'beh-repoint-01' \u2014 same target id, no second target document \u2014 and keep it selected in your own Tools.subagents.",
+      "prompt": "Change helper to use a new Specialist assistant with its own instructions for focused research, using our current model. Update the existing helper connection; keep just one.",
       "deadline_secs": 600,
       "checks": [
         {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
           "check": "captured_rows_count",
           "params": {
-            "name": "fix-target-rows",
+            "name": "targets",
             "min": 1,
             "max": 1
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
         },
         {
-          "check": "captured_fields_match",
+          "check": "crew_spec_match",
           "params": {
-            "name": "repointed-target",
-            "expect": [
-              {
-                "field": "behavior_id",
-                "matches": ":beh\\-repoint\\-01$"
-              }
-            ],
-            "max_rows": 1
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "specialist"
+                    ]
+                  }
+                }
+              ]
+            }
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
         }
       ],
       "capture": [
         {
           "kind": "documents",
-          "name": "fix-target-rows",
-          "collection": "SubagentTarget",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "name": {
-              "_eq": "fix-target"
             }
           },
           "fields": [
-            "target_id",
-            "name",
-            "behavior_id"
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
           ]
         },
         {
           "kind": "documents",
-          "name": "repointed-target",
-          "collection": "SubagentTarget",
+          "name": "contexts",
+          "collection": "AgentContext",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "target_id": {
-              "_eq": "tgt-fix-01"
-            },
-            "target_agent_did": {
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
               "_eq": "$trial"
             }
           },
           "fields": [
             "target_id",
             "agent_did",
+            "name",
             "target_agent_did",
-            "behavior_id",
-            "name"
+            "behavior_id"
           ]
         }
       ]
     },
     {
       "stage_id": "delegate-after-repoint",
-      "prompt": "Delegate a task to subagent 'fix-target': have the helper reply with exactly REP-555 and nothing else. End your turn after dispatch; report the reply when it arrives.",
+      "prompt": "Ask Specialist to reply with exactly REP-555 and report its reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -154,7 +257,8 @@
               "agent_new"
             ],
             "forbidden": [
-              "bash"
+              "bash",
+              "config"
             ]
           },
           "tier": "acceptance",
@@ -199,7 +303,7 @@
               {
                 "capture": "repointed-request",
                 "key": "behavior_id",
-                "id": "beh-repoint-01",
+                "id": "specialist",
                 "field": "caused_by_parent_tool_call_doc_id",
                 "target_capture": "delegation_calls",
                 "target_key": "_docID",
@@ -240,7 +344,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-repoint-01"
+              "_like": "%:specialist"
             }
           },
           "fields": [
@@ -258,7 +362,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-repoint-01"
+              "_like": "%:specialist"
             }
           },
           "fields": [

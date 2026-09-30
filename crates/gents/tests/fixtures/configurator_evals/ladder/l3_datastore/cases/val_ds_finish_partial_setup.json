@@ -5,41 +5,9 @@
   "stages": [
     {
       "stage_id": "setup_partial",
-      "prompt": "Callers supply their own correlation value and result when creating an output document, then find it by correlation alone.\n\nRegister this application schema on this node:\n\ntype EvalAutomationInput {\n correlation: String\n message: String\n}\n\ntype EvalAutomationOutput {\n correlation: String\n result: String\n}\n\nThen create a DatastoreToolSurface named \"HalfWired\" for the EvalAutomationOutput collection with a create entry and a query entry — scoped, no unscoped defra_query. Do not select the surface anywhere yet; that's all for now.",
+      "prompt": "Prepare recordkeeping for my workflow, for later use. The records are EvalAutomationInput { correlation: string, message: string } and EvalAutomationOutput { correlation: string, result: string }. The correlation is a caller-supplied business key: preserve it exactly, and find records using that key alone. Set up storage and tools to add and find outputs, but do not grant these tools to any assistant yet.",
       "deadline_secs": 600,
       "checks": [
-        {
-          "check": "captured_rows_count",
-          "params": {
-            "name": "surfaces",
-            "min": 1,
-            "max": 1
-          },
-          "tier": "acceptance",
-          "weight": 1
-        },
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "surfaces",
-            "expect": [
-              {
-                "field": "display_name",
-                "equals": "HalfWired"
-              },
-              {
-                "field": "entries",
-                "contains": "EvalAutomationOutput"
-              },
-              {
-                "field": "enabled",
-                "equals": true
-              }
-            ]
-          },
-          "tier": "acceptance",
-          "weight": 1
-        },
         {
           "check": "tool_calls_expected",
           "params": {
@@ -52,43 +20,63 @@
           },
           "tier": "acceptance",
           "weight": 1
-        }
-      ],
-      "capture": [
+        },
         {
-          "kind": "documents",
-          "name": "surfaces",
-          "collection": "DatastoreToolSurface",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [],
+                    "query": [],
+                    "lookup_by": "correlation",
+                    "caller_fields": {}
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    }
+                  ]
+                }
+              ]
             },
-            "display_name": {
-              "_eq": "HalfWired"
-            }
+            "present": [
+              {
+                "capture": "surfaces"
+              }
+            ]
           },
-          "fields": [
-            "surface_id",
-            "display_name",
-            "entries",
-            "enabled"
-          ]
-        }
-      ]
-    },
-    {
-      "stage_id": "finish_wiring",
-      "prompt": "The HalfWired surface still isn't callable. Finish the wiring by selecting it in The Engineer's Tools under datastore.datastore_tool_surface_ids, then read back the Tools selection to confirm it. Change nothing else.",
-      "deadline_secs": 600,
-      "checks": [
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
         {
           "check": "captured_fields_match",
           "params": {
-            "name": "tools",
+            "name": "surfaces",
             "expect": [
               {
-                "field": "datastore",
-                "matches": "\"datastore_tool_surface_ids\":\\[\\s*\"[^\"]+\""
+                "field": "entries",
+                "contains": "EvalAutomationOutput"
+              },
+              {
+                "field": "enabled",
+                "equals": true
               }
             ]
           },
@@ -99,26 +87,212 @@
       "capture": [
         {
           "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
           "name": "tools",
           "collection": "Tools",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "tools_id": {
-              "_eq": "engineer-tools"
             }
           },
           "fields": [
             "tools_id",
-            "datastore"
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "agent_did",
+            "display_name",
+            "enabled",
+            "entries"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "finish_wiring",
+      "prompt": "Make those recordkeeping tools available to you now. Reuse what you prepared; do not create another copy.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "EvalAutomationOutput"
+                    ],
+                    "query": [
+                      "EvalAutomationOutput"
+                    ],
+                    "lookup_by": "correlation",
+                    "caller_fields": {
+                      "EvalAutomationOutput": [
+                        "correlation",
+                        "result"
+                      ]
+                    }
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "agent_did",
+            "display_name",
+            "enabled",
+            "entries"
           ]
         }
       ]
     },
     {
       "stage_id": "exercise",
-      "prompt": "Through the selected HalfWired datastore surface, create one EvalAutomationOutput document with correlation \"val-delta-005\" and result \"resumed\", and confirm the row with a query. Change no configuration.",
+      "prompt": "Save one output for correlation \"val-delta-005\" with result \"resumed\". Then look it up by correlation and tell me what was saved. Use your recordkeeping tools; leave configuration alone.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -148,6 +322,73 @@
           },
           "tier": "acceptance",
           "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "forbidden": [
+              "config",
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "final_message_matches",
+          "params": {
+            "all": [
+              "val-delta-005",
+              "resumed"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "EvalAutomationOutput"
+                    ],
+                    "query": [
+                      "EvalAutomationOutput"
+                    ],
+                    "lookup_by": "correlation",
+                    "caller_fields": {
+                      "EvalAutomationOutput": [
+                        "correlation",
+                        "result"
+                      ]
+                    },
+                    "called_create": [
+                      "EvalAutomationOutput"
+                    ],
+                    "called_query": [
+                      "EvalAutomationOutput"
+                    ]
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
@@ -163,6 +404,72 @@
           "fields": [
             "correlation",
             "result"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "agent_did",
+            "display_name",
+            "enabled",
+            "entries"
           ]
         }
       ]

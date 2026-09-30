@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Create an enabled behavior named \"porter\" with its own Context and Tools. Set its system prompt exactly to: You are Porter, a build-and-fetch helper.\nGrant files ReadOnly and bash ReadOnly; no other tools. Reuse the existing inference profile. Leave your own behavior, Context and Tools unchanged. Apply the configuration.",
+      "prompt": "Create an assistant named Porter for repository inspection. Give it its own instructions and tool permissions, appropriate for its role: read local files and run read-only inspection commands. It must not modify anything. Use our existing model settings. Keep your own role and permissions unchanged.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -21,7 +21,7 @@
                   "behavior": [
                     {
                       "field": "display_name",
-                      "equals": "porter"
+                      "matches": "(?i)^porter$"
                     },
                     {
                       "field": "enabled",
@@ -31,7 +31,7 @@
                   "context": [
                     {
                       "field": "system_prompt",
-                      "equals": "You are Porter, a build-and-fetch helper."
+                      "matches": "(?i)(repository|inspect|read)"
                     }
                   ],
                   "tools": [
@@ -221,7 +221,7 @@
     },
     {
       "stage_id": "disable_bash",
-      "prompt": "Edit porter's existing Tools in place: set bash Off, keeping files ReadOnly and all other configuration unchanged.",
+      "prompt": "Porter should no longer be able to run commands. Keep its ability to read files and its other settings; update the existing assistant.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -237,7 +237,7 @@
                   "behavior": [
                     {
                       "field": "display_name",
-                      "equals": "porter"
+                      "matches": "(?i)^porter$"
                     },
                     {
                       "field": "enabled",
@@ -247,7 +247,7 @@
                   "context": [
                     {
                       "field": "system_prompt",
-                      "equals": "You are Porter, a build-and-fetch helper."
+                      "matches": "(?i)(repository|inspect|read)"
                     }
                   ],
                   "tools": [

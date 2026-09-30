@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "helper-and-target",
-      "prompt": "Wire up subagent delegation on this node. Create a helper behavior with the display name 'beh-helper-02' (minimal is fine). Then create a SubagentTarget with id 'tgt-fixer-01', name 'fixer-target', target_agent_did set to this node's own DID, and behavior 'beh-helper-02'. Select 'tgt-fixer-01' in your own Tools.subagents.",
+      "prompt": "Create a checking-helper assistant for delegated checks, using our current model, and make it available for you to delegate to.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -22,64 +22,14 @@
           "weight": 1
         },
         {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "fixer-target",
-            "expect": [
-              {
-                "field": "name",
-                "equals": "fixer-target"
-              },
-              {
-                "field": "behavior_id",
-                "matches": ":beh\\-helper\\-02$"
-              }
-            ],
-            "max_rows": 1
-          },
-          "tier": "acceptance",
-          "weight": 2
-        }
-      ],
-      "capture": [
-        {
-          "kind": "documents",
-          "name": "fixer-target",
-          "collection": "SubagentTarget",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "target_id": {
-              "_eq": "tgt-fixer-01"
-            },
-            "target_agent_did": {
-              "_eq": "$trial"
-            }
-          },
-          "fields": [
-            "target_id",
-            "agent_did",
-            "target_agent_did",
-            "behavior_id",
-            "name"
-          ]
-        }
-      ]
-    },
-    {
-      "stage_id": "caller-selects-target",
-      "prompt": "Create a caller behavior with the display name 'beh-caller-01' (minimal is fine). Select 'tgt-fixer-01' in its Tools.subagents as well, and keep 'tgt-fixer-01' selected in your own Tools too.",
-      "deadline_secs": 600,
-      "checks": [
-        {
           "check": "captured_rows_count",
           "params": {
-            "name": "caller-behavior",
-            "min": 1
+            "name": "targets",
+            "min": 1,
+            "max": 1
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
         },
         {
           "check": "crew_spec_match",
@@ -91,56 +41,21 @@
               "expect": [
                 {
                   "behavior_id": "engineer",
-                  "tools": [
-                    {
-                      "field": "subagents.enabled",
-                      "equals": true
-                    },
-                    {
-                      "field": "subagents.target_ids",
-                      "contains": "tgt-fixer-01"
-                    }
-                  ]
-                },
-                {
-                  "behavior_id": "beh-caller-01",
-                  "tools": [
-                    {
-                      "field": "subagents.enabled",
-                      "equals": true
-                    },
-                    {
-                      "field": "subagents.target_ids",
-                      "contains": "tgt-fixer-01"
-                    }
-                  ]
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "checking-helper"
+                    ]
+                  }
                 }
               ]
             }
           },
           "tier": "acceptance",
-          "weight": 3
+          "weight": 1
         }
       ],
       "capture": [
-        {
-          "kind": "documents",
-          "name": "caller-behavior",
-          "collection": "AgentBehavior",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "behavior_id": {
-              "_like": "%:beh-caller-01"
-            }
-          },
-          "fields": [
-            "behavior_id",
-            "display_name",
-            "enabled"
-          ]
-        },
         {
           "kind": "documents",
           "name": "behaviors",
@@ -152,7 +67,10 @@
           },
           "fields": [
             "behavior_id",
-            "context_id"
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
           ]
         },
         {
@@ -166,7 +84,8 @@
           },
           "fields": [
             "context_id",
-            "tools_id"
+            "tools_id",
+            "system_prompt"
           ]
         },
         {
@@ -180,14 +99,164 @@
           },
           "fields": [
             "tools_id",
-            "subagents"
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "name",
+            "target_agent_did",
+            "behavior_id"
+          ]
+        }
+      ]
+    },
+    {
+      "stage_id": "caller-selects-target",
+      "prompt": "Create Coordinator for organizing checks, with its own instructions and permission to delegate to Checking Helper. Keep that helper available to you as well.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "targets",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "checking-helper"
+                    ]
+                  }
+                },
+                {
+                  "behavior_id": "coordinator",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "checking-helper"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "name",
+            "target_agent_did",
+            "behavior_id"
           ]
         }
       ]
     },
     {
       "stage_id": "delegate",
-      "prompt": "Delegate a task to subagent 'fixer-target': have the helper reply with exactly PONG-7391 and nothing else. End your turn after dispatch; report the reply when it arrives.",
+      "prompt": "Ask Checking Helper to reply with exactly PONG-7391 and report its reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -197,7 +266,8 @@
               "agent_new"
             ],
             "forbidden": [
-              "bash"
+              "bash",
+              "config"
             ]
           },
           "tier": "acceptance",
@@ -242,7 +312,7 @@
               {
                 "capture": "helper-request",
                 "key": "behavior_id",
-                "id": "beh-helper-02",
+                "id": "checking-helper",
                 "field": "caused_by_parent_tool_call_doc_id",
                 "target_capture": "delegation_calls",
                 "target_key": "_docID",
@@ -283,7 +353,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-helper-02"
+              "_like": "%:checking-helper"
             }
           },
           "fields": [
@@ -301,7 +371,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-helper-02"
+              "_like": "%:checking-helper"
             }
           },
           "fields": [

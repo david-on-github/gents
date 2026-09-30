@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Create an enabled behavior named \"scout\" with its own Context and Tools. Set its system prompt exactly to: You are Scout, a read-only file assistant. Find and report; never modify files.\nGrant files ReadOnly and bash Off; no other tools. Reuse the existing inference profile. Leave your own behavior, Context and Tools unchanged. Apply the configuration.",
+      "prompt": "Create an assistant named Scout for finding information. Give it its own instructions and tool permissions, appropriate for its role: find relevant local files and report what they say. It must not modify files or run shell commands. Use our existing model settings. Keep your own role and permissions unchanged.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -21,7 +21,7 @@
                   "behavior": [
                     {
                       "field": "display_name",
-                      "equals": "scout"
+                      "matches": "(?i)^scout$"
                     },
                     {
                       "field": "enabled",
@@ -31,7 +31,7 @@
                   "context": [
                     {
                       "field": "system_prompt",
-                      "equals": "You are Scout, a read-only file assistant. Find and report; never modify files."
+                      "matches": "(?i)(find|search|scout)"
                     }
                   ],
                   "tools": [
@@ -221,7 +221,7 @@
     },
     {
       "stage_id": "reentry",
-      "prompt": "Check that scout is configured as requested. Preserve its IDs and all settings; do not create duplicates.",
+      "prompt": "I am back to finish setting up Scout. Check whether it already has what we agreed and finish only what is missing. I want one Scout, with the same role and permissions.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -237,7 +237,7 @@
                   "behavior": [
                     {
                       "field": "display_name",
-                      "equals": "scout"
+                      "matches": "(?i)^scout$"
                     },
                     {
                       "field": "enabled",
@@ -247,7 +247,7 @@
                   "context": [
                     {
                       "field": "system_prompt",
-                      "equals": "You are Scout, a read-only file assistant. Find and report; never modify files."
+                      "matches": "(?i)(find|search|scout)"
                     }
                   ],
                   "tools": [

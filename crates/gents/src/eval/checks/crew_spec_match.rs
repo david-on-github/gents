@@ -5,7 +5,7 @@
 //! once: the categories (completeness, templates, least privilege, receipt,
 //! ...) are reported in `raw.categories` rather than as separate verdicts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -19,18 +19,26 @@ use crate::eval::runner::executor::{CaptureResult, StageEvidence};
 
 /// Params (every list optional, at least one requirement overall):
 ///
-/// - `present`: `[{capture, category?}]`, each capture must exist. A
+/// - `present`: `[{capture, min?, max?, category?}]`, each capture must exist
+///   and meet any row-count bounds. A
 ///   documents capture that selects fields exists only when its collection
 ///   has them, so this checks a schema as well as rows.
 /// - `rows`: `[{capture, key, id, category?, expect: [expectation]}]`: a row
 ///   whose `key` equals `id` exists (one requirement) and holds each
 ///   expectation (one requirement each).
 /// - `links`: `[{capture, key, id, field, target_capture, target_key, expect, category?}]`
-///   follows a stored ID in `field` and tests the selected target row.
+///   follows a stored ID in `field` and tests the selected target row. Optional
+///   `via` hops follow more references before testing. `reported_fields` requires
+///   non-null target values in the final assistant message (ignoring case).
 /// - `agents`: `{behaviors, contexts, tools, expect: [{behavior_id, category?,
 ///   behavior: [...], context: [...], tools: [...]}]}`: the behavior exists,
 ///   and each expectation holds on it, on the Context it selects and on the
-///   Tools that Context selects.
+///   Tools that Context selects. Optional `datastore` follows selected surfaces,
+///   comparing exact create/query collection sets. `caller_fields` requires model-
+///   supplied required create fields; `lookup_by` requires queries usable with
+///   that key alone. `called_create`/`called_query` require successful calls to
+///   the selected tools. Optional `delegates` checks the exact local behavior set
+///   reached through selected subagent targets. Both reject unresolved references.
 /// - `templates`: `[{capture, key, id, fields: [field], allowed: [name],
 ///   category?}]`: every `{{ doc.NAME }}` in each present template field of
 ///   that row names an allowed field (one requirement per field present).
@@ -82,6 +90,10 @@ struct Continuation {
 struct Present {
     capture: String,
     #[serde(default)]
+    min: Option<usize>,
+    #[serde(default)]
+    max: Option<usize>,
+    #[serde(default)]
     category: Option<String>,
 }
 
@@ -112,6 +124,18 @@ struct LinkSpec {
     category: Option<String>,
     #[serde(default)]
     expect: Vec<Expectation>,
+    #[serde(default)]
+    via: Vec<LinkHop>,
+    #[serde(default)]
+    reported_fields: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LinkHop {
+    field: String,
+    target_capture: String,
+    target_key: String,
 }
 
 #[derive(Deserialize)]
@@ -135,6 +159,35 @@ struct AgentSpec {
     context: Vec<Expectation>,
     #[serde(default)]
     tools: Vec<Expectation>,
+    #[serde(default)]
+    datastore: Option<DatastoreSpec>,
+    #[serde(default)]
+    delegates: Option<DelegateSpec>,
+}
+
+/// Compare capabilities through the selected documents, allowing the model to
+/// choose internal IDs and tool names. Extra grants fail the exact-set check.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DatastoreSpec {
+    surfaces: String,
+    create: BTreeSet<String>,
+    query: BTreeSet<String>,
+    #[serde(default)]
+    caller_fields: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
+    lookup_by: Option<String>,
+    #[serde(default)]
+    called_create: BTreeSet<String>,
+    #[serde(default)]
+    called_query: BTreeSet<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DelegateSpec {
+    targets: String,
+    behaviors: BTreeSet<String>,
 }
 
 #[derive(Deserialize)]
@@ -192,11 +245,15 @@ fn is_id(stored: &str, id: &str) -> bool {
 }
 
 fn find<'a>(rows: &'a [Value], key: &str, id: &str) -> Option<&'a Value> {
-    let stored = |row: &'a Value| row.get(key).and_then(Value::as_str);
-    rows.iter().find(|row| stored(row) == Some(id)).or_else(|| {
-        rows.iter()
-            .find(|row| stored(row).is_some_and(|stored| is_id(stored, id)))
-    })
+    rows.iter()
+        .find(|row| lookup(row, key).as_str() == Some(id))
+        .or_else(|| {
+            rows.iter().find(|row| {
+                lookup(row, key)
+                    .as_str()
+                    .is_some_and(|stored| is_id(stored, id))
+            })
+        })
 }
 
 /// Every `NAME` a template reads as `doc.NAME`.
@@ -279,7 +336,7 @@ impl Check for CrewSpecMatch {
     }
 
     fn version(&self) -> &'static str {
-        "2"
+        "3"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -306,7 +363,7 @@ impl Check for CrewSpecMatch {
                 "properties": {
                     "present": {"type": "array", "items": {
                         "type": "object",
-                        "properties": {"capture": {"type": "string"}, "category": category},
+                        "properties": {"capture": {"type": "string"}, "category": category, "min":{"type":"integer","minimum":0}, "max":{"type":"integer","minimum":0}},
                         "required": ["capture"], "additionalProperties": false
                     }},
                     "rows": {"type": "array", "items": {
@@ -323,7 +380,13 @@ impl Check for CrewSpecMatch {
                             "capture": {"type": "string"}, "key": {"type": "string"},
                             "id": {"type": "string"}, "field": {"type": "string"},
                             "target_capture": {"type": "string"}, "target_key": {"type": "string"},
-                            "category": category, "expect": expectations
+                            "category": category, "expect": expectations,
+                            "reported_fields": strings,
+                            "via": {"type":"array", "items": {
+                                "type":"object", "properties": {
+                                    "field":{"type":"string"}, "target_capture":{"type":"string"}, "target_key":{"type":"string"}
+                                }, "required":["field","target_capture","target_key"], "additionalProperties":false
+                            }}
                         },
                         "required": ["capture", "key", "id", "field", "target_capture", "target_key"],
                         "additionalProperties": false
@@ -338,7 +401,13 @@ impl Check for CrewSpecMatch {
                                 "properties": {
                                     "behavior_id": {"type": "string"}, "category": category,
                                     "behavior": expectations, "context": expectations,
-                                    "tools": expectations
+                                    "tools": expectations,
+                                    "datastore": {"type":"object", "properties": {
+                                        "surfaces":{"type":"string"}, "create":strings, "query":strings, "caller_fields":{"type":"object", "additionalProperties":strings}, "lookup_by":{"type":"string"}, "called_create":strings, "called_query":strings
+                                    }, "required":["surfaces","create","query"], "additionalProperties":false},
+                                    "delegates": {"type":"object", "properties": {
+                                        "targets":{"type":"string"}, "behaviors":strings
+                                    }, "required":["targets","behaviors"], "additionalProperties":false}
                                 },
                                 "required": ["behavior_id"], "additionalProperties": false
                             }}
@@ -389,10 +458,25 @@ impl Check for CrewSpecMatch {
         let mut tally = Tally::default();
 
         for present in &params.present {
+            if present
+                .min
+                .zip(present.max)
+                .is_some_and(|(min, max)| min > max)
+            {
+                return grader("bad_params", "capture minimum exceeds maximum");
+            }
+            let count = rows(&present.capture).map(<[Value]>::len);
             tally.record(
                 present.category.as_deref(),
-                rows(&present.capture).is_some(),
-                || format!("capture {} absent", present.capture),
+                count.is_some_and(|n| {
+                    present.min.is_none_or(|min| n >= min) && present.max.is_none_or(|max| n <= max)
+                }),
+                || {
+                    format!(
+                        "capture {} has {:?} rows; expected min {:?}, max {:?}",
+                        present.capture, count, present.min, present.max
+                    )
+                },
             );
         }
         for spec in params.rows {
@@ -413,9 +497,15 @@ impl Check for CrewSpecMatch {
             };
             let source = rows(&spec.capture).and_then(|rows| find(rows, &spec.key, &spec.id));
             let reference = source.map(|row| lookup(row, &spec.field));
-            let target = reference.as_ref().and_then(Value::as_str).and_then(|id| {
+            let mut target = reference.as_ref().and_then(Value::as_str).and_then(|id| {
                 rows(&spec.target_capture).and_then(|rows| find(rows, &spec.target_key, id))
             });
+            for hop in &spec.via {
+                let reference = target.map(|row| lookup(row, &hop.field));
+                target = reference.as_ref().and_then(Value::as_str).and_then(|id| {
+                    rows(&hop.target_capture).and_then(|rows| find(rows, &hop.target_key, id))
+                });
+            }
             let subject = format!(
                 "{} {}.{} -> {}",
                 spec.capture, spec.id, spec.field, spec.target_capture
@@ -425,6 +515,25 @@ impl Check for CrewSpecMatch {
                 format!("{subject}: unresolved reference")
             });
             tally.expectations(category, &subject, target, &tests);
+            let final_message = stage
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == "assistant" && !m.content.trim().is_empty())
+                .map(|m| m.content.to_lowercase())
+                .unwrap_or_default();
+            for field in &spec.reported_fields {
+                let value = target.map(|row| lookup(row, field)).unwrap_or(Value::Null);
+                let text = match &value {
+                    Value::String(s) => s.to_lowercase(),
+                    other => other.to_string(),
+                };
+                tally.record(
+                    category,
+                    !value.is_null() && !text.is_empty() && final_message.contains(&text),
+                    || format!("final message does not report {subject}.{field}"),
+                );
+            }
         }
         if let Some(agents) = params.agents {
             let behaviors = rows(&agents.behaviors).unwrap_or_default();
@@ -458,6 +567,122 @@ impl Check for CrewSpecMatch {
                 );
                 tally.expectations(category, &format!("{id} context"), context, &context_tests);
                 tally.expectations(category, &format!("{id} tools"), tools_row, &tools_tests);
+                if let Some(expected) = spec.datastore {
+                    use crate::document_config::{DatastoreToolSurfaceDocument, SurfaceToolDecl};
+                    let selected =
+                        tools_row.map(|t| lookup(t, "datastore.datastore_tool_surface_ids"));
+                    let mut creates = BTreeSet::new();
+                    let mut queries = BTreeSet::new();
+                    let mut called_create = BTreeSet::new();
+                    let mut called_query = BTreeSet::new();
+                    let mut valid = context.is_some() && tools_row.is_some();
+                    if let Some(Value::Array(ids)) = selected {
+                        for reference in ids {
+                            let surface = reference
+                                .as_str()
+                                .and_then(|reference| {
+                                    rows(&expected.surfaces)
+                                        .and_then(|rows| find(rows, "surface_id", reference))
+                                })
+                                .and_then(|row| {
+                                    serde_json::from_value::<DatastoreToolSurfaceDocument>(
+                                        row.clone(),
+                                    )
+                                    .ok()
+                                });
+                            if let Some(surface) = surface.filter(|s| s.enabled) {
+                                for entry in surface.entries.unwrap_or_default() {
+                                    valid &= entry.is_well_formed();
+                                    let called = stage.tool_calls.iter().any(|call| {
+                                        call.tool_name == entry.tool_name()
+                                            && call.status.as_deref() == Some("completed")
+                                            && call.tool_failure_class.is_none()
+                                    });
+                                    match entry {
+                                        SurfaceToolDecl::Create(d) => {
+                                            if let Some(fields) =
+                                                expected.caller_fields.get(&d.collection)
+                                            {
+                                                valid &= fields.iter().all(|name| {
+                                                    d.fields.iter().any(|f| {
+                                                        &f.name == name
+                                                            && f.required
+                                                            && f.fill.is_none()
+                                                    })
+                                                });
+                                            }
+                                            if called {
+                                                called_create.insert(d.collection.clone());
+                                            }
+                                            creates.insert(d.collection);
+                                        }
+                                        SurfaceToolDecl::Query(d) => {
+                                            if let Some(key) = &expected.lookup_by {
+                                                valid &= d.fields.contains(key)
+                                                    && d.filter_fields.iter().any(|f| {
+                                                        &f.name == key && f.fill.is_none()
+                                                    })
+                                                    && d.filter_fields.iter().all(|f| {
+                                                        f.fill.is_none()
+                                                            && (!f.required || &f.name == key)
+                                                    });
+                                            }
+                                            if called {
+                                                called_query.insert(d.collection.clone());
+                                            }
+                                            queries.insert(d.collection);
+                                        }
+                                    }
+                                }
+                            } else {
+                                valid = false;
+                            }
+                        }
+                    } else if selected.is_some_and(|v| !v.is_null()) {
+                        valid = false;
+                    }
+                    tally.record(category, valid && creates == expected.create && queries == expected.query && expected.called_create.is_subset(&called_create) && expected.called_query.is_subset(&called_query), || {
+                        format!("{id} selected datastore grants: create {creates:?}, query {queries:?}; expected create {:?}, query {:?}; references valid: {valid}; called create {called_create:?}, query {called_query:?}", expected.create, expected.query)
+                    });
+                }
+                if let Some(expected) = spec.delegates {
+                    let selected = tools_row.map(|t| lookup(t, "subagents.target_ids"));
+                    let enabled =
+                        tools_row.map(|t| lookup(t, "subagents.enabled")) == Some(json!(true));
+                    let mut actual = BTreeSet::new();
+                    let mut valid = enabled;
+                    if let Some(Value::Array(ids)) = selected {
+                        for reference in ids {
+                            let target = reference.as_str().and_then(|reference| {
+                                rows(&expected.targets)
+                                    .and_then(|rows| find(rows, "target_id", reference))
+                            });
+                            valid &= target.is_some_and(|t| {
+                                t.get("agent_did").and_then(Value::as_str).is_some()
+                                    && t.get("target_agent_did") == t.get("agent_did")
+                            });
+                            if let Some(behavior) = target
+                                .and_then(|t| t.get("behavior_id"))
+                                .and_then(Value::as_str)
+                            {
+                                if let Some(name) =
+                                    expected.behaviors.iter().find(|name| is_id(behavior, name))
+                                {
+                                    actual.insert(name.clone());
+                                } else {
+                                    actual.insert(behavior.to_string());
+                                }
+                            } else {
+                                valid = false;
+                            }
+                        }
+                    } else {
+                        valid = false;
+                    }
+                    tally.record(category, valid && actual == expected.behaviors, || {
+                        format!("{id} selected delegates {actual:?}; expected {:?}; references valid: {valid}", expected.behaviors)
+                    });
+                }
             }
         }
         for spec in &params.templates {
@@ -634,6 +859,182 @@ mod tests {
     }
 
     #[test]
+    fn multiple_hops_require_the_connected_limit_and_the_reported_model() {
+        let params = json!({"links":[
+            {"capture":"behaviors","key":"behavior_id","id":"engineer","field":"inference_profile_id","target_capture":"profiles","target_key":"profile_id","reported_fields":["model_name"]},
+            {"capture":"behaviors","key":"behavior_id","id":"engineer","field":"inference_profile_id","target_capture":"profiles","target_key":"profile_id","via":[{"field":"execution_id","target_capture":"executions","target_key":"execution_id"}],"expect":[{"field":"max_turns","equals":30}]}
+        ]});
+        assert!(
+            jsonschema::validator_for(&CrewSpecMatch.describe().params_schema)
+                .unwrap()
+                .is_valid(&params)
+        );
+        let make = |execution: &str, report: &str| {
+            let mut e = stage(&[
+                (
+                    "behaviors",
+                    vec![json!({"behavior_id":"engineer","inference_profile_id":"chosen"})],
+                ),
+                (
+                    "profiles",
+                    vec![
+                        json!({"profile_id":"chosen","model_name":"actual-model","execution_id":execution}),
+                    ],
+                ),
+                (
+                    "executions",
+                    vec![
+                        json!({"execution_id":"good","max_turns":30}),
+                        json!({"execution_id":"wrong","max_turns":2}),
+                    ],
+                ),
+            ]);
+            e.messages = vec![crate::eval::runner::embedded::MessageEvidence {
+                role: "assistant".into(),
+                content: report.into(),
+                created_at: None,
+            }];
+            e
+        };
+        assert_eq!(
+            CrewSpecMatch
+                .evaluate(&params, &make("good", "We use ACTUAL-MODEL."))
+                .score_bp,
+            Some(10000)
+        );
+        for (exec, report) in [
+            ("wrong", "actual-model"),
+            ("missing", "actual-model"),
+            ("good", "another-model"),
+        ] {
+            let v = CrewSpecMatch.evaluate(&params, &make(exec, report));
+            assert!(v.score_bp.unwrap() < 10000, "{}", v.raw);
+        }
+    }
+
+    #[test]
+    fn reverse_reference_hops_do_not_accept_a_disconnected_task() {
+        let params = json!({"links":[{"capture":"sources","key":"source_collection","id":"Note","field":"event_source_id","target_capture":"triggers","target_key":"source.event_source_id","via":[{"field":"task_id","target_capture":"tasks","target_key":"task_id"}],"expect":[{"field":"behavior_id","equals":"reviewer"}]}]});
+        for (bound, score) in [("wanted", 10000), ("decoy", 5000)] {
+            let e = stage(&[
+                (
+                    "sources",
+                    vec![json!({"source_collection":"Note","event_source_id":"watch"})],
+                ),
+                (
+                    "triggers",
+                    vec![json!({"source": "{\"event_source_id\":\"watch\"}","task_id":bound})],
+                ),
+                (
+                    "tasks",
+                    vec![
+                        json!({"task_id":"wanted","behavior_id":"reviewer"}),
+                        json!({"task_id":"decoy","behavior_id":"writer"}),
+                    ],
+                ),
+            ]);
+            assert_eq!(CrewSpecMatch.evaluate(&params, &e).score_bp, Some(score));
+        }
+    }
+
+    #[test]
+    fn selected_datastore_contract_rejects_runtime_keys_decoys_and_missing_calls() {
+        let params = json!({"agents":{"behaviors":"behaviors","contexts":"contexts","tools":"tools","expect":[{"behavior_id":"worker-a","datastore":{"surfaces":"surfaces","create":["Result"],"query":["Result"],"caller_fields":{"Result":["correlation","result"]},"lookup_by":"correlation","called_create":["Result"],"called_query":["Result"]}}]}});
+        let mut e = home();
+        let tool =
+            json!({"tools_id":"t1","datastore":{"datastore_tool_surface_ids":["arbitrary-id"]}});
+        let surface = json!({"surface_id":"arbitrary-id","agent_did":"did:x","entries":[{"kind":"create","tool_name":"save_result","collection":"Result","description":"Save the caller's result","fields":[{"name":"correlation","required":true},{"name":"result","required":true}]},{"kind":"query","tool_name":"find_result","collection":"Result","description":"Find results by the caller's key","fields":["correlation","result"],"filter_fields":[{"name":"correlation"}]}]});
+        e.captures.insert(
+            "tools".into(),
+            CaptureResult::Documents {
+                rows: vec![tool.clone()],
+            },
+        );
+        e.captures.insert(
+            "surfaces".into(),
+            CaptureResult::Documents {
+                rows: vec![surface.clone()],
+            },
+        );
+        e.tool_calls = ["save_result", "find_result"]
+            .into_iter()
+            .map(|name| crate::eval::runner::embedded::ToolCallEvidence {
+                tool_name: name.into(),
+                status: Some("completed".into()),
+                lifecycle_state: Some("completed".into()),
+                tool_failure_class: None,
+                started_at: None,
+                completed_at: None,
+                args: Value::Null,
+                result: Value::Null,
+            })
+            .collect();
+        assert!(
+            jsonschema::validator_for(&CrewSpecMatch.describe().params_schema)
+                .unwrap()
+                .is_valid(&params)
+        );
+        let good = CrewSpecMatch.evaluate(&params, &e);
+        assert_eq!(good.score_bp, Some(10000), "{}", good.raw);
+        for mutation in 0..5 {
+            let mut bad = e.clone();
+            match mutation {
+                0 => {
+                    let mut s = surface.clone();
+                    s["entries"][0]["fields"][0] =
+                        json!({"name":"correlation","fill":"correlation"});
+                    bad.captures.insert(
+                        "surfaces".into(),
+                        CaptureResult::Documents { rows: vec![s] },
+                    );
+                }
+                1 => {
+                    let mut t = tool.clone();
+                    t["datastore"]["datastore_tool_surface_ids"] = json!(["unselected"]);
+                    bad.captures
+                        .insert("tools".into(), CaptureResult::Documents { rows: vec![t] });
+                }
+                2 => {
+                    bad.tool_calls.pop();
+                }
+                3 => {
+                    let mut s = surface.clone();
+                    s["entries"][1]["filter_fields"] =
+                        json!([{"name":"correlation"},{"name":"result","required":true}]);
+                    bad.captures.insert(
+                        "surfaces".into(),
+                        CaptureResult::Documents { rows: vec![s] },
+                    );
+                }
+                _ => {
+                    bad.tool_calls[0].status = Some("failed".into());
+                }
+            }
+            let v = CrewSpecMatch.evaluate(&params, &bad);
+            assert!(
+                v.score_bp.unwrap() < 10000,
+                "mutation {mutation}: {}",
+                v.raw
+            );
+        }
+    }
+
+    #[test]
+    fn delegates_follow_selected_targets_and_reject_foreign_or_extra_grants() {
+        let params = json!({"agents":{"behaviors":"behaviors","contexts":"contexts","tools":"tools","expect":[{"behavior_id":"worker-a","delegates":{"targets":"targets","behaviors":["reviewer"]}}]}});
+        for (selected, owner, score) in [
+            ("right", "did:x", 10000),
+            ("wrong", "did:x", 5000),
+            ("right", "did:other", 5000),
+        ] {
+            let mut e = home();
+            e.captures.insert("tools".into(),CaptureResult::Documents{rows:vec![json!({"tools_id":"t1","subagents":{"enabled":true,"target_ids":[selected]}})]});
+            e.captures.insert("targets".into(),CaptureResult::Documents{rows:vec![json!({"target_id":"right","agent_did":"did:x","target_agent_did":owner,"behavior_id":"scope:reviewer"}),json!({"target_id":"wrong","agent_did":"did:x","target_agent_did":"did:x","behavior_id":"scope:writer"})]});
+            assert_eq!(CrewSpecMatch.evaluate(&params, &e).score_bp, Some(score));
+        }
+    }
+
+    #[test]
     fn links_check_the_selected_source_and_fail_missing_or_wrong_references() {
         let params = json!({"links": [{
             "capture": "triggers", "key": "trigger_id", "id": "dispatch",
@@ -693,7 +1094,10 @@ mod tests {
         assert_eq!(verdict.score_bp, Some(7_692));
         let feedback = verdict.feedback.unwrap();
         assert!(feedback.contains("doc.owner"), "{feedback}");
-        assert!(feedback.contains("capture c_result absent"), "{feedback}");
+        assert!(
+            feedback.contains("capture c_result has None rows"),
+            "{feedback}"
+        );
         assert_eq!(verdict.raw["activity"]["tool_calls"], 0);
     }
 

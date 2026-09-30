@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure-two",
-      "prompt": "Set up two subagents. Create helper behaviors named 'beh-alpha-01' and 'beh-beta-01', both minimal. Create SubagentTarget 'tgt-alpha-01' (name 'alpha-target') pointing at 'beh-alpha-01' and SubagentTarget 'tgt-beta-01' (name 'beta-target') pointing at 'beh-beta-01', both with target_agent_did set to this node's own DID. Select both targets in your own Tools.subagents.",
+      "prompt": "Create two assistants using our current model: Researcher for finding facts, and Reviewer for checking conclusions. Make both available for you to delegate to.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -24,28 +24,33 @@
         {
           "check": "captured_rows_count",
           "params": {
-            "name": "all-targets",
+            "name": "targets",
             "min": 2,
             "max": 2
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
         },
         {
-          "check": "captured_fields_match",
+          "check": "crew_spec_match",
           "params": {
-            "name": "alpha-target",
-            "expect": [
-              {
-                "field": "name",
-                "equals": "alpha-target"
-              },
-              {
-                "field": "behavior_id",
-                "matches": ":beh\\-alpha\\-01$"
-              }
-            ],
-            "max_rows": 1
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "researcher",
+                      "reviewer"
+                    ]
+                  }
+                }
+              ]
+            }
           },
           "tier": "acceptance",
           "weight": 1
@@ -54,92 +59,75 @@
       "capture": [
         {
           "kind": "documents",
-          "name": "all-targets",
-          "collection": "SubagentTarget",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
             }
           },
           "fields": [
-            "target_id",
-            "name",
-            "behavior_id"
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
           ]
         },
         {
           "kind": "documents",
-          "name": "alpha-target",
-          "collection": "SubagentTarget",
+          "name": "contexts",
+          "collection": "AgentContext",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "target_id": {
-              "_eq": "tgt-alpha-01"
-            },
-            "target_agent_did": {
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
               "_eq": "$trial"
             }
           },
           "fields": [
             "target_id",
             "agent_did",
+            "name",
             "target_agent_did",
-            "behavior_id",
-            "name"
-          ]
-        }
-      ]
-    },
-    {
-      "stage_id": "verify-both-selected",
-      "prompt": "Report what you configured; change nothing.",
-      "deadline_secs": 600,
-      "checks": [
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "tools-row",
-            "expect": [
-              {
-                "field": "subagents",
-                "contains": "tgt-alpha-01"
-              },
-              {
-                "field": "subagents",
-                "contains": "tgt-beta-01"
-              }
-            ]
-          },
-          "tier": "acceptance",
-          "weight": 2
-        }
-      ],
-      "capture": [
-        {
-          "kind": "documents",
-          "name": "tools-row",
-          "collection": "Tools",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "tools_id": {
-              "_eq": "engineer-tools"
-            }
-          },
-          "fields": [
-            "tools_id",
-            "display_name",
-            "subagents"
+            "behavior_id"
           ]
         }
       ]
     },
     {
       "stage_id": "delegate-to-beta",
-      "prompt": "Delegate a task to subagent 'beta-target' specifically: have beh-beta-01 reply with exactly BETA-777 and nothing else. End your turn after dispatch; report the reply when it arrives.",
+      "prompt": "Ask Reviewer to reply with exactly BETA-777 and report its reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -149,7 +137,8 @@
               "agent_new"
             ],
             "forbidden": [
-              "bash"
+              "bash",
+              "config"
             ]
           },
           "tier": "acceptance",
@@ -194,7 +183,7 @@
               {
                 "capture": "beta-request",
                 "key": "behavior_id",
-                "id": "beh-beta-01",
+                "id": "reviewer",
                 "field": "caused_by_parent_tool_call_doc_id",
                 "target_capture": "delegation_calls",
                 "target_key": "_docID",
@@ -235,7 +224,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-beta-01"
+              "_like": "%:reviewer"
             }
           },
           "fields": [
@@ -253,7 +242,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-beta-01"
+              "_like": "%:reviewer"
             }
           },
           "fields": [

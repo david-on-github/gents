@@ -49,7 +49,7 @@ for suite in matrix['suites']:
     stages=[s for c in cases for s in c['stages']]
     print(f"{suite['id']:<20} {splits['train']:>5} {splits['validation']:>5} {splits['held_out']:>5} {len(stages):>6} {sum(len(s['checks']) for s in stages):>6}  {', '.join(suite['coverage'])}")
     if 'blocked_reason' in suite: print('  '+suite['blocked_reason'])
-print(f"Counts are cases; each selected case runs {trials} trials. Capstone stops at configuration.")
+print(f"Stage/check totals include held-out cases; each selected case runs {trials} trials. Capstone stops at configuration.")
 PYLIST
   exit 0
 fi

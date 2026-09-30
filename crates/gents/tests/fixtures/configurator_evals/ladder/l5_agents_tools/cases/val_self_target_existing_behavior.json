@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "I want a subagent that runs this same engineer behavior. Create a SubagentTarget with id 'tgt-self-01', name 'self-target', target_agent_did set to this node's own DID, and behavior set to the existing engineer behavior \u2014 look it up, don't create a new behavior. Select 'tgt-self-01' in your own Tools.subagents.",
+      "prompt": "Make it possible for you to delegate to a new conversation running your same role and settings. Call it helper; reuse your existing role.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -22,54 +22,111 @@
           "weight": 1
         },
         {
-          "check": "captured_fields_match",
+          "check": "captured_rows_count",
           "params": {
-            "name": "self-target",
-            "expect": [
-              {
-                "field": "name",
-                "equals": "self-target"
-              },
-              {
-                "field": "behavior_id",
-                "matches": "."
-              }
-            ],
-            "max_rows": 1
+            "name": "targets",
+            "min": 1,
+            "max": 1
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "engineer"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
         {
           "kind": "documents",
-          "name": "self-target",
-          "collection": "SubagentTarget",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "target_id": {
-              "_eq": "tgt-self-01"
-            },
-            "target_agent_did": {
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
               "_eq": "$trial"
             }
           },
           "fields": [
             "target_id",
             "agent_did",
+            "name",
             "target_agent_did",
-            "behavior_id",
-            "name"
+            "behavior_id"
           ]
         }
       ]
     },
     {
       "stage_id": "delegate",
-      "prompt": "Delegate a task to subagent 'self-target': have it reply with exactly ECHO-2468 and nothing else. End your turn after dispatch; report the reply when it arrives.",
+      "prompt": "Ask helper to reply with exactly ECHO-2468 and report its reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -79,7 +136,8 @@
               "agent_new"
             ],
             "forbidden": [
-              "bash"
+              "bash",
+              "config"
             ]
           },
           "tier": "acceptance",

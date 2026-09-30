@@ -14,10 +14,11 @@
       "path": "ladder/l1_inference",
       "subject": "ladder/engineer_subject",
       "coverage": [
-        "limits",
-        "profile binding",
+        "inspect and propose",
+        "approval before changes",
+        "selected limits",
         "backend reuse",
-        "preserve existing profile"
+        "independent role settings"
       ],
       "title": "Inference configuration"
     },
@@ -82,13 +83,14 @@
       "path": "factory_setup/definition",
       "subject": "factory_setup/engineer_kspec",
       "coverage": [
-        "nine crew roles",
-        "profiles and limits",
-        "datastore contracts",
-        "automation wiring",
+        "six distinct roles",
+        "shared inference limits",
+        "caller-supplied data contracts",
+        "handoffs and gather step",
+        "delegation permissions",
         "setup receipt"
       ],
-      "title": "Complete crew configuration"
+      "title": "Complete research desk configuration"
     },
     {
       "id": "l6-graph",
