@@ -50,6 +50,8 @@ use crate::pack::{
     bind_pack_install_config, declared_paths, digest_declared_assets, load_pack_config,
     PackInferenceBindings, PackInstallOptions, PackManifest,
 };
+use crate::tool_surface::{BashMode, FileToolMode, ToolCeiling, ToolPolicySurface};
+use crate::toolset::CommandExecutionMode;
 use crate::{Collection, ConfigAccess, DocumentRuntimeOptions, RuntimeSnapshotObserver};
 
 /// How long a request is watched after it has been interrupted, on the stage
@@ -173,6 +175,7 @@ impl EmbeddedExecutor {
         // Replaces any observer the caller's options carried: the trial's
         // latch is the only reader of this runtime's snapshots.
         options.runtime_snapshot_observer = Some(Arc::new(EventSourcesReady(event_sources_ready)));
+        options.tool_ceiling = trial_tool_ceiling(&workspace, spec.host_bash);
         // A failed boot has already stopped whatever it spawned, so the home is
         // ours to close.
         let runtime = match boot_runtime(&home, home.identity.clone(), options).await {
@@ -196,6 +199,29 @@ impl EmbeddedExecutor {
         let (usage, anchor) = (usage(&stages), anchor(&stages));
         TrialEvidence::new(locator, stages, usage, anchor)
     }
+}
+
+/// The process ceiling of an embedded trial: file tools, read-write, rooted
+/// at the trial's own workspace, and host bash only when the definition asks
+/// for it. Bash is then capped at `WorkspaceWrite`, the sandboxed mode a
+/// desktop node's write package uses, so no grant a behavior holds can write
+/// outside the trial root. It replaces the caller's ceiling because the root
+/// is per trial. Freezing still refuses a subject pack that grants itself
+/// host bash under [`Isolation::Embedded`]; a Tools document the subject
+/// writes at run time (a behavior it configures) is narrowed to this ceiling.
+fn trial_tool_ceiling(workspace: &Path, host_bash: bool) -> ToolCeiling {
+    let mut policy = ToolPolicySurface::ceiling_with_host_modes(
+        FileToolMode::ReadWrite,
+        if host_bash {
+            BashMode::Unrestricted
+        } else {
+            BashMode::Off
+        },
+    );
+    if host_bash {
+        policy.bash.execution_mode = CommandExecutionMode::WorkspaceWrite;
+    }
+    ToolCeiling::readwrite(workspace).with_policy(policy)
 }
 
 /// The first reconcile of the trial runtime's event sources, once there is one.
@@ -347,6 +373,7 @@ impl TrialExecutor for EmbeddedExecutor {
                 None => Some(OutcomeKind::Unknown),
             };
             stages.push(StageEvidence {
+                prods: 0,
                 stage_id: index.to_string(),
                 request_id: Some(request.request_id),
                 terminal_state,
@@ -496,6 +523,7 @@ async fn install(spec: &TrialSpec, home: &EmbeddedHome, workspace: &Path) -> Res
     )?;
     let config = bind_inference_slots(&manifest, &config, &spec.inference)
         .context("binding the pack's inference slots to the frozen profile")?;
+    let config = root_host_tools(config, workspace)?;
     let access = ConfigAccess::Local(home.node.clone());
     // The binding first: the pack's behaviors now reference the profile by id,
     // and a reference is only installable once what it names exists.
@@ -543,6 +571,22 @@ fn bind_inference_slots(
         .map(|slot| (slot.name.clone(), profile_id.to_owned()))
         .collect();
     bind_pack_install_config(manifest, config, &bindings)
+}
+
+/// Root every host-tools grant the pack leaves unrooted at the trial's
+/// workspace. A pack cannot know that path, and the workspace is the trial's
+/// one `WorkspaceRoot`: under that policy a host grant without a root does not
+/// start. A root the pack does name is kept; the ceiling still bounds it.
+fn root_host_tools(mut config: PackConfig, workspace: &Path) -> Result<PackConfig> {
+    let root = workspace
+        .to_str()
+        .with_context(|| format!("{} is not UTF-8", workspace.display()))?;
+    for tools in &mut config.tools {
+        if let Some(host) = tools.host.as_mut() {
+            host.root.get_or_insert_with(|| root.to_owned());
+        }
+    }
+    Ok(config)
 }
 
 async fn apply(
@@ -796,6 +840,7 @@ async fn run_stage(
             &stage.captures,
         )
         .await,
+        prods: observed.prods,
     }
 }
 
@@ -803,6 +848,7 @@ async fn run_stage(
 struct ObservedStage {
     /// `None` when the request was never submitted.
     request_id: Option<String>,
+    prods: u32,
     terminal_state: Option<RequestLifecycleState>,
     failure_kind: Option<OutcomeKind>,
     evidence: RequestEvidence,
@@ -820,6 +866,7 @@ impl ObservedStage {
     fn unsubmitted() -> Self {
         Self {
             request_id: None,
+            prods: 0,
             terminal_state: None,
             failure_kind: Some(OutcomeKind::Infrastructure),
             evidence: RequestEvidence::default(),
@@ -846,6 +893,7 @@ async fn submit_and_observe(
     ready: &watch::Receiver<Reconciled>,
 ) -> ObservedStage {
     let deadline = Duration::from_secs(stage.deadline_secs);
+    let started = Instant::now();
     // A seed stage spends part of the deadline waiting for the fire; the
     // request it observes gets the remainder.
     let submit = async {
@@ -903,8 +951,37 @@ async fn submit_and_observe(
         }
     };
 
+    let settling = stage.settle && !cancelled && observed.is_some();
+    if settling {
+        let budget = deadline.saturating_sub(started.elapsed());
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => {}
+            quiet = settle_home(&home.node, budget) => match quiet {
+                Ok(true) => {}
+                Ok(false) => tracing::warn!(
+                    trial_id = %spec.trial_id,
+                    stage_id = %stage.stage_id,
+                    "eval stage deadline ended before the trial home was quiet; capturing it with requests still running"
+                ),
+                Err(error) => tracing::warn!(
+                    error = %format!("{error:#}"),
+                    trial_id = %spec.trial_id,
+                    stage_id = %stage.stage_id,
+                    "eval stage could not observe the trial home settling"
+                ),
+            },
+        }
+    }
+
+    let (prods, prod_failed) = if settling {
+        continue_until_done(spec, cancel, home, locator, stage, deadline, started).await
+    } else {
+        (0, false)
+    };
+
     let mut collected = true;
-    let evidence = collect_request_evidence(&home.node, &request_id)
+    let mut evidence = collect_request_evidence(&home.node, &request_id)
         .await
         .unwrap_or_else(|error| {
             tracing::warn!(
@@ -916,13 +993,215 @@ async fn submit_and_observe(
             collected = false;
             RequestEvidence::default()
         });
+    // The stage's own request decides how the stage ended; later requests in
+    // the session are what the subject did next, not a second verdict on it.
+    // A prod the harness could not send, or a capture it could not read to
+    // decide one, says nothing about the subject: the stage is
+    // infrastructure, owed another attempt.
+    let failure_kind = if prod_failed {
+        Some(OutcomeKind::Infrastructure)
+    } else {
+        stage_failure_kind(observed.as_ref(), collected, cancelled, &evidence)
+    };
+    if settling && collected {
+        if let Err(error) =
+            extend_with_later_requests(&home.node, &locator.session_id, &request_id, &mut evidence)
+                .await
+        {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                trial_id = %spec.trial_id,
+                stage_id = %stage.stage_id,
+                "eval stage evidence of later session requests could not be collected"
+            );
+            return ObservedStage {
+                request_id: Some(request_id),
+                prods,
+                terminal_state: observed.as_ref().map(|observed| observed.terminal_state),
+                failure_kind: Some(OutcomeKind::Infrastructure),
+                evidence,
+            };
+        }
+    }
 
     ObservedStage {
         request_id: Some(request_id),
+        prods,
         terminal_state: observed.as_ref().map(|observed| observed.terminal_state),
-        failure_kind: stage_failure_kind(observed.as_ref(), collected, cancelled, &evidence),
+        failure_kind,
         evidence,
     }
+}
+
+/// The stage's continuation prods: while the `until` capture holds no row and
+/// fewer than `max` prods were sent, send the prompt into the trial session,
+/// wait for that request and for the home to settle again. Bounded by the
+/// stage's deadline and by cancellation; returns how many were sent, and
+/// whether the harness failed to read the capture or send a prod.
+async fn continue_until_done(
+    spec: &TrialSpec,
+    cancel: &CancellationToken,
+    home: &EmbeddedHome,
+    locator: &TrialLocator,
+    stage: &StageSpec,
+    deadline: Duration,
+    started: Instant,
+) -> (u32, bool) {
+    let Some(continuation) = &stage.continuation else {
+        return (0, false);
+    };
+    let until = stage.captures.iter().find_map(|capture| match capture {
+        Capture::Documents {
+            name,
+            collection,
+            filter,
+            fields,
+        } if name == &continuation.until => Some((collection, filter, fields)),
+        _ => None,
+    });
+    let Some((collection, filter, fields)) = until else {
+        return (0, false);
+    };
+    let prod = StageSpec {
+        prompt: continuation.prompt.clone(),
+        ..stage.clone()
+    };
+    let mut prods = 0;
+    while prods < continuation.max && !cancel.is_cancelled() {
+        match capture_documents(
+            &home.node,
+            collection,
+            filter,
+            fields,
+            &locator.trial_agent_did,
+        )
+        .await
+        {
+            Ok(rows) if !rows.is_empty() => break,
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %format!("{error:#}"),
+                    trial_id = %spec.trial_id,
+                    "eval continuation could not read its until capture"
+                );
+                return (prods, true);
+            }
+        }
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        let request_id = uuid::Uuid::new_v4().to_string();
+        if let Err(error) =
+            submit_stage(&home.node, locator, &spec.behavior_id, &prod, &request_id).await
+        {
+            tracing::warn!(
+                error = %format!("{error:#}"),
+                trial_id = %spec.trial_id,
+                "eval continuation prod could not be submitted"
+            );
+            return (prods, true);
+        }
+        prods += 1;
+        tracing::info!(target: "gents::eval", trial_id = %spec.trial_id, prods, "continuation prod sent");
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => break,
+            _ = await_terminal(&home.node, &request_id, remaining, GRACE, POLL) => {}
+        }
+        let remaining = deadline.saturating_sub(started.elapsed());
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => break,
+            _ = settle_home(&home.node, remaining) => {}
+        }
+    }
+    (prods, false)
+}
+
+/// How long every request in a settling trial home must stay terminal, with no
+/// new request written, before the home counts as quiet. A trigger fire, a
+/// queued delivery or a goal continuation writes its request a moment after
+/// the document or turn that causes it, so one all-terminal read is not
+/// quiescence.
+const SETTLE_QUIET: Duration = Duration::from_secs(60);
+
+/// How often a settling trial home's requests are read.
+const SETTLE_POLL: Duration = Duration::from_secs(2);
+
+/// Wait, within `budget`, until the home has been quiet for [`SETTLE_QUIET`].
+/// `Ok(false)` when the budget ran out first.
+async fn settle_home(node: &EmbeddedNode, budget: Duration) -> Result<bool> {
+    let started = Instant::now();
+    let mut quiet: Option<(Instant, usize)> = None;
+    loop {
+        let (total, running) = request_counts(node).await?;
+        let now = Instant::now();
+        quiet = match quiet {
+            Some((since, seen)) if running == 0 && seen == total => Some((since, seen)),
+            _ if running == 0 => Some((now, total)),
+            _ => None,
+        };
+        if quiet.is_some_and(|(since, _)| now.duration_since(since) >= SETTLE_QUIET) {
+            return Ok(true);
+        }
+        if started.elapsed() >= budget {
+            return Ok(false);
+        }
+        tokio::time::sleep(SETTLE_POLL.min(budget.saturating_sub(started.elapsed()))).await;
+    }
+}
+
+/// Every request in the home, and how many of them are not terminal.
+async fn request_counts(node: &EmbeddedNode) -> Result<(usize, usize)> {
+    let response = graphql_with_transaction_retry(
+        node,
+        "{ AgentRequest { lifecycle_state } }",
+        "eval trial settle",
+    )
+    .await?;
+    let rows = response
+        .data
+        .as_ref()
+        .and_then(|data| data.get("AgentRequest"))
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let running = rows
+        .iter()
+        .filter(|row| {
+            !row.get("lifecycle_state")
+                .and_then(Value::as_str)
+                .and_then(|state| RequestLifecycleState::parse(state).ok())
+                .is_some_and(|state| state.is_terminal())
+        })
+        .count();
+    Ok((rows.len(), running))
+}
+
+/// Append the assistant messages and inference calls of every request the
+/// trial session received after `request_id`, in session order. Tool calls
+/// need no merge: [`collect_request_evidence`] reads them from the request's
+/// run timeline, which spans its whole session, while messages and inference
+/// calls are read per request.
+async fn extend_with_later_requests(
+    node: &Arc<EmbeddedNode>,
+    session_id: &str,
+    request_id: &str,
+    evidence: &mut RequestEvidence,
+) -> Result<()> {
+    let requests = session_requests(node, session_id).await?;
+    let later = requests
+        .iter()
+        .skip_while(|request| request.request_id != request_id)
+        .skip(1);
+    for request in later {
+        let more = collect_request_evidence(node, &request.request_id).await?;
+        evidence.messages.extend(more.messages);
+        evidence.inference_calls.extend(more.inference_calls);
+    }
+    Ok(())
 }
 
 /// How a stage failed, when it did.
@@ -1413,6 +1692,53 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_trial_ceiling_grants_bash_only_when_the_definition_asks_for_it() {
+        let workspace = Path::new("/runs/r/trials/t/workspace");
+        let without = trial_tool_ceiling(workspace, false);
+        assert_eq!(
+            (without.file_tools(), without.bash(), without.root()),
+            (FileToolMode::ReadWrite, BashMode::Off, Some(workspace))
+        );
+        let with = trial_tool_ceiling(workspace, true);
+        assert_eq!(
+            (with.file_tools(), with.bash(), with.root()),
+            (
+                FileToolMode::ReadWrite,
+                BashMode::Unrestricted,
+                Some(workspace)
+            )
+        );
+        // Every grant meets this ceiling, so no crew bash writes outside the root.
+        assert_eq!(
+            with.policy().bash.execution_mode,
+            CommandExecutionMode::WorkspaceWrite
+        );
+    }
+
+    #[test]
+    fn unrooted_host_tools_are_rooted_at_the_trial_workspace() {
+        let config: PackConfig = serde_json::from_value(json!({
+            "agent_principal": {"agent_did": "did:x"},
+            "tools": [
+                {"agent_did": "did:x", "tools_id": "files", "host": {"files": {"mode": "ReadOnly"}}},
+                {"agent_did": "did:x", "tools_id": "rooted", "host": {"root": "/elsewhere", "files": {"mode": "ReadOnly"}}},
+                {"agent_did": "did:x", "tools_id": "meta"}
+            ]
+        }))
+        .unwrap();
+        let rooted = root_host_tools(config, Path::new("/runs/r/trials/t/workspace")).unwrap();
+        let roots: Vec<Option<&str>> = rooted
+            .tools
+            .iter()
+            .map(|tools| tools.host.as_ref().and_then(|host| host.root.as_deref()))
+            .collect();
+        assert_eq!(
+            roots,
+            [Some("/runs/r/trials/t/workspace"), Some("/elsewhere"), None]
+        );
+    }
+
+    #[test]
     fn provider_reason_from_failure_maps_the_table() {
         assert_eq!(
             provider_reason_from_failure("HTTP 503"),
@@ -1604,6 +1930,8 @@ mod tests {
                 document: json!({}),
             }),
             deadline_secs: 120,
+            settle: false,
+            continuation: None,
             captures: Vec::new(),
         };
         let locator = TrialLocator {
@@ -1965,6 +2293,8 @@ mod tests {
             prompt: "hello".to_string(),
             seed: None,
             deadline_secs: 1,
+            settle: false,
+            continuation: None,
             captures: vec![
                 Capture::Documents {
                     name: "requests".to_string(),

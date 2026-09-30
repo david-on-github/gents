@@ -1,0 +1,32 @@
+{
+  "manifest_version": 1,
+  "name": "factory_setup_kmin",
+  "version": "1.0.0",
+  "description": "The Engineer (the desktop Setup behavior) on an eval node, with its factory kickoff: the objective, the crew spec and what done means, with no procedure or tool hints.",
+  "authors": [
+    "gents-ai contributors"
+  ],
+  "tags": [
+    "eval"
+  ],
+  "kind": "documents",
+  "assets": [
+    "README.md",
+    "engineer/system_prompt.md",
+    "factory/crew_prompts.md",
+    "factory/crew_spec.json",
+    "factory/kickoff.md",
+    "factory/task_templates.md",
+    "pack_config.json"
+  ],
+  "config": "pack_config.json",
+  "inference_slots": [
+    {
+      "name": "engineer",
+      "description": "Runs the Engineer and, through the one backend it binds, every crew agent the Engineer configures.",
+      "behaviors": [
+        "engineer"
+      ]
+    }
+  ]
+}

@@ -224,6 +224,8 @@ mod tests {
                     prompt: "p".into(),
                     seed: None,
                     deadline_secs: 60,
+                    settle: false,
+                    continuation: None,
                     capture: vec![],
                     checks: checks
                         .iter()

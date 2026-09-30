@@ -7,7 +7,9 @@
 
 pub mod captured_fields_match;
 pub mod captured_rows_count;
+pub mod crew_spec_match;
 pub mod final_message_matches;
+pub mod handoff_delivery;
 pub mod tool_calls_expected;
 
 use std::collections::BTreeMap;
@@ -17,14 +19,16 @@ use serde_json::{json, Value};
 
 use crate::eval::checks::captured_fields_match::CapturedFieldsMatch;
 use crate::eval::checks::captured_rows_count::CapturedRowsCount;
+use crate::eval::checks::crew_spec_match::CrewSpecMatch;
 use crate::eval::checks::final_message_matches::FinalMessageMatches;
+use crate::eval::checks::handoff_delivery::HandoffDelivery;
 use crate::eval::checks::tool_calls_expected::ToolCallsExpected;
 use crate::eval::runner::executor::StageEvidence;
 use crate::eval::OutcomeKind;
 
 /// Bumped when the builtin set changes in a way that could move a score.
 /// Frozen into every run's origin.
-pub const CHECK_REGISTRY_VERSION: &str = "2";
+pub const CHECK_REGISTRY_VERSION: &str = "3";
 
 /// What one check concluded about one stage. `score_bp` is `None` when the
 /// verdict is not evidence about the subject, such as a grader fault.
@@ -80,7 +84,9 @@ impl CheckRegistry {
         };
         registry.register(Box::new(CapturedFieldsMatch));
         registry.register(Box::new(CapturedRowsCount));
+        registry.register(Box::new(CrewSpecMatch));
         registry.register(Box::new(FinalMessageMatches));
+        registry.register(Box::new(HandoffDelivery));
         registry.register(Box::new(ToolCallsExpected));
         registry
     }
@@ -238,7 +244,9 @@ mod tests {
             vec![
                 "captured_fields_match",
                 "captured_rows_count",
+                "crew_spec_match",
                 "final_message_matches",
+                "handoff_delivery",
                 "tool_calls_expected"
             ]
         );

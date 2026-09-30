@@ -43,6 +43,9 @@ mod readiness;
 #[path = "onboarding_scenarios.rs"]
 mod onboarding_scenarios;
 
+#[path = "factory_setup.rs"]
+mod factory_setup;
+
 const EVAL_CASE_ID: &str = "progressive-configurator";
 
 fn monitor_suite() -> bool {

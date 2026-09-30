@@ -581,6 +581,19 @@ async fn execute_trial(
     let mut spec = trial_spec(frozen, planned, case, cell, executor.wants_script_key())?;
 
     let locator = executor.provision(&spec).await;
+    // Names the trial's cell beside its DID, the only identity a trial's own
+    // log lines carry.
+    tracing::info!(
+        target: "gents::eval",
+        run_id,
+        cell = %planned.cell_id,
+        case = %planned.case_id,
+        trial_index = planned.trial_index,
+        attempt = planned.attempt,
+        agent_did = %locator.trial_agent_did,
+        session_id = %locator.session_id,
+        "trial started"
+    );
     let identity = TrialIdentity {
         trial_id: planned.trial_id.clone(),
         run_id: run_id.to_owned(),
@@ -735,6 +748,7 @@ fn trial_spec(
             frozen.definition.fixtures.as_ref(),
             case.fixtures.as_ref(),
         )?,
+        host_bash: frozen.definition.subject.host_bash,
         stages: stage_specs(case, &frozen.captures),
         trial_dir: frozen.run_dir.join("trials").join(&planned.trial_id),
         script_key: wants_script_key.then(|| ScriptKey {
@@ -761,6 +775,8 @@ fn stage_specs(case: &EvalCase, fallback: &[Capture]) -> Vec<StageSpec> {
                 document: seed.document.clone(),
             }),
             deadline_secs: stage.deadline_secs,
+            settle: stage.settle,
+            continuation: stage.continuation.clone(),
             captures: if stage.capture.is_empty() {
                 fallback.to_vec()
             } else {
@@ -787,7 +803,7 @@ fn fixtures(
                 document: document.document.clone(),
             }));
         for asset in &declared.assets {
-            fixtures.files.push(asset_file(pack_dir, asset)?);
+            fixtures.files.extend(asset_files(pack_dir, asset)?);
         }
         // Inline files are authored with the case, so they never need the
         // subject pack to carry test data.
@@ -805,7 +821,11 @@ fn fixtures(
 /// own copy of the pack and never a path out of it. An asset the pack does not
 /// hold is the runner's failure, not the trial's: no trial ran, so there is no
 /// outcome to record.
-fn asset_file(pack_dir: &Path, asset: &str) -> Result<FixtureFile> {
+///
+/// A path naming a directory of the pack materializes every file under it, so
+/// cells whose packs hold different files under one directory share a case.
+/// The run's copy of a pack holds only its declared assets and no symlinks.
+fn asset_files(pack_dir: &Path, asset: &str) -> Result<Vec<FixtureFile>> {
     anyhow::ensure!(
         Path::new(asset)
             .components()
@@ -813,11 +833,40 @@ fn asset_file(pack_dir: &Path, asset: &str) -> Result<FixtureFile> {
         "fixture asset {asset:?} must be a path inside the pack"
     );
     let path = pack_dir.join(asset);
-    Ok(FixtureFile {
-        path: asset.to_owned(),
-        contents: std::fs::read(&path)
-            .with_context(|| format!("reading fixture asset {}", path.display()))?,
-    })
+    if !path.is_dir() {
+        return Ok(vec![FixtureFile {
+            path: asset.to_owned(),
+            contents: std::fs::read(&path)
+                .with_context(|| format!("reading fixture asset {}", path.display()))?,
+        }]);
+    }
+    let mut files = Vec::new();
+    let mut pending = vec![path];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)
+            .with_context(|| format!("reading fixture asset directory {}", dir.display()))?
+        {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if entry.file_type()?.is_dir() {
+                pending.push(entry_path);
+                continue;
+            }
+            let relative = entry_path
+                .strip_prefix(pack_dir)
+                .context("fixture asset outside the pack")?
+                .to_str()
+                .with_context(|| format!("{} is not UTF-8", entry_path.display()))?
+                .to_owned();
+            files.push(FixtureFile {
+                path: relative,
+                contents: std::fs::read(&entry_path)
+                    .with_context(|| format!("reading fixture asset {}", entry_path.display()))?,
+            });
+        }
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
 }
 
 /// A verdict row as a document. `index` is the row's position among the
@@ -1450,6 +1499,35 @@ mod tests {
         assert!(
             fixtures(pack.path(), Some(&absent), None).is_err(),
             "a missing asset is the runner's failure, not a trial outcome"
+        );
+    }
+
+    /// A directory asset materializes every file under it, so two cells whose
+    /// packs hold different files there run one case.
+    #[test]
+    fn a_directory_asset_materializes_every_file_under_it() {
+        let pack = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(pack.path().join("brief/notes")).unwrap();
+        std::fs::write(pack.path().join("brief/kickoff.md"), b"k").unwrap();
+        std::fs::write(pack.path().join("brief/notes/spec.json"), b"{}").unwrap();
+        std::fs::write(pack.path().join("other.md"), b"o").unwrap();
+        let declared = EvalFixtures {
+            assets: vec!["brief".into()],
+            ..EvalFixtures::default()
+        };
+        let merged = fixtures(pack.path(), Some(&declared), None).unwrap();
+        assert_eq!(
+            merged.files,
+            [
+                FixtureFile {
+                    path: "brief/kickoff.md".into(),
+                    contents: b"k".to_vec(),
+                },
+                FixtureFile {
+                    path: "brief/notes/spec.json".into(),
+                    contents: b"{}".to_vec(),
+                },
+            ]
         );
     }
 

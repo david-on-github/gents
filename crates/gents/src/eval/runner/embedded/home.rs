@@ -195,8 +195,9 @@ pub async fn boot_runtime(
 /// [`boot_runtime`] with an explicit readiness budget, so a test can make
 /// readiness fail without waiting out the production timeout.
 ///
-/// A runtime that never became ready is still spawned and still holds the
-/// node, so it is stopped before the readiness error is reported: the caller
+/// A runtime that stops during startup ends the wait with its own error. One
+/// that is still running but never became ready still holds the node, so it
+/// is stopped before the readiness error is reported: the caller
 /// gets a home it can close, not one pinned by a task it was never handed.
 /// That stop is itself bounded, so a runtime that does not answer its shutdown
 /// signal cannot turn a reported failure into a hang.
@@ -210,15 +211,25 @@ pub(crate) async fn boot_runtime_within(
         Gents::from_default_behavior_documents(home.node.clone(), identity, options).await?;
     let agent_did = agent.agent_did().to_string();
     let (shutdown, shutdown_rx) = watch::channel(false);
-    let handle = tokio::spawn(agent.clone().run(shutdown_rx));
+    let mut handle = tokio::spawn(agent.clone().run(shutdown_rx));
+    // A runtime that stops during startup never becomes ready; its own error
+    // is the diagnosis, so it ends the wait rather than the timeout.
+    let ready = tokio::select! {
+        ready = wait_for_runtime_ready_within(home.node.as_ref(), &agent_did, ready_timeout) => ready,
+        stopped = &mut handle => {
+            return Err(match stopped {
+                Ok(Ok(())) => anyhow!("the runtime stopped before it became ready"),
+                Ok(Err(error)) => error.context("the runtime stopped before it became ready"),
+                Err(join) => anyhow!("the runtime task ended before it became ready: {join}"),
+            });
+        }
+    };
     let runtime = RunningRuntime {
         shutdown,
         handle,
         agent_did: agent_did.clone(),
     };
-    if let Err(error) =
-        wait_for_runtime_ready_within(home.node.as_ref(), &agent_did, ready_timeout).await
-    {
+    if let Err(error) = ready {
         // Bounded: a runtime that ignores its shutdown signal must not turn a
         // reported infrastructure failure into a caller that never returns.
         // Giving up on it leaks a task, which is the lesser of the two.
@@ -434,7 +445,13 @@ mod tests {
             Ok(_) => panic!("a zero readiness budget must not report a ready runtime"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("ready state"), "{error}");
+        // A bare temp home's runtime may also stop on its own first; either
+        // way the boot fails rather than reporting a ready runtime.
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("ready state") || message.contains("stopped before it became ready"),
+            "{message}"
+        );
         home.node.shutdown().await;
     }
 

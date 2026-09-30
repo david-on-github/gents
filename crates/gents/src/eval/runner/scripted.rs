@@ -67,6 +67,7 @@ impl ScriptedExecutor {
         evidence(
             locator(did),
             vec![StageEvidence {
+                prods: 0,
                 stage_id: stage_id.to_string(),
                 request_id: None,
                 terminal_state: Some(RequestLifecycleState::Completed),
@@ -95,6 +96,7 @@ impl ScriptedExecutor {
         evidence(
             locator(did),
             vec![StageEvidence {
+                prods: 0,
                 stage_id: stage_id.to_string(),
                 request_id: None,
                 terminal_state: Some(RequestLifecycleState::Failed),

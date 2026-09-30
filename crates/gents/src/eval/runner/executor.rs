@@ -43,6 +43,9 @@ pub struct TrialSpec {
     /// Profile and backend documents copied verbatim, plus the trial's seed.
     pub inference: InferenceBinding,
     pub fixtures: TrialFixtures,
+    /// The definition's [`crate::document_config::EvalSubject::host_bash`].
+    #[serde(default)]
+    pub host_bash: bool,
     pub stages: Vec<StageSpec>,
     /// `<run dir>/trials/<trial_id>`.
     pub trial_dir: PathBuf,
@@ -75,6 +78,7 @@ impl TrialSpec {
                 seed: 0,
             },
             fixtures: TrialFixtures::default(),
+            host_bash: false,
             stages: Vec::new(),
             trial_dir: PathBuf::new(),
             script_key: None,
@@ -125,6 +129,13 @@ pub struct StageSpec {
     /// the pack's trigger fires for it.
     pub seed: Option<FixtureDocument>,
     pub deadline_secs: u64,
+    /// Observe the home until it is quiet before capturing; see
+    /// [`crate::document_config::EvalStage::settle`].
+    #[serde(default)]
+    pub settle: bool,
+    /// See [`crate::document_config::EvalStage::continuation`].
+    #[serde(default)]
+    pub continuation: Option<crate::document_config::EvalContinuation>,
     /// What to read out of the home when this stage ends: the stage's own
     /// captures, or the run's request-level list when the stage declares none.
     pub captures: Vec<Capture>,
@@ -193,6 +204,10 @@ pub struct StageEvidence {
     pub tool_calls: Vec<ToolCallEvidence>,
     pub inference_calls: Vec<InferenceCallEvidence>,
     pub captures: BTreeMap<String, CaptureResult>,
+    /// Continuation prods the stage sent before its `until` capture held
+    /// (see [`crate::document_config::EvalContinuation`]).
+    #[serde(default)]
+    pub prods: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

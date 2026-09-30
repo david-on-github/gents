@@ -244,6 +244,8 @@ Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.beha
         };
         let mut previewing = false;
         let mut help = false;
+        let observed = observed_call(&args);
+        let words = args.argv.clone();
         let result = async {
             let argv = args.into_argv()?;
             previewing = argv.iter().any(|word| word == "preview");
@@ -252,6 +254,7 @@ Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.beha
         }
         .await;
         let receipt = call.execution.receipt();
+        log_config_call(&words, &observed, help, previewing, &result);
         match result {
             // Help is the page itself: plain text with no envelope. It is
             // answered before any command parses, so it never mutates.
@@ -281,6 +284,87 @@ Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.beha
             }
         }
     }
+}
+
+/// The model's call as compact JSON for the call log, cut at about 2 KB.
+/// The config tool accepts no credential fields, so none can appear here.
+fn observed_call(args: &ConfigCommandParams) -> String {
+    let call = json!({
+        "argv": args.argv,
+        "target_id": args.target_id,
+        "set": args.set,
+        "clear": args.clear,
+        "options": args.options,
+    });
+    truncated(&call.to_string(), 2048)
+}
+
+fn truncated(text: &str, max: usize) -> String {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &text[..at]),
+        None => text.to_owned(),
+    }
+}
+
+/// One `tool call` event per config call, and a `self-config write` event
+/// for each call that asks to change configuration, so a trial's
+/// exploration path and write counts can be followed from the log while its
+/// node is held.
+fn log_config_call(
+    argv: &[String],
+    call: &str,
+    help: bool,
+    previewing: bool,
+    result: &Result<String>,
+) {
+    let outcome = if result.is_ok() { "ok" } else { "error" };
+    let error = result
+        .as_ref()
+        .err()
+        .map(|error| truncated(&format!("{error:#}"), 500));
+    tracing::info!(
+        target: "gents::self_config",
+        call = %call,
+        outcome,
+        error = error.as_deref().unwrap_or(""),
+        "tool call"
+    );
+    let resource = argv.first().map(String::as_str).unwrap_or("");
+    let verb = argv.get(1).map(String::as_str).unwrap_or("");
+    let reads = [
+        "get", "list", "discover", "context", "help", "--help", "-h", "scan",
+    ];
+    if help || previewing || resource == "help" || resource == "get" || reads.contains(&verb) {
+        return;
+    }
+    let collection = match (resource, argv.get(2).map(String::as_str)) {
+        ("automation", Some(kind)) => kind,
+        (resource, _) => resource,
+    };
+    let verb = match verb {
+        "remove" => "delete",
+        "apply" => "plan",
+        "create" | "clone" | "install" | "import" => "create",
+        _ => "edit",
+    };
+    let error_kind = error.as_deref().map(|error| {
+        error
+            .split(|c: char| c == ':' || c == ';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .chars()
+            .take(80)
+            .collect::<String>()
+    });
+    tracing::info!(
+        target: "gents::self_config",
+        collection,
+        verb,
+        outcome = if result.is_ok() { "committed" } else { "refused" },
+        error_kind = error_kind.as_deref().unwrap_or(""),
+        "self-config write"
+    );
 }
 
 /// Every non-help result ends with the execution receipt, after the answer
