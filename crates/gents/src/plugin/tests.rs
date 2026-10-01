@@ -44,8 +44,8 @@ fn build_plugin_afb(wat_source: &str) -> Vec<u8> {
         pip: Default::default(),
         gem: Default::default(),
         signature: None,
-        metadata: toml::Table::new(),
-        extra: toml::Table::new(),
+        metadata: Default::default(),
+        extra: Default::default(),
     };
     let (bytes, _digest) = Builder::new(manifest, Manifold::sealed())
         .precompiled("precompiled/wasm32-wasip1/main.wasm", wat(wat_source))
@@ -489,8 +489,8 @@ fn source_only_afb(name: &str, language: &str, entry: &str, body: &[u8]) -> Vec<
         pip: Default::default(),
         gem: Default::default(),
         signature: None,
-        metadata: toml::Table::new(),
-        extra: toml::Table::new(),
+        metadata: Default::default(),
+        extra: Default::default(),
     };
     let (bytes, _digest) = Builder::new(manifest, Manifold::sealed())
         .source(entry, body.to_vec())
