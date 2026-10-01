@@ -585,12 +585,12 @@ fn for_plugin_raises_the_default_to_declared_limits() {
     plugin.limits = Some(crate::pack::PluginLimits {
         memory_mib: Some(512),
         wall_clock_secs: Some(120),
-        max_output_mib: Some(16),
+        max_output_mib: Some(4),
     });
     let budget = PluginBudget::for_plugin(&wasi, &plugin);
     assert_eq!(budget.memory_bytes, 512 * 1024 * 1024);
     assert_eq!(budget.wall_clock, std::time::Duration::from_secs(120));
-    assert_eq!(budget.max_output_bytes, 16 * 1024 * 1024);
+    assert_eq!(budget.max_output_bytes, 4 * 1024 * 1024);
 
     // A plugin that declares nothing gets exactly `for_artifact`'s answer.
     let no_limits = plugin_named("rs_plugin", "rust");
@@ -1140,4 +1140,122 @@ fn admission_refuses_a_bind_dir_plugin_whose_dispatch_path_cannot_enforce_read_o
     let message = format!("{error:#}");
     assert!(message.contains("py_plugin"), "{message}");
     assert!(message.contains("read-only"), "{message}");
+}
+
+#[test]
+fn generated_plugin_resource_cases_bind_budget_and_consent() {
+    let cases = &crate::lean_vocab_test::lean_contract_snapshot().plugin_resource_cases;
+    for case in cases["consent"].as_array().unwrap() {
+        let requested = case["requested"].as_u64().unwrap() as u32;
+        let previous = case["previous"].as_u64().unwrap() as u32;
+        let consent = case["consent"].as_bool().unwrap();
+        for axis in 0..3 {
+            let mut requested_limits = crate::pack::PluginLimits::default();
+            let mut previous_limits = crate::pack::PluginLimits::default();
+            match axis {
+                0 => {
+                    requested_limits.memory_mib = Some(requested);
+                    previous_limits.memory_mib = Some(previous);
+                }
+                1 => {
+                    requested_limits.wall_clock_secs = Some(requested);
+                    previous_limits.wall_clock_secs = Some(previous);
+                }
+                _ => {
+                    requested_limits.max_output_mib = Some(requested);
+                    previous_limits.max_output_mib = Some(previous);
+                }
+            }
+            assert_eq!(
+                authority::limits_consented(
+                    Some(&requested_limits),
+                    Some(&previous_limits),
+                    consent
+                ),
+                case["expected"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
+    }
+    for case in cases["budgets"].as_array().unwrap() {
+        let baseline = case["baseline"].as_u64().unwrap();
+        let requested = case["requested"].as_u64().unwrap() as u32;
+        let ceiling = case["ceiling"].as_u64().unwrap();
+        let expected = case["expected"].as_u64().unwrap();
+        let mut budget = PluginBudget::default();
+        let mut limits = crate::pack::PluginLimits::default();
+        match ceiling {
+            4096 => {
+                budget.memory_bytes = baseline * 1024 * 1024;
+                limits.memory_mib = Some(requested);
+            }
+            900 => {
+                budget.wall_clock = std::time::Duration::from_secs(baseline);
+                limits.wall_clock_secs = Some(requested);
+            }
+            4 => {
+                budget.max_output_bytes = baseline as usize * 1024 * 1024;
+                limits.max_output_mib = Some(requested);
+            }
+            _ => panic!("unknown resource case: {case}"),
+        }
+        let effective = budget.with_declared_limits(&limits);
+        let actual = match ceiling {
+            4096 => effective.memory_bytes / (1024 * 1024),
+            900 => effective.wall_clock.as_secs(),
+            _ => effective.max_output_bytes as u64 / (1024 * 1024),
+        };
+        assert_eq!(actual, expected, "{case}");
+    }
+}
+
+fn path_open_probe(path: &str, create: bool) -> String {
+    let flags = if create { 1 } else { 0 };
+    let rights = if create { 64 } else { 2 };
+    format!(
+        r#"(module
+      (import "wasi_snapshot_preview1" "path_open" (func $open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+      (import "wasi_snapshot_preview1" "fd_write" (func $write (param i32 i32 i32 i32) (result i32)))
+      (memory (export "memory") 1)
+      (data (i32.const 32) "{path}")
+      (data (i32.const 128) "true ")
+      (data (i32.const 144) "false")
+      (func (export "_start") (local $denied i32)
+        (local.set $denied (call $open (i32.const 3) (i32.const 1) (i32.const 32) (i32.const {length}) (i32.const {flags}) (i64.const {rights}) (i64.const 0) (i32.const 0) (i32.const 200)))
+        (i32.store (i32.const 256) (select (i32.const 128) (i32.const 144) (local.get $denied)))
+        (i32.store (i32.const 260) (i32.const 5))
+        (drop (call $write (i32.const 1) (i32.const 256) (i32.const 1) (i32.const 264)))))"#,
+        length = path.len()
+    )
+}
+
+#[test]
+#[cfg(unix)]
+fn bound_guest_can_read_inside_but_cannot_write_or_follow_a_symlink_out() {
+    let root = tempfile::tempdir().unwrap();
+    let inside = root.path().join("inside");
+    std::fs::create_dir(&inside).unwrap();
+    std::fs::write(inside.join("safe.txt"), b"safe").unwrap();
+    std::fs::write(root.path().join("outside.txt"), b"private").unwrap();
+    std::os::unix::fs::symlink(root.path().join("outside.txt"), inside.join("escape.txt")).unwrap();
+    let bound = BoundDir::new(&inside, None).unwrap();
+    for (path, create, denied) in [
+        ("safe.txt", false, false),
+        ("created.txt", true, true),
+        ("escape.txt", false, true),
+    ] {
+        let (mut plugin, afb) =
+            build_plugin_pack("containment", &path_open_probe(path, create), None);
+        plugin.bind_dir = Some(crate::pack::PluginDirBinding {
+            input_field: "root".into(),
+            description: "test root".into(),
+        });
+        let runner = PluginRunner::compile(&afb, &plugin).unwrap();
+        let result = runner
+            .call_bound(&serde_json::json!({}), &PluginBudget::default(), &bound)
+            .unwrap();
+        assert_eq!(result.verdict, PluginVerdict::Success, "{path}: {result:?}");
+        assert_eq!(result.output, serde_json::json!(denied), "{path}");
+    }
+    assert!(!inside.join("created.txt").exists());
 }

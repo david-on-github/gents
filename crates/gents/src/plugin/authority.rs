@@ -121,6 +121,20 @@ pub fn grant_for(
     )
 }
 
+pub(super) fn limits_consented(
+    requested: Option<&crate::pack::PluginLimits>,
+    previous: Option<&crate::pack::PluginLimits>,
+    consent: bool,
+) -> bool {
+    let empty = crate::pack::PluginLimits::default();
+    let requested = requested.unwrap_or(&empty);
+    let previous = previous.unwrap_or(&empty);
+    consent
+        || (requested.memory_mib.unwrap_or(0) <= previous.memory_mib.unwrap_or(0)
+            && requested.wall_clock_secs.unwrap_or(0) <= previous.wall_clock_secs.unwrap_or(0)
+            && requested.max_output_mib.unwrap_or(0) <= previous.max_output_mib.unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,14 +196,14 @@ mod tests {
         declaration.limits = Some(crate::pack::PluginLimits {
             memory_mib: Some(512),
             wall_clock_secs: Some(300),
-            max_output_mib: Some(16),
+            max_output_mib: Some(4),
         });
         let description =
             describe_plugin_authority(&declaration, &Manifold::sealed()).expect("must describe");
         assert!(description.contains("reads one directory its caller binds, per call"));
         assert!(description.contains("512 MiB memory"));
         assert!(description.contains("300s wall clock"));
-        assert!(description.contains("16 MiB output"));
+        assert!(description.contains("4 MiB output"));
     }
 
     #[test]

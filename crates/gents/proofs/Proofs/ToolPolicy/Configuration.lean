@@ -332,4 +332,21 @@ theorem unconfigured_wait_and_lsp_defaults :
     (resolvedLspTimeout none none).map (underCeiling lspActionCeiling) = some (20, 300) ∧
     effectiveBackgroundLifetime none = some 36000 := by decide
 
+/-- Plugin declarations are requests within the operator's host trust boundary.
+A manifest cannot raise a recorded resource grant without explicit consent. -/
+def pluginResourceConsented (requested previous : Nat) (consent : Bool) : Bool :=
+  consent || decide (requested ≤ previous)
+
+/-- Host ceilings apply even to direct operator/test calls with unvalidated manifests. -/
+def effectivePluginResource (baseline requested ceiling : Nat) : Nat :=
+  min (max baseline requested) ceiling
+
+theorem plugin_resource_no_unapproved_raise (requested previous : Nat)
+    (h : pluginResourceConsented requested previous false = true) : requested ≤ previous := by
+  simpa [pluginResourceConsented] using h
+
+theorem plugin_resource_within_host (baseline requested ceiling : Nat) :
+    effectivePluginResource baseline requested ceiling ≤ ceiling := by
+  exact Nat.min_le_right _ _
+
 end ToolPolicy

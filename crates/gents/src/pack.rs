@@ -362,11 +362,10 @@ impl PackPlugin {
             // one; a plugin that also declared its own `fs` grant would
             // read both, which is not a ceiling this field can express, so
             // the two are mutually exclusive.
-            let declares_fs = self
-                .manifold
-                .as_ref()
-                .and_then(|manifold| manifold.get("fs"))
-                .is_some_and(|fs| fs != &serde_json::json!("None"));
+            let declares_fs = !matches!(
+                crate::plugin::authority::declared_manifold(self)?.fs,
+                afterburner_core::manifold::FsAccess::None
+            );
             anyhow::ensure!(
                 !declares_fs,
                 "plugin {:?} declares both bind_dir and a manifold fs grant; a directory bound \

@@ -193,34 +193,41 @@ impl PluginBudget {
         }
     }
 
-    /// [`Self::for_artifact`], raised to what `plugin` declares in
-    /// `limits`.
-    ///
-    /// A declared limit only ever raises the floor, mirroring exactly how
-    /// [`Self::for_artifact`] raises [`Self::default`] to an interpreter's
-    /// own startup cost: a pack that declares less than the artifact needs
-    /// to start would otherwise admit a plugin that can never run. The host
-    /// ceiling a declared limit may not exceed is enforced once, at
-    /// manifest load, by [`crate::pack::PackPlugin::validate`], not
-    /// re-checked here.
+    /// Declared resource requests stay within host ceilings even when a caller
+    /// did not load the manifest through the pack validator.
     pub fn for_plugin(afb: &afterburner_afb::Afb, plugin: &PackPlugin) -> Self {
-        let mut budget = Self::for_artifact(afb);
-        if let Some(limits) = &plugin.limits {
-            if let Some(memory_mib) = limits.memory_mib {
-                budget.memory_bytes = budget.memory_bytes.max(u64::from(memory_mib) * 1024 * 1024);
-            }
-            if let Some(wall_clock_secs) = limits.wall_clock_secs {
-                budget.wall_clock = budget
-                    .wall_clock
-                    .max(std::time::Duration::from_secs(u64::from(wall_clock_secs)));
-            }
-            if let Some(max_output_mib) = limits.max_output_mib {
-                budget.max_output_bytes = budget
-                    .max_output_bytes
-                    .max(max_output_mib as usize * 1024 * 1024);
-            }
+        let budget = Self::for_artifact(afb);
+        match &plugin.limits {
+            Some(limits) => budget.with_declared_limits(limits),
+            None => budget,
         }
-        budget
+    }
+
+    fn with_declared_limits(mut self, limits: &crate::pack::PluginLimits) -> Self {
+        self.memory_bytes = self
+            .memory_bytes
+            .max(u64::from(limits.memory_mib.unwrap_or(0)) * 1024 * 1024)
+            .min(u64::from(MAX_DECLARED_MEMORY_MIB) * 1024 * 1024);
+        self.wall_clock = self
+            .wall_clock
+            .max(std::time::Duration::from_secs(u64::from(
+                limits.wall_clock_secs.unwrap_or(0),
+            )))
+            .min(std::time::Duration::from_secs(u64::from(
+                MAX_DECLARED_WALL_CLOCK_SECS,
+            )));
+        self.max_output_bytes = self
+            .max_output_bytes
+            .max(
+                limits
+                    .max_output_mib
+                    .unwrap_or(0)
+                    .min(MAX_DECLARED_OUTPUT_MIB) as usize
+                    * 1024
+                    * 1024,
+            )
+            .min(MAX_DECLARED_OUTPUT_MIB as usize * 1024 * 1024);
+        self
     }
 }
 

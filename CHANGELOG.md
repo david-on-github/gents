@@ -6,6 +6,11 @@ source consistency checks, not a separate runtime compatibility version.
 
 ## Unreleased
 
+- Plugins can declare bounded resource limits and read a directory explicitly
+  bound for one call. Increased installed resource limits require
+  `--grant-authority`; unchanged or reduced approved limits survive reinstall.
+  Calls enforce host ceilings and refresh admission when declarations change.
+
 ### Breaking
 
 - Every persistent store is encrypted at rest (DefraDB's AES-256-GCM value
