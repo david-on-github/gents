@@ -235,7 +235,7 @@
                 "expect": [
                   {
                     "field": "terminal_state",
-                    "equals": "completed"
+                    "matches": "^(complete|completed)$"
                   }
                 ]
               }
@@ -408,7 +408,7 @@
                 "expect": [
                   {
                     "field": "terminal_state",
-                    "equals": "completed"
+                    "matches": "^(complete|completed)$"
                   }
                 ]
               }

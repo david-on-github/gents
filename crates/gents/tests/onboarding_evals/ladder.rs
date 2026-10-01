@@ -540,3 +540,73 @@ fn delegation_execution_allows_inspection_but_rejects_config_mutations() {
     }
     assert_eq!(checked, 7);
 }
+
+#[test]
+fn automation_outcomes_accept_request_and_goal_success_but_reject_other_states() {
+    use gents::goal::GoalStatus;
+    use gents_protocol::request_lifecycle::RequestLifecycleState;
+    use serde_json::json;
+
+    let definition = definitions()
+        .into_iter()
+        .find(|d| d.definition_id == "configurator-l4-automation")
+        .unwrap();
+    assert_eq!(definition.comparability_version, 10);
+    let registry = CheckRegistry::builtin();
+    let grader = registry.get("crew_spec_match").unwrap();
+    let mut checked = 0;
+    for case in definition.cases {
+        for stage in case.stages {
+            for check in stage.checks {
+                let Some(rows) = check.params.get("rows").and_then(|rows| rows.as_array()) else {
+                    continue;
+                };
+                for row in rows.iter().filter(|row| row["capture"] == "fire_outcomes") {
+                    checked += 1;
+                    for (state, success) in [
+                        (RequestLifecycleState::Completed.as_str(), true),
+                        (GoalStatus::Complete.as_str(), true),
+                        (GoalStatus::Active.as_str(), false),
+                        (GoalStatus::Blocked.as_str(), false),
+                        (GoalStatus::BudgetLimited.as_str(), false),
+                        (RequestLifecycleState::Failed.as_str(), false),
+                        ("incomplete", false),
+                    ] {
+                        let mut evidence = ScriptedExecutor::passed_evidence(
+                            "did:key:eval-owner",
+                            &stage.stage_id,
+                            "reply",
+                            vec![],
+                        )
+                        .stages
+                        .remove(0);
+                        let mut outcome = json!({"terminal_state":state});
+                        outcome[row["key"].as_str().unwrap()] = row["id"].clone();
+                        for expected in row["expect"].as_array().unwrap() {
+                            if expected["field"] != "terminal_state" {
+                                outcome[expected["field"].as_str().unwrap()] =
+                                    expected["equals"].clone();
+                            }
+                        }
+                        evidence.captures.insert(
+                            "fire_outcomes".into(),
+                            CaptureResult::Documents {
+                                rows: vec![outcome],
+                            },
+                        );
+                        let verdict = grader.evaluate(&json!({"rows":[row]}), &evidence);
+                        assert_eq!(
+                            verdict.score_bp == Some(10000),
+                            success,
+                            "{} / {} / {state}: {}",
+                            case.case_id,
+                            stage.stage_id,
+                            verdict.raw
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(checked, 10);
+}
