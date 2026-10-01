@@ -38,6 +38,9 @@ class SnapshotTests(unittest.TestCase):
             progress["slots"]["active"]["pid"] = -1
             (run / "progress.json").write_text(json.dumps(progress))
             self.assertEqual(snapshots.runs()[0]["counts"], {"stopped": 1, "pass": 1})
+            stopped = snapshots.runs(index["key"])[0]["slots"][0]
+            self.assertEqual(stopped["live"]["tool_calls"], 3)
+            self.assertEqual(stopped["stage"], "setup")
             self.assertEqual(snapshots.runs("not-a-run"), [])
 
     def test_discovery_does_not_follow_homes_outside_the_selected_root(self):

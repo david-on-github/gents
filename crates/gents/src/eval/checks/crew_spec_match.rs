@@ -664,6 +664,7 @@ impl Check for CrewSpecMatch {
                     let mut queries = BTreeSet::new();
                     let mut called_create = BTreeSet::new();
                     let mut called_query = BTreeSet::new();
+                    let mut contract_issues = Vec::new();
                     let mut valid = context.is_some() && tools_row.is_some();
                     if let Some(Value::Array(ids)) = selected {
                         for reference in ids {
@@ -692,13 +693,17 @@ impl Check for CrewSpecMatch {
                                             if let Some(fields) =
                                                 expected.caller_fields.get(&d.collection)
                                             {
-                                                valid &= fields.iter().all(|name| {
+                                                let complete = fields.iter().all(|name| {
                                                     d.fields.iter().any(|f| {
                                                         &f.name == name
                                                             && f.required
                                                             && f.fill.is_none()
                                                     })
                                                 });
+                                                valid &= complete;
+                                                if !complete {
+                                                    contract_issues.push(format!("{} create fields {fields:?} must be required and caller-supplied", d.tool_name));
+                                                }
                                             }
                                             if called {
                                                 called_create.insert(d.collection.clone());
@@ -709,12 +714,19 @@ impl Check for CrewSpecMatch {
                                             if let Some(fields) =
                                                 expected.query_fields.get(&d.collection)
                                             {
-                                                valid &= fields
+                                                let complete = fields
                                                     .iter()
                                                     .all(|field| d.fields.contains(field));
+                                                valid &= complete;
+                                                if !complete {
+                                                    contract_issues.push(format!(
+                                                        "{} must return query fields {fields:?}",
+                                                        d.tool_name
+                                                    ));
+                                                }
                                             }
                                             if let Some(key) = &expected.lookup_by {
-                                                valid &= d.fields.contains(key)
+                                                let by_key_alone = d.fields.contains(key)
                                                     && d.filter_fields.iter().any(|f| {
                                                         &f.name == key && f.fill.is_none()
                                                     })
@@ -722,6 +734,10 @@ impl Check for CrewSpecMatch {
                                                         f.fill.is_none()
                                                             && (!f.required || &f.name == key)
                                                     });
+                                                valid &= by_key_alone;
+                                                if !by_key_alone {
+                                                    contract_issues.push(format!("{} must accept caller-supplied {key} alone; return {key}, remove runtime fills, and make every other filter optional", d.tool_name));
+                                                }
                                             }
                                             if called {
                                                 called_query.insert(d.collection.clone());
@@ -738,7 +754,7 @@ impl Check for CrewSpecMatch {
                         valid = false;
                     }
                     tally.record(category, valid && creates == expected.create && queries == expected.query && expected.called_create.is_subset(&called_create) && expected.called_query.is_subset(&called_query), || {
-                        format!("{id} selected datastore grants: create {creates:?}, query {queries:?}; expected create {:?}, query {:?}; references valid: {valid}; called create {called_create:?}, query {called_query:?}", expected.create, expected.query)
+                        format!("{id} selected datastore grants: create {creates:?}, query {queries:?}; expected create {:?}, query {:?}; references valid: {valid}; called create {called_create:?}, query {called_query:?}; field contracts: {contract_issues:?}", expected.create, expected.query)
                     });
                 }
                 if let Some(expected) = spec.delegates {
@@ -1127,6 +1143,13 @@ mod tests {
                 }
             }
             let v = CrewSpecMatch.evaluate(&params, &bad);
+            if mutation == 3 {
+                assert!(v
+                    .feedback
+                    .as_deref()
+                    .unwrap()
+                    .contains("find_result must accept caller-supplied correlation alone"));
+            }
             assert!(
                 v.score_bp.unwrap() < 10000,
                 "mutation {mutation}: {}",

@@ -80,11 +80,11 @@ class Snapshots:
                         if selected:
                             latest = slot.get("latest") or {}
                             retained = snapshot.get("trials", {}).get(latest.get("trial_id"), {})
-                            observed = active if running else retained
+                            observed = active if active and (running or state == "stopped") else retained
                             observed = observed or {}
                             slots.append(dict(slot, cell_id=cell["cell_id"], state=state,
                                 live=observed.get("live") or {}, goal=observed.get("goal") or [],
-                                stage=active.get("stage_id") if running else None,
+                                stage=active.get("stage_id") if active and (running or state == "stopped") else None,
                                 updated_at=observed.get("written_at") or observed.get("ended_at")))
                 item = dict(key=key, run=run, home=str(path.parents[3]), counts=counts,
                             updated_at=progress.get("holder", {}).get("written_at") or snapshot.get("written_at"))

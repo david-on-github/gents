@@ -556,6 +556,7 @@ mod tests {
             },
         ];
         let live = LiveSnapshot {
+            stages: Default::default(),
             observed_at: now_millis(1),
             elapsed_secs: 400,
             requests: 3,

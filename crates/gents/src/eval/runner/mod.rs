@@ -15,6 +15,7 @@ pub mod grade;
 pub mod plan;
 pub mod progress;
 pub mod record;
+pub mod review;
 pub mod scripted;
 pub mod view;
 
@@ -803,6 +804,7 @@ fn trial_spec(
             attempt: planned.attempt,
         }),
         progress: StageProgress::default(),
+        review: review::StageReview::new(case),
     })
 }
 
@@ -822,6 +824,7 @@ fn stage_specs(case: &EvalCase, fallback: &[Capture]) -> Vec<StageSpec> {
             deadline_secs: stage.deadline_secs,
             settle: stage.settle,
             continuation: stage.continuation.clone(),
+            review_previous: stage.review_previous,
             captures: if stage.capture.is_empty() {
                 fallback.to_vec()
             } else {
@@ -3020,6 +3023,7 @@ mod tests {
 
     fn snapshot(requests: u64) -> LiveSnapshot {
         LiveSnapshot {
+            stages: Default::default(),
             observed_at: "2026-09-29T00:00:00Z".into(),
             elapsed_secs: requests * 10,
             requests,

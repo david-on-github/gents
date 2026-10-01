@@ -879,9 +879,40 @@ async fn run_stages(
     ready: &watch::Receiver<Reconciled>,
 ) -> Vec<StageEvidence> {
     let mut stages = Vec::new();
-    for stage in &spec.stages {
+    for authored in &spec.stages {
+        let mut reviewed = authored.clone();
+        if authored.review_previous {
+            let feedback = stages
+                .last()
+                .ok_or_else(|| anyhow::anyhow!("no previous stage"))
+                .and_then(|previous| spec.review.feedback(previous));
+            match feedback {
+                Ok(feedback) => reviewed.prompt.push_str(&format!("\n\n{feedback}")),
+                Err(error) => {
+                    tracing::warn!(%error, "eval review could not be prepared");
+                    stages.push(StageEvidence {
+                        stage_id: authored.stage_id.clone(),
+                        request_id: None,
+                        terminal_state: None,
+                        failure_kind: Some(OutcomeKind::Grader),
+                        provider_reason: None,
+                        messages: Vec::new(),
+                        tool_calls: Vec::new(),
+                        inference_calls: Vec::new(),
+                        captures: Default::default(),
+                        prods: 0,
+                    });
+                    break;
+                }
+            }
+        }
+        let stage = &reviewed;
         spec.progress.stage_started(&stage.stage_id);
         let evidence = run_stage(spec, cancel, home, locator, workspace, stage, ready).await;
+        let mut summary = spec.review.summarize(&evidence);
+        summary["usage"] =
+            serde_json::to_value(usage_of(&evidence.inference_calls)).unwrap_or(Value::Null);
+        spec.progress.stage_result(&stage.stage_id, summary);
         spec.progress.stage_ended(&stage.stage_id);
         let failed = evidence.failure_kind.is_some();
         stages.push(evidence);
@@ -2018,6 +2049,7 @@ mod tests {
             deadline_secs: 120,
             settle: false,
             continuation: None,
+            review_previous: false,
             captures: Vec::new(),
         };
         let locator = TrialLocator {
@@ -2381,6 +2413,7 @@ mod tests {
             deadline_secs: 1,
             settle: false,
             continuation: None,
+            review_previous: false,
             captures: vec![
                 Capture::Documents {
                     name: "requests".to_string(),

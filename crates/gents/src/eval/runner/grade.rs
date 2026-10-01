@@ -226,6 +226,7 @@ mod tests {
                     deadline_secs: 60,
                     settle: false,
                     continuation: None,
+                    review_previous: false,
                     capture: vec![],
                     checks: checks
                         .iter()

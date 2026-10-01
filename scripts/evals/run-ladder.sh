@@ -104,8 +104,20 @@ if [ -n "${GENTS_BIN:-}" ]; then
   GENTS=$GENTS_BIN
 else
   echo "building gents at $SHA ..." >&2
-  cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p gents-cli --bin gents
+  cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p gents-cli --bin gents -p gents-fs-runner --bin gents-fs-runner
   GENTS="$ROOT/target/debug/gents"
+fi
+
+# Versioned binary names do not use the runtime's built-in runner discovery.
+# Resolve the packaged helper before any inference is started.
+if [ -z "${GENTS_FS_RUNNER:-}" ] && [ -x "$(dirname "$GENTS")/gents-fs-runner" ]; then
+  export GENTS_FS_RUNNER="$(dirname "$GENTS")/gents-fs-runner"
+fi
+if [ -n "${GENTS_FS_RUNNER:-}" ]; then
+  [ -x "$GENTS_FS_RUNNER" ] || { echo "GENTS_FS_RUNNER is not executable: $GENTS_FS_RUNNER" >&2; exit 1; }
+elif [ "$(python3 -c 'import os,sys; print(os.path.basename(os.path.realpath(sys.argv[1])))' "$GENTS")" != gents ]; then
+  echo "Install gents-fs-runner beside $GENTS, or set GENTS_FS_RUNNER to its executable before running evals." >&2
+  exit 1
 fi
 
 target_field() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]][0][sys.argv[3]])' "$TARGET_FILE" "$1" "$2"; }

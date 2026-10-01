@@ -13,11 +13,6 @@
       "prompt": "Please read factory/kickoff.md and set up the research desk it describes.",
       "deadline_secs": 7200,
       "settle": true,
-      "continuation": {
-        "prompt": "Continue the setup and send the receipt when ready. Do not launch the workflow.",
-        "max": 3,
-        "until": "receipt"
-      },
       "capture": [
         {
           "kind": "documents",
@@ -1799,12 +1794,9 @@
                 "Publisher",
                 "Coordinator"
               ]
-            },
-            "continuation": {
-              "max": 3
             }
           },
-          "tier": "acceptance",
+          "tier": "development",
           "weight": 1
         },
         {
@@ -1836,15 +1828,1837 @@
           "weight": 1
         }
       ]
+    },
+    {
+      "stage_id": "repair",
+      "prompt": "Review the setup against the findings below and fix every unmet requirement. Preserve correct configuration. Recheck your changes and send an updated Research desk setup receipt naming anything still missing. Do not launch the workflow or change your own model settings or instructions.",
+      "deadline_secs": 7200,
+      "settle": true,
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "agent_did",
+            "display_name",
+            "enabled",
+            "entries"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "profiles",
+          "collection": "InferenceProfile",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "profile_id",
+            "backend_id",
+            "model_name",
+            "execution_id",
+            "reasoning_effort",
+            "sampling_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "executions",
+          "collection": "InferenceExecution",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "execution_id",
+            "max_turns",
+            "max_total_tokens",
+            "deadline_duration_secs"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "backends",
+          "collection": "InferenceBackend",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "backend_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "sources",
+          "collection": "EventSource",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "event_source_id",
+            "source_collection",
+            "event_kind"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "triggers",
+          "collection": "Trigger",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "trigger_id",
+            "task_id",
+            "source",
+            "enabled",
+            "concurrency"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tasks",
+          "collection": "Task",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "task_id",
+            "behavior_id",
+            "enabled",
+            "emit_outcome",
+            "prompt_template"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "target_id",
+            "agent_did",
+            "name",
+            "target_agent_did",
+            "behavior_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "mailbox",
+          "collection": "MailboxItem",
+          "filter": {},
+          "fields": [
+            "title",
+            "summary",
+            "payload",
+            "kind",
+            "status",
+            "created_at"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "receipt",
+          "collection": "MailboxItem",
+          "filter": {
+            "title": {
+              "_ilike": "%receipt%"
+            }
+          },
+          "fields": [
+            "title",
+            "summary",
+            "created_at",
+            "payload"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "crew_requests",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "_not": {
+              "_or": [
+                {
+                  "behavior_id": {
+                    "_like": "%:engineer"
+                  }
+                },
+                {
+                  "behavior_id": {
+                    "_eq": "engineer"
+                  }
+                }
+              ]
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "lifecycle_state"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "BriefRequest",
+          "collection": "BriefRequest",
+          "filter": {},
+          "fields": [
+            "batch",
+            "topic",
+            "question_count"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "ResearchAssignment",
+          "collection": "ResearchAssignment",
+          "filter": {},
+          "fields": [
+            "batch",
+            "assignment",
+            "question",
+            "expected_count"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "ResearchFinding",
+          "collection": "ResearchFinding",
+          "filter": {},
+          "fields": [
+            "batch",
+            "assignment",
+            "finding",
+            "sources",
+            "expected_count"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "DraftBrief",
+          "collection": "DraftBrief",
+          "filter": {},
+          "fields": [
+            "batch",
+            "text"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "ReviewDecision",
+          "collection": "ReviewDecision",
+          "filter": {},
+          "fields": [
+            "batch",
+            "approved",
+            "feedback"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "PublishedBrief",
+          "collection": "PublishedBrief",
+          "filter": {},
+          "fields": [
+            "batch",
+            "text"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "sampling",
+          "collection": "InferenceSampling",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "sampling_id",
+            "temperature",
+            "top_p"
+          ]
+        }
+      ],
+      "checks": [
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "present": [
+              {
+                "capture": "BriefRequest",
+                "category": "collections"
+              },
+              {
+                "capture": "ResearchAssignment",
+                "category": "collections"
+              },
+              {
+                "capture": "ResearchFinding",
+                "category": "collections"
+              },
+              {
+                "capture": "DraftBrief",
+                "category": "collections"
+              },
+              {
+                "capture": "ReviewDecision",
+                "category": "collections"
+              },
+              {
+                "capture": "PublishedBrief",
+                "category": "collections"
+              },
+              {
+                "capture": "behaviors",
+                "min": 7,
+                "max": 7,
+                "category": "completeness"
+              },
+              {
+                "capture": "profiles",
+                "min": 3,
+                "max": 4,
+                "category": "completeness"
+              },
+              {
+                "capture": "backends",
+                "min": 1,
+                "max": 1,
+                "category": "completeness"
+              },
+              {
+                "capture": "sources",
+                "min": 5,
+                "max": 5,
+                "category": "completeness"
+              },
+              {
+                "capture": "triggers",
+                "min": 5,
+                "max": 5,
+                "category": "completeness"
+              },
+              {
+                "capture": "tasks",
+                "min": 5,
+                "max": 5,
+                "category": "completeness"
+              }
+            ],
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "planner",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "ResearchAssignment"
+                    ],
+                    "query": [
+                      "BriefRequest"
+                    ],
+                    "caller_fields": {
+                      "ResearchAssignment": [
+                        "batch",
+                        "assignment",
+                        "question",
+                        "expected_count"
+                      ]
+                    },
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "BriefRequest": [
+                        "batch",
+                        "topic",
+                        "question_count"
+                      ]
+                    }
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    },
+                    {
+                      "field": "host.files.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "self_config.enable_self_config",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    }
+                  ],
+                  "category": "role_permissions",
+                  "behavior": [
+                    {
+                      "field": "enabled",
+                      "equals": true
+                    }
+                  ],
+                  "context": [
+                    {
+                      "field": "system_prompt",
+                      "matches": "(?i)(question|plan)"
+                    }
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bplanner\\b"
+                  }
+                },
+                {
+                  "behavior_id": "researcher",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "ResearchFinding"
+                    ],
+                    "query": [
+                      "ResearchAssignment"
+                    ],
+                    "caller_fields": {
+                      "ResearchFinding": [
+                        "batch",
+                        "assignment",
+                        "finding",
+                        "sources",
+                        "expected_count"
+                      ]
+                    },
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "ResearchAssignment": [
+                        "batch",
+                        "assignment",
+                        "question",
+                        "expected_count"
+                      ]
+                    }
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    },
+                    {
+                      "field": "host.files.mode",
+                      "equals": "ReadOnly"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "self_config.enable_self_config",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    }
+                  ],
+                  "category": "role_permissions",
+                  "behavior": [
+                    {
+                      "field": "enabled",
+                      "equals": true
+                    }
+                  ],
+                  "context": [
+                    {
+                      "field": "system_prompt",
+                      "matches": "(?i)(research|evidence|source)"
+                    }
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bresearcher\\b"
+                  }
+                },
+                {
+                  "behavior_id": "analyst",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "DraftBrief"
+                    ],
+                    "query": [
+                      "ResearchAssignment",
+                      "ResearchFinding",
+                      "DraftBrief"
+                    ],
+                    "caller_fields": {
+                      "DraftBrief": [
+                        "batch",
+                        "text"
+                      ]
+                    },
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "ResearchAssignment": [
+                        "batch",
+                        "assignment",
+                        "question",
+                        "expected_count"
+                      ],
+                      "ResearchFinding": [
+                        "batch",
+                        "assignment",
+                        "finding",
+                        "sources",
+                        "expected_count"
+                      ],
+                      "DraftBrief": [
+                        "batch",
+                        "text"
+                      ]
+                    }
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    },
+                    {
+                      "field": "host.files.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "self_config.enable_self_config",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    }
+                  ],
+                  "category": "role_permissions",
+                  "behavior": [
+                    {
+                      "field": "enabled",
+                      "equals": true
+                    }
+                  ],
+                  "context": [
+                    {
+                      "field": "system_prompt",
+                      "matches": "(?i)(finding|gather|draft)"
+                    }
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\banalyst\\b"
+                  }
+                },
+                {
+                  "behavior_id": "reviewer",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "ReviewDecision"
+                    ],
+                    "query": [
+                      "DraftBrief",
+                      "ResearchFinding"
+                    ],
+                    "caller_fields": {
+                      "ReviewDecision": [
+                        "batch",
+                        "approved",
+                        "feedback"
+                      ]
+                    },
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "DraftBrief": [
+                        "batch",
+                        "text"
+                      ],
+                      "ResearchFinding": [
+                        "batch",
+                        "assignment",
+                        "finding",
+                        "sources",
+                        "expected_count"
+                      ]
+                    }
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    },
+                    {
+                      "field": "host.files.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "self_config.enable_self_config",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    }
+                  ],
+                  "category": "role_permissions",
+                  "behavior": [
+                    {
+                      "field": "enabled",
+                      "equals": true
+                    }
+                  ],
+                  "context": [
+                    {
+                      "field": "system_prompt",
+                      "matches": "(?i)(review|support|check)"
+                    }
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\breviewer\\b"
+                  }
+                },
+                {
+                  "behavior_id": "publisher",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "PublishedBrief"
+                    ],
+                    "query": [
+                      "DraftBrief",
+                      "ReviewDecision",
+                      "PublishedBrief"
+                    ],
+                    "caller_fields": {
+                      "PublishedBrief": [
+                        "batch",
+                        "text"
+                      ]
+                    },
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "DraftBrief": [
+                        "batch",
+                        "text"
+                      ],
+                      "ReviewDecision": [
+                        "batch",
+                        "approved",
+                        "feedback"
+                      ],
+                      "PublishedBrief": [
+                        "batch",
+                        "text"
+                      ]
+                    }
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    },
+                    {
+                      "field": "host.files.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "self_config.enable_self_config",
+                      "matches": "^(false|null)$"
+                    },
+                    {
+                      "field": "subagents.enabled",
+                      "matches": "^(false|null)$"
+                    }
+                  ],
+                  "category": "role_permissions",
+                  "behavior": [
+                    {
+                      "field": "enabled",
+                      "equals": true
+                    }
+                  ],
+                  "context": [
+                    {
+                      "field": "system_prompt",
+                      "matches": "(?i)(publish|approv)"
+                    }
+                  ],
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bpublisher\\b"
+                  }
+                },
+                {
+                  "behavior_id": "coordinator",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "ResearchAssignment"
+                    ],
+                    "query": [
+                      "ResearchFinding",
+                      "DraftBrief",
+                      "ReviewDecision"
+                    ],
+                    "caller_fields": {
+                      "ResearchAssignment": [
+                        "batch",
+                        "assignment",
+                        "question",
+                        "expected_count"
+                      ]
+                    },
+                    "lookup_by": "batch",
+                    "query_fields": {
+                      "ResearchFinding": [
+                        "batch",
+                        "assignment",
+                        "finding",
+                        "sources",
+                        "expected_count"
+                      ],
+                      "DraftBrief": [
+                        "batch",
+                        "text"
+                      ],
+                      "ReviewDecision": [
+                        "batch",
+                        "approved",
+                        "feedback"
+                      ]
+                    }
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    },
+                    {
+                      "field": "host.files.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "host.bash.mode",
+                      "matches": "^(Off|null)$"
+                    },
+                    {
+                      "field": "self_config.enable_self_config",
+                      "matches": "^(false|null)$"
+                    }
+                  ],
+                  "category": "role_permissions",
+                  "behavior": [
+                    {
+                      "field": "enabled",
+                      "equals": true
+                    }
+                  ],
+                  "context": [
+                    {
+                      "field": "system_prompt",
+                      "matches": "(?i)(revis|follow.up|coordinat)"
+                    }
+                  ],
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "researcher",
+                      "reviewer"
+                    ]
+                  },
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bcoordinator\\b"
+                  }
+                },
+                {
+                  "behavior_id": "engineer",
+                  "category": "delegation",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "planner",
+                      "researcher",
+                      "analyst",
+                      "reviewer",
+                      "publisher",
+                      "coordinator"
+                    ]
+                  }
+                }
+              ]
+            },
+            "links": [
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "reasoning_effort",
+                    "equals": "high"
+                  }
+                ],
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bplanner\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "max_turns",
+                    "equals": 40
+                  },
+                  {
+                    "field": "max_total_tokens",
+                    "equals": 180000
+                  },
+                  {
+                    "field": "deadline_duration_secs",
+                    "equals": 1200
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "execution_id",
+                    "target_capture": "executions",
+                    "target_key": "execution_id"
+                  }
+                ],
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bplanner\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "reasoning_effort",
+                    "equals": "high"
+                  }
+                ],
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bresearcher\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "max_turns",
+                    "equals": 30
+                  },
+                  {
+                    "field": "max_total_tokens",
+                    "equals": 120000
+                  },
+                  {
+                    "field": "deadline_duration_secs",
+                    "equals": 900
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "execution_id",
+                    "target_capture": "executions",
+                    "target_key": "execution_id"
+                  }
+                ],
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bresearcher\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "reasoning_effort",
+                    "equals": "high"
+                  }
+                ],
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\banalyst\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "max_turns",
+                    "equals": 40
+                  },
+                  {
+                    "field": "max_total_tokens",
+                    "equals": 180000
+                  },
+                  {
+                    "field": "deadline_duration_secs",
+                    "equals": 1200
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "execution_id",
+                    "target_capture": "executions",
+                    "target_key": "execution_id"
+                  }
+                ],
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\banalyst\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "reasoning_effort",
+                    "equals": "high"
+                  }
+                ],
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\breviewer\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "max_turns",
+                    "equals": 30
+                  },
+                  {
+                    "field": "max_total_tokens",
+                    "equals": 120000
+                  },
+                  {
+                    "field": "deadline_duration_secs",
+                    "equals": 900
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "execution_id",
+                    "target_capture": "executions",
+                    "target_key": "execution_id"
+                  }
+                ],
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\breviewer\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "reasoning_effort",
+                    "equals": "high"
+                  }
+                ],
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bpublisher\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "max_turns",
+                    "equals": 15
+                  },
+                  {
+                    "field": "max_total_tokens",
+                    "equals": 60000
+                  },
+                  {
+                    "field": "deadline_duration_secs",
+                    "equals": 600
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "execution_id",
+                    "target_capture": "executions",
+                    "target_key": "execution_id"
+                  }
+                ],
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bpublisher\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "reasoning_effort",
+                    "equals": "high"
+                  }
+                ],
+                "category": "inference",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bcoordinator\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "max_turns",
+                    "equals": 40
+                  },
+                  {
+                    "field": "max_total_tokens",
+                    "equals": 180000
+                  },
+                  {
+                    "field": "deadline_duration_secs",
+                    "equals": 1200
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "execution_id",
+                    "target_capture": "executions",
+                    "target_key": "execution_id"
+                  }
+                ],
+                "category": "limits",
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bcoordinator\\b"
+                }
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "BriefRequest",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "matches": "^(null|parallel)$"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "BriefRequest",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "emit_outcome",
+                    "equals": true
+                  },
+                  {
+                    "field": "prompt_template",
+                    "contains": "doc.batch"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchAssignment",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "matches": "^(null|parallel)$"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchAssignment",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "emit_outcome",
+                    "equals": true
+                  },
+                  {
+                    "field": "prompt_template",
+                    "contains": "doc.batch"
+                  },
+                  {
+                    "field": "prompt_template",
+                    "contains": "doc.assignment"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchFinding",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "queued_serial"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchFinding",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "emit_outcome",
+                    "equals": true
+                  },
+                  {
+                    "field": "prompt_template",
+                    "contains": "doc.batch"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "DraftBrief",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "matches": "^(null|parallel)$"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "DraftBrief",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "emit_outcome",
+                    "equals": true
+                  },
+                  {
+                    "field": "prompt_template",
+                    "contains": "doc.batch"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ReviewDecision",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "concurrency",
+                    "equals": "queued_serial"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ReviewDecision",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  },
+                  {
+                    "field": "emit_outcome",
+                    "equals": true
+                  },
+                  {
+                    "field": "prompt_template",
+                    "contains": "doc.batch"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "temperature",
+                    "equals": 1
+                  },
+                  {
+                    "field": "top_p",
+                    "equals": 0.95
+                  }
+                ],
+                "category": "inference",
+                "via": [
+                  {
+                    "field": "sampling_id",
+                    "target_capture": "sampling",
+                    "target_key": "sampling_id"
+                  }
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bplanner\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "temperature",
+                    "equals": 1
+                  },
+                  {
+                    "field": "top_p",
+                    "equals": 0.95
+                  }
+                ],
+                "category": "inference",
+                "via": [
+                  {
+                    "field": "sampling_id",
+                    "target_capture": "sampling",
+                    "target_key": "sampling_id"
+                  }
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bresearcher\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "temperature",
+                    "equals": 1
+                  },
+                  {
+                    "field": "top_p",
+                    "equals": 0.95
+                  }
+                ],
+                "category": "inference",
+                "via": [
+                  {
+                    "field": "sampling_id",
+                    "target_capture": "sampling",
+                    "target_key": "sampling_id"
+                  }
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\banalyst\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "temperature",
+                    "equals": 1
+                  },
+                  {
+                    "field": "top_p",
+                    "equals": 0.95
+                  }
+                ],
+                "category": "inference",
+                "via": [
+                  {
+                    "field": "sampling_id",
+                    "target_capture": "sampling",
+                    "target_key": "sampling_id"
+                  }
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\breviewer\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "temperature",
+                    "equals": 1
+                  },
+                  {
+                    "field": "top_p",
+                    "equals": 0.95
+                  }
+                ],
+                "category": "inference",
+                "via": [
+                  {
+                    "field": "sampling_id",
+                    "target_capture": "sampling",
+                    "target_key": "sampling_id"
+                  }
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bpublisher\\b"
+                }
+              },
+              {
+                "capture": "behaviors",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "temperature",
+                    "equals": 1
+                  },
+                  {
+                    "field": "top_p",
+                    "equals": 0.95
+                  }
+                ],
+                "category": "inference",
+                "via": [
+                  {
+                    "field": "sampling_id",
+                    "target_capture": "sampling",
+                    "target_key": "sampling_id"
+                  }
+                ],
+                "source_match": {
+                  "field": "display_name",
+                  "matches": "(?i)\\bcoordinator\\b"
+                }
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "BriefRequest",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\bplanner\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchAssignment",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\bresearcher\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchFinding",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\banalyst\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "DraftBrief",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\breviewer\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ReviewDecision",
+                "field": "event_source_id",
+                "target_capture": "triggers",
+                "target_key": "source.event_source_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\bpublisher\\b"
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "task_id",
+                    "target_capture": "tasks",
+                    "target_key": "task_id"
+                  },
+                  {
+                    "field": "behavior_id",
+                    "target_capture": "behaviors",
+                    "target_key": "behavior_id"
+                  }
+                ],
+                "category": "automation"
+              }
+            ],
+            "rows": [
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "BriefRequest",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "event_kind",
+                    "matches": "^(null|created)$"
+                  }
+                ]
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchAssignment",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "event_kind",
+                    "matches": "^(null|created)$"
+                  }
+                ]
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ResearchFinding",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "event_kind",
+                    "matches": "^(null|created)$"
+                  }
+                ]
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "DraftBrief",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "event_kind",
+                    "matches": "^(null|created)$"
+                  }
+                ]
+              },
+              {
+                "capture": "sources",
+                "key": "source_collection",
+                "id": "ReviewDecision",
+                "category": "automation",
+                "expect": [
+                  {
+                    "field": "event_kind",
+                    "matches": "^(null|created)$"
+                  }
+                ]
+              }
+            ],
+            "receipt": {
+              "capture": "receipt",
+              "fields": [
+                "title",
+                "summary",
+                "payload"
+              ],
+              "ids": [
+                "Planner",
+                "Researcher",
+                "Analyst",
+                "Reviewer",
+                "Publisher",
+                "Coordinator"
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "crew_requests",
+            "min": 0,
+            "max": 0
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "file_mailbox_item"
+            ],
+            "forbidden": [
+              "agent_new",
+              "agent_message",
+              "bash"
+            ],
+            "max_calls": 400
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "review_previous": true
     }
   ],
   "goal": {
     "AgentBehavior": 7,
-    "InferenceProfile": 3,
+    "InferenceProfile": 4,
     "SubagentTarget": 6,
     "EventSource": 5,
     "Task": 5,
     "Trigger": 5,
-    "schemas": 6
+    "schemas": 6,
+    "AgentContext": 7,
+    "Tools": 7
   }
 }

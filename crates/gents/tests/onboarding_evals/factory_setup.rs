@@ -168,8 +168,8 @@ fn the_definition_validates_and_every_check_accepts_its_params() {
         panic!("one case");
     };
     assert_eq!(case.fixtures.as_ref().unwrap().assets, ["factory"]);
-    let [stage] = case.stages.as_slice() else {
-        panic!("one stage");
+    let [stage, repair] = case.stages.as_slice() else {
+        panic!("setup and repair stages");
     };
     assert!(stage.settle);
     assert!(stage.checks.iter().all(|check| matches!(
@@ -177,10 +177,18 @@ fn the_definition_validates_and_every_check_accepts_its_params() {
         "crew_spec_match" | "tool_calls_expected" | "captured_rows_count"
     )));
     assert!(definition.subject.host_bash);
-    assert_eq!(
-        stage.continuation.as_ref().map(|c| c.until.as_str()),
-        Some("receipt")
-    );
+    assert!(!stage.review_previous && repair.review_previous);
+    assert!(stage.continuation.is_none() && repair.continuation.is_none());
+    assert!(stage.checks.iter().all(|c| c.tier
+        == if c.check == "crew_spec_match" {
+            gents::document_config::EvalTier::Development
+        } else {
+            gents::document_config::EvalTier::Acceptance
+        }));
+    assert!(repair
+        .checks
+        .iter()
+        .all(|c| c.tier == gents::document_config::EvalTier::Acceptance));
     // Evidence with every capture empty: each check must reach a verdict about
     // the subject (or say no fire happened), never reject its own params.
     let mut evidence =
@@ -194,7 +202,7 @@ fn the_definition_validates_and_every_check_accepts_its_params() {
             gents::eval::runner::CaptureResult::Documents { rows: Vec::new() },
         );
     }
-    for check in &stage.checks {
+    for check in stage.checks.iter().chain(&repair.checks) {
         let implementation = registry
             .get(&check.check)
             .unwrap_or_else(|| panic!("{} is not a shipped check", check.check));
