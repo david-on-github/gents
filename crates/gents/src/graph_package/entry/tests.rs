@@ -71,29 +71,7 @@ fn git_diff_host_step_runs_the_declared_diff() {
     assert_eq!(facts.patch, expected_patch);
 }
 
-/// A guest that ignores stdin and writes exactly `json` to stdout: the
-/// prepare plugin fixture for tests that only need a deterministic
-/// result, not a real transformation of the host facts.
-fn constant_output_wat(json: &[u8]) -> String {
-    let mut escaped = String::with_capacity(json.len() * 4);
-    for byte in json {
-        escaped.push_str(&format!("\\{byte:02x}"));
-    }
-    let len = json.len();
-    format!(
-        r#"(module
-  (import "wasi_snapshot_preview1" "fd_write"
-(func $fd_write (param i32 i32 i32 i32) (result i32)))
-  (memory (export "memory") 1)
-  (data (i32.const 0) "{escaped}")
-  (func (export "_start")
-(i32.store (i32.const 8192) (i32.const 0))
-(i32.store (i32.const 8196) (i32.const {len}))
-(call $fd_write (i32.const 1) (i32.const 8192) (i32.const 1) (i32.const 8200))
-drop))
-"#
-    )
-}
+use crate::plugin::tests::constant_output_wat;
 
 /// Installs a constant-output plugin under a fresh home, qualified
 /// `fixture/prepare_fixture`.

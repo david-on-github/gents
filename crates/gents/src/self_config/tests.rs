@@ -971,6 +971,188 @@ async fn run_graph_refuses_a_git_diff_prepare_without_ceiling_authority() {
     );
 }
 
+/// A model-invoked `run_graph` of an entry whose `prepare` declares a
+/// `git_diff` host step, end to end under a granted effective root: the
+/// repository named by the input resolves inside that root, the pack's
+/// prepare plugin runs on the collected facts, its evidence document is
+/// persisted, and the run starts on the plugin's input rather than the
+/// operator's.
+#[tokio::test]
+async fn run_graph_prepares_host_input_under_the_effective_root() {
+    let node = build_persona_node().await;
+    let identity = persona_identity("prepare-under-root");
+    let agent_did = identity.did().to_string();
+    crate::test_support::install_test_behavior(&node, &agent_did, "setup").await;
+
+    let options = crate::graph_package::GraphPackageInstallBindings {
+        agent_did: agent_did.clone(),
+        inference_slots: BTreeMap::from([("worker".to_owned(), "setup:inference".to_owned())]),
+    };
+    let plugin_output = json!({
+        "input": {
+            "repository_path": ".",
+            "head_ref": "prepared-head",
+            "evidence_id": "evidence-1",
+            "summary": "prepared by the pack plugin",
+        },
+        "documents": [{
+            "collection": "FixtureEvidence",
+            "fields": {"evidence_id": "evidence-1", "head_ref": "prepared-head", "note": "prepared"},
+        }],
+    });
+    let package = crate::test_support::load_test_graph_package_with_plugin_output(
+        "prepared_graph",
+        &options,
+        &plugin_output,
+    );
+    let prepare = package.config.graph_intents[0].entries[0]
+        .prepare
+        .clone()
+        .expect("the fixture entry prepares");
+    let plugin_home = tempfile::tempdir().expect("plugin home");
+    let declaration = package.manifest.plugins[0].clone();
+    let afb = package
+        .asset(&declaration.artifact)
+        .expect("the plugin artifact")
+        .to_vec();
+    let digest = prepare.digest.clone().expect("the loader pins the plugin");
+    let hex = digest.strip_prefix("sha256:").expect("sha256 pin");
+    crate::plugin::store::store_bytes(plugin_home.path(), hex, &afb).expect("store artifact");
+    crate::plugin::store::write_record(
+        plugin_home.path(),
+        &crate::plugin::store::InstalledPlugin {
+            namespace: "fixture".into(),
+            name: declaration.name.clone(),
+            version: "0.1.0".into(),
+            digest,
+            language: "rust".into(),
+            declaration,
+            granted: None,
+            instructions: None,
+            owner_pack_coordinate: None,
+            owner_pack_digest: None,
+        },
+    )
+    .expect("record the plugin");
+    let plugins = Arc::new(crate::plugin::executor::PluginExecutor::new(Some(
+        plugin_home.path().to_owned(),
+    )));
+
+    let access = graph_access(&node);
+    let receipt = crate::graph_package::install_loaded_graph_package(
+        &access,
+        &agent_did,
+        &package,
+        &options,
+        None,
+        &crate::graph_package::GraphInstallRecord::default(),
+    )
+    .await
+    .expect("fixture installs");
+    crate::graph_pipeline::activate_graph_revision_with_access(
+        &access,
+        &agent_did,
+        &receipt.graph_id,
+        &receipt.revision_digest,
+        None,
+    )
+    .await
+    .expect("fixture revision activates");
+
+    let root = tempfile::tempdir().expect("root");
+    let root_path = std::fs::canonicalize(root.path()).expect("canonical root");
+    let git = |args: &[&str]| {
+        let output = std::process::Command::new("git")
+            .current_dir(&root_path)
+            .args(["-c", "user.email=test@example.com", "-c", "user.name=Test"])
+            .args(args)
+            .output()
+            .expect("git runs");
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+    };
+    git(&["init", "--quiet"]);
+    std::fs::write(root_path.join("a.txt"), "one\n").expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    std::fs::write(root_path.join("a.txt"), "two\n").expect("write");
+    git(&["add", "-A"]);
+    git(&["commit", "--quiet", "-m", "head"]);
+
+    let mut tool_config = config(&["tools"]);
+    tool_config.behavior_id = "setup".to_owned();
+    tool_config.enable_graph_tools = true;
+    tool_config.process_ceiling = crate::tool_surface::SelfConfigProcessCeiling {
+        file_mode: crate::tool_surface::FileToolMode::ReadOnly,
+        bash_mode: crate::tool_surface::BashMode::Off,
+        root: Some(root_path.clone()),
+    };
+    let tools = build_self_config_tools(
+        node.clone(),
+        agent_did,
+        Some(identity),
+        &tool_config,
+        plugins,
+    );
+    let call = |name: &str, args: Value| {
+        tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .unwrap_or_else(|| panic!("missing tool {name}"))
+            .call(args.to_string())
+    };
+    call(
+        CONFIG_TOOL_NAME,
+        json!({"argv": [
+            "tools", "edit", "--set",
+            format!("host={}", json!({
+                "root": root_path.to_string_lossy(),
+                "files": {"mode": "ReadOnly"}
+            }))
+        ]}),
+    )
+    .await
+    .expect("current behavior receives effective read authority");
+
+    let started = call(
+        RUN_GRAPH_TOOL_NAME,
+        json!({
+            "package": "prepared_graph",
+            "input": {
+                "repository": root_path.to_string_lossy(),
+                "base": "HEAD~1",
+                "head": "HEAD",
+            },
+        }),
+    )
+    .await
+    .expect("a repository under the effective root prepares and starts");
+    let started: Value = serde_json::from_str(&started).expect("run_graph returns JSON");
+    assert_eq!(started["node_bound"], true, "{started}");
+
+    let evidence = access
+        .execute("{ FixtureEvidence { evidence_id head_ref note } }")
+        .await
+        .expect("query evidence");
+    assert_eq!(
+        evidence["data"]["FixtureEvidence"],
+        json!([{"evidence_id": "evidence-1", "head_ref": "prepared-head", "note": "prepared"}]),
+        "the plugin's evidence document is persisted"
+    );
+    let jobs = access
+        .execute("{ FixtureJob { summary head_ref evidence_id } }")
+        .await
+        .expect("query job");
+    assert_eq!(
+        jobs["data"]["FixtureJob"],
+        json!([{
+            "summary": "prepared by the pack plugin",
+            "head_ref": "prepared-head",
+            "evidence_id": "evidence-1",
+        }]),
+        "the run starts on the plugin's input, not the operator's"
+    );
+}
+
 #[tokio::test]
 async fn config_tools_cannot_self_grant_pack_install() {
     let node = build_persona_node().await;

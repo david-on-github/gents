@@ -246,6 +246,46 @@ pub(crate) mod test_support {
             .unwrap();
     }
 
+    /// Copies the declared files of the fixture pack `tests/fixtures/packs/<name>`
+    /// into a temp directory. A plugin's `.afb` is not checked in, so each
+    /// declared artifact is written as a module that ignores stdin and
+    /// prints `plugin_output`; every other file is copied as is.
+    pub(crate) fn fixture_pack_copy(
+        name: &str,
+        plugin_output: &serde_json::Value,
+    ) -> (tempfile::TempDir, std::path::PathBuf) {
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/packs")
+            .join(name);
+        let manifest: crate::pack::PackManifest = serde_json::from_slice(
+            &std::fs::read(source.join("manifest.json"))
+                .unwrap_or_else(|error| panic!("fixture {name:?} manifest: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("fixture {name:?} manifest: {error}"));
+        let artifacts: std::collections::BTreeSet<&str> = manifest
+            .plugins
+            .iter()
+            .map(|plugin| plugin.artifact.as_str())
+            .collect();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join(name);
+        for path in crate::pack::declared_paths(&manifest) {
+            let target = root.join(&path);
+            std::fs::create_dir_all(target.parent().expect("a parent")).expect("mkdir");
+            if artifacts.contains(path.as_str()) {
+                let wat = crate::plugin::tests::constant_output_wat(
+                    &serde_json::to_vec(plugin_output).expect("encode plugin output"),
+                );
+                std::fs::write(&target, crate::plugin::tests::build_plugin_afb(&wat))
+                    .expect("write artifact");
+            } else {
+                std::fs::copy(source.join(&path), &target)
+                    .unwrap_or_else(|error| panic!("fixture {name:?} file {path:?}: {error}"));
+            }
+        }
+        (dir, root)
+    }
+
     /// Reads a graph pack fixture from `tests/fixtures/packs/<name>` through
     /// the same archive path an install takes: `pack_dir` packs the
     /// directory, `PackArchive::from_bytes` reads it back, and the graph
@@ -254,12 +294,20 @@ pub(crate) mod test_support {
         name: &str,
         options: &crate::graph_package::GraphPackageInstallBindings,
     ) -> crate::graph_package::LoadedGraphPackage {
+        load_test_graph_package_with_plugin_output(name, options, &serde_json::json!({}))
+    }
+
+    /// [`load_test_graph_package`] for a fixture whose plugin runs: its
+    /// artifact prints `plugin_output` (see [`fixture_pack_copy`]).
+    pub(crate) fn load_test_graph_package_with_plugin_output(
+        name: &str,
+        options: &crate::graph_package::GraphPackageInstallBindings,
+        plugin_output: &serde_json::Value,
+    ) -> crate::graph_package::LoadedGraphPackage {
         let scope = crate::pack::PackInstallOptions {
             agent_did: options.agent_did.clone(),
         };
-        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/packs")
-            .join(name);
+        let (_guard, dir) = fixture_pack_copy(name, plugin_output);
         let (bytes, _) = crate::pack_archive::pack_dir(&dir)
             .unwrap_or_else(|error| panic!("packing fixture {name:?}: {error:#}"));
         let archive = crate::pack_archive::PackArchive::from_bytes(&bytes).unwrap();

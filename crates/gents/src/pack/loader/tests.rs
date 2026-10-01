@@ -222,7 +222,7 @@ fn graph_fixture_loads_slot_authoring_and_literal_prompt_assets() {
 /// name list.
 #[test]
 fn every_fixture_pack_that_ships_a_config_loads_it_cleanly() {
-    for name in crate::support::fixtures::fixture_pack_names_without_plugins() {
+    for name in crate::support::fixtures::fixture_pack_names() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/packs")
             .join(&name);

@@ -11,8 +11,9 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use support::{
-    agent_did_from_init, allocate_port, copy_dir_all, fixture_pack_dir, run_cli_failure_stderr,
-    run_cli_json, run_cli_text, run_init_json, spawn_server_with_ready_json,
+    agent_did_from_init, allocate_port, copy_dir_all, first_graphql_row, fixture_pack_dir,
+    graphql_query, run_cli_failure_stderr, run_cli_json, run_cli_text, run_init_json,
+    spawn_server_with_ready_json,
 };
 
 /// Unroutable: a connection to it fails immediately rather than timing out,
@@ -842,6 +843,143 @@ fn graph_run_validates_input_against_the_entry_schema() -> Result<()> {
     anyhow::ensure!(
         denial.contains("does not satisfy its schema"),
         "a value violating the pattern must be refused before any run starts: {denial}"
+    );
+    Ok(())
+}
+
+/// An entry's `git_diff` host step runs through the CLI and the pack's own
+/// prepare plugin: the pack is built (compiling its plugin), installed from
+/// a `.pack` file, and a run over a real two-commit repository persists the
+/// plugin's evidence document and starts on the plugin's input, both carrying
+/// the diff's head sha.
+#[tokio::test]
+async fn graph_run_prepares_git_diff_evidence_through_the_pack_plugin() -> Result<()> {
+    let tempdir = tempfile::tempdir().context("creating prepare tempdir")?;
+    let home = tempdir.path().join("agent-home");
+    let home_arg = home.to_str().context("path")?;
+    let initialized = run_init_json(
+        tempdir.path(),
+        &["--agent-name", "prepare-runner", "--home", home_arg],
+    )?;
+    let owner_did = agent_did_from_init(&initialized)?;
+    let port = allocate_port()?;
+    let (_server, readiness) =
+        spawn_server_with_ready_json(&home, port, &["--home", home_arg], &[])?;
+    anyhow::ensure!(
+        readiness.get("status").and_then(Value::as_str) == Some("serving"),
+        "server did not become ready: {readiness}"
+    );
+    let graphql = format!("http://127.0.0.1:{port}/api/v0/graphql");
+    let profile = format!("{owner_did}:default-profile");
+
+    let pack_dir = tempdir.path().join("prepared_graph");
+    copy_dir_all(&fixture_pack_dir("prepared_graph"), &pack_dir)?;
+    let pack_file = tempdir.path().join("prepared_graph.pack");
+    run_cli_json(
+        tempdir.path(),
+        &[
+            "pack",
+            "build",
+            dir_arg(&pack_dir),
+            "--out",
+            dir_arg(&pack_file),
+        ],
+    )?;
+    run_cli_json(
+        tempdir.path(),
+        &[
+            "pack",
+            "install",
+            dir_arg(&pack_file),
+            "--home",
+            home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &owner_did,
+            "--inference-slot",
+            &format!("worker={profile}"),
+        ],
+    )?;
+
+    let repo = tempdir.path().join("repo");
+    std::fs::create_dir_all(&repo)?;
+    let git = |args: &[&str]| -> Result<String> {
+        let output = std::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["-c", "user.email=test@example.com", "-c", "user.name=Test"])
+            .args(args)
+            .output()
+            .context("running git")?;
+        anyhow::ensure!(
+            output.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+    };
+    git(&["init", "--quiet"])?;
+    std::fs::write(repo.join("a.txt"), "one\n")?;
+    git(&["add", "-A"])?;
+    git(&["commit", "--quiet", "-m", "base"])?;
+    std::fs::write(repo.join("a.txt"), "two\n")?;
+    git(&["add", "-A"])?;
+    git(&["commit", "--quiet", "-m", "head"])?;
+    let head = git(&["rev-parse", "HEAD"])?;
+
+    let denial = run_cli_failure_stderr(
+        tempdir.path(),
+        &[
+            "graph",
+            "run",
+            "fixture/prepared_graph",
+            "--home",
+            home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &owner_did,
+            "--field",
+            &format!("repository={}", dir_arg(&repo)),
+            "--field",
+            "head=NOT VALID",
+        ],
+    )?;
+    anyhow::ensure!(
+        denial.contains("does not satisfy its schema"),
+        "an invalid head must be refused before any host step runs: {denial}"
+    );
+
+    let receipt = run_cli_json(
+        tempdir.path(),
+        &[
+            "graph",
+            "run",
+            "fixture/prepared_graph",
+            "--home",
+            home_arg,
+            "--graphql",
+            &graphql,
+            "--agent-did",
+            &owner_did,
+            "--field",
+            &format!("repository={}", dir_arg(&repo)),
+        ],
+    )?;
+    anyhow::ensure!(receipt.get("run_id").is_some(), "{receipt}");
+
+    let evidence = graphql_query(&graphql, "{ FixtureEvidence { head_ref note } }").await?;
+    let row = first_graphql_row(&evidence, "FixtureEvidence")?;
+    anyhow::ensure!(
+        row["head_ref"] == head.as_str() && row["note"] == "prepared",
+        "the plugin must have seen the repository's head {head}: {evidence}"
+    );
+    let jobs = graphql_query(&graphql, "{ FixtureJob { head_ref summary } }").await?;
+    let job = first_graphql_row(&jobs, "FixtureJob")?;
+    anyhow::ensure!(
+        job["head_ref"] == head.as_str()
+            && job["summary"] == format!("prepared at {head}").as_str(),
+        "the run must start on the plugin's input: {jobs}"
     );
     Ok(())
 }

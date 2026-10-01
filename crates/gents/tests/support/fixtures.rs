@@ -7,31 +7,52 @@ use gents::{
     RuntimePrincipal,
 };
 
-/// Every pack fixture directory under `tests/fixtures/packs` whose manifest
-/// declares no plugins, sorted by name. Shared by every test that must cover
-/// "every fixture pack" so a new fixture is picked up by all of them without
-/// each keeping its own copy of the list; a fixture with plugins is excluded
-/// because it needs a compiled Afterburner artifact to build.
-pub fn fixture_pack_names_without_plugins() -> Vec<String> {
+/// Every pack fixture directory under `tests/fixtures/packs`, sorted by
+/// name. Shared by every test that must cover "every fixture pack" so a new
+/// fixture is picked up by all of them without each keeping its own copy of
+/// the list. Panics on any unreadable directory or manifest, and when a
+/// known fixture is missing, so a broken fixture cannot drop out of the
+/// coverage unnoticed.
+pub fn fixture_pack_names() -> Vec<String> {
+    const KNOWN: [&str; 7] = [
+        "review_graph",
+        "prepared_graph",
+        "assets_fixture",
+        "documents_fixture",
+        "slot_fixture",
+        "dependent_fixture",
+        "bind_plugin_fixture",
+    ];
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/packs");
-    let mut names: Vec<String> = std::fs::read_dir(&root)
-        .expect("fixtures/packs dir")
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let manifest: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(path.join("manifest.json")).ok()?).ok()?;
-            let has_plugins = manifest
-                .get("plugins")
-                .and_then(|value| value.as_array())
-                .is_some_and(|plugins| !plugins.is_empty());
-            if has_plugins {
-                return None;
-            }
-            path.file_name()?.to_str().map(str::to_owned)
-        })
-        .collect();
+    let mut names = Vec::new();
+    for entry in std::fs::read_dir(&root)
+        .unwrap_or_else(|error| panic!("reading {}: {error}", root.display()))
+    {
+        let path = entry
+            .unwrap_or_else(|error| panic!("reading an entry of {}: {error}", root.display()))
+            .path();
+        if !path.is_dir() {
+            continue;
+        }
+        let manifest = path.join("manifest.json");
+        let bytes = std::fs::read(&manifest)
+            .unwrap_or_else(|error| panic!("reading {}: {error}", manifest.display()));
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .unwrap_or_else(|error| panic!("parsing {}: {error}", manifest.display()));
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| panic!("{} is not a UTF-8 name", path.display()));
+        names.push(name.to_owned());
+    }
     names.sort();
+    for known in KNOWN {
+        assert!(
+            names.iter().any(|name| name == known),
+            "fixture {known} is missing from {}",
+            root.display()
+        );
+    }
     names
 }
 

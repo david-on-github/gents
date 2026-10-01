@@ -8,7 +8,9 @@
 //!
 //! ```bash
 //! rust-analyzer --version
-//! GENTS_LIVE_LSP=1 GENTS_EVAL_TARGET=workstation-1 cargo test -p gents --test e2e_live \
+//! GENTS_LIVE_LSP=1 GENTS_EVAL_TARGET=workstation-1 \
+//!   GENTS_LSP_RUST_PACK_DIR=<packs checkout>/packs/gents/lsp_rust \
+//!   cargo test -p gents --test e2e_live \
 //!   lsp_live_model_uses_rust_analyzer \
 //!   -- --ignored --test-threads=1 --nocapture
 //! ```

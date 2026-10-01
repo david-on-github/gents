@@ -10,18 +10,9 @@ use crate::pack::{declared_paths, validate_manifest};
 /// Copies a fixture pack (`tests/fixtures/packs/<name>`) into a fresh temp
 /// directory, so a test that mutates its copy never touches the checked-in
 /// fixture, and reading it back does not race other tests over the same
-/// files.
+/// files. A plugin fixture's artifact is a generated stand-in.
 fn fixture_pack_dir(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
-    let source = fixture_manifest_dir(name);
-    let manifest = fixture_manifest(name);
-    let dir = tempfile::tempdir().expect("tempdir");
-    let root = dir.path().join(name);
-    for path in declared_paths(&manifest) {
-        let target = root.join(&path);
-        std::fs::create_dir_all(target.parent().expect("a parent")).expect("mkdir");
-        std::fs::copy(source.join(&path), &target).expect("copy");
-    }
-    (dir, root)
+    crate::test_support::fixture_pack_copy(name, &serde_json::json!({}))
 }
 
 fn fixture_manifest_dir(name: &str) -> std::path::PathBuf {
@@ -94,7 +85,7 @@ fn a_packed_pack_reads_back_as_the_same_pack() {
 
 #[test]
 fn every_fixture_pack_keeps_its_digest_through_a_pack_file() {
-    for name in crate::support::fixtures::fixture_pack_names_without_plugins() {
+    for name in crate::support::fixtures::fixture_pack_names() {
         let (_guard, root) = fixture_pack_dir(&name);
         let manifest = fixture_manifest(&name);
         let mut assets = std::collections::BTreeMap::new();
