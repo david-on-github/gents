@@ -1132,25 +1132,17 @@ fn seed_mutation(seed: &PackSeed, job_id: &str, prompt: &str) -> Result<String> 
     for key in seed.fields.keys() {
         gents::graphql::validate_graphql_name(key)?;
     }
-    let mut fields = vec![
-        format!(
-            "{}: \"{}\"",
-            seed.job_id_field,
-            escape_graphql_string(job_id)
-        ),
-        format!(
-            "{}: \"{}\"",
-            seed.prompt_field,
-            escape_graphql_string(prompt)
-        ),
-    ];
-    for (key, value) in &seed.fields {
-        fields.push(format!("{key}: \"{}\"", escape_graphql_string(value)));
-    }
+    let mut fields: serde_json::Map<String, serde_json::Value> = seed
+        .fields
+        .iter()
+        .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+        .collect();
+    fields.insert(seed.job_id_field.clone(), job_id.into());
+    fields.insert(seed.prompt_field.clone(), prompt.into());
+    let input = gents_protocol::graphql::graphql_input_literal(&serde_json::Value::Object(fields))?;
     Ok(format!(
-        "mutation {{ create_{}(input: {{ {} }}) {{ _docID }} }}",
-        seed.collection,
-        fields.join(", ")
+        "mutation {{ create_{}(input: {input}) {{ _docID }} }}",
+        seed.collection
     ))
 }
 

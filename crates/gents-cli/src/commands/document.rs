@@ -1,12 +1,11 @@
 use anyhow::{bail, Context, Result};
-use gents::defra_query::{unknown_collection_message, CollectionSchema, CollectionScope};
+use gents::defra_query::{unknown_collection_message, CollectionScope};
 use gents::graphql::validate_collection_identifier;
 use gents_protocol::graphql::{extract_mutation_doc_id, graphql_input_literal};
 use serde_json::{json, Value};
 
 use crate::cli::args::{DocumentCommand, DocumentCreateArgs};
-use crate::commands::query::fetch_collection_schema;
-use crate::{print_json, resolve_config_access, resolve_graphql_endpoint};
+use crate::{print_json, resolve_config_access};
 
 pub(crate) async fn dispatch(command: DocumentCommand) -> Result<()> {
     match command {
@@ -20,7 +19,16 @@ pub(crate) async fn dispatch(command: DocumentCommand) -> Result<()> {
 fn parse_fields(collection: &str, fields: &str) -> Result<Value> {
     validate_collection_identifier(collection)?;
     CollectionScope::all().ensure_allowed(collection)?;
-    let fields: Value = serde_json::from_str(fields).context("parsing --json as JSON")?;
+    if gents::Collection::ALL
+        .iter()
+        .any(|owner| owner.graphql_type() == collection)
+    {
+        bail!("collection {collection:?} is canonical configuration; use its configuration command or pack install");
+    }
+    let raw: Box<serde_json::value::RawValue> =
+        serde_json::from_str(fields).context("parsing --json as JSON")?;
+    ensure_exact_integers(&raw)?;
+    let fields: Value = serde_json::from_str(raw.get()).context("parsing --json as JSON")?;
     if !fields.as_object().is_some_and(|object| !object.is_empty()) {
         bail!("--json must be a non-empty JSON object of document fields");
     }
@@ -32,14 +40,41 @@ fn parse_fields(collection: &str, fields: &str) -> Result<Value> {
     Ok(fields)
 }
 
+fn ensure_exact_integers(raw: &serde_json::value::RawValue) -> Result<()> {
+    let text = raw.get();
+    match text.as_bytes().first() {
+        Some(b'{') => {
+            // Preserve number tokens until their representability has been checked.
+            let raw_fields: std::collections::BTreeMap<String, Box<serde_json::value::RawValue>> =
+                serde_json::from_str(text)?;
+            for value in raw_fields.values() {
+                ensure_exact_integers(value)?;
+            }
+        }
+        Some(b'[') => {
+            let items: Vec<Box<serde_json::value::RawValue>> = serde_json::from_str(text)?;
+            for value in &items {
+                ensure_exact_integers(value)?;
+            }
+        }
+        Some(b'-' | b'0'..=b'9') if !text.contains(['.', 'e', 'E']) => {
+            if text.parse::<i64>().is_err() && text.parse::<u64>().is_err() {
+                bail!("--json integer is outside the exact i64/u64 range; encode it as a string");
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// DefraDB ignores input fields the collection does not declare, so an
 /// unknown one is refused here against the introspected schema instead.
-fn ensure_known_fields(collection: &str, fields: &Value, schema: &CollectionSchema) -> Result<()> {
+fn ensure_known_fields(collection: &str, fields: &Value, input_fields: &[String]) -> Result<()> {
     let unknown = fields
         .as_object()
         .into_iter()
         .flat_map(|object| object.keys())
-        .find(|key| !schema.fields.iter().any(|field| &field.name == *key));
+        .find(|key| !input_fields.contains(key));
     match unknown {
         Some(key) => bail!("collection {collection:?} has no field {key:?}; check the field name"),
         None => Ok(()),
@@ -65,11 +100,24 @@ async fn create(args: DocumentCreateArgs) -> Result<()> {
     let fields = parse_fields(&args.collection, &args.json)?;
     let mutation = create_mutation(&args.collection, &fields)?;
     let (access, _) = resolve_config_access(args.home.as_deref(), args.graphql.as_deref()).await?;
-    let endpoint = resolve_graphql_endpoint(args.graphql.as_deref(), args.home.as_deref())?;
-    let schema = fetch_collection_schema(&endpoint, &args.collection)
-        .await?
-        .with_context(|| unknown_collection_message(&args.collection))?;
-    ensure_known_fields(&args.collection, &fields, &schema)?;
+    let input_type =
+        gents::graphql::escape_graphql_string(&format!("{}MutationInputArg", args.collection));
+    let query = format!(r#"{{ __type(name: "{input_type}") {{ inputFields {{ name }} }} }}"#);
+    let schema = access.execute(&query).await?;
+    let input_fields = schema
+        .pointer("/data/__type/inputFields")
+        .and_then(Value::as_array)
+        .with_context(|| unknown_collection_message(&args.collection))?
+        .iter()
+        .map(|field| {
+            field
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .context("invalid mutation input field in schema introspection")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ensure_known_fields(&args.collection, &fields, &input_fields)?;
     let response = access.write("cli.document.create", &mutation).await?;
     let doc_id = extract_mutation_doc_id(&response, &args.collection)?;
     print_json(&json!({ "collection": args.collection, "doc_id": doc_id }))
@@ -107,6 +155,17 @@ mod tests {
             ("Goal", r#"{"tags":[]}"#, "empty array"),
             ("Goal", r#"{"a":{"b":[]}}"#, "empty array"),
             ("Goal", "not json", "parsing --json"),
+            (
+                "Goal",
+                r#"{"n":18446744073709551616}"#,
+                "exact i64/u64 range",
+            ),
+            (
+                "Goal",
+                r#"{"nested":[-9223372036854775809]}"#,
+                "exact i64/u64 range",
+            ),
+            ("Tools", r#"{"tool_id":"x"}"#, "canonical configuration"),
         ] {
             let error = parse_fields(collection, json).expect_err("must refuse");
             assert!(
@@ -128,14 +187,11 @@ mod tests {
 
     #[test]
     fn refuses_fields_the_collection_does_not_declare() {
-        let schema = CollectionSchema {
-            fields: vec![gents::defra_query::SchemaField {
-                name: "goal_id".to_string(),
-                type_name: "String".to_string(),
-            }],
-        };
+        let schema = vec!["goal_id".to_string()];
         let known = serde_json::json!({"goal_id": "g"});
         assert!(ensure_known_fields("Goal", &known, &schema).is_ok());
+        let metadata = serde_json::json!({"_docID": "not-an-input"});
+        assert!(ensure_known_fields("Goal", &metadata, &schema).is_err());
         let unknown = serde_json::json!({"goal_id": "g", "nope": 1});
         let error = ensure_known_fields("Goal", &unknown, &schema).expect_err("must refuse");
         assert!(

@@ -16,6 +16,20 @@ async fn document_create_signs_as_the_home_principal_and_keeps_schema_validation
     let agent_name = format!("cli-document-{}", Uuid::new_v4().simple());
     let init = run_init_json(&home_dir, &["--agent-name", &agent_name])?;
     let agent_did = agent_did_from_init(&init)?;
+    let offline_fields = serde_json::json!({
+        "goal_id": "offline-goal",
+        "session_id": "offline-session",
+        "agent_did": agent_did,
+        "objective": "created before the server starts",
+        "status": "paused",
+        "created_at": "2026-07-16T00:00:00Z",
+    })
+    .to_string();
+    let offline = run_cli_json(
+        &home_dir,
+        &["document", "create", "Goal", "--json", &offline_fields],
+    )?;
+    assert!(offline["doc_id"].as_str().is_some(), "{offline}");
     let mut serve = spawn_server(&home_dir, port)?;
     wait_for_port(port, &mut serve)?;
     wait_for_runtime_ready(&graphql, &agent_did, Duration::from_secs(30)).await?;
@@ -82,6 +96,23 @@ async fn document_create_signs_as_the_home_principal_and_keeps_schema_validation
     )?;
     assert!(unknown_field.contains("no_such_field"), "{unknown_field}");
 
+    let metadata_field = run_cli_failure_stderr(
+        &home_dir,
+        &[
+            "document",
+            "create",
+            "Goal",
+            "--graphql",
+            &graphql,
+            "--json",
+            r#"{"_docID":"not-an-input"}"#,
+        ],
+    )?;
+    assert!(
+        metadata_field.contains("no field \"_docID\""),
+        "{metadata_field}"
+    );
+
     let unknown_collection = run_cli_failure_stderr(
         &home_dir,
         &[
@@ -129,7 +160,7 @@ async fn document_create_cannot_write_to_a_home_it_does_not_own() -> Result<()> 
         "created_at": "2026-07-16T00:00:00Z",
     })
     .to_string();
-    run_cli_failure_stderr(
+    let refusal = run_cli_failure_stderr(
         &other_dir,
         &[
             "document",
@@ -141,6 +172,11 @@ async fn document_create_cannot_write_to_a_home_it_does_not_own() -> Result<()> 
             &fields,
         ],
     )?;
+
+    assert!(
+        refusal.contains("not authorized to perform operation"),
+        "{refusal}"
+    );
 
     let rows = run_cli_json(
         &home_dir,

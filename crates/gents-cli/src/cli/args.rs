@@ -1972,7 +1972,7 @@ pub(crate) struct QueryArgs {
 pub(crate) enum DocumentCommand {
     #[command(
         about = "Create one document in a collection and print its document id",
-        long_about = "Create one document in a collection and print its document id.\n\nThis is an operator command: it writes any collection except the protected eval and optimization ones, signed as the home principal, after the usual schema validation."
+        long_about = "Create one document in a collection and print its document id.\n\nThis is an operator command: it refuses protected eval/optimization and canonical configuration collections. Writes to the home runtime are signed as the home principal; an unrelated explicit endpoint uses anonymous access with a warning. The mutation input schema is validated before writing."
     )]
     Create(DocumentCreateArgs),
 }
