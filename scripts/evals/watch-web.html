@@ -10,7 +10,7 @@
 </head>
 <body>
 <div class="shell">
-<aside class="sidebar"><div class="brand">gents<span> / </span>evals</div><div class="eyebrow">Workspace</div><button class="run-choice selected" id="activeRuns"><strong>All active runs</strong><small id="activeCount">Connecting…</small></button><div class="eyebrow">Recent runs</div><nav id="runList" aria-label="Choose an eval run"></nav><p class="side-note">A live view of your native evals. Watching here does not start, stop, or change a run.</p></aside>
+<aside class="sidebar"><div class="brand">gents<span> / </span>evals</div><div class="eyebrow">Workspace</div><button class="run-choice selected" id="activeRuns"><strong>All active runs</strong><small id="activeCount">Connecting…</small></button><button class="run-choice" id="batchRuns" hidden><strong>Selected batch</strong><small id="batchCount"></small></button><div class="eyebrow">Recent runs</div><nav id="runList" aria-label="Choose an eval run"></nav><p class="side-note">A live view of your native evals. Watching here does not start, stop, or change a run.</p></aside>
 <main class="main">
 <header><div><div class="eyebrow">Engineer onboarding</div><h1 id="title">Eval observatory</h1><p class="muted" id="subtitle">Connecting to local results…</p></div><div class="controls"><span class="live-status" id="connection"><span class="running-dot"></span>Live · every 3s</span><button class="button" id="pause">Pause updates</button></div></header>
 <div class="notice" id="notice" role="status"></div>
@@ -28,8 +28,9 @@ const duration=s=>s==null?'—':s<60?`${Math.floor(s)}s`:s<3600?`${Math.floor(s/
 const labels={running:'Running',pass:'Passed',fail:'Failed',not_evidence:'Not evidence',unknown:'Unknown',abandoned:'Stopped',stopped:'Stopped',planned:'Queued'};
 const colors={running:'#5d8edb',pass:'#219976',fail:'#ce7264',not_evidence:'#d4a153',unknown:'#bda674',abandoned:'#acb7c0',stopped:'#acb7c0',planned:'#e4eaf0'};
 const friendly={AgentContext:'Contexts',Tools:'Tool sets',DatastoreToolSurface:'Datastores',AgentBehavior:'Roles',InferenceProfile:'Profiles',EventSource:'Sources',SubagentTarget:'Targets',Task:'Tasks',Trigger:'Triggers',schemas:'Schemas',AgentRequest:'Requests'};
-const initialRuns=new URLSearchParams(location.search).get('runs');let pinned=Boolean(initialRuns);
-let selection='active', filter='all', selectedTrial=null, summaries=[], runs=[], paused=false, busy=false, sidebarState='', watched=new Set(initialRuns?initialRuns.split(','):[]);
+const initialRuns=new URLSearchParams(location.search).get('runs'),batchKeys=new Set(initialRuns?initialRuns.split(',').filter(Boolean):[]);
+let selection=batchKeys.size?'batch':'active', filter='all', selectedTrial=null, summaries=[], runs=[], paused=false, busy=false, sidebarState='';
+function selectedRunKeys(items,view=selection){return view==='active'?items.filter(r=>r.counts.running>0).map(r=>r.key):view==='batch'?items.filter(r=>batchKeys.has(r.key)).map(r=>r.key):[view]}
 const station=r=>(r.home.match(/workstation-\d+/)||[])[0]||r.home.split('/').pop();
 const suite=r=>r.run.definition.definition_id==='factory-setup'?'Crew configuration':r.run.definition.definition_id.replace('configurator-','').replaceAll('-',' ');
 const age=s=>s?Math.max(0,(Date.now()-Date.parse(s))/1000):null;
@@ -60,7 +61,7 @@ function render(){
  const slots=allSlots(),count=state=>slots.filter(s=>s.state===state).length,ended=slots.filter(s=>!['running','planned','stopped','abandoned'].includes(s.state)).length;
  const measured=slots.filter(s=>s.live.input_tokens!=null&&s.live.output_tokens!=null),inputs=measured.reduce((n,s)=>n+s.live.input_tokens,0),outputs=measured.reduce((n,s)=>n+s.live.output_tokens,0);
  const tools=slots.reduce((n,s)=>n+(s.live.tool_calls||0),0),failedTools=slots.reduce((n,s)=>n+(s.live.failed_tool_calls||0),0);
- $('title').textContent=selection==='active'?'Eval batch':runs[0]?suite(runs[0]):'Eval observatory';
+ $('title').textContent=selection==='batch'?'Selected eval batch':selection==='active'?'Active evals':runs[0]?suite(runs[0]):'Eval observatory';
  $('subtitle').textContent=runs.length?`${runs.length} run${runs.length===1?'':'s'} · ${slots.length} trials · ${[...new Set(runs.map(station))].join(' + ')}`:'No active runs. Choose a recent run to review its results.';
  const initialScores=slots.map(s=>configurationScore(s,'setup')).filter(Boolean), repairedScores=slots.map(s=>configurationScore(s,'repair')).filter(Boolean);
  const meanScore=xs=>xs.length?(xs.reduce((n,v)=>n+100*v.met/v.total,0)/xs.length).toFixed(1)+'%':'—';
@@ -77,9 +78,10 @@ function render(){
  $('trials').innerHTML=shown.length?trialTable(shown):'<div class="empty">No trials in this view yet.</div>';
  if(selectedTrial)renderDetail();
 }
-function renderSidebar(){const state=JSON.stringify(summaries.map(r=>[r.key,r.counts]));if(state===sidebarState)return;sidebarState=state;
+function renderSidebar(){const state=JSON.stringify([selection,summaries.map(r=>[r.key,r.counts])]);if(state===sidebarState)return;sidebarState=state;
  $('activeCount').textContent=`${summaries.filter(r=>r.counts.running).length} runs · ${summaries.reduce((n,r)=>n+(r.counts.running||0),0)} running trials`;
  $('activeRuns').classList.toggle('selected',selection==='active');
+ $('batchRuns').hidden=!batchKeys.size;$('batchRuns').classList.toggle('selected',selection==='batch');$('batchCount').textContent=`${batchKeys.size} selected runs · includes completed trials`;
  $('runList').innerHTML=summaries.slice(0,40).map(r=>`<button class="run-choice ${selection===r.key?'selected':''}" data-run="${r.key}">${r.counts.running?'<span class="running-dot"></span>':''}<strong>${esc(suite(r))}</strong><small>${esc(station(r))} · ${esc(r.run.split)}<br>${esc(new Date(r.run.created_at).toLocaleString([],{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}))} · ${esc(r.run.source_commit?.slice(0,9)||'unknown revision')}</small></button>`).join('');
 }
 function renderDetail(){const s=allSlots().find(s=>s.key===selectedTrial);if(!s)return;const l=s.live,scroll=$('detailBody').scrollTop;
@@ -89,8 +91,9 @@ function renderDetail(){const s=allSlots().find(s=>s.key===selectedTrial);if(!s)
  $('detailBody').scrollTop=scroll;
 }
 async function get(path){const r=await fetch(path,{cache:'no-store'});if(!r.ok)throw Error(`Dashboard request failed (${r.status})`);return r.json()}
-async function refresh(){if(paused||busy)return;busy=true;try{const index=await get('/api/runs');summaries=index.runs;if(!pinned)summaries.filter(r=>r.counts.running).forEach(r=>watched.add(r.key));if(selection==='active'&&watched.size)history.replaceState(null,'',location.pathname+'?runs='+encodeURIComponent([...watched].join(',')));const keys=selection==='active'?summaries.filter(r=>watched.has(r.key)).map(r=>r.key):[selection];runs=await Promise.all(keys.map(key=>get('/api/run?key='+encodeURIComponent(key))));renderSidebar();render();$('notice').style.display='none';$('connection').innerHTML='<span class="running-dot"></span>Live · '+new Date().toLocaleTimeString();}catch(e){$('notice').textContent=`Updates unavailable: ${e.message}. Showing the last snapshot.`;$('notice').style.display='block';$('connection').textContent='Disconnected';}finally{busy=false}}
-function choose(key){if(key==='active'){watched=new Set();pinned=false;history.replaceState(null,'',location.pathname);}selection=key;sidebarState='';selectedTrial=null;closeDetail();refresh()}
+async function refresh(){if(paused||busy)return;busy=true;const view=selection;try{const index=await get('/api/runs');const nextSummaries=index.runs;const nextRuns=await Promise.all(selectedRunKeys(nextSummaries,view).map(key=>get('/api/run?key='+encodeURIComponent(key))));if(selection!==view)return;summaries=nextSummaries;runs=nextRuns;renderSidebar();render();$('notice').style.display='none';$('connection').innerHTML='<span class="running-dot"></span>Live · '+new Date().toLocaleTimeString();}catch(e){$('notice').textContent=`Updates unavailable: ${e.message}. Showing the last snapshot.`;$('notice').style.display='block';$('connection').textContent='Disconnected';}finally{busy=false}}
+function choose(key){selection=key;const keys=key==='batch'?[...batchKeys]:key==='active'?[]:[key];history.replaceState(null,'',location.pathname+(keys.length?'?runs='+encodeURIComponent(keys.join(',')):''));sidebarState='';closeDetail();refresh()}
+$('batchRuns').onclick=()=>choose('batch');
 $('activeRuns').onclick=()=>choose('active');$('runList').onclick=e=>{const button=e.target.closest('[data-run]');if(button)choose(button.dataset.run)};
 $('filters').onclick=e=>{const b=e.target.closest('[data-filter]');if(!b)return;filter=b.dataset.filter;document.querySelectorAll('[data-filter]').forEach(x=>x.classList.toggle('selected',x===b));render()};
 $('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'Resume updates':'Pause updates';$('connection').textContent=paused?'Paused':'Reconnecting…';if(!paused)refresh()};

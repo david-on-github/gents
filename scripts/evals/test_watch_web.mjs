@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import vm from 'node:vm';
 
-function viewer() {
+function viewer(search='') {
   const html=fs.readFileSync(new URL('./watch-web.html',import.meta.url),'utf8');
   const script=html.split('<script>')[1].split('</script>')[0].replace('refresh();setInterval(refresh,3000);','');
   const elements=new Map();
-  const context=vm.createContext({URLSearchParams,Intl,Date,location:{search:''},document:{
+  const context=vm.createContext({URLSearchParams,Intl,Date,location:{search},document:{
     getElementById(id){if(!elements.has(id))elements.set(id,{});return elements.get(id)},addEventListener(){}}});
   vm.runInContext(script,context);
   return (code)=>vm.runInContext(code,context);
@@ -30,4 +30,15 @@ test('object progress caps extras, preserves unknowns and escapes table content'
   assert.match(table,/<table/);assert.match(table,/Stopped/);assert.match(table,/10 \/ 7/);assert.match(table,/20 \/ 70/);
   assert.match(table,/&lt;script&gt;/);assert.doesNotMatch(table,/<script>/);
   assert.equal(run('objectProgress({...slot,live:{}})'),null);
+});
+
+test('active view follows current runs; selected batch retains only its explicit members',()=>{
+  const run=viewer('?runs=old-a,old-b');
+  run(`globalThis.items=[{key:'old-a',counts:{pass:16}},{key:'old-b',counts:{fail:16}},{key:'new-a',counts:{running:16}},{key:'new-b',counts:{running:16}}]`);
+  assert.equal(run("JSON.stringify(selectedRunKeys(items,'active'))"),'["new-a","new-b"]');
+  assert.equal(run("JSON.stringify(selectedRunKeys(items,'batch'))"),'["old-a","old-b"]');
+  assert.equal(run("JSON.stringify(selectedRunKeys(items,'old-b'))"),'["old-b"]');
+  run("items[2].counts={pass:16};items[3].counts={fail:16}");
+  assert.equal(run("JSON.stringify(selectedRunKeys(items,'active'))"),'[]');
+  assert.equal(run("JSON.stringify(selectedRunKeys(items,'batch'))"),'["old-a","old-b"]');
 });
