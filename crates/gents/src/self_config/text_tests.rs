@@ -780,7 +780,8 @@ async fn mailbox_help_states_the_identity_choice() {
     );
 }
 
-/// Caller keys and runtime metadata use distinct write contracts.
+/// L3 datastore finding: the page says what fill means, with a caller key
+/// named correlation and a runtime-filled request_correlation.
 #[tokio::test]
 async fn datastore_help_says_what_fill_means() {
     let (_node, _owner, tools) = setup("fill-help", &["tools"]).await;
@@ -791,9 +792,7 @@ async fn datastore_help_says_what_fill_means() {
         "Omit fill for caller-supplied values",
         "omitted or empty means none",
         "current request keeps its existing tools",
-        r#"Caller value: {"name":"correlation","required":true}"#,
-        r#"{"name":"handoff_id","fill":"correlation"}"#,
-        "Completion records need handoff_id: String",
+        r#"Caller value: {"name":"correlation"}. Runtime ID: {"name":"request_correlation","fill":"correlation"}"#,
     ] {
         assert!(page.contains(line), "{line}\n{page}");
     }

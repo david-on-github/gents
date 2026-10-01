@@ -53,7 +53,7 @@ impl ConfigCommandTool {
             "committed": !preview && plan.requires_publication,
             "verified": !preview,
             "before_install": if preview && plan.requires_publication {
-                Some("Existing collection shapes cannot be changed here. If new records will trigger tasks with completion records, declare handoff_id: String now and populate it in their write tools; see [\"help\",\"datastore\"]. Keep caller business keys separate.")
+                Some("Existing collection shapes cannot be changed here. If you choose Task.emit_outcome for standard run records, declare handoff_id: String on its source collection and populate it in write tools; see [\"help\",\"datastore\"]. Keep caller business keys separate.")
             } else { None },
             "scope": "Schema contracts are node-wide. Document reads/writes still require DefraDB ACP and explicit datastore tool selection. Schema publication is separate from configuration document transactions.",
             "plan": plan,

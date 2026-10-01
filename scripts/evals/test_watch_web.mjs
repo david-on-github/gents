@@ -53,4 +53,3 @@ test('failure distribution counts affected trials and keeps execution failures s
  assert.equal(run('result.endings.length'),1);
  assert.equal(run('result.endings[0].reason'),'tool');
 });
-
