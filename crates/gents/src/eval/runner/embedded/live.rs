@@ -156,6 +156,20 @@ async fn activity(node: &std::sync::Arc<EmbeddedNode>) -> Result<LiveSnapshot> {
         model_turns: evidence.inference_calls.len() as u64,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
+        reported_input_tokens: Some(
+            evidence
+                .inference_calls
+                .iter()
+                .filter_map(|call| call.prompt_tokens)
+                .fold(0, u64::saturating_add),
+        ),
+        reported_output_tokens: Some(
+            evidence
+                .inference_calls
+                .iter()
+                .filter_map(|call| call.completion_tokens)
+                .fold(0, u64::saturating_add),
+        ),
         tool_calls: evidence.tool_calls.len() as u64,
         failed_tool_calls,
         tools,
@@ -235,6 +249,33 @@ async fn count(node: &EmbeddedNode, query: &str, collection: &str) -> Option<u64
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pending_usage_keeps_reported_tokens_visible_without_claiming_an_exact_total() {
+        let home = super::super::home::EmbeddedHome::create_temp("live-partial-usage")
+            .await
+            .unwrap();
+        for mutation in [
+            r#"mutation { create_InferenceCall(input: { call_id: "done", call_seq: 0, call_state: "completed", prompt_tokens: 112, completion_tokens: 20 }) { _docID } }"#,
+            r#"mutation { create_InferenceCall(input: { call_id: "pending", call_seq: 1, call_state: "running" }) { _docID } }"#,
+        ] {
+            ConfigAccess::write_local(&home.node, "eval.test.live_usage", mutation)
+                .await
+                .unwrap();
+        }
+        let live = activity(&home.node).await.unwrap();
+        assert_eq!(live.input_tokens, None);
+        assert_eq!(live.output_tokens, None);
+        assert_eq!(live.reported_input_tokens, Some(112));
+        assert_eq!(live.reported_output_tokens, Some(20));
+        ConfigAccess::write_local(&home.node, "eval.test.live_usage_complete", r#"mutation { update_InferenceCall(filter: {call_id: {_eq: "pending"}}, input: {call_state: "completed", prompt_tokens: 8, completion_tokens: 3}) { _docID } }"#).await.unwrap();
+        let live = activity(&home.node).await.unwrap();
+        assert_eq!(live.input_tokens, Some(120));
+        assert_eq!(live.output_tokens, Some(23));
+        assert_eq!(live.reported_input_tokens, live.input_tokens);
+        assert_eq!(live.reported_output_tokens, live.output_tokens);
+        home.node.shutdown().await;
+    }
 
     #[tokio::test]
     async fn last_tool_reads_canonical_delivery_and_keeps_running_calls_visible() {

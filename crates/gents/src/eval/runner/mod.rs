@@ -3030,6 +3030,8 @@ mod tests {
             model_turns: 4 * requests,
             input_tokens: Some(1_200 * requests),
             output_tokens: Some(300 * requests),
+            reported_input_tokens: None,
+            reported_output_tokens: None,
             tool_calls: 3,
             failed_tool_calls: 1,
             tools: std::collections::BTreeMap::from([(

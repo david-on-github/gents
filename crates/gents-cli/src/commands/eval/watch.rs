@@ -563,6 +563,8 @@ mod tests {
             model_turns: 57,
             input_tokens: Some(812_345),
             output_tokens: Some(41_234),
+            reported_input_tokens: None,
+            reported_output_tokens: None,
             tool_calls: 149,
             failed_tool_calls: 6,
             tools: [

@@ -53,3 +53,18 @@ test('failure distribution counts affected trials and keeps execution failures s
  assert.equal(run('result.endings.length'),1);
  assert.equal(run('result.endings[0].reason'),'tool');
 });
+
+test('pending calls preserve reported token lower bounds without claiming exact totals',()=>{
+ const run=viewer();
+ run(`globalThis.slots=[{live:{input_tokens:100}},{live:{input_tokens:null,reported_input_tokens:50}},{live:{}}]`);
+ assert.equal(run("tokenText(tokenReading(slots[0].live,'input_tokens'))"),'100');
+ assert.equal(run("tokenText(tokenReading(slots[1].live,'input_tokens'))"),'≥50');
+ assert.equal(run("tokenText(tokenReading(slots[2].live,'input_tokens'))"),'pending');
+ assert.equal(run("tokenText(tokenSummary(slots,'input_tokens'))"),'≥150');
+ assert.equal(run("tokenText(tokenMean(slots,'input_tokens'))"),'≥50');
+ assert.equal(run("tokenSummary(slots,'input_tokens').reporting"),2);
+ assert.equal(run("tokenMean([],'input_tokens').value"),null);
+ run('slots[1].live.input_tokens=60;slots[2].live.input_tokens=80');
+ assert.equal(run("tokenText(tokenSummary(slots,'input_tokens'))"),'240');
+ assert.equal(run("tokenText(tokenMean(slots,'input_tokens'))"),'80');
+});

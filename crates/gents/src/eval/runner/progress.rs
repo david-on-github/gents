@@ -46,6 +46,12 @@ pub struct LiveSnapshot {
     /// Summed as the trial's usage is: `None` once one call did not report.
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// Reported usage remains a lower bound while any call lacks usage.
+    /// Exact totals above remain unknown; observers must label these bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_output_tokens: Option<u64>,
     pub tool_calls: u64,
     /// Tool calls that ended failed or timed out.
     pub failed_tool_calls: u64,
