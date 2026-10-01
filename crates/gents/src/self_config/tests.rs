@@ -355,8 +355,8 @@ async fn build_registers_gated_family() {
     for core in [
         "native API",
         "\"<DID>:<slug>\"",
-        "Preview writes nothing; apply, then read back.",
-        "[\"help\"] lists resources",
+        "Preview writes nothing; read back after a write.",
+        "[\"help\"] lists granted resources",
     ] {
         assert!(definition.description.contains(core), "missing {core}");
     }
@@ -1641,7 +1641,7 @@ async fn datastore_preview_create_and_sparse_edit_use_owned_patch_path() {
         .await
         .unwrap();
     assert!(
-        create_help.starts_with("datastore [preview] create|edit"),
+        create_help.starts_with("datastore:") && create_help.contains("create ID | update ID"),
         "{create_help}"
     );
     assert!(
@@ -2266,7 +2266,7 @@ async fn persona_unknown_action_errors_cleanly() {
         &config(&["persona"]),
     );
 
-    let error = call_config_tool(&tools, vec!["behavior".into(), "delete".into()])
+    let error = call_config_tool(&tools, vec!["behavior".into(), "unknown-action".into()])
         .await
         .expect_err("unknown action must error");
     assert!(

@@ -170,7 +170,7 @@ async fn guessed_verbs_resolve_or_name_the_working_form() {
     ] {
         let error = refused(&tools, json!({"argv":argv,"set":{"tags":["x"]}})).await;
         assert!(
-            error.contains(r#"tools are created with their behavior (behavior create); change a behavior's tools with {\"argv\":[\"tools\",\"edit\"],\"options\":{\"behavior\":\"BEHAVIOR_ID\"}"#),
+            error.contains("tools create requires a new document ID"),
             "{error}"
         );
     }
@@ -301,6 +301,10 @@ async fn own_tools_refuse_a_group_set_that_silently_drops_existing_settings() {
             && error.contains("allow-drop"),
         "{error}"
     );
+    let exact_error = refused(&tools, json!({"argv":["tools","preview","update"],"target_id":"setup:tools","set":{"datastore":partial}})).await;
+    assert!(exact_error.contains("allow-drop"), "{exact_error}");
+    let exact_lockout = refused(&tools, json!({"argv":["tools","update"],"target_id":"setup:tools","set":{"self_config":{"enable_self_config":false}}})).await;
+    assert!(exact_lockout.contains("no-lockout"), "{exact_lockout}");
     // The lockout guard still reports a lockout as one.
     let error = refused(
         &tools,
@@ -534,7 +538,7 @@ async fn help_is_layered_and_its_recipes_run_as_written() {
             .unwrap();
         assert!(page.starts_with(&format!("{resource}: ")), "{page}");
         assert!(page.contains("\nNext: "), "{resource}: {page}");
-        assert!(!page.contains("config_execution") && !page.contains("Preview: tools"));
+        assert!(!page.contains("config_execution") && !page.contains("config resources."));
         assert!(
             page.len() <= 2_600,
             "{resource} help is {} chars",
@@ -670,31 +674,28 @@ fn a_list_of_strings_in_options_is_the_repeated_flag() {
     );
 }
 
-/// Ladder findings: reads a model guesses name the working read form.
 #[tokio::test]
-async fn guessed_lists_name_the_working_read() {
+async fn lists_include_unselected_documents() {
     let (_node, _owner, tools) = setup("lists", &["persona", "tools", "automation"]).await;
-    for (args, form) in [
-        (
-            json!({"argv":["tools","list"]}),
-            r#"tools has no list: each behavior has one; read it with {\"argv\":[\"tools\",\"get\"],\"options\":{\"behavior\":\"BEHAVIOR_ID\"}}"#,
-        ),
-        (
-            json!({"argv":["automation","list","task"]}),
-            r#"automation has no list; a behavior's event sources, schedules, triggers and tasks are in {\"argv\":[\"get\"],\"options\":{\"behavior\":\"BEHAVIOR_ID\"}} under automation"#,
-        ),
-        (
-            json!({"argv":["datastore","get"]}),
-            r#"surface IDs are listed in a behavior's Tools: read {\"argv\":[\"tools\",\"get\"],\"options\":{\"behavior\":\"BEHAVIOR_ID\"}}, then [\"datastore\",\"get\",SURFACE_ID]"#,
-        ),
-        (
-            json!({"argv":["datastore","list"]}),
-            r#"surface IDs are listed in a behavior's Tools"#,
-        ),
+    ok(
+        &tools,
+        json!({"argv":["datastore","create","unselected"],"set":{"entries":[]}}),
+    )
+    .await;
+    for argv in [
+        json!(["tools", "list"]),
+        json!(["datastore", "list"]),
+        json!(["automation", "list", "task"]),
     ] {
-        let error = refused(&tools, args.clone()).await;
-        assert!(error.contains(form), "{args}: {error}");
+        let result = ok(&tools, json!({"argv":argv})).await;
+        assert!(result["items"].is_array(), "{result}");
     }
+    let surfaces = ok(&tools, json!({"argv":["datastore","list"]})).await;
+    assert!(surfaces["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["surface_id"] == "unselected"));
 }
 
 /// Ladder finding: target_id on a command with a positional ID is that ID.
@@ -718,11 +719,7 @@ async fn target_id_fills_a_positional_id() {
         "{conflict}"
     );
     let unsupported = refused(&tools, json!({"argv":["tools","get"],"target_id":"x"})).await;
-    assert!(
-        unsupported.contains("target_id is not accepted by tools")
-            && unsupported.contains("options.behavior"),
-        "{unsupported}"
-    );
+    assert!(unsupported.contains("no owned Tools"), "{unsupported}");
     let recovered = ok(
         &tools,
         json!({"argv":["tools","get"],"options":{"behavior":"beh-test"}}),
@@ -804,4 +801,379 @@ async fn datastore_help_says_what_fill_means() {
             .contains(r#"fill fields are runtime-filled and never model arguments (what fill means: [\"help\",\"datastore\"])"#),
         "{shapes}"
     );
+}
+
+#[tokio::test]
+async fn crud_documents_share_verbs_and_preserve_reference_and_identity_checks() {
+    let (_node, owner, tools) = setup(
+        "crud",
+        &[
+            "persona",
+            "behavior",
+            "tools",
+            "profile",
+            "automation",
+            "mcp_service",
+        ],
+    )
+    .await;
+    for (resource, fields) in [
+        ("sampling", json!({"temperature":0.8})),
+        ("retry-policy", json!({"display_name":"Retry"})),
+        ("compaction", json!({"threshold":0.8})),
+        (
+            "mcp-service",
+            json!({"hostname":"localhost","mcp_port":9000}),
+        ),
+        (
+            "skill",
+            json!({"name":"Review","instructions":"Review carefully."}),
+        ),
+        ("datastore", json!({"entries":[]})),
+        ("tools", json!({})),
+        ("context", json!({"system_prompt":"Analyze."})),
+    ] {
+        let id = format!("crud-{resource}");
+        let create = json!({"argv":[resource,"create"],"target_id":id,"set":fields});
+        let mut preview = create.clone();
+        preview["argv"] = json!([resource, "preview", "create"]);
+        assert_eq!(ok(&tools, preview).await["committed"], false);
+        assert!(
+            refused(&tools, json!({"argv":[resource,"get"],"target_id":id}))
+                .await
+                .contains("no owned")
+        );
+        assert_eq!(ok(&tools, create.clone()).await["created"], true);
+        assert!(refused(&tools, create).await.contains("already exists"));
+        let changed = ok(
+            &tools,
+            json!({"argv":[resource,"update"],"target_id":id,"set":{"tags":["crud"]}}),
+        )
+        .await;
+        assert_eq!(changed["created"], false);
+        let document = ok(&tools, json!({"argv":[resource,"get"],"target_id":id})).await;
+        assert_eq!(document["document"]["agent_did"], owner);
+        assert_eq!(document["document"]["tags"], json!(["crud"]));
+        let inventory = ok(
+            &tools,
+            json!({"argv":[resource,"list"],"options":{"limit":50}}),
+        )
+        .await;
+        assert!(inventory["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["tags"] == json!(["crud"])));
+        assert!(refused(
+            &tools,
+            json!({"argv":[resource,"update"],"target_id":id,"set":{"agent_did":"other"}})
+        )
+        .await
+        .contains("protected"));
+        assert!(refused(
+            &tools,
+            json!({"argv":[resource,"update"],"target_id":"absent","set":{"tags":["no"]}})
+        )
+        .await
+        .contains("not found"));
+        let preview = ok(
+            &tools,
+            json!({"argv":[resource,"preview","delete"],"target_id":id}),
+        )
+        .await;
+        ok(
+            &tools,
+            json!({"argv":[resource,"update"],"target_id":id,"set":{"tags":["changed"]}}),
+        )
+        .await;
+        assert!(refused(&tools,json!({"argv":[resource,"delete"],"target_id":id,"options":{"digest":preview["plan_digest"]}})).await.contains("changed"));
+        let preview = ok(
+            &tools,
+            json!({"argv":[resource,"preview","delete"],"target_id":id}),
+        )
+        .await;
+        ok(&tools, preview["apply_with"].clone()).await;
+        assert!(
+            refused(&tools, json!({"argv":[resource,"get"],"target_id":id}))
+                .await
+                .contains("no owned")
+        );
+    }
+    ok(
+        &tools,
+        json!({"argv":["sampling","create","selected"],"set":{"temperature":1}}),
+    )
+    .await;
+    let profile = ok(&tools, json!({"argv":["profile","get"]})).await;
+    let id = profile["document"]["profile_id"].as_str().unwrap();
+    ok(
+        &tools,
+        json!({"argv":["profile","update"],"target_id":id,"set":{"sampling_id":"selected"}}),
+    )
+    .await;
+    assert!(refused(
+        &tools,
+        json!({"argv":["sampling","preview","delete","selected"]})
+    )
+    .await
+    .contains("selected"));
+    let before = ok(&tools, json!({"argv":["profile","get",id]})).await;
+    assert!(refused(
+        &tools,
+        json!({"argv":["profile","update",id],"set":{"sampling_id":"missing"}})
+    )
+    .await
+    .contains("missing"));
+    assert_eq!(
+        ok(&tools, json!({"argv":["profile","get",id]})).await,
+        before
+    );
+}
+
+#[tokio::test]
+async fn crud_batch_reports_partial_commits_and_stops_before_later_operations() {
+    let (_node, _owner, tools) = setup("crud-batch", &["profile"]).await;
+    let error = refused(
+        &tools,
+        json!({"argv":["batch"],"options":{"operations":[
+            {"argv":["sampling","create","first"],"set":{"temperature":1}},
+            {"argv":["sampling","update","missing"],"set":{"temperature":0.5}},
+            {"argv":["sampling","create","last"],"set":{"temperature":0.5}}
+        ]}}),
+    )
+    .await;
+    assert!(
+        error.contains("earlier items") && error.contains("unattempted"),
+        "{error}"
+    );
+    assert_eq!(
+        ok(&tools, json!({"argv":["sampling","get","first"]})).await["document"]["temperature"],
+        1.0
+    );
+    assert!(refused(&tools, json!({"argv":["sampling","get","last"]}))
+        .await
+        .contains("no owned"));
+    let resumed = ok(
+        &tools,
+        json!({"argv":["batch"],"options":{"operations":[
+            {"argv":["sampling","update","first"],"set":{"temperature":0.5}},
+            {"argv":["sampling","create","last"],"set":{"temperature":0.5}},
+            {"argv":["sampling","list"],"options":{"limit":1}}
+        ]}}),
+    )
+    .await;
+    assert_eq!(resumed["completed"], true);
+    assert_eq!(resumed["results"].as_array().unwrap().len(), 3);
+    assert_eq!(
+        resumed["results"][2]["config_execution"]["mutation_entered"],
+        false
+    );
+    let cursor = &resumed["results"][2]["result"]["page"]["next_cursor"];
+    assert!(cursor.is_string());
+    let next = ok(
+        &tools,
+        json!({"argv":["sampling","list"],"options":{"limit":1,"cursor":cursor}}),
+    )
+    .await;
+    assert_eq!(next["items"].as_array().unwrap().len(), 1);
+    let denied = refused(&tools,json!({"argv":["batch"],"options":{"operations":[{"argv":["mcp-service","create","denied"]}]}})).await;
+    assert!(denied.contains("not granted"));
+    let malformed = refused(
+        &tools,
+        json!({"argv":["batch"],"options":{"operations":[
+            {"argv":["sampling","create","never"]}, {"argv":["batch"],"options":{"operations":[]}}
+        ]}}),
+    )
+    .await;
+    assert!(malformed.contains("no operations ran"));
+    assert!(refused(&tools, json!({"argv":["sampling","get","never"]}))
+        .await
+        .contains("no owned"));
+}
+
+#[tokio::test]
+async fn crud_automation_keeps_strict_creation_and_selected_task_owner() {
+    let (node, owner, tools) = setup("crud-routing", &["persona", "automation"]).await;
+    let worker = format!("{owner}:worker");
+    crate::test_support::install_test_behavior(&node, &owner, &worker).await;
+    for (resource, id, fields) in [
+        (
+            "task",
+            "job",
+            json!({"prompt_template":"Reply with the result."}),
+        ),
+        (
+            "schedule",
+            "clock",
+            json!({"cadence":{"kind":"interval","interval_secs":60}}),
+        ),
+        (
+            "event-source",
+            "messages",
+            json!({"source_collection":"AgentRequest"}),
+        ),
+        (
+            "trigger",
+            "tick",
+            json!({"task_id":"job","source":{"kind":"schedule","schedule_id":"clock"}}),
+        ),
+    ] {
+        let create = json!({"argv":[resource,"create"],"target_id":id,"options":{"behavior":worker},"set":fields});
+        let mut preview = create.clone();
+        preview["argv"] = json!([resource, "preview", "create"]);
+        assert_eq!(ok(&tools, preview).await["committed"], false);
+        ok(&tools, create.clone()).await;
+        assert!(refused(&tools, create).await.contains("already exists"));
+        ok(&tools,json!({"argv":[resource,"update",id],"options":{"behavior":worker},"set":{"tags":["routing"]}})).await;
+        assert_eq!(
+            ok(&tools, json!({"argv":[resource,"get",id]})).await["document"]["tags"],
+            json!(["routing"])
+        );
+    }
+    for (resource, id) in [("task", "job"), ("trigger", "tick")] {
+        let changed = ok(
+            &tools,
+            json!({"argv":[resource,"update",id],"set":{"tags":["inferred-owner"]}}),
+        )
+        .await;
+        assert_eq!(changed["behavior_id"], worker);
+    }
+    assert!(refused(
+        &tools,
+        json!({"argv":["task","update","job"],"options":{"behavior":"beh-test"},"set":{"prompt_template":"Wrong owner."}})
+    )
+    .await
+    .contains("belongs to behavior"));
+    assert!(refused(
+        &tools,
+        json!({"argv":["trigger","update","tick"],"options":{"behavior":"beh-test"},"set":{"tags":["wrong"]}})
+    )
+    .await
+    .contains("selected behavior"));
+    assert!(
+        refused(&tools, json!({"argv":["task","preview","delete","job"]}))
+            .await
+            .contains("job")
+    );
+    for (resource, id) in [
+        ("trigger", "tick"),
+        ("task", "job"),
+        ("schedule", "clock"),
+        ("event-source", "messages"),
+    ] {
+        let preview = ok(&tools, json!({"argv":[resource,"preview","delete",id]})).await;
+        ok(
+            &tools,
+            json!({"argv":[resource,"delete",id],"options":{"digest":preview["plan_digest"]}}),
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn crud_exact_context_and_tools_preserve_shared_document_guards() {
+    let (node, owner, tools) = setup("crud-sharing", &["persona", "tools", "behavior"]).await;
+    let worker = format!("{owner}:worker");
+    crate::test_support::install_test_behavior(&node, &owner, &worker).await;
+    let context_id = format!("{worker}:context");
+    let tools_id = format!("{worker}:tools");
+    ok(&tools,json!({"argv":["context","update"],"target_id":context_id,"set":{"system_prompt":"Review clearly."}})).await;
+    ok(
+        &tools,
+        json!({"argv":["tools","update"],"target_id":tools_id,"set":{"tags":["review"]}}),
+    )
+    .await;
+    ok(
+        &tools,
+        json!({"argv":["behavior","update","beh-test"],"set":{"context_id":context_id}}),
+    )
+    .await;
+    for (resource, id) in [("context", context_id), ("tools", tools_id)] {
+        assert!(refused(
+            &tools,
+            json!({"argv":[resource,"update",id],"set":{"tags":["shared"]}})
+        )
+        .await
+        .contains("unshared"));
+    }
+}
+
+#[tokio::test]
+async fn crud_backend_creation_preserves_auth_boundary() {
+    let (_node, _owner, tools) = setup("crud-backend", &["backend"]).await;
+    ok(
+        &tools,
+        json!({"argv":["backend","create","local"],"set":{"endpoint":"http://127.0.0.1:8000/v1"}}),
+    )
+    .await;
+    ok(
+        &tools,
+        json!({"argv":["backend","update","local"],"set":{"name":"Local inference"}}),
+    )
+    .await;
+    let read = ok(&tools, json!({"argv":["backend","get","local"]})).await;
+    assert_eq!(read["document"]["name"], "Local inference");
+    assert_eq!(read["document"]["auth"]["redacted"], true);
+    assert!(refused(&tools,json!({"argv":["backend","create","keyed"],"set":{"endpoint":"http://127.0.0.1:8000/v1","auth":{"kind":"api_key","key":"test-only"}}})).await.contains("unauthenticated"));
+}
+
+#[tokio::test]
+async fn crud_help_exposes_parameters_for_the_named_resource_and_verb() {
+    let (_node, _owner, tools) =
+        setup("crud-help", &["persona", "tools", "profile", "automation"]).await;
+    for (resource, field) in [
+        ("context", "system_prompt"),
+        ("sampling", "temperature"),
+        ("retry-policy", "max_transport_retries"),
+        ("compaction", "threshold"),
+        ("task", "prompt_template"),
+    ] {
+        let text = call_config_tool(
+            &tools,
+            vec![resource.into(), "update".into(), "--help".into()],
+        )
+        .await
+        .unwrap();
+        assert!(text.contains(field), "{text}");
+    }
+    let nested = call_config_tool(
+        &tools,
+        vec![
+            "behavior".into(),
+            "context".into(),
+            "edit".into(),
+            "--help".into(),
+        ],
+    )
+    .await
+    .unwrap();
+    assert!(
+        nested.contains("system_prompt") && !nested.contains("inference_profile_id"),
+        "{nested}"
+    );
+    let delete = call_config_tool(
+        &tools,
+        vec!["skill".into(), "delete".into(), "--help".into()],
+    )
+    .await
+    .unwrap();
+    assert!(delete.contains("options.digest"));
+    let list = call_config_tool(
+        &tools,
+        vec!["sampling".into(), "list".into(), "--help".into()],
+    )
+    .await
+    .unwrap();
+    assert!(list.contains("options.cursor") && list.contains("1..50"));
+    for resource in [
+        "session",
+        "request",
+        "message",
+        "AgentSession",
+        "AgentRequest",
+    ] {
+        assert!(refused(&tools, json!({"argv":[resource,"list"]}))
+            .await
+            .contains("unknown config resource"));
+    }
 }

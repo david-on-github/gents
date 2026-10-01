@@ -1,5 +1,6 @@
 use super::*;
 
+mod crud;
 mod datastore;
 mod discovery;
 pub(super) mod help;
@@ -10,27 +11,36 @@ mod skill;
 /// Resource index returned by `["help"]`: one line per resource, filtered to
 /// the granted ones. Fields, syntax and recipes live in `["help", RESOURCE]`.
 const HELP_INDEX: &[(&str, &str)] = &[
-    ("get", "effective configuration of one behavior (options.behavior)"),
-    ("behavior", "behaviors and their Context (system prompt, skills)"),
-    ("tools", "a behavior's Tools groups: host, subagents, built_ins, datastore, remote, integrations, self_config"),
-    ("datastore", "DatastoreToolSurface: model tools that create or query one collection"),
-    ("subagent-target", "an agent that agent_new may start"),
-    ("skill", "import a SKILL.md and attach it to a Context"),
-    ("discovery", "scan external Claude, Codex or Grok configuration"),
-    ("profile", "model selection plus sampling, execution, retry-policy and compaction"),
-    ("execution", "InferenceExecution run limits and binding them to a profile"),
-    ("backend", "inference endpoints and model discovery"),
-    ("mcp-service", "existing MCP service registrations"),
-    ("automation", "event-source, schedule, trigger and task documents"),
-    ("schema", "node-wide collection schemas"),
-    ("cleanup", "remove documents atomically by exact ID"),
-    ("pack", "install packs; the only way graphs are created"),
-    ("plan", "preview a connected set of new documents"),
+    ("get", "a behavior's effective configuration"),
+    ("behavior", "agent role and configuration selections"),
+    ("context", "prompt, skills, Tools and compaction"),
+    ("tools", "host, delegation and other tool grants"),
+    ("datastore", "collection tool definitions"),
+    ("subagent-target", "delegation route"),
+    ("skill", "reusable instructions"),
+    ("profile", "model, backend and inference settings"),
+    ("sampling", "temperature and sampling"),
+    ("execution", "run limits"),
+    ("retry-policy", "retry settings"),
+    ("compaction", "context compaction"),
+    ("backend", "inference endpoint"),
+    ("mcp-service", "MCP registration"),
+    ("task", "work performed by a behavior"),
+    ("trigger", "route an event to a task"),
+    ("schedule", "timer"),
+    ("event-source", "collection change source"),
+    ("automation", "wiring and completion recipes"),
+    ("schema", "collection schema installation"),
+    ("pack", "pack and graph installation"),
+    ("discovery", "external configuration scan"),
+    ("cleanup", "atomic multi-document deletion"),
+    ("plan", "connected-document preview"),
+    ("batch", "ordered config calls"),
 ];
 
 /// Where `preview` goes, and the help aliases, stated once in the index.
-const HELP_GRAMMAR: &str = "Preview: tools, profile, backend and automation take preview in place of edit (profile preview); the others take it before the verb (datastore preview create). A preview writes nothing.
-Aliases: help agent and help context show behavior; task, trigger, schedule and event-source show automation; graph explains graphs.";
+const HELP_GRAMMAR: &str = "Documents: list, get, create, update, delete. target_id names the document; set writes fields, clear removes optional fields. list takes options.limit/cursor. create requires a new ID; update requires an existing ID. behavior create allocates its ID and Context/Tools.
+Preview: [RESOURCE,preview,VERB]. Delete needs options.digest from preview. batch takes options.operations: ordered config calls; each commits separately, stopping on error. Schemas/packs use installation workflows; graph authoring is unavailable.";
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -69,6 +79,10 @@ impl ConfigCommandParams {
             required_resource_id(Some(&id), "target_id")?;
             let words = argv.iter().map(String::as_str).collect::<Vec<_>>();
             let position = match words.as_slice() {
+                [resource, "preview", "create" | "update" | "delete", ..]
+                    if crud::resource_target(resource).is_some() && !(*resource == "behavior" && words[2] == "create") => 3,
+                [resource, "get" | "create" | "update" | "delete", ..]
+                    if crud::resource_target(resource).is_some() && !(*resource == "behavior" && words[1] == "create") => 2,
                 ["datastore" | "subagent-target" | "execution", "preview", "create" | "edit", ..]
                 | ["behavior", "preview", "edit" | "default", ..]
                 | ["backend" | "profile", "preview", "create", ..]
@@ -102,7 +116,7 @@ impl ConfigCommandParams {
                 name.bytes().next().is_some_and(|c| c.is_ascii_lowercase())
                     && name.bytes().all(|c| c.is_ascii_lowercase() || c == b'-')
                     && !matches!(name.as_str(), "set" | "clear"),
-                "options keys must be option names without --; use set/clear for patches"
+                "invalid options key {name:?}; argv, target_id, set and clear belong at the top level beside options. Option names use lowercase letters and hyphens, without --"
             );
             let flag = format!("--{name}");
             anyhow::ensure!(
@@ -230,16 +244,11 @@ impl Tool for ConfigCommandTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let resources = model_resources(&self.categories, self.allow_pack_install);
         ToolDefinition {
             name: Self::NAME.to_owned(),
-            description: format!(
-                r#"Read and change this node's configuration: a native API, not a shell.
-Call {{"argv":[words],"target_id"?,"set"?:{{field:value}},"clear"?:[field],"options"?:{{name:value}}}}. Put the resource before the verb: ["profile","list"], ["execution","get","ID"]. Preview writes nothing; apply, then read back.
-Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.behavior a command targets you.
-["help"] lists resources. Granted: {}."#,
-                resources.join(", ")
-            ),
+            description: r#"Read and change configuration through a native API, not a shell.
+Call {"argv":[RESOURCE,VERB],"target_id"?:ID,"set"?:{field:value},"clear"?:[field],"options"?:{name:value}}. Documents share list, get, create, update, delete. Preview writes nothing; read back after a write.
+Behavior IDs are "<DID>:<slug>"; the slug alone works. ["help"] lists granted resources; ["help",RESOURCE] explains fields and exceptions."#.to_owned(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -249,7 +258,7 @@ Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.beha
                         "minItems": 1,
                         "description": "Command words, never passed to a shell."
                     },
-                    "target_id": {"type":"string", "description":"Document ID for datastore, subagent-target, execution, automation and mcp-service commands. Do not also put it in argv."},
+                    "target_id": {"type":"string", "description":"Exact document ID; alternatively put it after the verb in argv. behavior create allocates its ID."},
                     "set": {"type":"object", "additionalProperties":true, "description":"Fields to write, as native JSON. Each replaces the whole field."},
                     "clear": {"type":"array", "items":{"type":"string"}, "description":"Optional fields to remove."},
                     "options": {"type":"object", "additionalProperties":true, "description":"Named options without --. Object options stay JSON objects."}
@@ -310,6 +319,7 @@ Behavior IDs are "<DID>:<slug>"; the slug alone also works. Without options.beha
                 };
                 let failure = ordered! {
                     "error": message,
+                    "batch": error.downcast_ref::<crud::BatchFailure>().map(|failure| json!({"atomic":false,"results":failure.results,"failed_index":failure.failed_index,"unattempted":failure.unattempted})),
                     "recovery": recovery,
                     "config_execution": receipt,
                 };
@@ -370,7 +380,13 @@ fn log_config_call(
     let reads = [
         "get", "list", "discover", "context", "help", "--help", "-h", "scan",
     ];
-    if help || previewing || resource == "help" || resource == "get" || reads.contains(&verb) {
+    if help
+        || previewing
+        || resource == "help"
+        || resource == "get"
+        || resource == "batch"
+        || reads.contains(&verb)
+    {
         return;
     }
     let collection = match (resource, argv.get(2).map(String::as_str)) {
@@ -378,7 +394,7 @@ fn log_config_call(
         (resource, _) => resource,
     };
     let verb = match verb {
-        "remove" => "delete",
+        "remove" | "delete" => "delete",
         "apply" => "plan",
         "create" | "clone" | "install" | "import" => "create",
         _ => "edit",
@@ -459,15 +475,23 @@ fn model_resources(categories: &BTreeSet<String>, pack: bool) -> Vec<&'static st
         resources.push("behavior (current only)");
     }
     for (category, resource) in [
+        ("persona", "context"),
         ("tools", "tools"),
         ("tools", "datastore"),
         ("tools", "skill"),
         ("tools", "subagent-target"),
         ("profile", "profile"),
         ("profile", "execution"),
+        ("profile", "sampling"),
+        ("profile", "retry-policy"),
+        ("profile", "compaction"),
         ("backend", "backend"),
         ("mcp_service", "mcp-service"),
         ("automation", "automation"),
+        ("automation", "task"),
+        ("automation", "trigger"),
+        ("automation", "schedule"),
+        ("automation", "event-source"),
         ("automation", "schema"),
     ] {
         if categories.contains(category) {
@@ -479,6 +503,7 @@ fn model_resources(categories: &BTreeSet<String>, pack: bool) -> Vec<&'static st
     }
     if !categories.is_empty() {
         resources.push("cleanup");
+        resources.push("batch");
     }
     if categories.contains("tools") {
         resources.push("discovery");
@@ -502,7 +527,11 @@ impl ConfigCommandTool {
                 bail!(refusal);
             }
         }
+        if let Some(result) = self.crud(argv).await? {
+            return Ok(result);
+        }
         match command {
+            "batch" => self.batch(argv).await,
             "help" => self.help(argv.get(1).map(String::as_str), Vec::new()),
             "get" => {
                 let (behavior_id, rest) = extract_behavior_target(&argv[1..])?;
@@ -519,14 +548,7 @@ impl ConfigCommandTool {
             "behavior" => self.behavior(&argv[1..]).await,
             "tools" => self.bound_document("tools", &argv[1..]).await,
             "datastore" => self.datastore(&argv[1..]).await,
-            "subagent-target" => {
-                self.exact_document("subagent-target", SelfConfigTarget::SubagentTarget, &argv[1..])
-                    .await
-            }
-            "execution" => {
-                self.exact_document("execution", SelfConfigTarget::InferenceExecution, &argv[1..])
-                    .await
-            }
+            "subagent-target" | "execution" => bail!("use {command} list|get|create|update|delete; see [\"help\",\"{command}\"]"),
             "profile" => self.profile(&argv[1..]).await,
             "backend" => self.backend(&argv[1..]).await,
             "mcp-service" => self.mcp_service(&argv[1..]).await,
@@ -1035,66 +1057,6 @@ impl ConfigCommandTool {
         }
     }
 
-    /// Exact-ID documents selected by reference rather than through a behavior
-    /// anchor: SubagentTarget (#2058) and InferenceExecution (#2059). Preview
-    /// and publication go through the desired-state owner `config apply` uses
-    /// for `PackConfig.subagent_targets` and `PackConfig.inference_execution`.
-    async fn exact_document(
-        &self,
-        resource: &str,
-        target: SelfConfigTarget,
-        argv: &[String],
-    ) -> Result<String> {
-        self.ensure_resource(target.category())?;
-        let preview = argv.first().is_some_and(|arg| arg == "preview");
-        let argv = if preview { &argv[1..] } else { argv };
-        let verb = argv.first().map(String::as_str).with_context(|| {
-            format!("{resource} command is required; see [\"help\",\"{resource}\"]")
-        })?;
-        if verb == "list" && !preview {
-            let parsed = ParsedArgs::parse(&argv[1..])?;
-            parsed.reject_mutation_flags()?;
-            return self
-                .inference_inventory(target, parse_limit(&parsed)?, parsed.one("cursor")?)
-                .await;
-        }
-        let id = required_resource_id(argv.get(1), &format!("{resource} ID"))?;
-        if verb == "get" && !preview {
-            anyhow::ensure!(argv.len() == 2, "{resource} get accepts only one ID");
-            return self.exact_read(target, id).await;
-        }
-        anyhow::ensure!(
-            matches!(verb, "create" | "edit"),
-            "unknown {resource} command {verb:?}; see [\"help\",\"{resource}\"]"
-        );
-        // Creation may rely entirely on canonical defaults; edits need a field.
-        let mut patch = if verb == "create" && argv.len() == 2 {
-            Vec::new()
-        } else {
-            parse_patch(&argv[2..], target)?
-        };
-        if target == SelfConfigTarget::SubagentTarget {
-            self.resolve_target_behavior(id, &mut patch).await?;
-        }
-        let mut request = ApplyRequest::new(target, patch);
-        let unique = id.clone();
-        request.resolve_unique = Box::new(move |_| Ok(unique.clone()));
-        request.allow_create = verb == "create";
-        request.require_create = verb == "create";
-        let owner = self.agent_did.clone();
-        request.on_create = Box::new(move |id, doc| {
-            doc.insert(target.unique_field().into(), json!(id));
-            doc.insert("agent_did".into(), json!(owner));
-            Ok(())
-        });
-        self.patch(
-            &self.core,
-            if preview { "preview" } else { "edit" },
-            request,
-        )
-        .await
-    }
-
     /// A local SubagentTarget names its behavior by the same short slug; a
     /// foreign target_agent_did keeps the ID exactly as given.
     async fn resolve_target_behavior(
@@ -1182,10 +1144,17 @@ impl ConfigCommandTool {
             .first()
             .map(String::as_str)
             .context("automation command is required; see [\"help\",\"automation\"]")?;
-        anyhow::ensure!(
-            verb != "list",
-            "automation has no list; a behavior's event sources, schedules, triggers and tasks are in {{\"argv\":[\"get\"],\"options\":{{\"behavior\":\"BEHAVIOR_ID\"}}}} under automation; read one with [\"automation\",\"get\",KIND,ID]"
-        );
+        if verb == "list" {
+            let kind = argv
+                .get(1)
+                .context("automation list requires task, trigger, schedule or event-source")?;
+            let target = automation_target(&kind.replace('-', "_"))?;
+            let parsed = ParsedArgs::parse(&argv[2..])?;
+            parsed.reject_mutation_flags()?;
+            return self
+                .inference_inventory(target, parse_limit(&parsed)?, parsed.one("cursor")?)
+                .await;
+        }
         let kind = argv.get(1).context("automation requires KIND")?;
         let id = required_resource_id(argv.get(2), "automation ID")?;
         let target = automation_target(&kind.replace('-', "_"))?;
@@ -1875,14 +1844,44 @@ impl ConfigCommandTool {
                 "backend_id",
                 "backend_id name provider_kind openai_wire_api endpoint connect_timeout_secs discovery_timeout_secs max_concurrent max_queue_depth enabled catalogs probe_status last_probe",
             ),
-            SelfConfigTarget::SubagentTarget | SelfConfigTarget::InferenceExecution => (
+            _ => (
                 target.collection_name(),
                 target.unique_field(),
                 "",
             ),
-            _ => unreachable!("inference inventory target"),
         };
-        let all_fields = target.all_fields().join(" ");
+        let all_fields = target
+            .all_fields()
+            .iter()
+            .copied()
+            .filter(|field| {
+                matches!(
+                    target,
+                    SelfConfigTarget::SubagentTarget | SelfConfigTarget::InferenceExecution
+                ) || *field == target.unique_field()
+                    || [
+                        "display_name",
+                        "name",
+                        "description",
+                        "enabled",
+                        "tags",
+                        "context_id",
+                        "tools_id",
+                        "inference_profile_id",
+                        "backend_id",
+                        "model_name",
+                        "sampling_id",
+                        "execution_id",
+                        "retry_policy_id",
+                        "compaction_id",
+                        "behavior_id",
+                        "task_id",
+                        "source_collection",
+                    ]
+                    .contains(field)
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
         let fields = if fields.is_empty() {
             all_fields.as_str()
         } else {
@@ -2049,6 +2048,8 @@ fn cleanup_target(name: &str) -> Result<SelfConfigTarget> {
         "schedule" => Ok(SelfConfigTarget::Schedule),
         "trigger" => Ok(SelfConfigTarget::Trigger),
         "event-source" => Ok(SelfConfigTarget::EventSource),
+        "datastore" => Ok(SelfConfigTarget::DatastoreToolSurface),
+        "skill" => Ok(SelfConfigTarget::Skill),
         other => bail!("unknown cleanup resource {other:?}; see [\"help\",\"cleanup\"]"),
     }
 }
@@ -2159,6 +2160,26 @@ fn patch_contract(target: SelfConfigTarget, field_shapes: Value) -> Value {
 }
 
 pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
+    if let Some(name) = resource {
+        let family = match name {
+            "context" => Some("behavior"),
+            "sampling" | "retry-policy" | "compaction" => Some("profile"),
+            "task" | "trigger" | "schedule" | "event-source" => Some("automation"),
+            _ => None,
+        };
+        if let Some(family) = family {
+            let target = crud::resource_target(name).expect("resource metadata");
+            return Value::Array(
+                help_patch_contracts(Some(family))
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter(|contract| contract["collection"] == target.collection_name())
+                    .cloned()
+                    .collect(),
+            );
+        }
+    }
     let contracts = match resource {
         Some("skill") => vec![patch_contract(
             SelfConfigTarget::Skill,

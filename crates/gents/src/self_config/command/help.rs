@@ -35,8 +35,8 @@ impl ConfigCommandTool {
             return Ok(self.help_index(&enabled));
         };
         let resource = match requested {
-            "agent" | "context" => "behavior",
-            "task" | "trigger" | "schedule" | "event-source" | "event_source" => "automation",
+            "agent" => "behavior",
+            "event_source" => "event-source",
             "graphs" => "graph",
             other => other,
         };
@@ -50,6 +50,17 @@ impl ConfigCommandTool {
                 enabled.join(", ")
             );
         };
+        if resource == "behavior" && command.first() == Some(&"context") {
+            return crud_help(
+                "context",
+                SelfConfigTarget::AgentContext,
+                &self::page("context").expect("context help"),
+                &command[1..],
+            );
+        }
+        if let Some(target) = crud::resource_target(resource) {
+            return crud_help(resource, target, &page, &command);
+        }
         if let Some(text) = command_help(resource, &page, &command) {
             return Ok(text);
         }
@@ -97,7 +108,7 @@ impl ConfigCommandTool {
 
     fn help_index(&self, enabled: &[&str]) -> String {
         let mut out = String::from(
-            "config resources. [\"help\",RESOURCE] shows one; append \"--help\" to a command for its syntax and field shapes. Commands are written as argv words: behavior get ID means {\"argv\":[\"behavior\",\"get\",\"ID\"]}; [x] is optional.\n",
+            "config resources. [\"help\",RESOURCE] explains one; [RESOURCE,VERB,\"--help\"] gives field shapes. Commands go in argv; IDs may follow the verb or use target_id.\n",
         );
         let connected_preview = !self.connected_preview_contract().is_null();
         for (resource, line) in HELP_INDEX {
@@ -211,6 +222,18 @@ fn resource_has_fields(resource: &str) -> bool {
 
 pub(super) fn page(resource: &str) -> Option<Page> {
     Some(match resource {
+        "context" => Page {
+            what: "a prompt, skills and selected Tools. A behavior selects it through context_id.",
+            commands: &[], notes: "If tools_id is set, those Tools must already exist. Shared Context/Tools updates are refused; clone the behavior to customize it independently.", next: "select it with behavior update and set.context_id.",
+        },
+        "sampling" => Page { what: "temperature and sampling parameters. A profile selects it through sampling_id.", commands: &[], notes: "Editing a shared document affects every profile selecting it. Create a separate document for different settings.", next: "profile update with set.sampling_id." },
+        "retry-policy" => Page { what: "retry settings selected by an execution document.", commands: &[], notes: "Create a separate document for different retry settings.", next: "execution update with set.retry_policy_id." },
+        "compaction" => Page { what: "context compaction settings selected by a Context.", commands: &[], notes: "Create a separate document for different compaction settings.", next: "context update with set.compaction_id." },
+        "task" | "trigger" | "schedule" | "event-source" => Page {
+            what: match resource { "task" => "work performed by a behavior.", "trigger" => "routes an event source or schedule to a task.", "schedule" => "a timer that starts work.", _ => "watches collection changes and starts work." },
+            commands: &[], notes: "task create: options.behavior selects its owner (default: you); behavior_id is protected. Trigger creation resolves its task’s owner; updates resolve the saved owner. options.behavior may assert that owner. Create Task before Trigger. For wiring and completion records see help automation.", next: "get the saved document and verify its references.",
+        },
+        "batch" => Page { what: "run ordered config calls in one tool call.", commands: &["batch  options.operations: [{argv, target_id?, set?, clear?, options?}, ...]"], notes: "1–64 calls, at most 128 KiB; no nested batches. Each call uses its usual grants and validation and commits separately. Stops at the first failure, returns each attempted result, and leaves earlier changes committed. Fix the failed call and resume there; do not repeat successful creates. Use cleanup for atomic multi-document deletion.", next: "inspect each result; references must exist when its call runs." },
         "get" => Page {
             what: "the effective configuration of one behavior. Use it to read before any change.",
             commands: &["get  options.behavior (default: the invoking behavior)"],
@@ -261,7 +284,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "datastore [preview] create|edit  set: surface fields, or options.mailbox",
             ],
             notes: concat!(
-                "Create fields: writable {name} arguments; omitted or empty means none. Query fields: returned columns; filter_fields: exact-match arguments as {name} objects. Tool descriptions state use, inputs and side effects.\nfill: correlation uses the request/trigger correlation ID; fill: {source_field: F} copies trigger field F. Omit fill for caller-supplied values. Filled fields cannot be required.\nCaller value: {\"name\":\"correlation\"}. Runtime ID: {\"name\":\"request_correlation\",\"fill\":\"correlation\"}.\nInstall schemas before selection. Selection checks names, not schemas.\nGrant only the requested operations. Mailbox: options.mailbox builds file_mailbox_item for existing MailboxItem and replaces entries. Put other tools on another surface. Never replace the mailbox collection.\n",
+                "Surface create fields: writable {name} arguments; omitted or empty means none. Query fields: returned columns; filter_fields: exact-match arguments as {name} objects. Tool descriptions state use, inputs and side effects.\nfill: correlation uses the request/trigger correlation ID; fill: {source_field: F} copies trigger field F. Omit fill for caller-supplied values. Filled fields cannot be required.\nCaller value: {\"name\":\"correlation\"}. Runtime ID: {\"name\":\"request_correlation\",\"fill\":\"correlation\"}.\nInstall schemas before selection. Selection checks names, not schemas.\nGrant only the requested operations. Mailbox: options.mailbox builds file_mailbox_item for existing MailboxItem and replaces entries. Put other tools on another surface. Never replace the mailbox collection.\n",
                 mailbox_identity_choice!(),
                 " A monitor uses condition identity: {\"argv\":[\"datastore\",\"create\"],\"target_id\":\"monitor-mailbox\",\"options\":{\"mailbox\":{\"identity\":{\"mode\":\"condition\",\"key\":\"host-health\"},\"kind\":\"flag\",\"action\":\"ack\"}}}"
             ),
@@ -308,7 +331,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "profile get PROFILE_ID",
                 "profile get|preview|edit [TARGET]  options.behavior; TARGET is profile (default), sampling, execution, retry-policy or compaction",
             ],
-            notes: "Without options.behavior these target the invoking behavior's profile, and preview or edit refuses once the principal has more than one behavior; the receipt's behavior_id and target_id name what changed. Creating a profile binds nothing.",
+            notes: "Create requires backend_id and model_name; it selects nothing. Update by exact profile ID. Editing a shared profile affects every behavior selecting it; create another profile for different settings, reusing backend and sampling. Without an ID, get/update use options.behavior to select the bound profile.",
             next: "select a new profile with behavior edit BEHAVIOR_ID and set.inference_profile_id.",
         },
         "backend" => Page {
@@ -324,9 +347,9 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             next: "create a profile on it with a discovered model ([\"help\",\"profile\"]).",
         },
         "mcp-service" => Page {
-            what: "an existing MCP service registration (mcp_service grant). SERVICE_ID goes in target_id.",
+            what: "an MCP service registration (mcp_service grant). SERVICE_ID goes in target_id.",
             commands: &["mcp-service get", "mcp-service preview|edit  set: service fields"],
-            notes: "The service must already exist under this principal.",
+            notes: "Creating a registration grants no tools; select its service ID in Tools remote.services.",
             next: "select its tools in a behavior's Tools remote.services.",
         },
         "automation" => Page {
@@ -341,7 +364,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "cleanup preview  options.target: RESOURCE=ID or a list of them",
                 "cleanup remove  options.digest from the preview and the same options.target",
             ],
-            notes: "RESOURCE: behavior, context, tools, subagent-target, profile, sampling, execution, retry-policy, compaction, backend, mcp-service, task, schedule, trigger, event-source. Datastore surfaces, skills and schemas cannot be removed. Remove refuses if any target changed since the preview. Behavior and context need the behavior catalog grant; the Setup behavior cannot be removed.",
+            notes: "RESOURCE: behavior, context, tools, subagent-target, profile, sampling, execution, retry-policy, compaction, backend, mcp-service, task, schedule, trigger, event-source, datastore, skill. Datastore surfaces and skills are removable once unreferenced; schemas cannot be removed. Remove refuses if any target changed since the preview. Behavior and context need the behavior catalog grant; the Setup behavior cannot be removed.",
             next: "read back to confirm the targets are gone.",
         },
         "pack" => Page {
@@ -474,4 +497,104 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
         )],
         _ => Vec::new(),
     }
+}
+
+fn crud_help(
+    resource: &str,
+    target: SelfConfigTarget,
+    page: &Page,
+    command: &[&str],
+) -> Result<String> {
+    let verb = command.iter().copied().find(|word| *word != "preview");
+    if matches!(
+        (resource, verb),
+        ("behavior", Some("clone" | "disable" | "default" | "create"))
+            | ("skill", Some("import"))
+            | ("backend", Some("discover"))
+    ) {
+        if let Some(text) = command_help(
+            resource,
+            page,
+            &command
+                .iter()
+                .copied()
+                .filter(|word| *word != "preview")
+                .collect::<Vec<_>>(),
+        ) {
+            return Ok(text);
+        }
+    }
+    let mut out = format!("{resource}: {}\n", page.what);
+    writeln!(out, "Verbs: list | get ID | create ID | update ID | delete ID. Preview: {resource} preview create|update|delete ID.")?;
+    if verb == Some("list") {
+        writeln!(
+            out,
+            "options.limit: 1..50 (default 20); options.cursor: previous page.next_cursor."
+        )?;
+    }
+    if verb == Some("delete") {
+        writeln!(out, "options.digest: plan_digest from preview delete. Remove references first; changed targets require a new preview.")?;
+    }
+    if resource == "behavior" {
+        out = out.replace("create ID", "create (options.display-name, system-prompt, preset, profile; allocates ID and Context/Tools)");
+        out = out.replace(
+            "behavior preview create|update|delete ID",
+            "behavior preview create (same options) | update|delete ID",
+        );
+        writeln!(out, "Also: behavior clone, disable, default; behavior context get|edit addresses its selected Context.")?;
+    }
+    if resource == "backend" {
+        writeln!(out, "Create requires set.endpoint; optional set.name/openai_wire_api. Only enabled unauthenticated OpenAI-compatible endpoints can be created. Also: backend discover ID.")?;
+    }
+    if resource == "skill" {
+        writeln!(
+            out,
+            "Also: skill [preview] import ID PATH reads a SKILL.md inside the tool root."
+        )?;
+    }
+    let writes = command.is_empty()
+        || command
+            .iter()
+            .any(|word| matches!(*word, "create" | "update" | "edit"))
+            && !command.contains(&"delete");
+    if writes {
+        for contract in contracts(resource, None)
+            .into_iter()
+            .filter(|c| c["collection"] == target.collection_name())
+        {
+            if command.is_empty() {
+                writeln!(
+                    out,
+                    "Fields of {}: {}. Append --help to create/update for shapes.",
+                    target.collection_name(),
+                    contract["writable_fields"]
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "{} fields: {}. Protected: {}.",
+                    target.collection_name(),
+                    contract["field_shapes"],
+                    contract["protected_fields"]
+                )?;
+            }
+        }
+    }
+    if writes && !command.is_empty() && resource == "datastore" {
+        writeln!(out, "options.mailbox policy values: {}", mailbox_values())?;
+    }
+    writeln!(out, "{}", page.notes)?;
+    if command.is_empty() {
+        for (title, steps) in recipes(resource).into_iter().take(1) {
+            writeln!(out, "Recipe: {title}")?;
+            for (call, next) in steps {
+                writeln!(out, "  {}", render_call(&call))?;
+                if let Some(next) = next {
+                    writeln!(out, "  {next}")?;
+                }
+            }
+        }
+    }
+    write!(out, "Next: {}", page.next)?;
+    Ok(out)
 }
