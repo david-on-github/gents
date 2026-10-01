@@ -136,9 +136,9 @@
               "agent_new"
             ],
             "forbidden": [
-              "bash",
-              "config"
-            ]
+              "bash"
+            ],
+            "config_read_only": true
           },
           "tier": "acceptance",
           "weight": 1
@@ -293,9 +293,9 @@
               "agent_message"
             ],
             "forbidden": [
-              "agent_new",
-              "config"
-            ]
+              "agent_new"
+            ],
+            "config_read_only": true
           },
           "tier": "acceptance",
           "weight": 1

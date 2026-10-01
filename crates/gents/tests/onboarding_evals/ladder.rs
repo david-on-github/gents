@@ -479,3 +479,64 @@ fn repointed_delegation_grades_the_named_role_and_its_delivered_reply() {
     let verdict = grader.evaluate(&check(2).params, &evidence);
     assert!(verdict.score_bp.unwrap() < 10000, "{}", verdict.raw);
 }
+
+#[test]
+fn delegation_execution_allows_inspection_but_rejects_config_mutations() {
+    let definition = definitions()
+        .into_iter()
+        .find(|d| d.definition_id == "configurator-l5-agents-tools")
+        .unwrap();
+    let registry = CheckRegistry::builtin();
+    let grader = registry.get("tool_calls_expected").unwrap();
+    let mut checked = 0;
+    for case in definition.cases {
+        for stage in case.stages {
+            for check in stage.checks.iter().filter(|check| {
+                check.check == "tool_calls_expected" && check.params["config_read_only"] == true
+            }) {
+                checked += 1;
+                let mut evidence = ScriptedExecutor::passed_evidence(
+                    "did:key:eval-owner",
+                    &stage.stage_id,
+                    "reply",
+                    vec![],
+                )
+                .stages
+                .remove(0);
+                evidence.tool_calls = check.params["required"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|name| {
+                        serde_json::from_value(serde_json::json!({
+                            "tool_name": name, "status": "completed", "args": {}, "result": {}
+                        }))
+                        .unwrap()
+                    })
+                    .collect();
+                assert_eq!(
+                    grader.evaluate(&check.params, &evidence).score_bp,
+                    Some(10000)
+                );
+                evidence.tool_calls.push(
+                    serde_json::from_value(serde_json::json!({
+                        "tool_name": "config", "status": "completed",
+                        "args": {"argv": ["tools", "get"]},
+                        "result": {"config_execution": {"version": 1, "mutation_entered": false}}
+                    }))
+                    .unwrap(),
+                );
+                assert_eq!(
+                    grader.evaluate(&check.params, &evidence).score_bp,
+                    Some(10000)
+                );
+                evidence.tool_calls.last_mut().unwrap().result["config_execution"]
+                    ["mutation_entered"] = true.into();
+                assert!(grader.evaluate(&check.params, &evidence).score_bp.unwrap() < 10000);
+                evidence.tool_calls.last_mut().unwrap().result = serde_json::Value::Null;
+                assert!(grader.evaluate(&check.params, &evidence).score_bp.unwrap() < 10000);
+            }
+        }
+    }
+    assert_eq!(checked, 7);
+}

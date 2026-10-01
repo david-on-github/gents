@@ -137,9 +137,9 @@
               "agent_new"
             ],
             "forbidden": [
-              "bash",
-              "config"
-            ]
+              "bash"
+            ],
+            "config_read_only": true
           },
           "tier": "acceptance",
           "weight": 1
