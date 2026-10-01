@@ -270,7 +270,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "subagent-target" => Page {
             what: "a named route to a behavior for agent_new (tools grant). TARGET_ID goes in target_id or argv.",
             commands: &["subagent-target list", "subagent-target get TARGET_ID", "subagent-target [preview] create|edit TARGET_ID  set: target fields"],
-            notes: "name is the agent name the model sees; target_agent_did owns the behavior. A local behavior_id must exist; its short slug resolves when target_agent_did is this principal. Multiple callers can select the same target.",
+            notes: "name is the name passed to agent_new. For local helpers, use agent_did from [\"get\"] as target_agent_did; profile_id identifies inference settings. The local behavior_id must exist; its short slug resolves. Multiple callers can select a target.",
             next: "read tools get, then tools edit: preserve set.subagents, set enabled true and add this ID to target_ids. Selecting targets alone leaves delegation disabled. Use options.behavior to grant another caller; tools apply next request.",
         },
         "execution" => Page {

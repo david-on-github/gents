@@ -199,7 +199,7 @@ fn help_verb(argv: &[String]) -> Vec<&str> {
 fn required_resource_id<'a>(value: Option<&'a String>, label: &str) -> Result<&'a String> {
     value
         .filter(|id| !id.trim().is_empty() && !id.starts_with('-'))
-        .with_context(|| format!("missing {label}: supply a non-empty resource ID before options or patch fields; see [\"help\"]"))
+        .with_context(|| format!("missing {label}: supply target_id, or a non-empty resource ID in argv before options or patch fields; see [\"help\"]"))
 }
 
 /// Native `config` tool. Its model-facing text is layered for progressive
@@ -2295,7 +2295,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
         Some("subagent-target") => vec![patch_contract(
             SelfConfigTarget::SubagentTarget,
             json!({
-                "name":"string; the agent name agent_new exposes","target_agent_did":"principal DID that owns the behavior; this principal for local agents","behavior_id":"behavior ID on target_agent_did; must exist when local","description":"string|null","tags":"array<string>; default []"
+                "name":"string; the agent name agent_new exposes","target_agent_did":"principal DID that owns the behavior; local helpers use agent_did from [\"get\"]","behavior_id":"behavior ID on target_agent_did; must exist when local","description":"string|null","tags":"array<string>; default []"
             }),
         )],
         Some("execution") => help_patch_contracts(Some("profile"))
