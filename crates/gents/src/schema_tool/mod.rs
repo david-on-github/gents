@@ -25,10 +25,64 @@ pub struct SchemaParams {
     pub target_id: Option<String>,
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub options: Map<String, Value>,
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub preview: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub digest: Option<String>,
+}
+
+struct SchemaCommand {
+    args: SchemaParams,
+    preview: bool,
+    digest: Option<String>,
+}
+
+impl SchemaCommand {
+    fn parse(mut args: SchemaParams) -> Result<Self> {
+        let preview = args.argv.get(1).is_some_and(|word| word == "preview");
+        if preview {
+            args.argv.remove(1);
+        }
+        let words: Vec<_> = args.argv.iter().map(String::as_str).collect();
+        let takes_id = matches!(
+            words.as_slice(),
+            ["collection", "get" | "update" | "materialize", _]
+                | ["version", "list" | "get" | "activate", _]
+        );
+        if takes_id {
+            let id = args.argv.pop().unwrap();
+            ensure!(
+                args.target_id.as_ref().is_none_or(|value| value == &id),
+                "positional ID conflicts with target_id; supply one ID"
+            );
+            args.target_id = Some(id);
+        }
+        let digest = args
+            .options
+            .remove("digest")
+            .map(|value| {
+                value
+                    .as_str()
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .context("options.digest must be a nonempty string returned by preview")
+            })
+            .transpose()?;
+        Ok(Self {
+            args,
+            preview,
+            digest,
+        })
+    }
+}
+
+fn preview_call(args: &SchemaParams) -> SchemaParams {
+    let mut next = args.clone();
+    next.argv.insert(1, "preview".into());
+    next.options.remove("digest");
+    next
+}
+
+fn apply_call(args: &SchemaParams, digest: &str) -> SchemaParams {
+    let mut next = args.clone();
+    next.options.insert("digest".into(), json!(digest));
+    next
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,7 +90,7 @@ pub struct SchemaParams {
 pub struct SchemaError(String);
 
 #[derive(Debug, thiserror::Error)]
-#[error("missing or stale digest: repeat this call with preview:true and no digest, then apply the returned next_call. The command or observed schema changed")]
+#[error("missing or stale digest: run the returned preview call, inspect the effect, then use its next_call. options.digest binds the command and observed schema")]
 struct SchemaDigestMismatch;
 
 #[derive(Clone)]
@@ -49,7 +103,8 @@ impl SchemaTool {
         Self { node }
     }
 
-    async fn execute(&self, args: &SchemaParams) -> Result<Value> {
+    async fn execute(&self, command: &SchemaCommand) -> Result<Value> {
+        let args = &command.args;
         let access = ConfigAccess::Local(self.node.clone());
         let words: Vec<_> = args.argv.iter().map(String::as_str).collect();
         let target = || {
@@ -72,7 +127,7 @@ impl SchemaTool {
             ["view", "create"] => &["query", "sdl"],
             ["migration", "set"] => &["config"],
             ["collection", "list" | "get" | "materialize"] | ["version", "list" | "get" | "activate"] => &[],
-            _ => bail!("unknown schema command; use [\"help\"] for supported resources and verbs. Collection deletion is not exposed by the pinned native adapter"),
+            _ => bail!("unknown schema command; use RESOURCE VERB [ID]. Read [\"help\"] for resources, or RESOURCE VERB --help for parameters"),
         };
         for key in args.options.keys() {
             ensure!(
@@ -82,7 +137,7 @@ impl SchemaTool {
         }
         let read = matches!(words.as_slice(), ["collection" | "version", "list" | "get"]);
         ensure!(
-            !read || (!args.preview && args.digest.is_none()),
+            !read || (!command.preview && command.digest.is_none()),
             "reads do not use preview or digest"
         );
         let uses_target = !matches!(
@@ -121,8 +176,8 @@ impl SchemaTool {
             _ => {}
         }
         ensure!(
-            !(args.preview && args.digest.is_some()),
-            "preview returns a digest; omit digest while previewing"
+            !(command.preview && command.digest.is_some()),
+            "preview returns a digest; omit options.digest while previewing"
         );
         let before = match words.as_slice() {
             ["collection", "create"] | ["view", "create"] => {
@@ -192,24 +247,22 @@ impl SchemaTool {
             }
             _ => unreachable!(),
         };
-        let mut intent = args.clone();
-        intent.preview = false;
-        intent.digest = None;
+        let intent = args;
         let digest = format!(
             "sha256:{:x}",
             Sha256::digest(serde_json::to_vec(
                 &json!({"intent":intent,"before":before})
             )?)
         );
-        if args.preview {
+        if command.preview {
             return Ok(
                 json!({"committed":false,"digest":digest,"command":args.argv,"target_id":args.target_id,"before":before,
                 "effect":help::effect(&words),
                 "validation":"Input shape and observed schema checked. DefraDB validates and authorizes publication when applied; preview is not a transaction.",
-                "next_call":{"tool":"schema","args":SchemaParams { digest:Some(digest.clone()),preview:false,..args.clone() }}}),
+                "next_call":{"tool":"schema","args":apply_call(args, &digest)}}),
             );
         }
-        if args.digest.as_deref() != Some(digest.as_str()) {
+        if command.digest.as_deref() != Some(digest.as_str()) {
             return Err(SchemaDigestMismatch.into());
         }
         let result = match words.as_slice() {
@@ -318,13 +371,15 @@ impl Tool for SchemaTool {
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {name:Self::NAME.into(),description:"Manage DefraDB application schemas: collections, versions, migrations and views. Use {\"argv\":[RESOURCE,VERB],\"target_id\"?:ID,\"options\"?:{...}}. Read [\"help\"] for commands, then [\"help\",RESOURCE] for parameters. Preview mutations with preview:true; apply the returned next_call and digest. Schema changes affect the whole node; document access and Gents configuration use their own tools.".into(),parameters:json!({"type":"object","required":["argv"],"additionalProperties":false,"properties":{
-            "argv":{"type":"array","items":{"type":"string"},"minItems":1},
-            "target_id":{"type":"string","description":"Collection name or exact version ID."},
-            "options":{"type":"object","additionalProperties":true},
-            "preview":{"type":"boolean","description":"Inspect a mutation without applying it; returns a digest and next_call."},
-            "digest":{"type":"string","description":"Digest returned by preview for this exact mutation and observed schema."}
-        }})}
+        ToolDefinition {
+            name: Self::NAME.into(),
+            description: "Manage DefraDB application schemas: collections, versions, migrations and views. Commands go in argv as RESOURCE VERB; IDs follow the verb or use target_id. Read [\"help\"] for resources and [RESOURCE,VERB,\"--help\"] for parameters. Configuration and document access use their own tools.".into(),
+            parameters: json!({"type":"object","required":["argv"],"additionalProperties":false,"properties":{
+                "argv":{"type":"array","items":{"type":"string"},"minItems":1},
+                "target_id":{"type":"string","description":"Collection name or exact version ID; may instead follow the verb in argv."},
+                "options":{"type":"object","additionalProperties":true}
+            }})
+        }
     }
 
     async fn call(&self, args: Self::Args) -> std::result::Result<String, Self::Error> {
@@ -334,12 +389,10 @@ impl Tool for SchemaTool {
             ));
         }
         if args.argv == ["batch"] {
-            if args.target_id.is_some()
-                || args.preview
-                || args.digest.is_some()
-                || args.options.len() != 1
-            {
-                return Err(SchemaError("batch accepts only options.operations; each mutation carries its own preview or digest".into()));
+            if args.target_id.is_some() || args.options.len() != 1 {
+                return Err(SchemaError(
+                    "batch accepts only options.operations; each item is a schema command".into(),
+                ));
             }
             let operations = args.options.get("operations").and_then(Value::as_array).filter(|ops|!ops.is_empty()&&ops.len()<=64)
                 .ok_or_else(||SchemaError("options.operations must be an array of 1–64 schema calls; nested batches are not supported".into()))?;
@@ -365,44 +418,92 @@ impl Tool for SchemaTool {
 }
 
 impl SchemaTool {
-    async fn call_one(&self, args: SchemaParams) -> std::result::Result<String, SchemaError> {
+    async fn call_one(&self, mut args: SchemaParams) -> std::result::Result<String, SchemaError> {
+        if args
+            .argv
+            .last()
+            .is_some_and(|word| matches!(word.as_str(), "--help" | "-h"))
+        {
+            args.argv.pop();
+            if args.argv.get(1).is_some_and(|word| word == "preview") {
+                args.argv.remove(1);
+            }
+            args.argv.truncate(2);
+            args.argv.insert(0, "help".into());
+        }
         if args.argv.first().is_some_and(|s| s == "help") {
-            if args.target_id.is_some()
-                || !args.options.is_empty()
-                || args.preview
-                || args.digest.is_some()
-            {
+            if args.target_id.is_some() || !args.options.is_empty() {
                 return Err(SchemaError(
-                    "help accepts argv only; omit target_id, options, preview and digest".into(),
+                    "help accepts argv only; omit target_id and options".into(),
                 ));
             }
             return help::page(&args.argv[1..])
                 .map(str::to_owned)
                 .map_err(|e| SchemaError(e.to_string()));
         }
-        match self.execute(&args).await {
-            Ok(value) => serde_json::to_string(&value).map_err(|e| SchemaError(e.to_string())),
+        let command = match SchemaCommand::parse(args.clone()) {
+            Ok(command) => command,
+            Err(error) => return Err(schema_error(error, help_call(&args))),
+        };
+        let args = &command.args;
+        if let Some(value) = args.options.get("preview") {
+            if let Some(preview) = value.as_bool().filter(|_| args.argv.len() >= 2) {
+                let mut next = args.clone();
+                next.options.remove("preview");
+                if preview || command.preview {
+                    next = preview_call(&next);
+                } else if let Some(digest) = &command.digest {
+                    next = apply_call(&next, digest);
+                }
+                return Err(schema_error(anyhow::anyhow!(
+                    "preview is a command word, not an option; use RESOURCE preview VERB, then apply the returned next_call"
+                ), json!({"tool":"schema","args":next})));
+            }
+        }
+        match self.execute(&command).await {
+            Ok(mut value) => {
+                let encoded = if command.preview {
+                    let effect = value.as_object_mut().unwrap().remove("effect").unwrap();
+                    let next_call = value.as_object_mut().unwrap().remove("next_call").unwrap();
+                    serde_json::to_string(&crate::self_config::Ordered::reading_order(
+                        json!({"effect":effect,"next_call":next_call,"metadata":value}),
+                        &["effect", "next_call", "metadata"],
+                    ))
+                } else {
+                    serde_json::to_string(&value)
+                };
+                encoded.map_err(|error| SchemaError(error.to_string()))
+            }
             Err(error) => {
                 let recovery = if error.is::<SchemaDigestMismatch>() {
-                    json!({"tool":"schema","args":SchemaParams {preview:true,digest:None,..args.clone()}})
+                    json!({"tool":"schema","args":preview_call(args)})
                 } else if let Some(mismatch) =
                     error.downcast_ref::<crate::config_client::SchemaInstallMismatch>()
                 {
                     json!({"tool":"schema","args":{"argv":["collection","get"],"target_id":mismatch.collection}})
                 } else {
-                    let resource = args.argv.first().map(String::as_str).unwrap_or("");
-                    let argv =
-                        if matches!(resource, "collection" | "version" | "migration" | "view") {
-                            vec!["help", resource]
-                        } else {
-                            vec!["help"]
-                        };
-                    json!({"tool":"schema","args":{"argv":argv}})
+                    help_call(args)
                 };
-                Err(SchemaError(
-                    json!({"error":format!("{error:#}"),"recovery":recovery}).to_string(),
-                ))
+                Err(schema_error(error, recovery))
             }
         }
     }
+}
+
+fn help_call(args: &SchemaParams) -> Value {
+    let resource = args.argv.first().map(String::as_str).unwrap_or("");
+    let argv = if matches!(resource, "collection" | "version" | "migration" | "view") {
+        if args.argv.len() >= 2 && help::page(&args.argv[..2]).is_ok() {
+            vec!["help", resource, args.argv[1].as_str()]
+        } else {
+            vec!["help", resource]
+        }
+    } else {
+        vec!["help"]
+    };
+    json!({"tool":"schema","args":{"argv":argv}})
+}
+
+fn schema_error(error: anyhow::Error, recovery: Value) -> SchemaError {
+    SchemaError(json!({"error":format!("{error:#}"),"recovery":recovery}).to_string())
 }

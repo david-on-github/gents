@@ -8,7 +8,10 @@ async fn call(tool: &SchemaTool, value: Value) -> Value {
     serde_json::from_str(&tool.call(args(value)).await.unwrap()).unwrap()
 }
 async fn apply(tool: &SchemaTool, mut value: Value) -> Value {
-    value["preview"] = json!(true);
+    value["argv"]
+        .as_array_mut()
+        .unwrap()
+        .insert(1, json!("preview"));
     let preview = call(tool, value).await;
     call(tool, preview["next_call"]["args"].clone()).await
 }
@@ -47,15 +50,15 @@ async fn schema_publication_matches_executable_lean_contract() {
         .resolve(&node, "did:key:test")
         .await
         .unwrap();
-        let mut intent = json!({"argv":["collection","create"],"options":{"sdl":"type Probe { value: String }"},"preview":true});
+        let mut intent = json!({"argv":["collection","preview","create"],"options":{"sdl":"type Probe { value: String }"}});
         let preview = tool.call(args(intent.clone())).await;
-        intent["preview"] = json!(false);
-        intent["digest"] = if artifact {
+        intent["argv"].as_array_mut().unwrap().remove(1);
+        intent["options"]["digest"] = if artifact {
             preview
                 .as_ref()
                 .ok()
                 .and_then(|v| serde_json::from_str::<Value>(v).ok())
-                .map(|v| v["digest"].clone())
+                .map(|v| v["next_call"]["args"]["options"]["digest"].clone())
                 .unwrap_or(json!("unavailable"))
         } else {
             json!("wrong")
@@ -99,7 +102,7 @@ async fn additive_recovery_preserves_documents_and_rejects_stale_preview() {
         .await
         .unwrap()
         .unwrap();
-    let intent = json!({"argv":["collection","update"],"target_id":"WorkItem","options":{"patch":[{"op":"add","path":"/WorkItem/Fields/-","value":{"Name":"handoff_id","Kind":"String"}}]},"preview":true});
+    let intent = json!({"argv":["collection","preview","update"],"target_id":"WorkItem","options":{"patch":[{"op":"add","path":"/WorkItem/Fields/-","value":{"Name":"handoff_id","Kind":"String"}}]}});
     let preview = call(&tool, intent.clone()).await;
     assert_eq!(
         original,
@@ -173,7 +176,7 @@ async fn schema_recovery_help_and_grant_are_independent_of_config() {
             .is_empty());
     }
     for intent in [
-        json!({"argv":["collection","create"],"options":{"sdl":"type Bad { value: Bool }"},"preview":true}),
+        json!({"argv":["collection","preview","create"],"options":{"sdl":"type Bad { value: Bool }"}}),
         json!({"argv":["collection","get"],"target_id":"Missing"}),
     ] {
         let error = tool.call(args(intent)).await.unwrap_err();
@@ -199,7 +202,7 @@ async fn schema_recovery_help_and_grant_are_independent_of_config() {
     .await
     .unwrap();
     assert!(!surface.tool_names().contains(&SCHEMA_TOOL_NAME.to_owned()));
-    let error=tool.call(args(json!({"argv":["collection","update"],"target_id":"Tools","options":{"patch":[{"op":"add","path":"/Tools/Fields/-","value":{"Name":"bad","Kind":"String"}}]},"preview":true}))).await.unwrap_err();
+    let error=tool.call(args(json!({"argv":["collection","preview","update"],"target_id":"Tools","options":{"patch":[{"op":"add","path":"/Tools/Fields/-","value":{"Name":"bad","Kind":"String"}}]}}))).await.unwrap_err();
     assert!(error.to_string().contains("Gents-managed"));
 }
 
@@ -264,7 +267,7 @@ async fn inline_lens_migration_transforms_existing_rows_through_native_owner() {
     );
     assert!(tool
         .call(args(
-            json!({"argv":["migration","set"],"options":{"config":path_lens},"preview":true})
+            json!({"argv":["migration","preview","set"],"options":{"config":path_lens}})
         ))
         .await
         .unwrap_err()
@@ -291,8 +294,8 @@ async fn batch_retains_prior_commit_and_does_not_attempt_later_calls() {
     let node = node().await;
     let tool = SchemaTool::new(node.clone());
     let access = ConfigAccess::Local(node);
-    let first=call(&tool,json!({"argv":["collection","create"],"options":{"sdl":"type BatchFirst { title: String }"},"preview":true})).await;
-    let last=call(&tool,json!({"argv":["collection","create"],"options":{"sdl":"type BatchLast { title: String }"},"preview":true})).await;
+    let first=call(&tool,json!({"argv":["collection","preview","create"],"options":{"sdl":"type BatchFirst { title: String }"}})).await;
+    let last=call(&tool,json!({"argv":["collection","preview","create"],"options":{"sdl":"type BatchLast { title: String }"}})).await;
     let result=tool.call(args(json!({"argv":["batch"],"options":{"operations":[first["next_call"]["args"],{"argv":["collection","get"],"target_id":"Missing"},last["next_call"]["args"]]}}))).await.unwrap_err();
     let failure: Value = serde_json::from_str(&result.to_string()).unwrap();
     assert_eq!(failure["unattempted"], 1);
@@ -323,8 +326,8 @@ async fn malformed_schema_previews_return_executable_help_without_publication() 
         .await
         .unwrap();
     for value in [
-        json!({"argv":["view","create"],"options":{"sdl":"type Titles { title: String }"},"preview":true}),
-        json!({"argv":["collection","update"],"target_id":"Shape","options":{"patch":[{"op":"add","path":"/Shape/Fields/-"}]},"preview":true}),
+        json!({"argv":["view","preview","create"],"options":{"sdl":"type Titles { title: String }"}}),
+        json!({"argv":["collection","preview","update"],"target_id":"Shape","options":{"patch":[{"op":"add","path":"/Shape/Fields/-"}]}}),
         json!({"argv":["unknown","create"]}),
     ] {
         let error = tool.call(args(value)).await.unwrap_err();
@@ -340,4 +343,123 @@ async fn malformed_schema_previews_return_executable_help_without_publication() 
             .await
             .unwrap()
     );
+}
+
+#[tokio::test]
+async fn config_shaped_schema_calls_preview_then_apply_without_rewriting_the_receipt() {
+    let node = node().await;
+    let tool = SchemaTool::new(node.clone());
+    let access = ConfigAccess::Local(node);
+    let help = tool
+        .call(args(json!({"argv":["collection","create","--help"]})))
+        .await
+        .unwrap();
+    assert_eq!(
+        help,
+        tool.call(args(json!({"argv":["help","collection","create"]})))
+            .await
+            .unwrap()
+    );
+    let request = json!({"argv":["collection","create"],"options":{"sdl":"type CallShape { value: String }"}});
+    let error: Value =
+        serde_json::from_str(&tool.call(args(request)).await.unwrap_err().0).unwrap();
+    assert_eq!(
+        error["recovery"]["args"]["argv"],
+        json!(["collection", "preview", "create"])
+    );
+    let text = tool
+        .call(args(error["recovery"]["args"].clone()))
+        .await
+        .unwrap();
+    assert!(text.find("\"effect\"").unwrap() < text.find("\"next_call\"").unwrap());
+    assert!(text.find("\"next_call\"").unwrap() < text.find("\"metadata\"").unwrap());
+    let preview: Value = serde_json::from_str(&text).unwrap();
+    assert!(access
+        .collection_version("CallShape")
+        .await
+        .unwrap()
+        .is_none());
+    assert!(preview["next_call"]["args"]["options"]["digest"].is_string());
+    call(&tool, preview["next_call"]["args"].clone()).await;
+    let positional = call(&tool, json!({"argv":["collection","get","CallShape"]})).await;
+    let named = call(
+        &tool,
+        json!({"argv":["collection","get"],"target_id":"CallShape"}),
+    )
+    .await;
+    assert_eq!(positional, named);
+    assert!(tool
+        .call(args(
+            json!({"argv":["collection","get","CallShape"],"target_id":"Other"})
+        ))
+        .await
+        .unwrap_err()
+        .0
+        .contains("conflicts"));
+}
+
+#[tokio::test]
+async fn misplaced_preview_returns_the_corrected_call_without_publishing() {
+    let node = node().await;
+    let tool = SchemaTool::new(node.clone());
+    let request = json!({"argv":["collection","create"],"options":{"preview":true,"sdl":"type RecoveryShape { value: String }"}});
+    let error: Value =
+        serde_json::from_str(&tool.call(args(request)).await.unwrap_err().0).unwrap();
+    assert_eq!(
+        error["recovery"]["args"]["argv"],
+        json!(["collection", "preview", "create"])
+    );
+    assert!(error["recovery"]["args"]["options"]
+        .get("preview")
+        .is_none());
+    let preview = call(&tool, error["recovery"]["args"].clone()).await;
+    assert!(ConfigAccess::Local(node.clone())
+        .collection_version("RecoveryShape")
+        .await
+        .unwrap()
+        .is_none());
+    call(&tool, preview["next_call"]["args"].clone()).await;
+    assert!(ConfigAccess::Local(node)
+        .collection_version("RecoveryShape")
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn schema_command_normalizes_config_conventions_without_changing_the_intent() {
+    for (resource, verb) in [
+        ("collection", "get"),
+        ("collection", "update"),
+        ("collection", "materialize"),
+        ("version", "list"),
+        ("version", "get"),
+        ("version", "activate"),
+    ] {
+        let positional = SchemaCommand::parse(args(json!({"argv":[resource,verb,"id"]}))).unwrap();
+        let named =
+            SchemaCommand::parse(args(json!({"argv":[resource,verb],"target_id":"id"}))).unwrap();
+        assert_eq!(
+            serde_json::to_value(&positional.args).unwrap(),
+            serde_json::to_value(&named.args).unwrap()
+        );
+        assert!(SchemaCommand::parse(args(
+            json!({"argv":[resource,verb,"id"],"target_id":"different"})
+        ))
+        .is_err());
+    }
+    let preview = SchemaCommand::parse(args(json!({"argv":["collection","preview","update","WorkItem"],"options":{"patch":[{"op":"add","path":"/WorkItem/Fields/-","value":{"Name":"title","Kind":"String"}}]}}))).unwrap();
+    assert!(preview.preview);
+    assert!(preview.digest.is_none());
+    let apply = SchemaCommand::parse(apply_call(&preview.args, "sha256:receipt")).unwrap();
+    assert!(!apply.preview);
+    assert_eq!(apply.digest.as_deref(), Some("sha256:receipt"));
+    assert_eq!(
+        serde_json::to_value(preview.args).unwrap(),
+        serde_json::to_value(apply.args).unwrap()
+    );
+    assert!(SchemaCommand::parse(args(
+        json!({"argv":["collection","create"],"options":{"digest":false}})
+    ))
+    .is_err());
 }
