@@ -4,6 +4,7 @@ use std::time::Duration;
 fn request(home: &Path) -> Request {
     let folder = home.join("docs");
     std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(folder.join("x.pdf"), "pdf").unwrap();
     let resolved = allowed::Resolved {
         target: folder.canonicalize().unwrap().join("x.pdf"),
         is_dir: false,
@@ -39,7 +40,7 @@ async fn an_allow_reaches_the_waiting_call_and_clears_the_question() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(pending(home.path()).unwrap(), vec![request.clone()]);
-    decide(home.path(), &request.id, true, false).unwrap();
+    decide(home.path(), &request.id, Answer::Once).unwrap();
     assert!(waiting.await.unwrap().unwrap());
     assert!(pending(home.path()).unwrap().is_empty());
     assert!(
@@ -60,7 +61,7 @@ async fn a_deny_reaches_the_waiting_call() {
     while pending(home.path()).unwrap().is_empty() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    decide(home.path(), &request.id, false, true).unwrap();
+    decide(home.path(), &request.id, Answer::Deny).unwrap();
     assert!(!waiting.await.unwrap().unwrap());
     assert!(
         allowed::list(home.path()).unwrap().is_empty(),
@@ -81,7 +82,7 @@ async fn always_allow_adds_the_folder_and_keeps_wider_access() {
     while pending(home.path()).unwrap().is_empty() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    decide(home.path(), &request.id, true, true).unwrap();
+    decide(home.path(), &request.id, Answer::AlwaysFolder).unwrap();
     assert!(waiting.await.unwrap().unwrap());
     let listed = allowed::list(home.path()).unwrap();
     assert_eq!(listed.len(), 1);
@@ -102,6 +103,45 @@ async fn an_unanswered_question_times_out_and_is_removed() {
 #[test]
 fn only_a_waiting_question_can_be_answered() {
     let home = tempfile::tempdir().unwrap();
-    assert!(decide(home.path(), "nope", true, false).is_err());
-    assert!(decide(home.path(), "../escape", true, false).is_err());
+    assert!(decide(home.path(), "nope", Answer::Once).is_err());
+    assert!(decide(home.path(), "../escape", Answer::Once).is_err());
+}
+
+#[tokio::test]
+async fn always_allow_this_file_adds_only_the_file() {
+    let home = tempfile::tempdir().unwrap();
+    let request = request(home.path());
+    let waiting = {
+        let home = home.path().to_owned();
+        let request = request.clone();
+        tokio::spawn(async move { ask(&home, &request, Duration::from_secs(10)).await })
+    };
+    while pending(home.path()).unwrap().is_empty() {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    decide(home.path(), &request.id, Answer::AlwaysPath).unwrap();
+    assert!(waiting.await.unwrap().unwrap());
+    let listed = allowed::list(home.path()).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, PathBuf::from(&request.path));
+    let scope = allowed::Scope::load(home.path(), None, None).unwrap();
+    assert!(scope.granted(Path::new(&request.path)).is_some());
+    assert!(
+        scope.granted(&request.folder.join("other.pdf")).is_none(),
+        "the sibling stays closed"
+    );
+}
+
+#[tokio::test]
+async fn a_call_with_nobody_listening_fails_at_once_naming_the_command() {
+    let home = tempfile::tempdir().unwrap();
+    let request = request(home.path());
+    let started = std::time::Instant::now();
+    let error = ask(home.path(), &request, Duration::from_secs(60))
+        .await
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("gents plugin dirs add"), "{message}");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert!(pending(home.path()).unwrap().is_empty());
 }

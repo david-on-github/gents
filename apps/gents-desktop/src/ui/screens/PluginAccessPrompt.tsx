@@ -13,12 +13,13 @@ import {
 import { toast } from "sonner";
 import { call, message } from "./agent/bridgeCall";
 
-type Decision = "once" | "always" | "deny";
+type Decision = "once" | "file" | "always" | "deny";
 
 interface Question {
   id: string;
   prompt: string;
   folder: string;
+  isDir: boolean;
 }
 
 const POLL_MS = 1000;
@@ -71,15 +72,20 @@ export function PluginAccessPrompt() {
         <DialogHeader>
           <DialogTitle>{question?.prompt}</DialogTitle>
           <DialogDescription>
-            Always allow remembers {question?.folder}.
+            Always allow this folder remembers {question?.folder}.
           </DialogDescription>
         </DialogHeader>
         <DialogFooter>
           <Button variant="outline" onClick={() => void answer("deny")}>
             Deny
           </Button>
+          {question && !question.isDir && (
+            <Button variant="outline" onClick={() => void answer("file")}>
+              Always allow this file
+            </Button>
+          )}
           <Button variant="outline" onClick={() => void answer("always")}>
-            Always allow
+            Always allow this folder
           </Button>
           <Button onClick={() => void answer("once")}>Allow once</Button>
         </DialogFooter>

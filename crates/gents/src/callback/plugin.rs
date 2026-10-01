@@ -422,6 +422,7 @@ mod tests {
         if bind {
             record.declaration.bind_dir = Some(crate::pack::PluginDirBinding {
                 input_field: "path".into(),
+                original_field: Some("origin".into()),
                 description: "a directory".into(),
                 access: Default::default(),
             });
@@ -434,8 +435,8 @@ mod tests {
         let node = std::sync::Arc::new(EmbeddedNode::builder().build().await.unwrap());
         crate::ensure_runtime_schemas(node.as_ref()).await.unwrap();
         node.add_schema(
-            "type Job { job_run: String text: String path: String }
-             type Echoed { job_run: String text: String path: String run_ref: String }",
+            "type Job { job_run: String text: String path: String origin: String }
+             type Echoed { job_run: String text: String path: String origin: String run_ref: String }",
         )
         .await
         .unwrap();
@@ -446,7 +447,7 @@ mod tests {
                     handler:{{kind:"plugin",plugin:"team/plugin",digest:"{digest}",correlation_field:"job_run",
                         outputs:[{{name:"echoed",collection:"Echoed",schema:"Echoed/v1",correlation_field:"run_ref",cardinality:"one",required:true}}]}}}}) {{_docID}}
                 create_EventSource(input: {{event_source_id:"jobs",agent_did:"{owner}",source_collection:"Job",event_kind:"created"}}) {{_docID}}
-                create_CallbackBinding(input: {{binding_id:"bind-echo",agent_did:"{owner}",event_source_id:"jobs",callback_id:"cb-echo",input_fields:["job_run","text","path"],enabled:true}}) {{_docID}}
+                create_CallbackBinding(input: {{binding_id:"bind-echo",agent_did:"{owner}",event_source_id:"jobs",callback_id:"cb-echo",input_fields:["job_run","text","path","origin"],enabled:true}}) {{_docID}}
             }}"#
         );
         let response = node.execute(&setup).await;
@@ -560,7 +561,12 @@ mod tests {
             only_invocation(&node).await["lifecycle_state"],
             LIFECYCLE_SUCCEEDED
         );
-        let echoed = rows(&node, "{ Echoed { path } }", "Echoed").await;
+        let echoed = rows(&node, "{ Echoed { path origin } }", "Echoed").await;
+        assert_eq!(
+            echoed[0]["origin"],
+            file.canonicalize().unwrap().to_str().unwrap(),
+            "the next stage is told the real path, not the link"
+        );
         let seen = echoed[0]["path"].as_str().unwrap();
         assert!(seen.ends_with("/a.txt"), "{seen}");
         assert_ne!(

@@ -68,29 +68,32 @@ pub fn desktop_plugin_approvals_pending(
                 "id": request.id,
                 "prompt": request.prompt(),
                 "folder": request.folder,
+                "path": request.path,
+                "isDir": request.is_dir,
                 "sessionId": request.session_id,
             }))
             .collect::<Vec<_>>()
     }))
 }
 
-/// Answers one question: `once`, `always` (also allows its folder from now
-/// on) or `deny`.
+/// Answers one question: `once`, `file` (also allows that exact file from now
+/// on), `always` (also allows its folder from now on) or `deny`.
 #[tauri::command]
 pub fn desktop_plugin_approval_decide(
     id: String,
     decision: String,
     state: State<'_, DesktopAppState>,
 ) -> Result<(), BridgeError> {
-    let (allow, always) = match decision.as_str() {
-        "once" => (true, false),
-        "always" => (true, true),
-        "deny" => (false, false),
+    let answer = match decision.as_str() {
+        "once" => approval::Answer::Once,
+        "file" => approval::Answer::AlwaysPath,
+        "always" => approval::Answer::AlwaysFolder,
+        "deny" => approval::Answer::Deny,
         other => {
             return Err(BridgeError::untyped(format!(
-                "{other:?} is not an answer; use once, always or deny"
+                "{other:?} is not an answer; use once, file, always or deny"
             )))
         }
     };
-    approval::decide(&home(&state)?, &id, allow, always).map_err(failed)
+    approval::decide(&home(&state)?, &id, answer).map_err(failed)
 }

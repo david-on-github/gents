@@ -4,11 +4,16 @@
 //! arguments) is untrusted. A call reads exactly what it names: one file is
 //! exposed alone, a folder as that folder. The path is reachable without a
 //! question when, symlinks resolved, it lies inside the session's working
-//! folder (read-only) or inside a folder in the operator's list. The list is
-//! one operator-owned file in the gents home, written by `gents plugin dirs`
-//! and the desktop "Allowed folders" panel; no pack, document or model writes
-//! it. Anything else needs the operator's approval for that call (see
-//! [`super::approval`]) or is refused. The gents home is never reachable.
+//! folder (read-only) or inside a folder or file in the operator's list. The
+//! working folder is only ever a specific folder: never `/`, the user's home
+//! or a folder holding either it or the gents home, because a server started
+//! from a launcher has one of those as its current directory and that must not
+//! make everything readable. The list is one operator-owned file in the gents
+//! home, written by `gents plugin dirs` and the desktop "Allowed folders"
+//! panel; the file tools refuse to write it (see [`protect`]), though a shell
+//! run as the same user can. Anything else needs the operator's approval for
+//! that call (see [`super::approval`]) or is refused. The gents home is never
+//! reachable.
 
 use std::path::{Path, PathBuf};
 
@@ -61,13 +66,17 @@ fn save(home: &Path, dirs: Vec<AllowedDir>) -> Result<()> {
     Ok(())
 }
 
-/// Allows `path` (an existing folder, stored in canonical form) with
-/// `access`, replacing any earlier entry for it.
+/// Allows `path` (an existing folder or one file, stored in canonical form)
+/// with `access`, replacing any earlier entry for it.
 pub fn add(home: &Path, path: &Path, access: BindAccess) -> Result<AllowedDir> {
     let path = path
         .canonicalize()
         .with_context(|| format!("{} does not exist or cannot be read", path.display()))?;
-    anyhow::ensure!(path.is_dir(), "{} is not a folder", path.display());
+    anyhow::ensure!(
+        path.is_dir() || path.is_file(),
+        "{} is not a file or folder",
+        path.display()
+    );
     let entry = AllowedDir { path, access };
     let mut dirs = list(home)?;
     dirs.retain(|existing| existing.path != entry.path);
@@ -148,6 +157,16 @@ pub fn resolve(
     })
 }
 
+/// Whether `dir` is too wide to be a working folder: the filesystem root, the
+/// user's home or a folder that holds it, or a folder that holds the gents home.
+fn too_broad(dir: &Path, user_home: Option<&Path>, gents_home: &Path) -> bool {
+    dir.parent().is_none()
+        || user_home.is_some_and(|home| home.starts_with(dir))
+        || gents_home
+            .canonicalize()
+            .is_ok_and(|home| home.starts_with(dir))
+}
+
 /// What a session reaches without asking: its working folder read-only and
 /// the operator's list.
 #[derive(Clone, Debug)]
@@ -156,9 +175,16 @@ pub struct Scope {
 }
 
 impl Scope {
-    pub fn load(gents_home: &Path, workdir: Option<&Path>) -> Result<Self> {
+    pub fn load(
+        gents_home: &Path,
+        workdir: Option<&Path>,
+        user_home: Option<&Path>,
+    ) -> Result<Self> {
         let mut entries = list(gents_home)?;
-        if let Some(workdir) = workdir.and_then(|dir| dir.canonicalize().ok()) {
+        let working = workdir
+            .and_then(|dir| dir.canonicalize().ok())
+            .filter(|dir| !too_broad(dir, user_home, gents_home));
+        if let Some(workdir) = working {
             entries.push(AllowedDir {
                 path: workdir,
                 access: BindAccess::Read,
@@ -183,15 +209,17 @@ impl Scope {
 }
 
 /// Binds `resolved` for one call with `access` of it: the folder itself, or
-/// the one file alone.
-pub fn bind(resolved: &Resolved, access: BindAccess) -> Result<BoundDir, String> {
+/// the one file alone. A file that cannot be linked is bound through its own
+/// folder (read-only) when `folder_allowed`, which holds only when the
+/// working folder or an allowed folder already covers it.
+pub fn bind(
+    resolved: &Resolved,
+    access: BindAccess,
+    folder_allowed: bool,
+) -> Result<BoundDir, String> {
+    let failed = |error: anyhow::Error| format!("{error:#}");
     if resolved.is_dir {
-        return Ok(BoundDir {
-            dir: resolved.target.clone(),
-            target: resolved.target.clone(),
-            access,
-            _private: None,
-        });
+        return BoundDir::folder(&resolved.target, access).map_err(failed);
     }
     if !resolved.target.is_file() {
         return Err(format!(
@@ -199,7 +227,50 @@ pub fn bind(resolved: &Resolved, access: BindAccess) -> Result<BoundDir, String>
             resolved.target.display()
         ));
     }
-    BoundDir::for_file(&resolved.target, access).map_err(|error| format!("{error:#}"))
+    match BoundDir::for_file(&resolved.target, access) {
+        Err(error)
+            if folder_allowed
+                && access == BindAccess::Read
+                && error.is::<super::bound::NotLinkable>() =>
+        {
+            BoundDir::beside(&resolved.target, access).map_err(failed)
+        }
+        Err(error) if error.is::<super::bound::NotLinkable>() => Err(format!(
+            "{error:#}; allow its folder with `gents plugin dirs add {}`",
+            resolved.folder().display()
+        )),
+        other => other.map_err(failed),
+    }
+}
+
+// vertexia: a plain mutex over a handful of paths read once per file-tool call; a lock-free set if that ever shows in a profile
+static PROTECTED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+
+/// Registers `home`'s allowed-folders file and approval queue as paths the
+/// agent's file tools must not write, so a model cannot answer its own
+/// question or widen its own access through them. A shell run as the same
+/// user is outside this guard, as it is outside every file the operator owns.
+pub fn protect(home: &Path) {
+    let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+    let paths = [
+        file(&home),
+        home.join(crate::home::PLUGIN_APPROVALS_DIR_NAME),
+    ];
+    if let Ok(mut protected) = PROTECTED.lock() {
+        for path in paths {
+            if !protected.contains(&path) {
+                protected.push(path);
+            }
+        }
+    }
+}
+
+/// Whether the file tools must refuse `path` (a registered file, or anything
+/// inside a registered folder).
+pub fn is_protected(path: &Path) -> bool {
+    PROTECTED
+        .lock()
+        .is_ok_and(|protected| protected.iter().any(|guarded| path.starts_with(guarded)))
 }
 
 #[cfg(test)]

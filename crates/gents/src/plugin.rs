@@ -71,7 +71,7 @@
 //!    precompiled artifact) is a hard `Err` from [`PluginRunner::compile`]
 //!    or [`PluginRunner::call`], never swallowed into a generic verdict.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 use afterburner::afb_run::{run_afb_bytes, AfbRunOutcome, AfbRunRequest};
@@ -465,12 +465,12 @@ impl PluginRunner {
             )
         })?;
         anyhow::ensure!(
-            bound.access >= bind_dir.access,
+            bound.access() >= bind_dir.access,
             "plugin {:?} needs {} access, but {} is only allowed {}",
             self.plugin.name,
             bind_dir.access.as_str(),
             bound.path().display(),
-            bound.access.as_str()
+            bound.access().as_str()
         );
         bound.recheck()?;
         let canonical = bound.target().to_str().with_context(|| {
@@ -491,6 +491,18 @@ impl PluginRunner {
             bind_dir.input_field.clone(),
             serde_json::Value::String(canonical.to_owned()),
         );
+        if let Some(field) = &bind_dir.original_field {
+            let original = bound.original().to_str().with_context(|| {
+                format!(
+                    "bound path {} is not valid UTF-8",
+                    bound.original().display()
+                )
+            })?;
+            object.insert(
+                field.clone(),
+                serde_json::Value::String(original.to_owned()),
+            );
+        }
         let roots = vec![bound.path().to_path_buf()];
         let manifold = Manifold {
             fs: match bind_dir.access {
@@ -626,155 +638,6 @@ fn plugin_run_request(stdin: Vec<u8>, manifold: Manifold, budget: &PluginBudget)
 /// observation, not a promise of byte-identical recomputation on another host.
 /// The macOS startup must select this same engine mode before installing handlers.
 const PLUGIN_NAN_MODE: NanMode = NanMode::Native;
-
-/// A single directory, or one file, admitted for one plugin call, never wider
-/// than the ceiling [`Self::new`]'s `within` names or what [`allowed::bind`]
-/// was granted.
-///
-/// A file is exposed alone: the guest's one preopen is a private directory
-/// that holds a hard link to the file and nothing else, so its siblings are
-/// invisible and no byte is copied. The private directory lives as long as
-/// the binding.
-///
-/// The inner paths are private: the only ways to build one are [`Self::new`]
-/// and [`allowed::bind`], which canonicalize and validate, so nothing
-/// downstream can hand [`PluginRunner::call_bound`] an unverified or
-/// non-canonical path. Binding grants nothing standing - it is authority for
-/// exactly one call, decided fresh by the call site that asks for it and
-/// never recorded in an install's `granted` manifold. Operator call sites
-/// (`gents plugin run --bind-dir`, a `gents pack test` case's own `bind`
-/// field, a scenario `prepare` step) name the directory themselves. A path
-/// that comes from data (a graph node's source document, a model's tool
-/// arguments) is bound only through [`allowed::bind`]: it must resolve
-/// inside the working folder or an allowed folder, or be approved by the
-/// operator for that one call.
-#[derive(Debug, Clone)]
-pub struct BoundDir {
-    dir: PathBuf,
-    target: PathBuf,
-    access: BindAccess,
-    /// Keeps the private folder of a single-file binding alive.
-    _private: Option<std::sync::Arc<tempfile::TempDir>>,
-}
-
-impl BoundDir {
-    /// Canonicalizes `requested` (resolving it against the process's
-    /// current directory first when it is relative, and resolving symlinks),
-    /// and requires it to be a directory. The operator named it, so it
-    /// permits whatever access the plugin declares.
-    ///
-    /// When `within` is given, the canonical path must have `within`'s own
-    /// canonical form as a component-wise prefix: a `..` or a symlink that
-    /// would otherwise step outside it is refused here, before any plugin
-    /// runs, rather than left to WASI's own preopen resolution (which
-    /// refuses it too, but only at read time, deep inside a call). `within`
-    /// is canonicalized independently so a host-specific symlink in its own
-    /// path (macOS's `/tmp` -> `/private/tmp`, for one) resolves the same
-    /// way on both sides of the comparison.
-    pub fn new(requested: &Path, within: Option<&Path>) -> Result<Self> {
-        let canonical = requested
-            .canonicalize()
-            .with_context(|| format!("{} does not exist or cannot be read", requested.display()))?;
-        anyhow::ensure!(
-            canonical.is_dir(),
-            "{} is not a directory",
-            canonical.display()
-        );
-        if let Some(within) = within {
-            let within = within.canonicalize().with_context(|| {
-                format!("{} does not exist or cannot be read", within.display())
-            })?;
-            anyhow::ensure!(
-                canonical.starts_with(&within),
-                "{} is outside {}, the only directory this call may bind",
-                canonical.display(),
-                within.display()
-            );
-        }
-        Ok(Self {
-            target: canonical.clone(),
-            dir: canonical,
-            access: BindAccess::ReadWrite,
-            _private: None,
-        })
-    }
-
-    /// Exposes the canonical regular file `file` alone through a private
-    /// directory holding a hard link to it. The directory is made on the
-    /// system temp volume, then beside the file when that is another
-    /// filesystem; a file that can be linked on neither is refused so the
-    /// caller can name its folder instead.
-    pub(crate) fn for_file(file: &Path, access: BindAccess) -> Result<Self> {
-        let name = file
-            .file_name()
-            .with_context(|| format!("{} has no file name", file.display()))?;
-        let mut last = None;
-        let beside = file.parent();
-        for base in [Some(std::env::temp_dir()), beside.map(Path::to_path_buf)]
-            .into_iter()
-            .flatten()
-        {
-            let private = tempfile::Builder::new()
-                .prefix(".gents-bind-")
-                .tempdir_in(&base)
-                .with_context(|| format!("creating a private folder in {}", base.display()))?;
-            let dir = private.path().canonicalize()?;
-            let link = dir.join(name);
-            match std::fs::hard_link(file, &link) {
-                Ok(()) => {
-                    return Ok(Self {
-                        dir,
-                        target: link,
-                        access,
-                        _private: Some(std::sync::Arc::new(private)),
-                    })
-                }
-                Err(error) => last = Some(error),
-            }
-        }
-        let error = last.map(|error| format!(": {error}")).unwrap_or_default();
-        anyhow::bail!(
-            "{} cannot be shared on its own{error}; name its folder instead",
-            file.display()
-        )
-    }
-
-    /// Fails when the directory or target is no longer the canonical path it
-    /// was validated as, for instance a component swapped for a symlink since
-    /// it was resolved. Run immediately before the preopen; a swap between
-    /// this check and the guest's first read remains possible, and only
-    /// WASI's own preopen resolution contains it then.
-    pub fn recheck(&self) -> Result<()> {
-        for path in [&self.dir, &self.target] {
-            let now = path.canonicalize().with_context(|| {
-                format!("{} no longer exists or cannot be read", path.display())
-            })?;
-            anyhow::ensure!(
-                &now == path,
-                "{} now resolves to {}; the bound path changed after it was validated",
-                path.display(),
-                now.display()
-            );
-        }
-        Ok(())
-    }
-
-    /// The canonical, absolute directory this binding grants access to.
-    pub fn path(&self) -> &Path {
-        &self.dir
-    }
-
-    /// The canonical path the plugin's input field carries: the directory
-    /// itself, or the one file inside it the caller named.
-    pub fn target(&self) -> &Path {
-        &self.target
-    }
-
-    /// The most access a plugin may use of this directory.
-    pub fn access(&self) -> BindAccess {
-        self.access
-    }
-}
 
 /// Creates Afterburner's first Wasmtime engine on a thread that blocks every
 /// signal, before any plugin runs.
@@ -1080,6 +943,8 @@ fn narrow_manifold(declared: &Manifold, ceiling: &Manifold) -> Manifold {
 pub mod allowed;
 pub mod approval;
 pub mod authority;
+mod bound;
+pub use bound::BoundDir;
 
 /// The attempts a plugin call gets in all when its caller configured
 /// `max_attempts`: absent, or zero, is one.

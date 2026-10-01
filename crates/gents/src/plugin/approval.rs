@@ -21,6 +21,16 @@ use crate::pack::BindAccess;
 /// How long a call waits for an answer before it gives up and fails.
 pub const WAIT: Duration = Duration::from_secs(10 * 60);
 
+/// How long a listener's last poll still counts as someone listening.
+const LISTENER_FRESH: Duration = Duration::from_secs(15);
+
+/// How long a call waits for a first listener before it fails for want of one.
+const LISTENER_GRACE: Duration = if cfg!(test) {
+    Duration::from_millis(150)
+} else {
+    Duration::from_secs(5)
+};
+
 tokio::task_local! {
     static INTERACTIVE: ();
 }
@@ -33,6 +43,15 @@ pub async fn scope_interactive<F: std::future::Future>(interactive: bool, future
     } else {
         future.await
     }
+}
+
+/// Wraps `future` for a task about to be spawned: the spawned task starts with
+/// no task-locals, so the caller's interactivity is read now and re-applied
+/// there. Every spawn on a tool call's path goes through this.
+pub fn carry_interactive<F: std::future::Future>(
+    future: F,
+) -> impl std::future::Future<Output = F::Output> {
+    scope_interactive(interactive(), future)
 }
 
 /// Whether the running call came from an interactive chat.
@@ -49,6 +68,9 @@ pub struct Request {
     pub path: String,
     /// The folder "always allow" remembers.
     pub folder: PathBuf,
+    /// Whether the path is a folder, so "always allow this file" is the folder.
+    #[serde(default)]
+    pub is_dir: bool,
     pub access: BindAccess,
     #[serde(default)]
     pub session_id: Option<String>,
@@ -67,6 +89,7 @@ impl Request {
             plugin: plugin.to_owned(),
             path: resolved.target.display().to_string(),
             folder: resolved.folder().to_path_buf(),
+            is_dir: resolved.is_dir,
             access,
             session_id,
             created_at_ms: now_ms(),
@@ -83,9 +106,48 @@ impl Request {
     }
 }
 
+/// The operator's answer to one question.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Answer {
+    /// This call only.
+    Once,
+    /// This call, and the exact file from now on (the folder when the path is one).
+    AlwaysPath,
+    /// This call, and the whole folder holding the path from now on.
+    AlwaysFolder,
+    Deny,
+}
+
 #[derive(Serialize, Deserialize)]
 struct Decision {
     allow: bool,
+}
+
+fn listener_file(home: &Path) -> PathBuf {
+    dir(home).join(".listening")
+}
+
+/// Marks `home` as having someone who answers questions, by touching a file.
+fn mark_listening(home: &Path) -> Result<()> {
+    let path = listener_file(home);
+    std::fs::create_dir_all(dir(home)).context("creating the approval queue")?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&path)
+        .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .with_context(|| format!("marking {} as listening", path.display()))
+}
+
+fn listener_fresh(home: &Path) -> bool {
+    std::fs::metadata(listener_file(home))
+        .and_then(|meta| meta.modified())
+        .is_ok_and(|modified| {
+            std::time::SystemTime::now()
+                .duration_since(modified)
+                .map_or(true, |age| age < LISTENER_FRESH)
+        })
 }
 
 fn now_ms() -> u64 {
@@ -140,7 +202,8 @@ pub async fn ask(home: &Path, request: &Request, wait: Duration) -> Result<bool>
         home,
         id: &request.id,
     };
-    let deadline = tokio::time::Instant::now() + wait;
+    let started = tokio::time::Instant::now();
+    let deadline = started + wait;
     let mut pause = Duration::from_millis(20);
     loop {
         match std::fs::read(decision_file(home, &request.id)) {
@@ -156,14 +219,21 @@ pub async fn ask(home: &Path, request: &Request, wait: Duration) -> Result<bool>
             tokio::time::Instant::now() < deadline,
             "the operator did not answer in time"
         );
+        anyhow::ensure!(
+            started.elapsed() < LISTENER_GRACE || listener_fresh(home),
+            "no chat or desktop on this server's home is listening to answer; allow it with `gents plugin dirs add {}`",
+            request.folder.display()
+        );
         tokio::time::sleep(pause).await;
         pause = (pause * 2).min(Duration::from_millis(250));
     }
 }
 
 /// The unanswered questions, oldest first. A question older than [`WAIT`]
-/// belongs to a call that already gave up and is skipped.
+/// belongs to a call that already gave up and is skipped. Listing marks the
+/// caller as listening for [`ask`].
 pub fn pending(home: &Path) -> Result<Vec<Request>> {
+    mark_listening(home)?;
     let entries = match std::fs::read_dir(dir(home)) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -191,9 +261,10 @@ pub fn pending(home: &Path) -> Result<Vec<Request>> {
     Ok(requests)
 }
 
-/// Answers question `id`. With `always` an allow also adds the question's
-/// folder to the operator's list, keeping any wider access it already has.
-pub fn decide(home: &Path, id: &str, allow: bool, always: bool) -> Result<()> {
+/// Answers question `id`. An allow with [`Answer::AlwaysPath`] or
+/// [`Answer::AlwaysFolder`] also adds that file or folder to the operator's
+/// list, keeping any wider access it already has.
+pub fn decide(home: &Path, id: &str, answer: Answer) -> Result<()> {
     anyhow::ensure!(
         id.chars().all(|c| c.is_ascii_alphanumeric()),
         "{id:?} is not a question id"
@@ -201,20 +272,23 @@ pub fn decide(home: &Path, id: &str, allow: bool, always: bool) -> Result<()> {
     let bytes = std::fs::read(request_file(home, id))
         .with_context(|| format!("question {id} is not waiting for an answer"))?;
     let request: Request = serde_json::from_slice(&bytes).context("the question is unreadable")?;
-    if allow && always {
+    let remembered = match answer {
+        Answer::AlwaysPath if !request.is_dir => Some(PathBuf::from(&request.path)),
+        Answer::AlwaysPath | Answer::AlwaysFolder => Some(request.folder.clone()),
+        Answer::Once | Answer::Deny => None,
+    };
+    if let Some(path) = remembered {
         let held = allowed::list(home)?
             .into_iter()
-            .find(|entry| entry.path == request.folder)
+            .find(|entry| entry.path == path)
             .map(|entry| entry.access);
-        allowed::add(
-            home,
-            &request.folder,
-            request.access.max(held.unwrap_or_default()),
-        )?;
+        allowed::add(home, &path, request.access.max(held.unwrap_or_default()))?;
     }
     write_atomic(
         &decision_file(home, id),
-        &serde_json::to_vec(&Decision { allow })?,
+        &serde_json::to_vec(&Decision {
+            allow: answer != Answer::Deny,
+        })?,
     )
 }
 

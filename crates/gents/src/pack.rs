@@ -22,7 +22,7 @@ pub use installation::{
     InstallReport, InstalledPack, InstalledPackPlugin, PackIdentity, RemoveReport, Retained,
 };
 pub(crate) use installation::{observe_graph_install_in_txn, record_graph_install_in_txn};
-pub use loader::{decode_pack_config, load_pack_config};
+pub use loader::{decode_pack_config, load_pack_config, pin_pack_plugins};
 pub(crate) use provenance::{pack_artifact_document_digest, prepare_pack_plan_in_txn};
 pub use provenance::{pack_document_digests, pack_origin_from_tags, pack_origin_tag};
 
@@ -226,6 +226,13 @@ pub struct PluginDirBinding {
     /// canonical bound path, so a plugin can never point itself at a
     /// different directory than the one its caller named.
     pub input_field: String,
+    /// A second string property of `input_schema` that the call fills with the
+    /// canonical path the caller named, overwriting anything passed. For a
+    /// single file `input_field` holds a short-lived link to it, so a plugin
+    /// that hands the path on (a graph node writing the next stage's input)
+    /// reads the real one here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_field: Option<String>,
     /// Shown to an operator deciding whether to bind this plugin.
     pub description: String,
     /// `read` (the default) or `read_write`. A caller may bind it only
@@ -400,6 +407,16 @@ impl PackPlugin {
                 self.name,
                 bind_dir.input_field
             );
+            if let Some(original) = &bind_dir.original_field {
+                anyhow::ensure!(
+                    original != &bind_dir.input_field
+                        && schema_declares_string_property(&self.input_schema, original),
+                    "plugin {:?} bind_dir.original_field {:?} must be a string property of \
+                     input_schema other than input_field",
+                    self.name,
+                    original
+                );
+            }
             // The directory a caller binds is authority granted fresh at
             // every call (see `crate::plugin::BoundDir`), never a standing
             // one; a plugin that also declared its own `fs` grant would
@@ -998,6 +1015,7 @@ mod tests {
             input_schema: serde_json::json!({"type": "object", "properties": {"root": {"type": "string"}}}),
             bind_dir: Some(PluginDirBinding {
                 input_field: "root".to_owned(),
+                original_field: None,
                 description: "the directory to scan".to_owned(),
                 access: BindAccess::Read,
             }),
@@ -1035,6 +1053,23 @@ mod tests {
         missing.input_schema = serde_json::json!({"type": "object"});
         let error = missing.validate().expect_err("root is not declared");
         assert!(format!("{error:#}").contains("root"));
+    }
+
+    #[test]
+    fn bind_dir_original_field_is_a_second_string_property() {
+        let mut plugin = bindable_plugin();
+        plugin.input_schema = serde_json::json!({"type": "object", "properties": {
+            "root": {"type": "string"}, "root_original": {"type": "string"}}});
+        plugin.bind_dir.as_mut().unwrap().original_field = Some("root_original".into());
+        plugin
+            .validate()
+            .expect("a declared second string property");
+
+        plugin.bind_dir.as_mut().unwrap().original_field = Some("root".into());
+        assert!(plugin.validate().is_err(), "it cannot be the input field");
+        plugin.bind_dir.as_mut().unwrap().original_field = Some("elsewhere".into());
+        let error = plugin.validate().expect_err("it must be declared");
+        assert!(format!("{error:#}").contains("original_field"));
     }
 
     #[test]

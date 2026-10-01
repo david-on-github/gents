@@ -23,6 +23,7 @@ pub(crate) fn installed_plugin(
     let (mut declaration, bytes) = build_plugin_pack("echo_pack", wat, None);
     declaration.bind_dir = access.map(|access| crate::pack::PluginDirBinding {
         input_field: "path".into(),
+        original_field: None,
         description: "a directory".into(),
         access,
     });
@@ -56,7 +57,8 @@ fn tool_ref(digest: Option<&str>) -> PluginToolRef {
 async fn a_model_tool_runs_the_installed_plugin_with_its_declared_schema() {
     let (home, record) = installed_echo();
     let executor = Arc::new(PluginExecutor::new(Some(home.path().to_owned())));
-    let tool = PluginTool::resolve(executor.clone(), &tool_ref(Some(&record.digest))).unwrap();
+    let tool =
+        PluginTool::resolve(executor.clone(), &tool_ref(Some(&record.digest)), None).unwrap();
 
     let definition = tool.definition(String::new()).await;
     assert_eq!(definition.name, "plugin");
@@ -79,7 +81,7 @@ fn a_pin_that_no_longer_matches_the_installed_plugin_is_refused() {
     let (home, _) = installed_echo();
     let executor = Arc::new(PluginExecutor::new(Some(home.path().to_owned())));
     let stale = format!("sha256:{}", "0".repeat(64));
-    let error = PluginTool::resolve(executor, &tool_ref(Some(&stale)))
+    let error = PluginTool::resolve(executor, &tool_ref(Some(&stale)), None)
         .err()
         .expect("a stale pin must not resolve");
     assert!(format!("{error:#}").contains("not the pinned"), "{error:#}");
@@ -169,7 +171,7 @@ mod bound {
 
     fn tool_for(home: &tempfile::TempDir, record: &InstalledPlugin) -> PluginTool {
         let executor = Arc::new(PluginExecutor::new(Some(home.path().to_owned())));
-        PluginTool::resolve(executor, &tool_ref(Some(&record.digest))).unwrap()
+        PluginTool::resolve(executor, &tool_ref(Some(&record.digest)), None).unwrap()
     }
 
     fn args(path: &std::path::Path) -> String {
@@ -208,11 +210,16 @@ mod bound {
         allow: bool,
         always: bool,
     ) -> tokio::task::JoinHandle<String> {
+        let answer = match (allow, always) {
+            (false, _) => approval::Answer::Deny,
+            (true, false) => approval::Answer::Once,
+            (true, true) => approval::Answer::AlwaysFolder,
+        };
         let home = home.to_owned();
         tokio::spawn(async move {
             loop {
                 if let Some(request) = approval::pending(&home).unwrap().into_iter().next() {
-                    approval::decide(&home, &request.id, allow, always).unwrap();
+                    approval::decide(&home, &request.id, answer).unwrap();
                     return request.prompt();
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -339,9 +346,12 @@ mod bound {
             let error = in_session(&tool, &through, &work, false).await.unwrap_err();
             assert!(error.contains("gents plugin dirs add"), "{error}");
         }
-        assert!(refusal(&tool, std::path::Path::new("relative/x"))
-            .await
-            .contains("does not exist"));
+        assert!(
+            refusal(&tool, std::path::Path::new("relative/x"))
+                .await
+                .contains("give the full path"),
+            "no working folder, so a relative path has nothing to start from"
+        );
         assert!(refusal(&tool, &fx.root.join("work/missing"))
             .await
             .contains("does not exist"));
@@ -416,5 +426,121 @@ mod bound {
             .unwrap_err();
         assert!(error.contains("gents plugin dirs add"), "{error}");
         assert!(approval::pending(fx.home.path()).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_dispatched_call_on_a_spawned_task_files_a_question_the_decision_unblocks() {
+        let fx = fixture(&open_and_copy_wat("in.json", 0), BindAccess::Read);
+        let tool = Arc::new(tool_for(&fx.home, &fx.record));
+        let work = fx.root.join("work");
+        let target = fx.root.join("outside/in.json");
+        let home = fx.home.path().to_owned();
+        let queue = home.join(crate::home::PLUGIN_APPROVALS_DIR_NAME);
+        let call = scope_request_tool_execution_with_workspace_overlay(
+            None,
+            tokio_util::sync::CancellationToken::new(),
+            ToolWorkspaceScope::cwd_only(Some(work.clone())),
+            None,
+            Some("session-1".into()),
+            None,
+            Default::default(),
+            false,
+            approval::scope_interactive(true, async {
+                // The way a background tool call leaves the chat's task.
+                tokio::spawn(approval::carry_interactive(
+                    scope_request_tool_execution_with_workspace_overlay(
+                        None,
+                        tokio_util::sync::CancellationToken::new(),
+                        ToolWorkspaceScope::cwd_only(Some(work)),
+                        None,
+                        Some("session-1".into()),
+                        None,
+                        Default::default(),
+                        false,
+                        async move {
+                            crate::tool_call_lifecycle::runtime::call_tool_managed(
+                                tool.as_ref(),
+                                args(&target),
+                            )
+                            .await
+                        },
+                    ),
+                ))
+                .await
+                .unwrap()
+            }),
+        );
+        let operator = async {
+            let request = loop {
+                if let Some(request) = approval::pending(&home).unwrap().into_iter().next() {
+                    break request;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            };
+            assert!(queue.join(format!("{}.json", request.id)).is_file());
+            approval::decide(&home, &request.id, approval::Answer::Once).unwrap();
+            assert!(queue.join(format!("{}.decision", request.id)).is_file());
+        };
+        let (outcome, ()) = tokio::join!(call, operator);
+        assert!(
+            matches!(&outcome, crate::tool_call_lifecycle::ToolOutcome::Completed(text) if text == r#"{"read":true}"#),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_tool_root_is_the_working_folder_only_when_the_session_has_none_of_its_own() {
+        let fx = fixture(&open_and_copy_wat("in.json", 0), BindAccess::Read);
+        let executor = PluginExecutor::new(Some(fx.home.path().to_owned()));
+        let input = serde_json::json!({ "path": fx.root.join("work/in.json") });
+        let work = fx.root.join("work");
+        let call = executor
+            .call_data_bound(&fx.record, input.clone(), Some(&work))
+            .await
+            .unwrap();
+        assert_eq!(call.outcome.output, serde_json::json!({ "read": true }));
+        let error = executor
+            .call_data_bound(&fx.record, input, None)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("gents plugin dirs add"),
+            "{error:#}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_declared_original_field_carries_the_real_path_of_a_single_file() {
+        let (home, mut record) = installed_plugin(ECHO_WAT, Some(BindAccess::Read));
+        record.declaration.bind_dir.as_mut().unwrap().original_field = Some("path_original".into());
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        std::fs::write(root.join("a.txt"), "a").unwrap();
+        let executor = PluginExecutor::new(Some(home.path().to_owned()));
+        let input = serde_json::json!({
+            "path": root.join("a.txt"),
+            "path_original": "/spoofed",
+        });
+        let call = executor
+            .call_data_bound(&record, input, Some(&root))
+            .await
+            .unwrap();
+        let seen = &call.outcome.output;
+        assert_eq!(seen["path_original"], root.join("a.txt").to_str().unwrap());
+        let linked = seen["path"].as_str().unwrap();
+        assert!(
+            linked.ends_with("/a.txt") && !linked.starts_with(root.to_str().unwrap()),
+            "{linked}"
+        );
+
+        let folder = serde_json::json!({ "path": root });
+        let call = executor
+            .call_data_bound(&record, folder, Some(&root))
+            .await
+            .unwrap();
+        assert_eq!(
+            call.outcome.output["path"],
+            call.outcome.output["path_original"]
+        );
     }
 }

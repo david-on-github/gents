@@ -68,13 +68,13 @@ fn resolve_never_reaches_the_gents_home_or_a_folder_holding_it() {
 fn the_workdir_is_read_only_and_the_list_adds_folders() {
     let world = world();
     let work = world.root.join("work");
-    let scope = Scope::load(&world.gents, Some(&work)).unwrap();
+    let scope = Scope::load(&world.gents, Some(&work), Some(&world.root)).unwrap();
     assert_eq!(scope.granted(&work.join("a.txt")), Some(BindAccess::Read));
     assert_eq!(scope.granted(&world.root.join("docs/x.pdf")), None);
 
     add(&world.gents, &world.root.join("docs"), BindAccess::Read).unwrap();
     add(&world.gents, &work, BindAccess::ReadWrite).unwrap();
-    let scope = Scope::load(&world.gents, Some(&work)).unwrap();
+    let scope = Scope::load(&world.gents, Some(&work), Some(&world.root)).unwrap();
     assert_eq!(
         scope.granted(&world.root.join("docs/x.pdf")),
         Some(BindAccess::Read)
@@ -90,7 +90,7 @@ fn the_workdir_is_read_only_and_the_list_adds_folders() {
 fn dot_dot_and_symlinks_resolve_before_the_scope_check() {
     let world = world();
     let work = world.root.join("work");
-    let scope = Scope::load(&world.gents, Some(&work)).unwrap();
+    let scope = Scope::load(&world.gents, Some(&work), Some(&world.root)).unwrap();
     let escaped = resolved(&world, "../outside/o.txt").unwrap();
     assert_eq!(escaped.target, world.root.join("outside/o.txt"));
     assert_eq!(scope.granted(&escaped.target), None);
@@ -119,10 +119,18 @@ fn the_list_adds_replaces_and_removes_folders() {
     );
     assert!(add(
         &world.gents,
-        &world.root.join("docs/x.pdf"),
+        &world.root.join("docs/missing.pdf"),
         BindAccess::Read
     )
     .is_err());
+    let file = add(
+        &world.gents,
+        &world.root.join("docs/x.pdf"),
+        BindAccess::Read,
+    )
+    .unwrap();
+    assert_eq!(file.path, world.root.join("docs/x.pdf"));
+    assert!(remove(&world.gents, &file.path).unwrap());
     assert!(remove(&world.gents, &docs).unwrap());
     assert!(!remove(&world.gents, &docs).unwrap());
 }
@@ -130,7 +138,7 @@ fn the_list_adds_replaces_and_removes_folders() {
 #[test]
 fn a_folder_binds_as_itself() {
     let world = world();
-    let bound = bind(&resolved(&world, "sub").unwrap(), BindAccess::Read).unwrap();
+    let bound = bind(&resolved(&world, "sub").unwrap(), BindAccess::Read, true).unwrap();
     assert_eq!(bound.path(), world.root.join("work/sub"));
     assert_eq!(bound.target(), world.root.join("work/sub"));
     assert_eq!(bound.access(), BindAccess::Read);
@@ -142,7 +150,7 @@ fn a_file_binds_alone_through_a_hard_link_not_a_copy() {
     use std::os::unix::fs::MetadataExt;
     let world = world();
     let file = world.root.join("work/a.txt");
-    let bound = bind(&resolved(&world, "a.txt").unwrap(), BindAccess::Read).unwrap();
+    let bound = bind(&resolved(&world, "a.txt").unwrap(), BindAccess::Read, true).unwrap();
     let names: Vec<_> = std::fs::read_dir(bound.path())
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
@@ -170,10 +178,54 @@ fn a_file_binds_alone_through_a_hard_link_not_a_copy() {
 #[test]
 fn the_recheck_catches_a_binding_whose_target_was_swapped() {
     let world = world();
-    let bound = bind(&resolved(&world, "sub").unwrap(), BindAccess::Read).unwrap();
+    let bound = bind(&resolved(&world, "sub").unwrap(), BindAccess::Read, true).unwrap();
     bound.recheck().unwrap();
-    let file = bind(&resolved(&world, "a.txt").unwrap(), BindAccess::Read).unwrap();
+    let file = bind(&resolved(&world, "a.txt").unwrap(), BindAccess::Read, true).unwrap();
     file.recheck().unwrap();
     std::fs::remove_file(file.target()).unwrap();
     assert!(file.recheck().is_err());
+}
+
+#[test]
+fn a_working_folder_that_is_the_root_the_home_or_holds_either_is_not_allowed() {
+    let world = world();
+    let user_home = world.root.join("docs");
+    let gents_home = world.gents.clone();
+    for broad in [
+        PathBuf::from("/"),
+        user_home.clone(),
+        world.root.clone(),
+        user_home.parent().unwrap().to_path_buf(),
+    ] {
+        let scope = Scope::load(&gents_home, Some(&broad), Some(&user_home)).unwrap();
+        assert_eq!(
+            scope.granted(&user_home.join("x.pdf")),
+            None,
+            "{} must not be auto-allowed",
+            broad.display()
+        );
+        assert_eq!(scope.granted(&world.root.join("outside/o.txt")), None);
+    }
+    let work = world.root.join("work");
+    let scope = Scope::load(&gents_home, Some(&work), Some(&user_home)).unwrap();
+    assert_eq!(scope.granted(&work.join("a.txt")), Some(BindAccess::Read));
+    let own_folder = Scope::load(&gents_home, Some(&work.join("sub")), None).unwrap();
+    assert_eq!(own_folder.granted(&work.join("a.txt")), None);
+}
+
+#[test]
+fn the_file_tools_refuse_the_allowed_folders_file_and_the_approval_queue() {
+    let world = world();
+    protect(&world.gents);
+    assert!(is_protected(
+        &world.gents.join(crate::home::ALLOWED_DIRS_FILE_NAME)
+    ));
+    assert!(is_protected(
+        &world
+            .gents
+            .join(crate::home::PLUGIN_APPROVALS_DIR_NAME)
+            .join("q.decision")
+    ));
+    assert!(!is_protected(&world.gents.join("plugins/x")));
+    assert!(!is_protected(&world.root.join("work/a.txt")));
 }

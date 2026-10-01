@@ -199,6 +199,7 @@ mod tests {
         let mut declaration = plugin(None);
         declaration.bind_dir = Some(crate::pack::PluginDirBinding {
             input_field: "root".to_owned(),
+            original_field: None,
             description: "The directory to scan".to_owned(),
             access: Default::default(),
         });
@@ -220,6 +221,7 @@ mod tests {
         let mut declaration = plugin(None);
         declaration.bind_dir = Some(crate::pack::PluginDirBinding {
             input_field: "root".to_owned(),
+            original_field: None,
             description: "scan target".to_owned(),
             access: Default::default(),
         });

@@ -14,6 +14,7 @@ const question = {
   id: "q1",
   prompt: "Allow team/ocr to read /data/x.pdf?",
   folder: "/data",
+  isDir: false,
 };
 
 describe("PluginAccessPrompt", () => {
@@ -30,7 +31,8 @@ describe("PluginAccessPrompt", () => {
 
   it.each([
     ["Allow once", "once"],
-    ["Always allow", "always"],
+    ["Always allow this file", "file"],
+    ["Always allow this folder", "always"],
     ["Deny", "deny"],
   ])("sends %s as %s", async (label, decision) => {
     call.mockImplementation(async (command: string) =>

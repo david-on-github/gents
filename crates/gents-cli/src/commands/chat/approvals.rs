@@ -6,20 +6,15 @@ use std::io::{IsTerminal, Write};
 use std::path::Path;
 
 use anyhow::Result;
-use gents::plugin::approval::{self, Request};
+use gents::plugin::approval::{self, Answer, Request};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Answer {
-    Once,
-    Always,
-    Deny,
-}
-
-/// `o` allows once, `a` always, anything else (an empty line included) denies.
+/// `o` allows once, `f` always this file, `a` always the folder, anything
+/// else (an empty line included) denies.
 pub(super) fn parse_answer(line: &str) -> Answer {
     match line.trim().to_ascii_lowercase().as_str() {
         "o" | "once" | "y" | "yes" => Answer::Once,
-        "a" | "always" => Answer::Always,
+        "f" | "file" => Answer::AlwaysPath,
+        "a" | "always" | "folder" => Answer::AlwaysFolder,
         _ => Answer::Deny,
     }
 }
@@ -52,12 +47,7 @@ pub(super) fn answer_pending(
         }
         asked = true;
         let answer = read(&request);
-        approval::decide(
-            home,
-            &request.id,
-            answer != Answer::Deny,
-            answer == Answer::Always,
-        )?;
+        approval::decide(home, &request.id, answer)?;
     }
     Ok(asked)
 }
@@ -70,8 +60,13 @@ pub(super) fn ask_on_terminal(request: &Request) -> Answer {
         return Answer::Deny;
     }
     println!("{}", request.prompt());
+    let file = if request.is_dir {
+        String::new()
+    } else {
+        "  [f] always allow this file".to_owned()
+    };
     print!(
-        "[o] allow once  [a] always allow {}  [d] deny (default) > ",
+        "[o] allow once{file}  [a] always allow the folder {}  [d] deny (default) > ",
         request.folder.display()
     );
     let _ = std::io::stdout().flush();
@@ -91,7 +86,8 @@ mod tests {
     #[test]
     fn answers_parse_and_default_to_deny() {
         assert_eq!(parse_answer("o\n"), Answer::Once);
-        assert_eq!(parse_answer(" Always "), Answer::Always);
+        assert_eq!(parse_answer(" Always "), Answer::AlwaysFolder);
+        assert_eq!(parse_answer("f"), Answer::AlwaysPath);
         assert_eq!(parse_answer("yes"), Answer::Once);
         assert_eq!(parse_answer(""), Answer::Deny);
         assert_eq!(parse_answer("whatever"), Answer::Deny);
@@ -119,7 +115,7 @@ mod tests {
         let mut seen = Vec::new();
         let asked = answer_pending(home.path(), "s1", |request| {
             seen.push(request.id.clone());
-            Answer::Always
+            Answer::AlwaysFolder
         })
         .unwrap();
         assert!(asked);

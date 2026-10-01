@@ -29,8 +29,9 @@ struct Admitted {
     bytes: u64,
 }
 
-/// What a data-chosen path is checked against: the session's working folder,
-/// and whether the operator can be asked about a path outside the allowed
+/// What a data-chosen path is checked against: the session's working folder
+/// (`None` when the session has no explicit one; the folder is also ignored
+/// when it is too broad, see [`allowed`]), and whether the operator can be asked about a path outside the allowed
 /// folders (`interactive`, set by an interactive chat's calls).
 pub struct BindContext<'a> {
     pub workdir: Option<&'a Path>,
@@ -105,6 +106,9 @@ impl Default for PluginExecutor {
 impl PluginExecutor {
     /// Plugins installed under `home`; `None` has none installed.
     pub fn new(home: Option<PathBuf>) -> Self {
+        if let Some(home) = &home {
+            allowed::protect(home);
+        }
         Self {
             home,
             admitted: kovan_map::HopscotchMap::new(),
@@ -145,10 +149,11 @@ impl PluginExecutor {
         let user_home = allowed::user_home();
         let resolved = allowed::resolve(requested, context.workdir, user_home.as_deref(), home)
             .map_err(refuse)?;
-        let scope = allowed::Scope::load(home, context.workdir)
+        let scope = allowed::Scope::load(home, context.workdir, user_home.as_deref())
             .map_err(|error| refuse(format!("{error:#}")))?;
         let granted = scope.granted(&resolved.target);
-        if granted.is_none_or(|granted| granted < binding.access) {
+        let covered = granted.is_some_and(|granted| granted >= binding.access);
+        if !covered {
             let allowed = context.interactive && {
                 let request = approval::Request::new(
                     &plugin,
@@ -164,23 +169,26 @@ impl PluginExecutor {
                 return Err(refuse(not_allowed(&resolved, binding.access, context)));
             }
         }
-        allowed::bind(&resolved, binding.access)
+        allowed::bind(&resolved, binding.access, covered)
             .map(Some)
             .map_err(refuse)
     }
 
     /// [`Self::call`] for a model tool: binds the path the model named under
-    /// the ambient session, then runs.
+    /// the ambient session, then runs. The working folder is the session's
+    /// workspace folder, else `tool_root`, the root the operator gave the
+    /// agent's file tools; never the process's own current directory.
     pub async fn call_data_bound(
         &self,
         record: &InstalledPlugin,
         input: serde_json::Value,
+        tool_root: Option<&Path>,
     ) -> Result<PluginCall> {
         let session = crate::tool_call_lifecycle::runtime::current_tool_runtime_context();
         let workdir = session
             .as_ref()
             .and_then(|context| context.workspace_cwd.clone())
-            .or_else(|| std::env::current_dir().ok());
+            .or_else(|| tool_root.map(Path::to_path_buf));
         let session_id = session.and_then(|context| context.session_id);
         let context = BindContext {
             workdir: workdir.as_deref(),
