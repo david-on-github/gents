@@ -383,6 +383,7 @@ async fn seed_interrupted_echo_invocation(
         None,
         "input",
         json!({ "payload": "hello" }),
+        EntryInputOrigin::Operator,
     )
     .await
     .unwrap();

@@ -263,6 +263,7 @@ pub(crate) mod test_support {
         )
         .unwrap_or_else(|error| panic!("fixture {name:?} manifest: {error}"));
         let artifacts: std::collections::BTreeSet<&str> = manifest
+            .metadata
             .plugins
             .iter()
             .map(|plugin| plugin.artifact.as_str())

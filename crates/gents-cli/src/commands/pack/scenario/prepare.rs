@@ -294,9 +294,12 @@ mod tests {
             instructions: None,
             bind_dir: bind_dir.then(|| gents::pack::PluginDirBinding {
                 input_field: "root".to_string(),
+                original_field: None,
                 description: "scan target".to_string(),
+                access: Default::default(),
             }),
             limits: None,
+            model_slot: None,
         }
     }
 

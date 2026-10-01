@@ -680,6 +680,7 @@ mod tests {
             OWNER.to_owned(),
             None,
             &config,
+            std::sync::Arc::new(crate::plugin::executor::PluginExecutor::default()),
         )
         .iter()
         .any(|tool| tool.name() == PREVIEW_GRAPH_TOOL_NAME));

@@ -1010,7 +1010,7 @@ async fn run_graph_prepares_host_input_under_the_effective_root() {
         .clone()
         .expect("the fixture entry prepares");
     let plugin_home = tempfile::tempdir().expect("plugin home");
-    let declaration = package.manifest.plugins[0].clone();
+    let declaration = package.manifest.metadata.plugins[0].clone();
     let afb = package
         .asset(&declaration.artifact)
         .expect("the plugin artifact")
@@ -1031,6 +1031,7 @@ async fn run_graph_prepares_host_input_under_the_effective_root() {
             instructions: None,
             owner_pack_coordinate: None,
             owner_pack_digest: None,
+            model_binding: None,
         },
     )
     .expect("record the plugin");
@@ -4533,7 +4534,13 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     grants.behavior_id = "setup".into();
     grants.preview = true;
     grants.no_lockout = true;
-    let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &grants);
+    let tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity),
+        &grants,
+        test_plugins(),
+    );
     let command = |args: &[&str]| args.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
     let ok = |result: Result<String, String>| -> Value {
         serde_json::from_str(&result.unwrap_or_else(|error| panic!("{error}"))).unwrap()
@@ -4940,7 +4947,7 @@ async fn backend_reads_expose_operator_catalogs_without_credentials_or_provider_
     let mut tool_config = config(&["backend"]);
     tool_config.behavior_id = "setup".into();
     tool_config.preview = true;
-    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config);
+    let tools = build_self_config_tools(node, owner, Some(identity), &tool_config, test_plugins());
     let call = |argv: &[&str]| {
         let argv = std::iter::once("backend")
             .chain(argv.iter().copied())
