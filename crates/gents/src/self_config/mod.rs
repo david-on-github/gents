@@ -2020,7 +2020,7 @@ impl PackInstaller {
         )
         .await?;
         let effective = self
-            .installed(&receipt.package_name)
+            .installed(distribution.manifest())
             .await?
             .context("installed package is not discoverable after activation")?;
         anyhow::ensure!(

@@ -223,9 +223,10 @@ fn graph_fixture_loads_slot_authoring_and_literal_prompt_assets() {
 #[test]
 fn every_fixture_pack_that_ships_a_config_loads_it_cleanly() {
     for name in crate::support::fixtures::fixture_pack_names() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/packs")
-            .join(&name);
+        // The copy carries a built stand-in for each plugin artifact the
+        // fixture declares; the repository holds none.
+        let (_guard, copy) = crate::test_support::fixture_pack_copy(&name, &json!({}));
+        let root = copy;
         let manifest: PackManifest =
             serde_json::from_slice(&std::fs::read(root.join("manifest.json")).unwrap())
                 .unwrap_or_else(|error| panic!("{name} manifest: {error}"));

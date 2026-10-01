@@ -717,6 +717,31 @@ async fn pack_list_pages_the_packs_the_home_store_holds() {
 }
 
 #[tokio::test]
+async fn pack_list_reports_a_damaged_archive_as_an_error_row() {
+    let (home, plugins) = crate::test_support::home_with_fixture_pack("review_graph");
+    let (_node, _did, tools) = pack_tool("pack-list-damaged", plugins).await;
+    let page: Value =
+        serde_json::from_str(&config_call(&tools, &["pack", "list"]).await.unwrap()).unwrap();
+    let digest = page["items"][0]["artifact_digest"].as_str().unwrap();
+    let path = crate::pack_store::PackStore::new(home.path())
+        .path(digest)
+        .unwrap();
+    std::fs::write(path, b"not a pack archive").unwrap();
+    // An open prefers the unpacked copy, so the damage must be all there is.
+    std::fs::remove_dir_all(home.path().join("packs").join("unpacked")).unwrap();
+
+    let page: Value =
+        serde_json::from_str(&config_call(&tools, &["pack", "list"]).await.unwrap()).unwrap();
+    assert_eq!(page["page"]["returned"], 1);
+    assert_eq!(page["items"][0]["name"], "fixture/review_graph");
+    assert_eq!(page["items"][0]["installable"], false);
+    assert!(page["items"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("could not be opened"));
+}
+
+#[tokio::test]
 async fn pack_update_without_a_version_asks_the_registry_and_fails_loudly_offline() {
     let _registry = crate::test_support::EnvVarGuard::set("GENTS_REGISTRY", "http://127.0.0.1:9");
     let (_home, plugins) = crate::test_support::home_with_fixture_pack("review_graph");

@@ -26,6 +26,7 @@ self_config_no_lockout?: boolean | null,
 self_config_preview?: boolean | null,
 /**
  * Opt-in authority to install and activate graph packs from the home store or
- * registry for this principal. Disabled by absence and never implied by general self-config.
+ * registry for this principal. Disabled by absence and never implied by
+ * general self-config.
  */
 enable_pack_install?: boolean | null, };
