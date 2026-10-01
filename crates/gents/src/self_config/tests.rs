@@ -771,7 +771,16 @@ async fn pack_update_without_a_version_asks_the_registry_and_fails_loudly_offlin
 #[tokio::test]
 async fn pack_install_puts_a_sealed_plugin_in_the_home_and_refuses_one_that_asks_for_authority() {
     let slot = ["--inference-slot", "worker=setup:inference"];
-    let (home, plugins) = crate::test_support::home_with_fixture_pack("prepared_graph");
+    let (_fixture, dir) = crate::test_support::fixture_pack_copy("prepared_graph", &json!({}));
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["plugins"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("limits");
+    std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let (home, plugins) = crate::test_support::home_with_pack_dir(&dir);
     let (_node, _did, tools) = pack_tool("pack-plugins", plugins).await;
     let mut preview_argv = vec!["pack", "preview", "install", "fixture/prepared_graph"];
     preview_argv.extend(slot);
@@ -815,6 +824,10 @@ async fn pack_install_puts_a_sealed_plugin_in_the_home_and_refuses_one_that_asks
     let manifest_path = dir.join("manifest.json");
     let mut manifest: Value =
         serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["plugins"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("limits");
     manifest["plugins"][0]["manifold"] = json!({
         "fs": "None",
         "net": {"OutboundHttp": ["api.example.com"]},
@@ -1253,6 +1266,9 @@ async fn run_graph_prepares_host_input_under_the_effective_root() {
     let digest = prepare.digest.clone().expect("the loader pins the plugin");
     let hex = digest.strip_prefix("sha256:").expect("sha256 pin");
     crate::plugin::store::store_bytes(plugin_home.path(), hex, &afb).expect("store artifact");
+    let granted =
+        crate::plugin::store::grant_on_install(plugin_home.path(), "fixture", &declaration, true)
+            .expect("operator consents to fixture limits");
     crate::plugin::store::write_record(
         plugin_home.path(),
         &crate::plugin::store::InstalledPlugin {
@@ -1262,7 +1278,7 @@ async fn run_graph_prepares_host_input_under_the_effective_root() {
             digest,
             language: "rust".into(),
             declaration,
-            granted: None,
+            granted,
             instructions: None,
             owner_pack_coordinate: None,
             owner_pack_digest: None,
