@@ -44,8 +44,8 @@ fn build_plugin_afb(wat_source: &str) -> Vec<u8> {
         pip: Default::default(),
         gem: Default::default(),
         signature: None,
-        metadata: toml::Table::new(),
-        extra: toml::Table::new(),
+        metadata: Default::default(),
+        extra: Default::default(),
     };
     let (bytes, _digest) = Builder::new(manifest, Manifold::sealed())
         .precompiled("precompiled/wasm32-wasip1/main.wasm", wat(wat_source))
@@ -489,8 +489,8 @@ fn source_only_afb(name: &str, language: &str, entry: &str, body: &[u8]) -> Vec<
         pip: Default::default(),
         gem: Default::default(),
         signature: None,
-        metadata: toml::Table::new(),
-        extra: toml::Table::new(),
+        metadata: Default::default(),
+        extra: Default::default(),
     };
     let (bytes, _digest) = Builder::new(manifest, Manifold::sealed())
         .source(entry, body.to_vec())
@@ -765,4 +765,21 @@ fn tool_instructions_live_beside_the_plugin_and_stay_small_text() {
     assert!(crate::pack::tool_instructions("lint", &[0xff, 0xfe]).is_err());
     let oversized = vec![b'a'; crate::pack::MAX_TOOL_INSTRUCTIONS_BYTES + 1];
     assert!(crate::pack::tool_instructions("lint", &oversized).is_err());
+}
+
+#[test]
+fn plugin_requests_select_native_nan_arithmetic() {
+    let request = plugin_run_request(Vec::new(), Manifold::sealed(), &PluginBudget::default());
+    assert_eq!(request.nan_mode, NanMode::Native);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn masked_trap_startup_uses_the_plugin_request_engine() {
+    let startup = start_wasm_trap_handler_with_signals_blocked()
+        .unwrap()
+        .unwrap();
+    let request = plugin_run_request(Vec::new(), Manifold::sealed(), &PluginBudget::default());
+    let selected = afterburner::wasi::embedder_vm::shared_epoch_vm_with(request.nan_mode).unwrap();
+    assert!(std::ptr::eq(startup, selected));
 }

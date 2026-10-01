@@ -75,6 +75,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use afterburner::afb_run::{run_afb_bytes, AfbRunOutcome, AfbRunRequest};
+use afterburner::wasi::embedder_vm::NanMode;
 use afterburner_core::manifold::{EnvAccess, FsAccess, ListenAccess, NetAccess};
 use anyhow::{Context, Result};
 
@@ -344,20 +345,7 @@ impl PluginRunner {
         start_wasm_trap_handler_with_signals_blocked()?;
         let stdin =
             serde_json::to_vec(arguments).context("encoding plugin arguments as canonical JSON")?;
-        let request = AfbRunRequest {
-            stdin,
-            manifold: self.manifold.clone(),
-            // Afterburner's own `None` means its family's default fuel
-            // budget (100 million for a WASI command guest), not
-            // "unlimited" - so a `budget.fuel` of `None` is carried as the
-            // largest ceiling Wasmtime's `Store::set_fuel` accepts, the
-            // same sentinel Afterburner's own daemon runtime uses for an
-            // unbounded guest.
-            fuel: Some(budget.fuel.unwrap_or(u64::MAX)),
-            memory_bytes: Some(budget.memory_bytes),
-            timeout: Some(budget.wall_clock),
-            ..Default::default()
-        };
+        let request = plugin_run_request(stdin, self.manifold.clone(), budget);
 
         let started = Instant::now();
         let output = run_afb_bytes(&self.afb_bytes, request)
@@ -409,6 +397,32 @@ impl PluginRunner {
     }
 }
 
+fn plugin_run_request(stdin: Vec<u8>, manifold: Manifold, budget: &PluginBudget) -> AfbRunRequest {
+    AfbRunRequest {
+        stdin,
+        manifold,
+        // Afterburner's own `None` means its family's default fuel
+        // budget (100 million for a WASI command guest), not
+        // "unlimited" - so a `budget.fuel` of `None` is carried as the
+        // largest ceiling Wasmtime's `Store::set_fuel` accepts, the
+        // same sentinel Afterburner's own daemon runtime uses for an
+        // unbounded guest.
+        fuel: Some(budget.fuel.unwrap_or(u64::MAX)),
+        memory_bytes: Some(budget.memory_bytes),
+        timeout: Some(budget.wall_clock),
+        nan_mode: PLUGIN_NAN_MODE,
+        ..Default::default()
+    }
+}
+
+/// WASM command/component plugins use native NaN arithmetic for OCR throughput.
+/// Python dispatch ignores this mode and retains its interpreter engine's
+/// canonicalization. Native payload bits may differ across CPUs and guests can
+/// expose them as JSON integers or strings; plugin output is a recorded external
+/// observation, not a promise of byte-identical recomputation on another host.
+/// The macOS startup must select this same engine mode before installing handlers.
+const PLUGIN_NAN_MODE: NanMode = NanMode::Native;
+
 /// Creates Afterburner's first Wasmtime engine on a thread that blocks every
 /// signal, before any plugin runs.
 ///
@@ -426,16 +440,18 @@ impl PluginRunner {
 /// Fails closed: if the masked thread cannot be started, cannot mask its
 /// signals, or cannot create the engine, every plugin call is refused with
 /// that error rather than letting a call create the engine unprotected.
-fn start_wasm_trap_handler_with_signals_blocked() -> Result<()> {
+fn start_wasm_trap_handler_with_signals_blocked(
+) -> Result<Option<&'static afterburner::wasi::embedder_vm::EmbedderVm>> {
     #[cfg(target_os = "macos")]
     {
-        static STARTED: std::sync::OnceLock<std::result::Result<(), String>> =
-            std::sync::OnceLock::new();
-        STARTED
+        static STARTED: std::sync::OnceLock<
+            std::result::Result<&'static afterburner::wasi::embedder_vm::EmbedderVm, String>,
+        > = std::sync::OnceLock::new();
+        return STARTED
             .get_or_init(|| {
                 std::thread::Builder::new()
                     .name("gents-wasm-trap-init".into())
-                    .spawn(|| -> std::result::Result<(), String> {
+                    .spawn(|| -> std::result::Result<&'static afterburner::wasi::embedder_vm::EmbedderVm, String> {
                         // SAFETY: changes only this short-lived thread's own mask.
                         let masked = unsafe {
                             let mut all: libc::sigset_t = std::mem::zeroed();
@@ -448,8 +464,7 @@ fn start_wasm_trap_handler_with_signals_blocked() -> Result<()> {
                                 std::io::Error::from_raw_os_error(masked)
                             ));
                         }
-                        afterburner::wasi::embedder_vm::shared_epoch_vm()
-                            .map(|_| ())
+                        afterburner::wasi::embedder_vm::shared_epoch_vm_with(PLUGIN_NAN_MODE)
                             .map_err(|error| format!("creating the engine: {error}"))
                     })
                     .map_err(|error| format!("spawning the thread: {error}"))?
@@ -461,9 +476,10 @@ fn start_wasm_trap_handler_with_signals_blocked() -> Result<()> {
                 anyhow::anyhow!(
                     "could not start the Wasmtime trap handler with signals blocked: {error}"
                 )
-            })?;
+            }).map(Some);
     }
-    Ok(())
+    #[cfg(not(target_os = "macos"))]
+    Ok(None)
 }
 
 /// What one call to this artifact would ask for that its dispatch path
