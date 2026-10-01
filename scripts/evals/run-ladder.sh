@@ -104,8 +104,18 @@ if [ -n "${GENTS_BIN:-}" ]; then
   GENTS=$GENTS_BIN
 else
   echo "building gents at $SHA ..." >&2
-  cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p gents-cli --bin gents -p gents-fs-runner --bin gents-fs-runner
+  BUILD_SOURCE=$(git -C "$ROOT" rev-parse HEAD)
+  BUILD_REF=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)
+  BUILD_DIRTY=false
+  [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ] || BUILD_DIRTY=true
+  GENTS_BUILD_GIT_SHA="$BUILD_SOURCE" GENTS_BUILD_GIT_REF="$BUILD_REF" GENTS_BUILD_GIT_DIRTY="$BUILD_DIRTY" GENTS_BUILD_GIT_TAG= \
+    cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p gents-cli --bin gents -p gents-fs-runner --bin gents-fs-runner
   GENTS="$ROOT/target/debug/gents"
+  BUILT_VERSION=$("$GENTS" version)
+  case "$BUILT_VERSION" in
+    *"$BUILD_SOURCE"*) ;;
+    *) echo "built binary does not match checkout $BUILD_SOURCE: $BUILT_VERSION" >&2; exit 1 ;;
+  esac
 fi
 
 # Versioned binary names do not use the runtime's built-in runner discovery.

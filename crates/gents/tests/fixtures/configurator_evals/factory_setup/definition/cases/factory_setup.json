@@ -149,6 +149,9 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
+            },
+            "enabled": {
+              "_eq": true
             }
           },
           "fields": [
@@ -333,6 +336,23 @@
             "temperature",
             "top_p"
           ]
+        },
+        {
+          "kind": "documents",
+          "name": "all_triggers",
+          "collection": "Trigger",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "trigger_id",
+            "task_id",
+            "source",
+            "enabled",
+            "concurrency"
+          ]
         }
       ],
       "checks": [
@@ -389,7 +409,7 @@
                 "category": "completeness"
               },
               {
-                "capture": "triggers",
+                "capture": "all_triggers",
                 "min": 5,
                 "max": 5,
                 "category": "completeness"
@@ -1996,6 +2016,9 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
+            },
+            "enabled": {
+              "_eq": true
             }
           },
           "fields": [
@@ -2180,6 +2203,23 @@
             "temperature",
             "top_p"
           ]
+        },
+        {
+          "kind": "documents",
+          "name": "all_triggers",
+          "collection": "Trigger",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "trigger_id",
+            "task_id",
+            "source",
+            "enabled",
+            "concurrency"
+          ]
         }
       ],
       "checks": [
@@ -2236,7 +2276,7 @@
                 "category": "completeness"
               },
               {
-                "capture": "triggers",
+                "capture": "all_triggers",
                 "min": 5,
                 "max": 5,
                 "category": "completeness"
