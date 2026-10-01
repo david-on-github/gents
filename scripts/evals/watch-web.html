@@ -37,8 +37,7 @@ const suite=r=>r.run.definition.definition_id==='factory-setup'?'Crew configurat
 const age=s=>s?Math.max(0,(Date.now()-Date.parse(s))/1000):null;
 const goalValue=(slot,g)=>g.collection==='schemas'?slot.live.schemas?.length:g.capture?(slot.live.captures||{})[g.capture]:(slot.live.documents||{})[g.collection];
 const slotKey=(r,s)=>`${r.key}:${s.cell_id}:${s.case_id}:${s.trial_index}`;
-function allSlots(){return runs.flatMap(r=>r.slots.map(s=>({...s,live:{...s.live,...settledUsage(s)},run:r,key:slotKey(r,s)})))}
-function settledUsage(s){return ['pass','fail','unknown','not_evidence'].includes(s.state)?s.latest?.usage||{}:{}}
+function allSlots(){return runs.flatMap(r=>r.slots.map(s=>({...s,run:r,key:slotKey(r,s)})))}
 function badge(state){return `<span class="badge ${esc(state)}">${esc(labels[state]||state)}</span>`}
 function stageRail(s){const stages=s.run.cases.find(c=>c.case_id===s.case_id)?.stages||[];return `<div class="stages">${stages.map(name=>{const terminal=stageResult(s,name)?.terminal_state||s.latest?.stages?.find(t=>t.stage_id===name)?.terminal_state;return `<span class="stage ${s.stage===name?'active':terminal==='completed'?'done':''}">${esc(name.replaceAll('_',' '))}</span>`}).join('')}</div>`}
 function milestones(s){return `<div class="milestones">${s.goal.filter(g=>g.min>0).map(g=>{const n=goalValue(s,g),met=n!=null&&n>=g.min,over=g.max!=null&&n>g.max;return `<div class="milestone"><div class="label"><span>${esc(friendly[g.collection]||g.collection)}</span><span>${n??'—'}/${g.min}</span></div><div class="mini-track ${over?'over':met?'met':''}"><span style="width:${Math.min(100,Math.max(0,100*(n||0)/g.min))}%"></span></div></div>`}).join('')}</div>`}

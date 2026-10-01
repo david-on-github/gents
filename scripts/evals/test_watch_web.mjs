@@ -54,10 +54,3 @@ test('failure distribution counts affected trials and keeps execution failures s
  assert.equal(run('result.endings[0].reason'),'tool');
 });
 
-
-test('settled token usage comes from the authoritative native result',()=>{
- const run=viewer();
- run(`globalThis.slot={state:'pass',latest:{usage:{input_tokens:12,output_tokens:3}}}`);
- assert.equal(run('settledUsage(slot).input_tokens'),12);
- assert.equal(run("Object.keys(settledUsage({...slot,state:'running'})).length"),0);
-});

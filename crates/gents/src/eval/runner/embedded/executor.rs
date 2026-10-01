@@ -32,8 +32,8 @@ use crate::document_config::{InferenceSampling, PackConfig};
 use crate::eval::runner::embedded::home::{boot_runtime, EmbeddedHome, RUNTIME_READY_TIMEOUT};
 use crate::eval::runner::embedded::live::LiveObserver;
 use crate::eval::runner::embedded::observe::{
-    await_terminal, classify_request_outcome, collect_request_evidence, InferenceCallEvidence,
-    RequestEvidence, TerminalObservation,
+    await_terminal, classify_request_outcome, collect_request_evidence,
+    request_evidence_from_query_data, InferenceCallEvidence, RequestEvidence, TerminalObservation,
 };
 use crate::eval::runner::executor::{
     Capture, CaptureResult, FileRef, FixtureDocument, InferenceBinding, Isolation, StageEvidence,
@@ -205,8 +205,9 @@ impl EmbeddedExecutor {
                 "eval trial runtime did not shut down cleanly"
             );
         }
+        let usage = home_usage(&home.node).await;
         close(home).await;
-        let (usage, anchor) = (usage(&stages), anchor(&stages));
+        let anchor = anchor(&stages);
         TrialEvidence::new(locator, stages, usage, anchor)
     }
 }
@@ -445,8 +446,9 @@ impl TrialExecutor for EmbeddedExecutor {
                 captures: run_captures(&home.node, &at.trial_agent_did, &workspace, captures).await,
             });
         }
+        let usage = home_usage(&home.node).await;
         close(home).await;
-        let (usage, anchor) = (usage(&stages), anchor(&stages));
+        let anchor = anchor(&stages);
         Some(TrialEvidence::new(at.clone(), stages, usage, anchor))
     }
 }
@@ -1750,14 +1752,26 @@ async fn session_requests(node: &EmbeddedNode, session_id: &str) -> Result<Vec<S
         .collect())
 }
 
-/// Step 6: totals over every inference call the trial made. A missing total is
-/// `None`, never zero: one call that never reported its tokens makes the sum
-/// unknown.
-fn usage(stages: &[StageEvidence]) -> TrialUsage {
-    usage_of(stages.iter().flat_map(|stage| &stage.inference_calls))
+/// Every inference call in an isolated home belongs to its trial, including
+/// automation, delegation and goal continuations outside the named stages.
+async fn home_usage(node: &EmbeddedNode) -> TrialUsage {
+    let result = async {
+        let response = graphql_with_transaction_retry(
+            node,
+            "{ InferenceCall { call_seq call_state failure_reason prompt_tokens completion_tokens } }",
+            "eval trial total usage",
+        ).await?;
+        let data = response.data.context("trial usage query omitted data")?;
+        anyhow::ensure!(data.get("InferenceCall").is_some_and(Value::is_array), "trial usage query omitted inference calls");
+        Ok::<_, anyhow::Error>(usage_of(&request_evidence_from_query_data(&data).inference_calls))
+    }.await;
+    result.unwrap_or_else(|error| {
+        tracing::warn!(error = %format!("{error:#}"), "eval trial usage could not be collected");
+        TrialUsage::default()
+    })
 }
 
-/// The totals over `calls`, by [`usage`]'s rule.
+/// Missing provider usage stays unknown; it is never counted as zero.
 pub(super) fn usage_of<'a>(
     calls: impl IntoIterator<Item = &'a InferenceCallEvidence>,
 ) -> TrialUsage {
@@ -2286,6 +2300,33 @@ mod tests {
             .expect("the trial home survives the close");
         assert_eq!(reopened.did(), locator.trial_agent_did);
         reopened.node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn trial_usage_includes_child_requests_and_preserves_unknown_tokens() {
+        let home = EmbeddedHome::create_temp("trial-total-usage")
+            .await
+            .unwrap();
+        for (id, input, output) in [("stage-call", 11, 7), ("automation-call", 101, 13)] {
+            let id = escape_graphql_string(id);
+            crate::config_client::ConfigAccess::write_local(
+                &home.node,
+                "eval.test.usage",
+                &format!(r#"mutation {{ create_InferenceCall(input: {{ call_id: "{id}", request_id: "{id}", call_seq: 0, call_state: "completed", prompt_tokens: {input}, completion_tokens: {output} }}) {{ _docID }} }}"#),
+            ).await.unwrap();
+        }
+        let total = home_usage(&home.node).await;
+        assert_eq!(total.input_tokens, Some(112));
+        assert_eq!(total.output_tokens, Some(20));
+        crate::config_client::ConfigAccess::write_local(
+            &home.node,
+            "eval.test.usage_missing",
+            r#"mutation { create_InferenceCall(input: { call_id: "unreported", request_id: "child", call_seq: 1, call_state: "failed", prompt_tokens: null, completion_tokens: 3 }) { _docID } }"#,
+        ).await.unwrap();
+        let total = home_usage(&home.node).await;
+        assert_eq!(total.input_tokens, None);
+        assert_eq!(total.output_tokens, Some(23));
+        close(home).await;
     }
 
     /// `home_hint` is read back from the database, so a hint that leaves the
