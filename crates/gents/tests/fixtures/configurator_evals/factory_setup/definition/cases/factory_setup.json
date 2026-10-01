@@ -431,6 +431,11 @@
                         "topic",
                         "question_count"
                       ]
+                    },
+                    "required_fields": {
+                      "ResearchAssignment": [
+                        "handoff_id"
+                      ]
                     }
                   },
                   "tools": [
@@ -499,6 +504,11 @@
                         "assignment",
                         "question",
                         "expected_count"
+                      ]
+                    },
+                    "required_fields": {
+                      "ResearchFinding": [
+                        "handoff_id"
                       ]
                     }
                   },
@@ -579,6 +589,11 @@
                         "batch",
                         "text"
                       ]
+                    },
+                    "required_fields": {
+                      "DraftBrief": [
+                        "handoff_id"
+                      ]
                     }
                   },
                   "tools": [
@@ -651,6 +666,11 @@
                         "finding",
                         "sources",
                         "expected_count"
+                      ]
+                    },
+                    "required_fields": {
+                      "ReviewDecision": [
+                        "handoff_id"
                       ]
                     }
                   },
@@ -727,7 +747,8 @@
                         "batch",
                         "text"
                       ]
-                    }
+                    },
+                    "required_fields": {}
                   },
                   "tools": [
                     {
@@ -806,6 +827,11 @@
                         "batch",
                         "approved",
                         "feedback"
+                      ]
+                    },
+                    "required_fields": {
+                      "ResearchAssignment": [
+                        "handoff_id"
                       ]
                     }
                   },
@@ -2252,6 +2278,11 @@
                         "topic",
                         "question_count"
                       ]
+                    },
+                    "required_fields": {
+                      "ResearchAssignment": [
+                        "handoff_id"
+                      ]
                     }
                   },
                   "tools": [
@@ -2320,6 +2351,11 @@
                         "assignment",
                         "question",
                         "expected_count"
+                      ]
+                    },
+                    "required_fields": {
+                      "ResearchFinding": [
+                        "handoff_id"
                       ]
                     }
                   },
@@ -2400,6 +2436,11 @@
                         "batch",
                         "text"
                       ]
+                    },
+                    "required_fields": {
+                      "DraftBrief": [
+                        "handoff_id"
+                      ]
                     }
                   },
                   "tools": [
@@ -2472,6 +2513,11 @@
                         "finding",
                         "sources",
                         "expected_count"
+                      ]
+                    },
+                    "required_fields": {
+                      "ReviewDecision": [
+                        "handoff_id"
                       ]
                     }
                   },
@@ -2548,7 +2594,8 @@
                         "batch",
                         "text"
                       ]
-                    }
+                    },
+                    "required_fields": {}
                   },
                   "tools": [
                     {
@@ -2627,6 +2674,11 @@
                         "batch",
                         "approved",
                         "feedback"
+                      ]
+                    },
+                    "required_fields": {
+                      "ResearchAssignment": [
+                        "handoff_id"
                       ]
                     }
                   },

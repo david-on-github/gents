@@ -37,7 +37,8 @@ use crate::eval::runner::executor::{CaptureResult, StageEvidence};
 ///   and each expectation holds on it, on the Context it selects and on the
 ///   Tools that Context selects. Optional `datastore` follows selected surfaces,
 ///   comparing exact create/query collection sets. `caller_fields` requires model-
-///   supplied required create fields; `query_fields` requires returned columns;
+///   supplied required create fields; `required_fields` accepts required caller
+///   fields or runtime fills; `query_fields` requires returned columns;
 ///   `lookup_by` requires queries usable with
 ///   that key alone. `called_create`/`called_query` require successful calls to
 ///   the selected tools. Optional `delegates` checks the exact local behavior set
@@ -188,6 +189,8 @@ struct DatastoreSpec {
     #[serde(default)]
     caller_fields: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
+    required_fields: BTreeMap<String, BTreeSet<String>>,
+    #[serde(default)]
     query_fields: BTreeMap<String, BTreeSet<String>>,
     #[serde(default)]
     lookup_by: Option<String>,
@@ -225,9 +228,6 @@ struct Receipt {
     #[serde(default)]
     category: Option<String>,
 }
-
-/// Unmet requirements quoted in the verdict before the rest are only counted.
-const SHOWN: usize = 60;
 
 /// A dotted path into `row`, reading a JSON string on the way as its JSON.
 /// A path the row lacks reads as `null`, so `equals: null` and `matches`
@@ -350,7 +350,7 @@ impl Check for CrewSpecMatch {
     }
 
     fn version(&self) -> &'static str {
-        "6"
+        "7"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -423,7 +423,7 @@ impl Check for CrewSpecMatch {
                                     "behavior": expectations, "context": expectations,
                                     "tools": expectations,
                                     "datastore": {"type":"object", "properties": {
-                                        "surfaces":{"type":"string"}, "create":strings, "query":strings, "caller_fields":{"type":"object", "additionalProperties":strings}, "query_fields":{"type":"object", "additionalProperties":strings}, "lookup_by":{"type":"string"}, "called_create":strings, "called_query":strings
+                                        "surfaces":{"type":"string"}, "create":strings, "query":strings, "caller_fields":{"type":"object", "additionalProperties":strings}, "required_fields":{"type":"object", "additionalProperties":strings}, "query_fields":{"type":"object", "additionalProperties":strings}, "lookup_by":{"type":"string"}, "called_create":strings, "called_query":strings
                                     }, "required":["surfaces","create","query"], "additionalProperties":false},
                                     "delegates": {"type":"object", "properties": {
                                         "targets":{"type":"string"}, "behaviors":strings
@@ -550,9 +550,25 @@ impl Check for CrewSpecMatch {
                     rows(&hop.target_capture).and_then(|rows| find(rows, &hop.target_key, id))
                 });
             }
+            let (destination, destination_key) = spec
+                .via
+                .last()
+                .map(|hop| (&hop.target_capture, &hop.target_key))
+                .unwrap_or((&spec.target_capture, &spec.target_key));
+            let source_name = if spec.id.is_empty() {
+                source
+                    .map(|row| lookup(row, "display_name"))
+                    .unwrap_or(Value::Null)
+                    .to_string()
+            } else {
+                spec.id.clone()
+            };
+            let target_name = target
+                .map(|row| lookup(row, destination_key))
+                .unwrap_or(Value::Null);
             let subject = format!(
-                "{} {}.{} -> {}",
-                spec.capture, spec.id, spec.field, spec.target_capture
+                "{} {} -> {} {}",
+                spec.capture, source_name, destination, target_name
             );
             let category = spec.category.as_deref();
             tally.record(category, target.is_some(), || {
@@ -690,6 +706,19 @@ impl Check for CrewSpecMatch {
                                     });
                                     match entry {
                                         SurfaceToolDecl::Create(d) => {
+                                            if let Some(fields) =
+                                                expected.required_fields.get(&d.collection)
+                                            {
+                                                for name in fields {
+                                                    if !d.fields.iter().any(|f| {
+                                                        &f.name == name
+                                                            && (f.required || f.fill.is_some())
+                                                    }) {
+                                                        valid = false;
+                                                        contract_issues.push(format!("{} must write {name}: declare a required caller field or a runtime fill", d.tool_name));
+                                                    }
+                                                }
+                                            }
                                             if let Some(fields) =
                                                 expected.caller_fields.get(&d.collection)
                                             {
@@ -898,7 +927,7 @@ impl Check for CrewSpecMatch {
             .map(|(name, (s, t))| (name.clone(), json!({"satisfied": s, "total": t})))
             .collect::<serde_json::Map<_, _>>()
             .into();
-        verdict.raw["unmet"] = json!(tally.unmet.iter().take(SHOWN).collect::<Vec<_>>());
+        verdict.raw["unmet"] = json!(tally.unmet);
         verdict.raw["unmet_count"] = json!(tally.unmet.len());
         verdict.raw["activity"] = json!({
             "tool_calls": stage.tool_calls.len(),
@@ -1059,6 +1088,60 @@ mod tests {
             ]);
             assert_eq!(CrewSpecMatch.evaluate(&params, &e).score_bp, Some(score));
         }
+    }
+
+    #[test]
+    fn completion_record_requires_a_write_path_for_its_metadata() {
+        let params = json!({"agents":{"behaviors":"behaviors","contexts":"contexts","tools":"tools","expect":[{"behavior_id":"worker-a","datastore":{"surfaces":"surfaces","create":["Result"],"query":[],"required_fields":{"Result":["handoff_id"]}}}]}});
+        assert!(
+            jsonschema::validator_for(&CrewSpecMatch.describe().params_schema)
+                .unwrap()
+                .is_valid(&params)
+        );
+        for (field, met) in [
+            (None, false),
+            (Some(json!({"name":"handoff_id"})), false),
+            (Some(json!({"name":"handoff_id","required":true})), true),
+            (
+                Some(json!({"name":"handoff_id","fill":"correlation"})),
+                true,
+            ),
+        ] {
+            let mut evidence = home();
+            evidence.captures.insert("tools".into(), CaptureResult::Documents { rows: vec![json!({"tools_id":"t1","datastore":{"datastore_tool_surface_ids":["results"]}})] });
+            let mut fields = vec![json!({"name":"text","required":true})];
+            fields.extend(field);
+            evidence.captures.insert("surfaces".into(), CaptureResult::Documents { rows: vec![json!({"surface_id":"results","agent_did":"did:x","enabled":true,"entries":[{"tool_name":"write_result","collection":"Result","description":"Record the result","fields":fields}]})] });
+            let verdict = CrewSpecMatch.evaluate(&params, &evidence);
+            assert_eq!(verdict.score_bp == Some(10000), met, "{}", verdict.raw);
+            if !met {
+                assert!(verdict
+                    .feedback
+                    .unwrap()
+                    .contains("write_result must write handoff_id"));
+            }
+        }
+    }
+
+    #[test]
+    fn multi_hop_feedback_names_the_field_owner() {
+        let params = json!({"links":[{"capture":"sources","key":"source_collection","id":"Note","field":"event_source_id","target_capture":"triggers","target_key":"source.event_source_id","via":[{"field":"task_id","target_capture":"tasks","target_key":"task_id"}],"expect":[{"field":"emit_outcome","equals":true}]}]});
+        let evidence = stage(&[
+            (
+                "sources",
+                vec![json!({"source_collection":"Note","event_source_id":"notes"})],
+            ),
+            (
+                "triggers",
+                vec![json!({"source":{"event_source_id":"notes"},"task_id":"ack"})],
+            ),
+            ("tasks", vec![json!({"task_id":"ack","emit_outcome":false})]),
+        ]);
+        let feedback = CrewSpecMatch.evaluate(&params, &evidence).feedback.unwrap();
+        assert!(
+            feedback.contains("tasks \"ack\": emit_outcome"),
+            "{feedback}"
+        );
     }
 
     #[test]

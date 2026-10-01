@@ -3,7 +3,7 @@
   "eval_definitions": [
     {
       "definition_id": "configurator-l4-automation",
-      "comparability_version": 6,
+      "comparability_version": 7,
       "title": "The Engineer \u2014 Level 4 document automation (EventSource / Trigger / Task)",
       "subject": {
         "kind": "behavior",
@@ -19,7 +19,8 @@
         "./cases/emit_outcome_false.json",
         "./cases/default_filter_missing_field.json",
         "./cases/parallel_two_inputs.json",
-        "./cases/serial_session_combo.json"
+        "./cases/serial_session_combo.json",
+        "./cases/completion_record_write_contract.json"
       ]
     }
   ]

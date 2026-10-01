@@ -20,7 +20,8 @@
     "cases/serial_session_combo.json",
     "cases/session_template_routing.json",
     "cases/train_parallel_baseline.json",
-    "pack_config.json"
+    "pack_config.json",
+    "cases/completion_record_write_contract.json"
   ],
   "config": "pack_config.json"
 }

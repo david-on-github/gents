@@ -68,7 +68,14 @@ impl StageReview {
                 "review check failed: {}",
                 check["check"]
             );
-            if let Some(feedback) = check["feedback"].as_str() {
+            if let Some(unmet) = check["raw"]["unmet"]
+                .as_array()
+                .filter(|items| !items.is_empty())
+            {
+                for finding in unmet.iter().filter_map(Value::as_str) {
+                    lines.push(format!("- {finding}"));
+                }
+            } else if let Some(feedback) = check["feedback"].as_str() {
                 lines.push(feedback.to_owned());
             } else if check["kind"] != "passed" {
                 lines.push(format!("{}: {}", check["check"], check["raw"]));
@@ -85,6 +92,29 @@ impl StageReview {
 mod tests {
     use super::*;
     use crate::eval::runner::scripted::ScriptedExecutor;
+
+    #[test]
+    fn review_delivers_every_requirement_even_after_the_summary_limit() {
+        let rows: Vec<Value> = (0..75)
+            .map(|i| json!({"capture":"items","key":"id","id":format!("missing-item-{i:03}")}))
+            .collect();
+        let case: EvalCase = serde_json::from_value(json!({"case_id":"test","split":"validation",
+            "stages":[{"stage_id":"setup","prompt":"configure","deadline_secs":30,
+            "checks":[{"check":"crew_spec_match","params":{"rows":rows},"tier":"development"}]}]}))
+        .unwrap();
+        let review = StageReview::new(&case);
+        let evidence = ScriptedExecutor::passed_evidence("did:x", "setup", "items", vec![]);
+        let summary = review.summarize(&evidence.stages[0]);
+        assert!(!summary["checks"][0]["feedback"]
+            .as_str()
+            .unwrap()
+            .contains("missing-item-074"));
+        let feedback = review.feedback(&evidence.stages[0]).unwrap();
+        assert!(feedback.len() > 2048);
+        for i in 0..75 {
+            assert!(feedback.contains(&format!("missing-item-{i:03}")));
+        }
+    }
 
     #[test]
     fn review_uses_previous_evidence_without_rewriting_it() {
