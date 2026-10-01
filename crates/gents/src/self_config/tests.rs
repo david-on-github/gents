@@ -4158,7 +4158,7 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     let node = build_persona_node().await;
     let identity = persona_identity("engineer-god-mode");
     let owner = identity.did().to_string();
-    for behavior in ["setup", "lead"] {
+    for behavior in ["setup", "lead", "caller"] {
         crate::test_support::install_test_behavior(&node, &owner, behavior).await;
     }
     let setup = SelfConfigCore::new(node.clone(), owner.clone(), "setup".into()).unwrap();
@@ -4262,8 +4262,68 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     )
     .await);
 
-    // Own Tools: select the target, the sessions tool and read-only query.
+    for selection in [
+        r#"subagents={"target_ids":["gatekeeper"]}"#,
+        r#"subagents={"enabled":false,"target_ids":["gatekeeper"]}"#,
+    ] {
+        let receipt = ok(call_config_tool(
+            &tools,
+            command(&["tools", "edit", "--behavior", "caller", "--set", selection]),
+        )
+        .await);
+        assert_eq!(receipt["committed"], true);
+        assert!(receipt["effect"]
+            .as_str()
+            .unwrap()
+            .contains("Selected targets are inactive"));
+        let stored =
+            ok(call_config_tool(&tools, command(&["tools", "get", "--behavior", "caller"])).await);
+        assert_ne!(stored["document"]["subagents"]["enabled"], true);
+        assert_eq!(
+            stored["document"]["subagents"]["target_ids"],
+            json!(["gatekeeper"])
+        );
+    }
+
+    let recovery = ok(call_config_tool(
+        &tools,
+        command(&[
+            "tools",
+            "edit",
+            "--behavior",
+            "caller",
+            "--set",
+            r#"subagents={"enabled":true,"target_ids":["gatekeeper"]}"#,
+        ]),
+    )
+    .await);
+    assert!(!recovery["effect"]
+        .as_str()
+        .unwrap()
+        .contains("Selected targets are inactive"));
+    let recovered =
+        ok(call_config_tool(&tools, command(&["tools", "get", "--behavior", "caller"])).await);
+    assert_eq!(recovered["document"]["subagents"]["enabled"], true);
+    assert_eq!(
+        recovered["document"]["subagents"]["target_ids"],
+        json!(["gatekeeper"])
+    );
+
     ok(call_config_tool(
+        &tools,
+        command(&[
+            "tools",
+            "edit",
+            "--behavior",
+            "caller",
+            "--set",
+            r#"subagents={"enabled":true}"#,
+        ]),
+    )
+    .await);
+
+    // Own Tools: select the target, the sessions tool and read-only query.
+    let enabled = ok(call_config_tool(
         &tools,
         command(&[
             "tools",
@@ -4277,6 +4337,12 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
         ]),
     )
     .await);
+    assert!(!enabled["effect"]
+        .as_str()
+        .unwrap()
+        .contains("Selected targets are inactive"));
+    let stored = ok(call_config_tool(&tools, command(&["tools", "get"])).await);
+    assert_eq!(stored["document"]["subagents"]["enabled"], true);
     for (patch, refusal) in [
         (
             r#"subagents={"enabled":false,"target_ids":["gatekeeper"]}"#,

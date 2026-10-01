@@ -335,6 +335,17 @@ impl SelfConfigCore {
                 "Install its collection schemas before selecting this surface. Read tools get, then add its ID to set.datastore.datastore_tool_surface_ids, preserving existing selections. Tools apply after reconciliation to later requests."
             } else if creating && request.target == SelfConfigTarget::InferenceProfile {
                 "Creating a profile does not select it for a behavior. To use it, call behavior edit with set.inference_profile_id equal to this target_id. Selecting it preserves the previous profile and its settings. The selection applies to later requests after reconciliation."
+            } else if request.target == SelfConfigTarget::Tools
+                && request.patch.iter().any(|(field, _)| field == "subagents")
+                && merged.get("subagents").is_some_and(|group| {
+                    group.get("enabled").and_then(Value::as_bool) != Some(true)
+                        && group
+                            .get("target_ids")
+                            .and_then(Value::as_array)
+                            .is_some_and(|ids| !ids.is_empty())
+                })
+            {
+                "Selected targets are inactive: subagents.enabled is not true. To enable delegation, call tools edit with options.behavior set to this behavior_id and set.subagents containing enabled:true plus the existing target_ids. Tools apply after reconciliation to later requests."
             } else {
                 EFFECT_TIMING_NOTE
             },
