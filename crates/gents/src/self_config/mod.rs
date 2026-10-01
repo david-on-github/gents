@@ -570,7 +570,9 @@ fn automation_request(
             if target == SelfConfigTarget::Task {
                 anyhow::ensure!(
                     merged.get("behavior_id").and_then(Value::as_str) == Some(core.behavior_id()),
-                    "task belongs to another behavior"
+                    "task belongs to behavior {:?}, not {:?}; retry with options.behavior set to its owner; to run a different behavior, create a separate task",
+                    merged.get("behavior_id").and_then(Value::as_str),
+                    core.behavior_id()
                 );
             }
             // Packs may publish an event source before installing its schema;

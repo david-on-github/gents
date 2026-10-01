@@ -1846,7 +1846,7 @@ impl ConfigCommandTool {
             })
             .with_context(|| {
                 format!(
-                    "no {} {id:?} is reachable from selected behavior {:?}",
+                    "no {} {id:?} is reachable from selected behavior {:?}; use options.behavior to select its owning behavior, then get to read its automation IDs",
                     target.collection_name(),
                     core.behavior_id()
                 )
@@ -2238,7 +2238,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
             patch_contract(
                 SelfConfigTarget::InferenceExecution,
                 json!({
-                    "display_name":"string|null","max_turns":format!("positive integer|null; default {}", crate::config::DEFAULT_MAX_TURNS),"max_total_tokens":"positive integer|null; null is unlimited","stream_batch_ms":"positive integer|null; persistence batching interval; default 1000 ms","stream_liveness_timeout_secs":format!("positive integer|null; renewed execution lease, independent of provider output; default {} seconds and less than deadline", crate::config::DEFAULT_STREAM_LIVENESS_TIMEOUT_SECS),"provider_idle_timeout_secs":format!("positive integer|null; maximum provider transport silence; default {} seconds", crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS),"deadline_duration_secs":format!("positive integer|null; default 86400; at most {}", crate::document_config::MAX_DEADLINE_DURATION_SECS),"retry_policy_id":"existing same-principal retry policy ID|null; null uses request-origin retry defaults","tags":"array<string>; default []"
+                    "display_name":"string|null","max_turns":format!("positive integer|null; default {}", crate::config::DEFAULT_MAX_TURNS),"max_total_tokens":"positive integer|null; null is unlimited","stream_batch_ms":"positive integer|null; persistence batching interval; default 1000 ms","stream_liveness_timeout_secs":format!("positive integer|null; renewed execution lease, independent of provider output; default {} seconds and less than deadline", crate::config::DEFAULT_STREAM_LIVENESS_TIMEOUT_SECS),"provider_idle_timeout_secs":format!("positive integer|null; maximum provider transport silence, not total request duration; default {} seconds", crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS),"deadline_duration_secs":format!("positive integer|null; total wall time for one request across model/tool turns, not the whole session; default 86400; at most {}", crate::document_config::MAX_DEADLINE_DURATION_SECS),"retry_policy_id":"existing same-principal retry policy ID|null; null uses request-origin retry defaults","tags":"array<string>; default []"
                 }),
             ),
             patch_contract(
