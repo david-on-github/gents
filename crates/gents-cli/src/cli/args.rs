@@ -4183,6 +4183,11 @@ pub(crate) struct EvalGcArgs {
 pub(crate) struct EvalChecksArgs {
     #[arg(long)]
     pub(crate) json: bool,
+    /// Instead of the catalog, check one eval case (a JSON file, or `-` for
+    /// stdin) against it: prints `{"violations": [...]}` and exits non-zero
+    /// when any check is unknown or its params are refused.
+    #[arg(long, value_name = "FILE|-", conflicts_with = "json")]
+    pub(crate) validate_case: Option<String>,
 }
 
 /// `--policy defaults` or a path to a `PolicyV2` JSON document.
@@ -4324,9 +4329,8 @@ pub(crate) struct EvalRunArgs {
     pub(crate) run_id: Option<String>,
     #[arg(long, default_value_t = 1)]
     pub(crate) max_infra_retries: u32,
-    /// The pack registry to fall back to for a pack not compiled in. As with
-    /// `gents pack install`, a registry download is cached under the default
-    /// home, not `--home` (inherited behavior).
+    /// The pack registry to fall back to for a pack the home's store does not
+    /// hold; a download is stored in the home for the next run.
     #[arg(long)]
     pub(crate) registry: Option<String>,
     #[arg(long)]
@@ -4336,7 +4340,7 @@ pub(crate) struct EvalRunArgs {
 }
 
 /// `gents eval init`'s exit statuses.
-const EVAL_INIT_AFTER_HELP: &str = "Needs a terminal (this command is an interview) and a served home: start `gents server` first, or the command refuses before reading anything. An existing --out refuses unless --force replaces it, and --force replaces only a definition pack gents eval init wrote; an --out that is, lies inside, or contains the subject's directory, a Gents home, the user home or the working directory always refuses. --validation-min (default 6) is the floor the author drafts the validation split against; lower it when the operator wants fewer validation cases. --pilot runs the written pack once against the subject, one trial per case and one run per populated split (train, validation, held-out), and asks to spend that before it does, unless --yes; a decline leaves the pack written at --out but the command still exits 1. The session id printed at the end continues with `gents chat --session-id <id> --behavior-id eval-author`. A documents capture filter's only variable is \"$trial\", replaced with the trial's DID wherever it appears in a string value. Exit status: 0 when the pack was written and validated (piloted too, with --pilot) or the operator ended the interview with nothing written; 1 when refused (an existing --out without --force, an --out overlapping the subject, a non-terminal stdin, an unserved home, a declined pilot, or another failure) or when three drafts did not validate; 2 on a usage error.";
+const EVAL_INIT_AFTER_HELP: &str = "Needs a terminal (this command is an interview) and a served home: start `gents server` first, or the command refuses before reading anything. An existing --out refuses unless --force replaces it, and --force replaces only a definition pack gents eval init wrote; an --out that is, lies inside, or contains the subject's directory, a Gents home, the user home or the working directory always refuses. --validation-min (default 6) is the floor the author drafts the validation split against; lower it when the operator wants fewer validation cases. --pilot runs the written pack once against the subject, one trial per case and one run per populated split (train, validation, held-out), and asks to spend that before it does, unless --yes; a decline leaves the pack written at --out but the command still exits 1. The session id printed at the end continues with `gents chat --session-id <id> --behavior-id <the author's behavior>`. A documents capture filter's only variable is \"$trial\", replaced with the trial's DID wherever it appears in a string value. Exit status: 0 when the pack was written and validated (piloted too, with --pilot) or the operator ended the interview with nothing written; 1 when refused (an existing --out without --force, an --out overlapping the subject, a non-terminal stdin, an unserved home, a declined pilot, or another failure) or when three drafts did not validate; 2 on a usage error.";
 
 #[derive(clap::Args)]
 pub(crate) struct EvalInitArgs {
@@ -4346,6 +4350,11 @@ pub(crate) struct EvalInitArgs {
     /// The behavior to draft cases for; implied when the pack has one.
     #[arg(long)]
     pub(crate) behavior: Option<String>,
+    /// The pack that authors the draft, resolved like `gents pack install`
+    /// (or a directory path); it declares one inference slot with one
+    /// behavior.
+    #[arg(long, default_value = "gents/eval_author")]
+    pub(crate) author: String,
     /// Where the definition pack is written; refused when it exists, unless
     /// --force.
     #[arg(long)]
@@ -4375,7 +4384,8 @@ pub(crate) struct EvalInitArgs {
     pub(crate) timeout_secs: u64,
     #[arg(long, default_value_t = 1)]
     pub(crate) poll_secs: u64,
-    /// The pack registry to fall back to for a subject not compiled in.
+    /// The pack registry to fall back to for a subject or author the home's
+    /// store does not hold.
     #[arg(long)]
     pub(crate) registry: Option<String>,
     #[command(flatten)]
@@ -4432,7 +4442,7 @@ pub(crate) fn parse_target(raw: &str) -> Result<JobTarget, String> {
 pub(crate) enum ProposerArg {
     /// A script of proposals, one per round.
     Scripted(PathBuf),
-    /// A behavior of a built-in pack asked once per round; without a
+    /// A behavior of a pack asked once per round; without a
     /// behavior, the pack's only inference-slot behavior.
     Behavior {
         pack: String,
@@ -4525,8 +4535,9 @@ pub(crate) struct OptimizationRunArgs {
     /// `scripted:<file>`: a JSON array of `{"text", "rationale"}`, one per
     /// round; a file holding fewer than `--rounds` is refused before the job
     /// is frozen. `behavior:<pack>[:<behavior>]`: a behavior of a pack
-    /// (`prompt_proposer` is built in), installed into the home and asked
-    /// once per round on the served home.
+    /// (`<pack>` resolves like `gents pack install`, e.g. `prompt_proposer`
+    /// or `gents/prompt_proposer@1.0.0`, or is a directory path), installed
+    /// into the home and asked once per round on the served home.
     #[arg(long, value_parser = parse_proposer)]
     pub(crate) proposer: Option<ProposerArg>,
     /// The inference profile the proposer behavior runs on; the home's
@@ -4547,7 +4558,8 @@ pub(crate) struct OptimizationRunArgs {
     /// The structural gate's cap on a proposed text, in bytes.
     #[arg(long, default_value_t = crate::commands::optimization::DEFAULT_MAX_TEXT_BYTES)]
     pub(crate) max_text_bytes: usize,
-    /// The pack registry to fall back to for a pack not compiled in.
+    /// The pack registry to fall back to for a pack the home's store does not
+    /// hold.
     #[arg(long)]
     pub(crate) registry: Option<String>,
     #[arg(long)]

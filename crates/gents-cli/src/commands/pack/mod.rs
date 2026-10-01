@@ -392,7 +392,8 @@ fn materialize_cached_pack(
 
 /// A subject pack for `gents eval run` and `gents optimization run`: a
 /// directory on disk, or a name resolved the way `gents pack install`
-/// resolves one (compiled in, else the registry).
+/// resolves one (installed, the home's store, else the registry) and
+/// materialized into a directory.
 pub(crate) struct SubjectPack {
     pub(crate) source: gents::eval::runner::CellSource,
     pub(crate) manifest: PackManifest,
@@ -401,13 +402,11 @@ pub(crate) struct SubjectPack {
 }
 
 impl SubjectPack {
-    /// The pack's directory, when it resolved to one (always, when
-    /// resolved with `directory` set).
-    pub(crate) fn directory(&self) -> Option<&std::path::Path> {
-        match &self.source {
-            gents::eval::runner::CellSource::Directory(dir) => Some(dir),
-            gents::eval::runner::CellSource::InstalledPack { .. } => None,
-        }
+    /// The pack's directory: the one the operator named, or the cache entry
+    /// a resolved name was materialized into.
+    pub(crate) fn directory(&self) -> &std::path::Path {
+        let gents::eval::runner::CellSource::Directory(dir) = &self.source;
+        dir
     }
 
     /// The pack's one inference-slot behavior; refused when it declares
@@ -444,11 +443,6 @@ pub(crate) async fn resolve_subject_pack(
     home: &std::path::Path,
     spec: &str,
     registry: Option<&str>,
-    // vertexia: every resolved pack now materializes (no more zero-copy
-    // bundled-by-name fast path once PackSource always wraps an archive);
-    // callers still pass this flag, unused, until it is dropped from
-    // every call site along with the eval/optimization subject resolvers.
-    _directory: bool,
 ) -> Result<SubjectPack> {
     let path = std::path::Path::new(spec);
     if names_a_directory(spec) {
@@ -472,6 +466,34 @@ pub(crate) async fn resolve_subject_pack(
         manifest,
         _lease: Some(lease),
     })
+}
+
+/// The one inference slot a pack declares: refused when it declares none or
+/// several, with a sentence naming the pack.
+pub(crate) fn single_slot(manifest: &PackManifest) -> Result<&gents::pack::PackInferenceSlot> {
+    match manifest.metadata.inference_slots.as_slice() {
+        [only] => Ok(only),
+        slots => anyhow::bail!(
+            "pack {} declares {} inference slots; expected exactly one",
+            manifest.name,
+            slots.len()
+        ),
+    }
+}
+
+/// The `(slot, behavior)` of a pack with one inference slot holding one
+/// behavior, which is how an eval author pack names the behavior it runs.
+pub(crate) fn single_slot_behavior(manifest: &PackManifest) -> Result<(String, String)> {
+    let slot = single_slot(manifest)?;
+    match slot.behaviors.as_slice() {
+        [only] => Ok((slot.name.clone(), only.clone())),
+        behaviors => anyhow::bail!(
+            "pack {} slot {} declares {} behaviors; expected exactly one",
+            manifest.name,
+            slot.name,
+            behaviors.len()
+        ),
+    }
 }
 
 /// Whether a subject spec names a directory rather than a pack: see
@@ -980,7 +1002,7 @@ mod tests {
 
         let home = tempfile::tempdir().unwrap();
         let unreachable = Some("http://127.0.0.1:9");
-        let bare = resolve_subject_pack(home.path(), "src", unreachable, false)
+        let bare = resolve_subject_pack(home.path(), "src", unreachable)
             .await
             .err()
             .expect("no pack is named src");
@@ -988,7 +1010,7 @@ mod tests {
             format!("{bare:#}").contains("is not in the pack store of"),
             "{bare:#}"
         );
-        let dotted = resolve_subject_pack(home.path(), "./src", unreachable, false)
+        let dotted = resolve_subject_pack(home.path(), "./src", unreachable)
             .await
             .err()
             .expect("./src has no manifest");
