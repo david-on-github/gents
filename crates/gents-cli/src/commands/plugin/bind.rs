@@ -11,6 +11,10 @@ use super::store;
 use crate::cli::args::{PluginBindArgs, PluginUnbindArgs};
 
 pub(super) async fn bind(args: PluginBindArgs) -> Result<()> {
+    anyhow::ensure!(
+        args.scope.graphql.is_none(),
+        "plugin model bindings run on the local host; bind there with --home instead of --graphql"
+    );
     let (namespace, name) = crate::commands::pack::split_namespace(&args.name);
     let coordinate = format!("{namespace}/{name}");
     let home = crate::home_state::resolve_home_dir(args.scope.home.as_deref());
@@ -76,6 +80,23 @@ mod tests {
         let record = store::read_record(home.path(), "team", "ocr").unwrap();
         assert!(record.model_binding.is_none());
         assert_eq!(record.declaration.model_slot.as_deref(), Some("remote_ocr"));
+    }
+
+    #[tokio::test]
+    async fn remote_binding_is_rejected_before_reading_local_records() {
+        let home = tempfile::tempdir().unwrap();
+        let error = bind(PluginBindArgs {
+            name: "team/ocr".to_owned(),
+            profile: "chandra".to_owned(),
+            scope: crate::cli::args::GraphScopeArgs {
+                home: Some(home.path().to_owned()),
+                graphql: Some("http://127.0.0.1:1/graphql".to_owned()),
+                agent_did: None,
+            },
+        })
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("local host"), "{error:#}");
     }
 
     #[tokio::test]

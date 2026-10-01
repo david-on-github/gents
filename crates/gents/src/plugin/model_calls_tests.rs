@@ -387,6 +387,13 @@ async fn a_plugin_that_never_stops_asking_is_cut_at_the_round_cap() {
         wall_clock_secs: Some(120),
         ..Default::default()
     });
+    budget_record.granted = store::grant_on_install(
+        home.path(),
+        &budget_record.namespace,
+        &budget_record.declaration,
+        true,
+    )
+    .unwrap();
     store::write_record(home.path(), &budget_record).unwrap();
     let call = executor(&home, Fixed(fake.clone(), 1, Duration::from_secs(30)))
         .call(&budget_record, json!({}))
@@ -642,6 +649,8 @@ fn installed_within(
         wall_clock_secs: Some(secs),
         ..Default::default()
     });
+    record.granted =
+        store::grant_on_install(home.path(), &record.namespace, &record.declaration, true).unwrap();
     store::write_record(home.path(), &record).unwrap();
     (home, record)
 }

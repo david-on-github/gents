@@ -171,6 +171,26 @@ pub async fn preview_pack_inference_bindings(
 ) -> Result<PackInferenceBindingPreview> {
     let mut preview =
         inspect_pack_inference_bindings(access, manifest, agent_did, requested).await?;
+    use crate::plugin::model_calls::{AccessModels, ModelBinding, ModelResolver};
+    let models = AccessModels(access);
+    for slot in manifest
+        .metadata
+        .plugins
+        .iter()
+        .filter_map(|plugin| plugin.model_slot.as_ref())
+    {
+        if let Some(profile_id) = requested.get(slot) {
+            models
+                .resolve(&ModelBinding {
+                    agent_did: agent_did.to_owned(),
+                    profile_id: profile_id.clone(),
+                })
+                .await
+                .with_context(|| {
+                    format!("profile {profile_id:?} cannot serve plugin slot {slot:?}")
+                })?;
+        }
+    }
     let required = preview
         .slots
         .iter()

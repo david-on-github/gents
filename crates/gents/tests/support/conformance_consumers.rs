@@ -413,6 +413,13 @@ pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
             function: "generated_plugin_resource_cases_bind_budget_and_consent",
         },
         ConformanceConsumer::RustTest {
+            id: "pack::tests::generated_plugin_model_slots_require_optional_behavior_free_declarations",
+            package: "gents",
+            source_path: "crates/gents/src/pack.rs",
+            module_path: "pack::tests",
+            function: "generated_plugin_model_slots_require_optional_behavior_free_declarations",
+        },
+        ConformanceConsumer::RustTest {
             id: "tool_surface::timeouts::tests::generated_tool_timeout_cases_bind_native_resolution",
             package: "gents",
             source_path: "crates/gents/src/tool_surface/timeouts.rs",

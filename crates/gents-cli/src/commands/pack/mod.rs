@@ -425,16 +425,7 @@ async fn resolve_plugin_slot_owner(
         );
     }
     let (access, owner) = resolve_scope_owner(scope).await?;
-    let models = gents::plugin::model_calls::AccessModels(access);
-    for (slot, profile_id) in requested {
-        let binding = gents::plugin::model_calls::ModelBinding {
-            agent_did: owner.clone(),
-            profile_id: profile_id.clone(),
-        };
-        gents::plugin::model_calls::ModelResolver::resolve(&models, &binding)
-            .await
-            .with_context(|| format!("profile {profile_id:?} cannot serve slot {slot:?}"))?;
-    }
+    gents::pack::preview_pack_inference_bindings(&access, manifest, &owner, requested).await?;
     Ok(Some(owner))
 }
 
@@ -830,9 +821,10 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     .collect(),
                 installed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             };
-            if let Err(error) = gents::pack::write_home_install(&home, &record).and_then(|()| {
+            if let Err(error) =
                 bind_plugin_slots(&home, pack.manifest(), slot_owner.as_deref(), &requested)
-            }) {
+                    .and_then(|()| gents::pack::write_home_install(&home, &record))
+            {
                 rollback_pack_plugin_records(&home, &rollback);
                 return Err(error);
             }

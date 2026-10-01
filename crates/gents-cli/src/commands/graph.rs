@@ -129,6 +129,13 @@ pub(crate) async fn install_with_access(
         .inspect_err(|_| super::pack::rollback_pack_plugin_records(&plugin_home, &rollback))?;
         (rollback, installed)
     };
+    gents::plugin::install::bind_plugin_slots(
+        &plugin_home,
+        &distribution.manifest,
+        owner_did,
+        &bindings.inference_slots,
+    )
+    .inspect_err(|_| super::pack::rollback_pack_plugin_records(&plugin_home, &plugin_rollback))?;
     let record = GraphInstallRecord {
         plugins: installed_plugins
             .iter()

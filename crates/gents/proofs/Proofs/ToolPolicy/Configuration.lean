@@ -349,4 +349,12 @@ theorem plugin_resource_within_host (baseline requested ceiling : Nat) :
     effectivePluginResource baseline requested ceiling ≤ ceiling := by
   exact Nat.min_le_right _ _
 
+/-- Plugin inference is an optional capability, separate from required behavior inference. -/
+def pluginModelSlotAllowed (declared optional behaviorFree : Bool) : Bool :=
+  declared && optional && behaviorFree
+
+theorem plugin_model_slot_optional (declared optional behaviorFree : Bool)
+    (h : pluginModelSlotAllowed declared optional behaviorFree = true) : optional = true := by
+  cases declared <;> cases optional <;> cases behaviorFree <;> simp_all [pluginModelSlotAllowed]
+
 end ToolPolicy

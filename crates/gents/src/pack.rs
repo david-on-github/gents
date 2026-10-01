@@ -766,6 +766,13 @@ pub fn validate_pack_manifest(manifest: &PackManifest) -> Result<()> {
                 "plugin {:?} names the model slot {slot:?}, which the pack does not declare",
                 plugin.name
             );
+            anyhow::ensure!(
+                manifest.metadata.inference_slots.iter().any(|declared| {
+                    declared.name == *slot && declared.optional && declared.behaviors.is_empty()
+                }),
+                "plugin {:?} model slot {slot:?} must be optional and have no behaviors",
+                plugin.name
+            );
             plugin_slots.insert(slot.as_str());
         }
     }
@@ -1083,6 +1090,31 @@ mod tests {
         let undeclared =
             validate_pack_manifest(&plugins_pack(serde_json::json!([]), Some("remote_ocr")));
         assert!(undeclared.is_err());
+    }
+
+    #[test]
+    fn generated_plugin_model_slots_require_optional_behavior_free_declarations() {
+        let cases = &crate::lean_vocab_test::lean_contract_snapshot().plugin_resource_cases;
+        for case in cases["model_slots"].as_array().unwrap() {
+            let slots = if case["declared"].as_bool().unwrap() {
+                serde_json::json!([{
+                    "name": "remote_ocr", "description": "d",
+                    "optional": case["optional"],
+                    "behaviors": if case["behavior_free"].as_bool().unwrap() { vec![] } else { vec!["scan"] },
+                }])
+            } else {
+                serde_json::json!([])
+            };
+            let mut manifest = plugins_pack(slots, Some("remote_ocr"));
+            manifest.metadata.kind = PackKind::Documents;
+            manifest.config = Some("config.json".to_owned());
+            manifest.metadata.assets.push("config.json".to_owned());
+            assert_eq!(
+                validate_pack_manifest(&manifest).is_ok(),
+                case["expected"].as_bool().unwrap(),
+                "{case}"
+            );
+        }
     }
 
     #[test]
