@@ -379,6 +379,8 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
         crate::test_support::install_test_behavior(&node, &agent_did, role).await;
     }
 
+    // The pack resolves from the home's store: the registry is never asked.
+    let (_home, plugins) = crate::test_support::home_with_fixture_pack("review_graph");
     let mut tool_config = config(&[]);
     tool_config.behavior_id = "setup".to_string();
     tool_config.enable_pack_install = true;
@@ -388,7 +390,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
         agent_did.clone(),
         Some(identity),
         &tool_config,
-        test_plugins(),
+        plugins,
     );
     let tool = tools
         .iter()
@@ -409,7 +411,9 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
     }
     let discovery: Value = serde_json::from_str(
         &tool
-            .call(json!({"argv": ["pack", "preview", "install", "code_review"]}).to_string())
+            .call(
+                json!({"argv": ["pack", "preview", "install", "fixture/review_graph"]}).to_string(),
+            )
             .await
             .expect("incomplete preview remains readable"),
     )
@@ -445,7 +449,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
         "--inference-slot",
         "verifier=verifier:inference",
     ];
-    let mut preview_argv = vec!["pack", "preview", "install", "code_review"];
+    let mut preview_argv = vec!["pack", "preview", "install", "fixture/review_graph"];
     preview_argv.extend(slot_argv);
     let preview: Value = serde_json::from_str(
         &tool
@@ -456,14 +460,20 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
     .unwrap();
     assert_eq!(preview["ready"], true);
     let digest = preview["artifact_digest"].as_str().unwrap();
-    let mut install_argv = vec!["pack", "install", "code_review", "--digest", digest];
+    let mut install_argv = vec![
+        "pack",
+        "install",
+        "fixture/review_graph",
+        "--digest",
+        digest,
+    ];
     install_argv.extend(slot_argv);
     let output = tool
         .call(json!({"argv": install_argv}).to_string())
         .await
-        .expect("bundled pack installs");
+        .expect("a stored pack installs");
     let output: serde_json::Value = serde_json::from_str(&output).expect("JSON receipt");
-    assert_eq!(output["install"]["package_name"], "code_review");
+    assert_eq!(output["install"]["package_name"], "review_graph");
     assert_eq!(output["artifact_digest"], preview["artifact_digest"]);
     assert_eq!(
         output["inference"]["bindings"],
@@ -499,7 +509,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
     );
     let inspected: Value = serde_json::from_str(
         &tool
-            .call(json!({"argv": ["pack", "get", "code_review"]}).to_string())
+            .call(json!({"argv": ["pack", "get", "fixture/review_graph"]}).to_string())
             .await
             .expect("installed pack is inspectable"),
     )
@@ -513,7 +523,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
     let rejected = tool
         .call(
             json!({"argv": [
-                "pack", "update", "code_review", "--digest", bad_digest,
+                "pack", "update", "fixture/review_graph@1.0.0", "--digest", bad_digest,
                 "--inference-slot", "coordinator=coordinator:inference",
                 "--inference-slot", "worker=worker:inference",
                 "--inference-slot", "verifier=verifier:inference"
@@ -527,7 +537,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
     let owner = crate::graphql::escape_graphql_string(&agent_did);
     let tagged = node
         .execute(&format!(
-            r#"mutation {{ update_AgentBehavior(filter: {{agent_did: {{_eq: "{owner}"}}, behavior_id: {{_eq: "review-recon"}}}}, input: {{tags: ["gents:pack:code_review", "user:favorite"]}}) {{_docID}} }}"#
+            r#"mutation {{ update_AgentBehavior(filter: {{agent_did: {{_eq: "{owner}"}}, behavior_id: {{_eq: "review-recon"}}}}, input: {{tags: ["gents:pack:review_graph", "user:favorite"]}}) {{_docID}} }}"#
         ))
         .await;
     assert!(!tagged.has_errors(), "{:?}", tagged.errors);
@@ -535,7 +545,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
         &tool
             .call(
                 json!({"argv": [
-                    "pack", "preview", "update", "code_review",
+                    "pack", "preview", "update", "fixture/review_graph@1.0.0",
                     "--inference-slot", "coordinator=coordinator:inference",
                     "--inference-slot", "worker=worker:inference",
                     "--inference-slot", "verifier=verifier:inference"
@@ -552,7 +562,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
         &tool
             .call(
                 json!({"argv": [
-                    "pack", "update", "code_review", "--digest", update_digest,
+                    "pack", "update", "fixture/review_graph@1.0.0", "--digest", update_digest,
                     "--inference-slot", "coordinator=coordinator:inference",
                     "--inference-slot", "worker=worker:inference",
                     "--inference-slot", "verifier=verifier:inference"
@@ -575,7 +585,7 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
     assert!(!tags.has_errors(), "{:?}", tags.errors);
     assert_eq!(
         tags.data.unwrap()["AgentBehavior"][0]["tags"],
-        json!(["gents:pack:code_review", "user:favorite"])
+        json!(["gents:pack:review_graph", "user:favorite"])
     );
     let list = tools
         .iter()
@@ -608,11 +618,11 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
     // `pack remove` is a real operation now, not a stale refusal: it deletes
     // the installed graph and its record.
     let removed = tool
-        .call(json!({"argv": ["pack", "remove", "code_review"]}).to_string())
+        .call(json!({"argv": ["pack", "remove", "fixture/review_graph"]}).to_string())
         .await
         .expect("an installed graph package removes");
     let removed: Value = serde_json::from_str(&removed).unwrap();
-    assert_eq!(removed["pack"], "gents/code_review");
+    assert_eq!(removed["pack"], "fixture/review_graph");
 
     let response = node
         .execute(&format!(
@@ -627,10 +637,209 @@ async fn pack_install_uses_current_principal_and_inference_chain() {
     assert!(data["PackInstallation"].as_array().unwrap().is_empty());
 
     let again = tool
-        .call(json!({"argv": ["pack", "remove", "code_review"]}).to_string())
+        .call(json!({"argv": ["pack", "remove", "fixture/review_graph"]}).to_string())
         .await
         .expect_err("a second remove finds no record");
     assert!(again.to_string().contains("is not installed"), "{again:#}");
+}
+
+/// A tool over `plugins` that may install packs, plus the node it acts on.
+async fn pack_tool(
+    label: &str,
+    plugins: Arc<crate::plugin::executor::PluginExecutor>,
+) -> (Arc<EmbeddedNode>, String, Vec<Box<dyn ToolDyn>>) {
+    let node = build_persona_node().await;
+    let identity = persona_identity(label);
+    let agent_did = identity.did().to_string();
+    crate::test_support::install_test_behavior(&node, &agent_did, "setup").await;
+    let mut tool_config = config(&[]);
+    tool_config.behavior_id = "setup".to_string();
+    tool_config.enable_pack_install = true;
+    let tools = build_self_config_tools(
+        node.clone(),
+        agent_did.clone(),
+        Some(identity),
+        &tool_config,
+        plugins,
+    );
+    (node, agent_did, tools)
+}
+
+async fn config_call(
+    tools: &[Box<dyn ToolDyn>],
+    argv: &[&str],
+) -> Result<String, crate::llm::tool::ToolError> {
+    tools
+        .iter()
+        .find(|tool| tool.name() == CONFIG_TOOL_NAME)
+        .expect("config registered")
+        .call(json!({ "argv": argv }).to_string())
+        .await
+}
+
+#[tokio::test]
+async fn pack_list_pages_the_packs_the_home_store_holds() {
+    let (_home, plugins) = crate::test_support::home_with_fixture_pack("review_graph");
+    let (_node, _did, tools) = pack_tool("pack-list", plugins).await;
+    let page: Value =
+        serde_json::from_str(&config_call(&tools, &["pack", "list"]).await.unwrap()).unwrap();
+    assert_eq!(page["source"], "store");
+    assert_eq!(page["page"]["total"], 1);
+    assert_eq!(page["page"]["truncated"], false);
+    assert_eq!(page["items"][0]["name"], "fixture/review_graph");
+    assert_eq!(page["items"][0]["version"], "1.0.0");
+    assert_eq!(page["items"][0]["installable"], true);
+    assert_eq!(page["items"][0]["installed"], Value::Null);
+
+    // The cursor names the last coordinate returned; nothing sorts after it.
+    let after: Value = serde_json::from_str(
+        &config_call(
+            &tools,
+            &["pack", "list", "--cursor", "fixture/review_graph"],
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(after["items"].as_array().unwrap().is_empty());
+
+    let error = config_call(&tools, &["pack", "list", "--limit", "51"])
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("between 1 and 50"), "{error}");
+
+    // A runtime with no home has no store to list.
+    let (_node, _did, homeless) = pack_tool("pack-list-homeless", test_plugins()).await;
+    let page: Value =
+        serde_json::from_str(&config_call(&homeless, &["pack", "list"]).await.unwrap()).unwrap();
+    assert_eq!(page["page"]["total"], 0);
+    assert!(page["items"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn pack_update_without_a_version_asks_the_registry_and_fails_loudly_offline() {
+    let _registry = crate::test_support::EnvVarGuard::set("GENTS_REGISTRY", "http://127.0.0.1:9");
+    let (_home, plugins) = crate::test_support::home_with_fixture_pack("review_graph");
+    let (_node, _did, tools) = pack_tool("pack-update-offline", plugins).await;
+    let error = config_call(
+        &tools,
+        &["pack", "preview", "update", "fixture/review_graph"],
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(
+        error.contains("the newest version of fixture/review_graph could not be looked up"),
+        "{error}"
+    );
+    // A pinned version resolves from the store with no network call.
+    let error = config_call(
+        &tools,
+        &["pack", "preview", "update", "fixture/review_graph@1.0.0"],
+    )
+    .await
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("is not installed"), "{error}");
+}
+
+#[tokio::test]
+async fn pack_install_puts_a_sealed_plugin_in_the_home_and_refuses_one_that_asks_for_authority() {
+    let slot = ["--inference-slot", "worker=setup:inference"];
+    let (home, plugins) = crate::test_support::home_with_fixture_pack("prepared_graph");
+    let (_node, _did, tools) = pack_tool("pack-plugins", plugins).await;
+    let mut preview_argv = vec!["pack", "preview", "install", "fixture/prepared_graph"];
+    preview_argv.extend(slot);
+    let preview: Value =
+        serde_json::from_str(&config_call(&tools, &preview_argv).await.unwrap()).unwrap();
+    assert_eq!(preview["ready"], true);
+    let digest = preview["artifact_digest"].as_str().unwrap();
+    assert_eq!(
+        preview["apply_with"]["argv_prefix"],
+        json!([
+            "pack",
+            "install",
+            "fixture/prepared_graph@1.0.0",
+            "--digest",
+            digest
+        ])
+    );
+    let mut install_argv = vec![
+        "pack",
+        "install",
+        "fixture/prepared_graph",
+        "--digest",
+        digest,
+    ];
+    install_argv.extend(slot);
+    config_call(&tools, &install_argv)
+        .await
+        .expect("a sealed plugin installs with its pack");
+    let record = crate::plugin::store::read_record(home.path(), "fixture", "prepare_fixture")
+        .expect("the pack's plugin is in the home's plugin store");
+    assert_eq!(
+        record.owner_pack_coordinate.as_deref(),
+        Some("fixture/prepared_graph")
+    );
+    assert!(record.granted.is_none(), "a sealed plugin holds no grant");
+
+    // The same pack with a plugin that asks for network access is refused,
+    // and nothing is left behind.
+    let (_guard, dir) =
+        crate::test_support::fixture_pack_copy("prepared_graph", &serde_json::json!({}));
+    let manifest_path = dir.join("manifest.json");
+    let mut manifest: Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["plugins"][0]["manifold"] = json!({
+        "fs": "None",
+        "net": {"OutboundHttp": ["api.example.com"]},
+        "env": "None",
+        "crypto": false,
+        "child_process": false,
+    });
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+    let (home, plugins) = crate::test_support::home_with_pack_dir(&dir);
+    let (node_2, agent_did_2, tools) = pack_tool("pack-plugins-authority", plugins).await;
+    let mut preview_argv = vec!["pack", "preview", "install", "fixture/prepared_graph"];
+    preview_argv.extend(slot);
+    let preview: Value =
+        serde_json::from_str(&config_call(&tools, &preview_argv).await.unwrap()).unwrap();
+    let digest = preview["artifact_digest"].as_str().unwrap();
+    let mut install_argv = vec![
+        "pack",
+        "install",
+        "fixture/prepared_graph",
+        "--digest",
+        digest,
+    ];
+    install_argv.extend(slot);
+    let error = format!(
+        "{:#}",
+        config_call(&tools, &install_argv).await.unwrap_err()
+    );
+    assert!(
+        error.contains("install it with `gents pack install --grant-authority`")
+            && error.contains("api.example.com"),
+        "{error}"
+    );
+    assert!(
+        crate::plugin::store::read_record(home.path(), "fixture", "prepare_fixture").is_err(),
+        "a refused plugin leaves no record"
+    );
+    let graphs = node_2
+        .execute(&format!(
+            "{{ GraphDefinition(filter: {{agent_did: {{_eq: \"{}\"}}}}) {{graph_id}} }}",
+            crate::graphql::escape_graphql_string(&agent_did_2)
+        ))
+        .await;
+    assert!(graphs.data.unwrap()["GraphDefinition"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
@@ -673,12 +882,13 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
         bash_mode: crate::tool_surface::BashMode::Off,
         root: Some(repository.path().to_owned()),
     };
+    let (_home, plugins) = crate::test_support::home_with_fixture_pack("review_graph");
     let tools = build_self_config_tools(
         node.clone(),
         agent_did.clone(),
         Some(identity.clone()),
         &tool_config,
-        test_plugins(),
+        plugins.clone(),
     );
     let call = |name: &str, args: Value| {
         let tool = tools
@@ -703,7 +913,7 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
     let preview = call(
         CONFIG_TOOL_NAME,
         json!({"argv": [
-            "pack", "preview", "install", "code_review",
+            "pack", "preview", "install", "fixture/review_graph",
             "--inference-slot", "coordinator=setup:inference",
             "--inference-slot", "worker=setup:inference",
             "--inference-slot", "verifier=setup:inference"
@@ -716,7 +926,7 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
     call(
         CONFIG_TOOL_NAME,
         json!({"argv": [
-            "pack", "install", "code_review", "--digest", digest,
+            "pack", "install", "fixture/review_graph", "--digest", digest,
             "--inference-slot", "coordinator=setup:inference",
             "--inference-slot", "worker=setup:inference",
             "--inference-slot", "verifier=setup:inference"
@@ -724,7 +934,7 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
     )
     .await
     .expect("code-review pack installs");
-    // The bundled `code_review` has no `prepare`, so this test passes the
+    // The `review_graph` fixture has no `prepare`, so this test passes the
     // entry's workspace and ref fields directly, provisioned through the
     // same production path as `git_diff`, and leaves out evidence. That is
     // enough to start, observe and cancel the run.
@@ -775,7 +985,7 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
         agent_did.clone(),
         Some(identity),
         &tool_config,
-        test_plugins(),
+        plugins,
     );
     assert!(!tools.iter().any(|t| t.name() == CONFIG_TOOL_NAME));
     let call = |name: &str, args: Value| {
@@ -788,7 +998,7 @@ async fn graph_tools_start_observe_and_cancel_on_the_current_node() {
     let started = call(
         RUN_GRAPH_TOOL_NAME,
         json!({
-            "package": "code_review",
+            "package": "review_graph",
             "input": input,
         }),
     )

@@ -287,6 +287,39 @@ pub(crate) mod test_support {
         (dir, root)
     }
 
+    /// A gents home whose pack store holds the fixture pack
+    /// `tests/fixtures/packs/<name>` (indexed by name, as any import is), with
+    /// a plugin executor over it: what a runtime that resolves
+    /// `fixture/<name>` without a network call looks like.
+    pub(crate) fn home_with_fixture_pack(
+        name: &str,
+    ) -> (
+        tempfile::TempDir,
+        std::sync::Arc<crate::plugin::executor::PluginExecutor>,
+    ) {
+        let (_guard, dir) = fixture_pack_copy(name, &serde_json::json!({}));
+        home_with_pack_dir(&dir)
+    }
+
+    /// [`home_with_fixture_pack`] for a pack directory a test has edited.
+    pub(crate) fn home_with_pack_dir(
+        dir: &std::path::Path,
+    ) -> (
+        tempfile::TempDir,
+        std::sync::Arc<crate::plugin::executor::PluginExecutor>,
+    ) {
+        let (bytes, _) = crate::pack_archive::pack_dir(dir)
+            .unwrap_or_else(|error| panic!("packing {}: {error:#}", dir.display()));
+        let home = tempfile::tempdir().expect("home");
+        crate::pack_store::PackStore::new(home.path())
+            .import(&bytes[..], None)
+            .unwrap_or_else(|error| panic!("storing {}: {error:#}", dir.display()));
+        let plugins = std::sync::Arc::new(crate::plugin::executor::PluginExecutor::new(Some(
+            home.path().to_path_buf(),
+        )));
+        (home, plugins)
+    }
+
     /// Reads a graph pack fixture from `tests/fixtures/packs/<name>` through
     /// the same archive path an install takes: `pack_dir` packs the
     /// directory, `PackArchive::from_bytes` reads it back, and the graph

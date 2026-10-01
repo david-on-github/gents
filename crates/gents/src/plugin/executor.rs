@@ -122,6 +122,11 @@ impl PluginExecutor {
         }
     }
 
+    /// The gents home plugins are installed under, when there is one.
+    pub fn home(&self) -> Option<&std::path::Path> {
+        self.home.as_deref()
+    }
+
     /// Lets the plugins whose model slot is bound call a model through
     /// `models` (see [`super::model_calls`]).
     pub fn with_models(mut self, models: Arc<dyn ModelResolver>) -> Self {
