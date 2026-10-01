@@ -73,10 +73,6 @@
               {
                 "field": "entries",
                 "contains": "EvalAutomationOutput"
-              },
-              {
-                "field": "enabled",
-                "equals": true
               }
             ]
           },
