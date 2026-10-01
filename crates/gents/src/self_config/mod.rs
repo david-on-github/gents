@@ -1732,7 +1732,7 @@ impl PackInstaller {
         let missing_slots = inspected
             .slots
             .iter()
-            .filter(|slot| !args.inference_slots.contains_key(&slot.name))
+            .filter(|slot| !slot.optional && !args.inference_slots.contains_key(&slot.name))
             .map(|slot| slot.name.clone())
             .collect::<Vec<_>>();
         if !missing_slots.is_empty() {
@@ -1832,7 +1832,7 @@ impl PackInstaller {
             .metadata
             .inference_slots
             .iter()
-            .filter(|slot| !args.inference_slots.contains_key(&slot.name))
+            .filter(|slot| !slot.optional && !args.inference_slots.contains_key(&slot.name))
             .map(|slot| slot.name.as_str())
             .collect::<Vec<_>>();
         anyhow::ensure!(

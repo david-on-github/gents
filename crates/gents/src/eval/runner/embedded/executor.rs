@@ -570,6 +570,7 @@ fn bind_inference_slots(
         .metadata
         .inference_slots
         .iter()
+        .filter(|slot| !slot.optional)
         .map(|slot| (slot.name.clone(), profile_id.to_owned()))
         .collect();
     bind_pack_install_config(manifest, config, &bindings)

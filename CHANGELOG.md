@@ -137,6 +137,25 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Added
 
+- A plugin can call a model through the host. A pack declares an optional
+  inference slot (`optional: true`, no behaviors) and names it in a plugin's
+  `model_slot`; while the slot is bound, the plugin's input carries
+  `"model_calls": true` and it may answer with `{"model_calls": {"requests":
+  [...], "state": ...}}`. The host sends each request (prompt and PNG or JPEG
+  images) to the bound profile's OpenAI-compatible chat completions endpoint at
+  temperature 0, within the backend's `max_concurrent`, and calls the plugin
+  again with `model_results` and its `state`. A call has at most 64 rounds of at
+  most 64 requests (512 requests and 32 MiB of answers in all) inside its wall
+  clock and fuel, and after two failed rounds in a row every further request
+  fails at once. The backend's `max_concurrent` holds across all calls in the
+  process. When the wall clock runs out during model requests, the plugin gets
+  one final round to finish with what it has. A binding whose profile or
+  backend is gone, disabled or lacks its key runs the plugin without a model
+  and says so (`gents plugin run` prints one sentence). A pack that uses
+  `optional` or `model_slot` needs this gents version. The endpoint and key
+  never enter the sandbox. Bind with `gents pack install --inference-slot SLOT=PROFILE`,
+  `gents plugin bind NAME PROFILE` or the desktop Packs panel; `gents plugin
+  unbind` and "Not set" leave it unbound, and the plugin runs as before.
 - `gents pack remove` works for every pack kind, not only documents packs
   (#2067). Assets and plugins packs record their install at
   `<home>/pack-installs/<namespace>/<name>.json` and remove locally, with no

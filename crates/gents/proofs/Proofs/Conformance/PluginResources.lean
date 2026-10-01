@@ -15,5 +15,11 @@ private def budgetsJson : Json := toJson <| [(64, 4096), (5, 900), (60, 900), (1
     ("baseline", toJson baseline), ("requested", toJson requested), ("ceiling", toJson ceiling),
     ("expected", toJson (effectivePluginResource baseline requested ceiling))]
 
-def casesJson : String := (Json.mkObj [("consent", consentJson), ("budgets", budgetsJson)]).compress
+private def modelSlotsJson : Json := toJson <| [false, true].flatMap fun declared =>
+  [false, true].flatMap fun optional =>
+  [false, true].map fun behaviorFree => Json.mkObj [
+    ("declared", toJson declared), ("optional", toJson optional), ("behavior_free", toJson behaviorFree),
+    ("expected", toJson (pluginModelSlotAllowed declared optional behaviorFree))]
+
+def casesJson : String := (Json.mkObj [("consent", consentJson), ("budgets", budgetsJson), ("model_slots", modelSlotsJson)]).compress
 end Conformance.PluginResources

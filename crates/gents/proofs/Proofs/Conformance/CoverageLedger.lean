@@ -1130,6 +1130,11 @@ def caseCoverage : List CoverageEntry :=
       "completion-retry" [Surface.runtimeInternal]
   , tagged (consumerCoverage
       "plugin_resource_cases"
+      "PluginModelSlotCases"
+      "pack::tests::generated_plugin_model_slots_require_optional_behavior_free_declarations")
+      "tool-policy" [Surface.agentFacing]
+  , tagged (consumerCoverage
+      "plugin_resource_cases"
       "PluginResourceCases"
       "plugin::tests::generated_plugin_resource_cases_bind_budget_and_consent")
       "tool-policy" [Surface.agentFacing]

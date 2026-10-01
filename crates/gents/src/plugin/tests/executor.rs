@@ -41,6 +41,7 @@ pub(crate) fn installed_plugin(
         instructions: None,
         owner_pack_coordinate: None,
         owner_pack_digest: None,
+        model_binding: None,
     };
     store::write_record(home.path(), &record).unwrap();
     (home, record)

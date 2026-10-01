@@ -554,6 +554,12 @@ impl std::ops::Deref for CommandAccess {
     }
 }
 
+impl std::borrow::Borrow<ConfigAccess> for CommandAccess {
+    fn borrow(&self) -> &ConfigAccess {
+        &self.access
+    }
+}
+
 impl From<ConfigAccess> for CommandAccess {
     /// Access whose store, if any, its caller already holds.
     fn from(access: ConfigAccess) -> Self {
