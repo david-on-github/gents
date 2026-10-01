@@ -406,6 +406,13 @@ pub fn registered_conformance_consumers() -> &'static [ConformanceConsumer] {
             function: "generated_logical_output_obligation_cases_drive_signed_requests_and_durable_writes",
         },
         ConformanceConsumer::RustTest {
+            id: "plugin::tests::generated_plugin_resource_cases_bind_budget_and_consent",
+            package: "gents",
+            source_path: "crates/gents/src/plugin/tests.rs",
+            module_path: "plugin::tests",
+            function: "generated_plugin_resource_cases_bind_budget_and_consent",
+        },
+        ConformanceConsumer::RustTest {
             id: "tool_surface::timeouts::tests::generated_tool_timeout_cases_bind_native_resolution",
             package: "gents",
             source_path: "crates/gents/src/tool_surface/timeouts.rs",

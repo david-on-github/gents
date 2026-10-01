@@ -22,6 +22,7 @@ const ADMITTED_BYTES_BUDGET: u64 = 512 * 1024 * 1024;
 
 struct Admitted {
     granted: Option<Manifold>,
+    declaration: crate::pack::PackPlugin,
     runner: PluginRunner,
     budget: PluginBudget,
     bytes: u64,
@@ -110,7 +111,7 @@ impl PluginExecutor {
 
     fn admit(&self, record: &InstalledPlugin) -> Result<Arc<Admitted>> {
         if let Some(admitted) = self.admitted.get(&record.digest) {
-            if admitted.granted == record.granted {
+            if admitted.granted == record.granted && admitted.declaration == record.declaration {
                 return Ok(admitted);
             }
         }
@@ -129,10 +130,19 @@ impl PluginExecutor {
                 record.name
             )
         })?;
-        let budget = PluginBudget::for_artifact(&afb);
+        anyhow::ensure!(
+            super::authority::limits_consented(
+                record.declaration.limits.as_ref(),
+                None,
+                record.granted.is_some()
+            ),
+            "plugin resource limits have no recorded consent; reinstall with --grant-authority"
+        );
+        let budget = PluginBudget::for_plugin(&afb, &record.declaration);
         let runner = PluginRunner::compile_within(&bytes, &record.declaration, &record.ceiling())?;
         let admitted = Arc::new(Admitted {
             granted: record.granted.clone(),
+            declaration: record.declaration.clone(),
             runner,
             budget,
             bytes: bytes.len() as u64,

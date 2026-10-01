@@ -32,3 +32,6 @@ __pycache__/
 
 # Worktree-local Gents runtime, credentials, and review artifacts
 /.gents/
+
+# Fixture plugin artifacts: every test builds its own
+crates/gents/tests/fixtures/packs/*/plugins/*.afb

@@ -1,6 +1,6 @@
 //! One package-facing CLI; install writes stay with their existing owners.
 pub(crate) mod account;
-mod build;
+pub(crate) mod build;
 mod cache;
 mod check;
 mod cli_process;
@@ -365,11 +365,9 @@ fn asset_cache_root(home: &std::path::Path, pack: &PackSource) -> Result<std::pa
     cache::asset_cache_root_for(home, &pack.manifest().name, pack.digest())
 }
 
-/// Admits and stores every plugin a pack ships in `home`'s plugin store, the
-/// one `gents plugin install` uses, so a plugin that arrived inside a pack
-/// runs by name like one installed alone. `pack_digest` is the pack's own
-/// content digest, recorded on each plugin's record for operator visibility
-/// (see [`super::plugin::store::InstalledPlugin::owner_pack_digest`]).
+/// Thin caller over [`gents::plugin::install::install_pack_plugins`]; the
+/// implementation moved into the runtime crate so `self_config` can install
+/// a graph pack's plugins itself, without asking this CLI to do it.
 pub(crate) fn install_pack_plugins<'a>(
     home: &std::path::Path,
     manifest: &PackManifest,
@@ -377,36 +375,10 @@ pub(crate) fn install_pack_plugins<'a>(
     asset: impl Fn(&str) -> Result<&'a [u8]>,
     consent: bool,
 ) -> Result<Vec<super::plugin::store::InstalledPlugin>> {
-    let pack_coordinate = format!("{}/{}", manifest.metadata.namespace, manifest.name);
-    manifest
-        .metadata
-        .plugins
-        .iter()
-        .map(|plugin| {
-            let instructions = plugin
-                .instructions
-                .as_deref()
-                .map(|path| gents::pack::tool_instructions(&plugin.name, asset(path)?))
-                .transpose()?;
-            super::plugin::install_from_pack(
-                home,
-                &manifest.metadata.namespace,
-                &pack_coordinate,
-                &manifest.version,
-                pack_digest,
-                plugin,
-                asset(&plugin.artifact)?,
-                instructions,
-                consent,
-            )
-        })
-        .collect()
+    gents::plugin::install::install_pack_plugins(home, manifest, pack_digest, asset, consent)
 }
 
-/// Every plugin `manifest` would install and its plugin-store record before
-/// any write, so a failure later in the same pack install can restore
-/// exactly what was there (or remove what was not) instead of leaving an
-/// orphaned plugin record behind. `None` means the name was not installed.
+/// Thin caller over [`gents::plugin::install::snapshot_pack_plugin_records`].
 pub(crate) fn snapshot_pack_plugin_records(
     home: &std::path::Path,
     manifest: &PackManifest,
@@ -415,28 +387,10 @@ pub(crate) fn snapshot_pack_plugin_records(
     String,
     Option<super::plugin::store::InstalledPlugin>,
 )> {
-    manifest
-        .metadata
-        .plugins
-        .iter()
-        .map(|plugin| {
-            let previous =
-                super::plugin::store::read_record(home, &manifest.metadata.namespace, &plugin.name)
-                    .ok();
-            (
-                manifest.metadata.namespace.clone(),
-                plugin.name.clone(),
-                previous,
-            )
-        })
-        .collect()
+    gents::plugin::install::snapshot_pack_plugin_records(home, manifest)
 }
 
-/// Restores each `(namespace, name)` plugin record to what [`snapshot_pack_plugin_records`]
-/// observed before the install that must now be undone: the previous record is
-/// put back, or removed if there was none. Best-effort and never fails the
-/// caller: a restore that cannot complete is logged loudly rather than
-/// masking the original error that triggered the rollback.
+/// Thin caller over [`gents::plugin::install::rollback_pack_plugin_records`].
 pub(crate) fn rollback_pack_plugin_records(
     home: &std::path::Path,
     previous: &[(
@@ -445,25 +399,7 @@ pub(crate) fn rollback_pack_plugin_records(
         Option<super::plugin::store::InstalledPlugin>,
     )],
 ) {
-    for (namespace, name, record) in previous {
-        let result = match record {
-            Some(record) => super::plugin::store::write_record(home, record),
-            None => match super::plugin::store::read_record(home, namespace, name) {
-                Ok(_) => super::plugin::store::remove_record(home, namespace, name).map(|_| ()),
-                // Never written by this install (it failed before reaching
-                // this plugin, or this plugin failed itself): nothing to undo.
-                Err(_) => Ok(()),
-            },
-        };
-        if let Err(error) = result {
-            tracing::error!(
-                namespace,
-                name,
-                error = %error,
-                "failed to roll back a plugin record after a failed pack install",
-            );
-        }
-    }
+    gents::plugin::install::rollback_pack_plugin_records(home, previous)
 }
 
 /// The node and the owner a pack command acts for.

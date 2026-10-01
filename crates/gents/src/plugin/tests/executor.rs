@@ -96,3 +96,49 @@ async fn a_changed_grant_is_admitted_again() {
         "the new grant replaces the old admission"
     );
 }
+
+#[tokio::test]
+async fn changed_resource_declaration_invalidates_admission_without_new_artifact() {
+    let (home, mut record) = installed_plugin(&super::large_json_output_wat(1536 * 1024), None);
+    record.granted = Some(crate::plugin::Manifold::sealed());
+    record.declaration.limits = Some(crate::pack::PluginLimits {
+        max_output_mib: Some(2),
+        ..Default::default()
+    });
+    let executor = PluginExecutor::new(Some(home.path().to_owned()));
+    let input = serde_json::json!({});
+    assert_eq!(
+        executor
+            .call(&record, input.clone())
+            .await
+            .unwrap()
+            .outcome
+            .verdict,
+        crate::plugin::PluginVerdict::Success
+    );
+    record.declaration.limits = None;
+    assert_eq!(
+        executor.call(&record, input).await.unwrap().outcome.verdict,
+        crate::plugin::PluginVerdict::BadOutput
+    );
+}
+
+#[test]
+fn resource_increases_need_fresh_consent_and_reinstall_retains_it() {
+    let (home, mut record) = installed_echo();
+    record.declaration.limits = Some(crate::pack::PluginLimits {
+        memory_mib: Some(1536),
+        ..Default::default()
+    });
+    assert!(store::grant_on_install(home.path(), "team", &record.declaration, false).is_err());
+    record.granted =
+        store::grant_on_install(home.path(), "team", &record.declaration, true).unwrap();
+    store::write_record(home.path(), &record).unwrap();
+    assert!(
+        store::grant_on_install(home.path(), "team", &record.declaration, false)
+            .unwrap()
+            .is_some()
+    );
+    record.declaration.limits.as_mut().unwrap().memory_mib = Some(2048);
+    assert!(store::grant_on_install(home.path(), "team", &record.declaration, false).is_err());
+}

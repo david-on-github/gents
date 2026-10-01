@@ -1193,6 +1193,12 @@ pub(crate) struct PluginRunArgs {
     pub(crate) input: Option<String>,
     #[arg(long, help = "Home to run the plugin from; defaults to ~/.gents")]
     pub(crate) home: Option<PathBuf>,
+    #[arg(
+        long,
+        value_name = "DIR",
+        help = "Bind DIR read-only for this call; only a plugin that declares bind_dir may use it"
+    )]
+    pub(crate) bind_dir: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]
