@@ -136,7 +136,13 @@ pub(crate) async fn update(args: PackUpdateArgs) -> Result<()> {
         }
         // Pinned: an unpinned install resolves installed-first and would
         // reinstall the version already there.
-        let latest = pack["latest"].as_str().unwrap_or_default();
+        let Some(latest) = pack["latest"].as_str() else {
+            failed.push(json!({
+                "pack": coordinate,
+                "error": "the registry reported no latest version for this pack; run gents pack outdated and retry",
+            }));
+            continue;
+        };
         let install_args = PackInstallArgs {
             package: format!("{coordinate}@{latest}"),
             bindings: args.bindings.clone(),
@@ -213,7 +219,7 @@ mod tests {
 
     /// A minimal document pack: an agent principal placeholder and one empty
     /// tools document, the same shape a real document pack ships (compare
-    /// `packs/background_continuation/pack_config.json`). Returns its bytes
+    /// a pack's `pack_config.json`). Returns its bytes
     /// and the sha256 hex a registry advertises for them.
     fn build_document_pack(version: &str) -> (Vec<u8>, String) {
         let dir = tempfile::tempdir().unwrap();

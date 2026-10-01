@@ -3736,12 +3736,12 @@ mod tests {
 
     #[test]
     fn source_pack_paths_require_normalized_snake_case_directories() {
-        for path in ["pipeline", "packs/pipeline", "/tmp/my_pack"] {
+        for path in ["pipeline", "packs/subject_pack", "/tmp/my_pack"] {
             validate_source_pack_path(Path::new(path)).unwrap();
         }
         for path in [
             "packs/../pipeline",
-            "./packs/pipeline",
+            "./packs/subject_pack",
             "packs/CodeReview",
             "packs/code-review",
         ] {
@@ -3821,7 +3821,8 @@ mod tests {
 
     #[test]
     fn scenario_staging_explicitly_binds_the_initialized_profile() {
-        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
+        let pack = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../gents/tests/fixtures/packs/documents_fixture");
         let distribution = read_distribution_manifest(&pack).unwrap();
         let staged = stage_scenario_pack(
             &pack,
@@ -3842,17 +3843,17 @@ mod tests {
             .agent_behaviors
             .iter()
             .all(|behavior| behavior.inference_profile_id == "default-profile"));
-        assert!(config
-            .agent_behaviors
-            .iter()
-            .all(|behavior| behavior.tags.contains(&"gents:pack:pipeline".to_owned())));
+        assert!(config.agent_behaviors.iter().all(|behavior| behavior
+            .tags
+            .contains(&"gents:pack:documents_fixture".to_owned())));
         assert!(config.inference_profiles.is_empty());
         assert!(config.inference_backends.is_empty());
     }
 
     #[test]
     fn scenario_staging_retains_an_authored_default_behavior() {
-        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
+        let pack = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../gents/tests/fixtures/packs/documents_fixture");
         let distribution = read_distribution_manifest(&pack).unwrap();
         let authored_pack = tempfile::tempdir().unwrap();
         for asset in &distribution.metadata.assets {
@@ -3863,7 +3864,7 @@ mod tests {
         let config_path = authored_pack.path().join("pack_config.json");
         let mut config: Value =
             serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
-        config["agent_principal"]["default_behavior_id"] = json!("exp-stage1");
+        config["agent_principal"]["default_behavior_id"] = json!("fixture-worker");
         std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
 
         let staged = stage_scenario_pack(
@@ -3882,7 +3883,7 @@ mod tests {
                 .agent_principal
                 .default_behavior_id
                 .as_deref(),
-            Some("exp-stage1"),
+            Some("fixture-worker"),
         );
     }
 
@@ -3951,7 +3952,8 @@ mod tests {
 
     #[test]
     fn scenario_rejects_duplicate_dependency_configuration() {
-        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/grok_tui_port");
+        let pack = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../gents/tests/fixtures/packs/documents_fixture");
         let mut experiment = read_pack_json_defaults(&pack.join("experiment.json")).unwrap();
         experiment["bundled_graph_packages"] = json!(["code_review"]);
         let error = serde_json::from_value::<ScenarioManifest>(experiment).unwrap_err();
@@ -4156,203 +4158,10 @@ mod tests {
             .contains("source_edges requires expect.signed_provenance=true"));
     }
 
-    fn canonical_document(
-        manifest: &ScenarioManifest,
-        collection: &str,
-        id_field: &str,
-        id: &str,
-    ) -> Value {
-        let config =
-            serde_json::to_value(manifest.config.as_ref().expect("canonical config loaded"))
-                .expect("canonical config serializes");
-        config[collection]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .find(|row| row[id_field].as_str() == Some(id))
-            .unwrap_or_else(|| panic!("missing {collection} document {id}"))
-            .clone()
-    }
-
-    #[test]
-    fn defending_code_pack_is_typed_static_and_closes_both_fan_outs() {
-        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/defending_code");
-        let manifest = load_manifest_defaults(&pack).expect("defending-code pack should load");
-        let config = manifest.config.as_ref().unwrap();
-        assert_eq!(manifest.expect.prompt_tool_contracts.len(), 14);
-        assert_eq!(manifest.expect.result_documents.len(), 17);
-        assert_eq!(manifest.init.tool_package, "write");
-        assert_eq!(config.agent_behaviors.len(), 16);
-        assert_eq!(config.tasks.len(), 16);
-        assert_eq!(config.triggers.len(), 16);
-
-        for (trigger_id, source_collection) in [
-            ("defend-scan", "DefenseReviewArea"),
-            ("defend-verifier", "DefenseVerificationAssignment"),
-            ("defend-contract-review", "DefenseRootCauseCluster"),
-        ] {
-            let trigger = config
-                .triggers
-                .iter()
-                .find(|trigger| trigger.trigger_id == trigger_id)
-                .unwrap();
-            let gents::document_config::TriggerSource::Event { event_source_id } = &trigger.source
-            else {
-                panic!("{trigger_id} must use an event source")
-            };
-            let source = config
-                .event_sources
-                .iter()
-                .find(|source| source.event_source_id == *event_source_id)
-                .unwrap();
-            assert_eq!(source.source_collection, source_collection);
-            assert_eq!(source.correlation_field.as_deref(), Some("run_id"));
-            assert!(
-                manifest
-                    .expect
-                    .trigger_request_count_sources
-                    .contains_key(trigger_id),
-                "{trigger_id} must declare its fan-out count source"
-            );
-        }
-
-        for trigger_id in ["defend-patch-review", "defend-patch-security-review"] {
-            let trigger = canonical_document(&manifest, "triggers", "trigger_id", trigger_id);
-            let source_id = trigger["source"]["event_source_id"].as_str().unwrap();
-            let source =
-                canonical_document(&manifest, "event_sources", "event_source_id", source_id);
-            assert_eq!(
-                source["filter"],
-                "{ _and: [ { workspace_id: { _neq: null } }, { workspace_id: { _ne: \"\" } } ] }"
-            );
-        }
-
-        let skip_surface = canonical_document(
-            &manifest,
-            "datastore_tool_surfaces",
-            "surface_id",
-            "defend-patch-skip-writes",
-        );
-        let collections = skip_surface["entries"]["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter_map(|entry| entry["collection"].as_str())
-            .collect::<BTreeSet<_>>();
-        for collection in [
-            "DefensePatchCandidate",
-            "DefensePatchValidation",
-            "DefensePatchReview",
-            "DefensePatchSecurityReview",
-        ] {
-            assert!(collections.contains(collection));
-        }
-    }
-
-    #[test]
-    fn repo_maintenance_pack_preserves_categories_and_worktree_sized_packages() {
-        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/repo_maintenance");
-        let manifest = load_manifest_defaults(&pack).expect("repo-maintenance pack should load");
-        let config = manifest.config.as_ref().unwrap();
-        assert_eq!(manifest.expect.prompt_tool_contracts.len(), 6);
-        assert_eq!(manifest.expect.result_documents.len(), 6);
-        assert!(manifest
-            .default_prompt
-            .contains("one shared branch and worktree"));
-        assert_eq!(
-            manifest.seed.fields.get("area_count").map(String::as_str),
-            Some("auto")
-        );
-        assert_eq!(
-            manifest
-                .seed
-                .fields
-                .get("history_depth")
-                .map(String::as_str),
-            Some("250")
-        );
-        assert_eq!(config.tasks.len(), 8);
-        assert!(config
-            .triggers
-            .iter()
-            .any(|trigger| trigger.trigger_id == "maintenance-execute-skip"));
-
-        let triage_surface = canonical_document(
-            &manifest,
-            "datastore_tool_surfaces",
-            "surface_id",
-            "maintenance-triage-writes",
-        );
-        assert!(triage_surface
-            .to_string()
-            .contains("MaintenanceWorkPackage"));
-        let publish_prompt =
-            std::fs::read_to_string(pack.join("tasks/maintenance_publish_task/prompt.md")).unwrap();
-        assert!(publish_prompt.contains("one normal, non-draft PR"));
-        assert!(publish_prompt.contains("Bound this at two full review rounds"));
-        assert!(!publish_prompt.contains("make worktree BRANCH="));
-    }
-
-    #[test]
-    fn workspace_packs_bind_callbacks_and_forbid_prompt_worktrees() {
-        let catalog_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
-        for (pack_name, binding_id, source_collection, worker_prompt) in [
-            (
-                "defending_code",
-                "defense-patch-workspace",
-                "DefensePatchAssignment",
-                "tasks/defend_patch_task/prompt.md",
-            ),
-            (
-                "repo_maintenance",
-                "maintenance-execute-workspace",
-                "MaintenanceReport",
-                "tasks/maintenance_execute_task/prompt.md",
-            ),
-            (
-                "grok_tui_port",
-                "port-implement-workspace",
-                "PortWorkUnit",
-                "tasks/port_implement_task/prompt.md",
-            ),
-        ] {
-            let pack = catalog_root.join(pack_name);
-            let manifest = load_manifest_defaults(&pack)
-                .unwrap_or_else(|error| panic!("{pack_name}: {error:#}"));
-            let binding =
-                canonical_document(&manifest, "callback_bindings", "binding_id", binding_id);
-            let source = canonical_document(
-                &manifest,
-                "event_sources",
-                "event_source_id",
-                binding["event_source_id"].as_str().unwrap(),
-            );
-            assert_eq!(source["source_collection"], source_collection);
-            let prompt = std::fs::read_to_string(pack.join(worker_prompt)).unwrap();
-            assert!(!prompt.contains("make worktree BRANCH="));
-            assert!(
-                prompt.contains("Do not run `git commit`")
-                    || prompt.contains("Do not run git commit")
-            );
-        }
-
-        let grok = catalog_root.join("grok_tui_port");
-        let experiment = read_pack_json_defaults(&grok.join("experiment.json")).unwrap();
-        assert!(experiment.get("bundled_graph_bindings").is_none());
-        assert_eq!(
-            experiment["graph_dependency_environment"]["code_review"]["GENTS_REVIEW_MODEL"],
-            "GLM-5.3-Flash-NVFP4"
-        );
-        let grok_config = load_manifest_defaults(&grok).unwrap().config.unwrap();
-        assert!(grok_config
-            .inference_profiles
-            .iter()
-            .all(|profile| profile.profile_id != "grok-port-code-review-profile"));
-    }
-
     #[test]
     fn every_checked_in_scenario_loads() {
-        let catalog_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs");
+        let catalog_root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../gents/tests/fixtures/packs");
         let mut packs = std::fs::read_dir(&catalog_root)
             .expect("read pack directory")
             .map(|entry| entry.expect("read pack entry").path())
@@ -4364,29 +4173,6 @@ mod tests {
             load_manifest_defaults(&pack)
                 .unwrap_or_else(|error| panic!("{} should load: {error:#}", pack.display()));
         }
-    }
-
-    #[test]
-    fn omitted_tool_package_keeps_the_minimal_ceiling() {
-        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
-        let manifest = load_manifest_defaults(&pack).expect("pipeline pack should load");
-        assert_eq!(manifest.init.tool_package, "minimal");
-        assert!(manifest.init.tool_root.is_none());
-    }
-
-    #[test]
-    fn pipeline_stage_declares_controller_owned_goal_with_least_privilege_tools() {
-        let pack = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/pipeline");
-        let manifest = load_manifest_defaults(&pack).expect("pipeline pack should load");
-        let task = canonical_document(&manifest, "tasks", "task_id", "exp-stage1-task");
-        assert!(task["goal_objective_template"]
-            .as_str()
-            .is_some_and(|value| !value.trim().is_empty()));
-        assert!(task["goal_token_budget"].is_null());
-
-        let tools = canonical_document(&manifest, "tools", "tools_id", "exp-tools-stage1");
-        assert_eq!(tools["built_ins"]["enable_goal_tools"], true);
-        assert!(tools["built_ins"].get("enable_goal_creation").is_none());
     }
 
     #[test]
@@ -4610,52 +4396,6 @@ mod tests {
         let mut missing_wake = complete;
         missing_wake.completed_wake_request_ids.clear();
         assert!(!missing_wake.satisfies(&expected));
-    }
-
-    #[test]
-    fn lsp_rust_pack_declares_readonly_ceiling_and_tool_calls() {
-        let pack =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../packs/lsp_rust");
-        let manifest = load_manifest_defaults(&pack).expect("packs/lsp_rust experiment.json");
-        assert_eq!(manifest.init.tool_package, "readonly");
-        assert!(manifest
-            .init
-            .tool_root
-            .as_deref()
-            .is_some_and(|root| !root.is_empty()));
-        assert_eq!(
-            manifest.init.tool_root_env_var.as_deref(),
-            Some("GENTS_LSP_WORKSPACE")
-        );
-        assert!(manifest
-            .expect
-            .tool_calls
-            .iter()
-            .any(|call| call.tool_name == "lsp" && call.action.as_deref() == Some("hover")));
-        assert!(manifest
-            .expect
-            .tool_calls
-            .iter()
-            .any(|call| call.result_contains.iter().any(|n| n == "FileToolMode")));
-        for (file, symbol, result_needle) in [
-            ("crates/gents-loop/src/tool_policy.rs", "meet", "Disabled"),
-            (
-                "crates/gents/src/toolset/lsp/auth.rs",
-                "lsp_advertised",
-                "FileToolMode",
-            ),
-        ] {
-            assert!(manifest.expect.tool_calls.iter().any(|call| {
-                call.tool_name == "lsp"
-                    && call.action.as_deref() == Some("hover")
-                    && call.file.as_deref() == Some(file)
-                    && call.symbol.as_deref() == Some(symbol)
-                    && call
-                        .result_contains
-                        .iter()
-                        .any(|needle| needle == result_needle)
-            }));
-        }
     }
 
     #[test]

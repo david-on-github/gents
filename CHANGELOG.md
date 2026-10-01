@@ -13,6 +13,16 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- The official packs (`code_review`, `mailbox`, `pipeline`, `security_scan`,
+  `lsp_rust`, `grok_tui_port`, `repo_maintenance`, `defending_code`,
+  `eval_author`, `prompt_proposer`, `web_deep_research`, `graph_pipeline`,
+  `background_continuation`) no longer ship in the binary. They are published
+  from gents-ai/packs to the registry; `gents pack install gents/<name>`
+  (or the desktop Packs panel) fetches one into the home's store, and a bare
+  name resolves from the store first, then the registry. `gents pack list`
+  lists the home's store, so a fresh home lists nothing. The `make maintain`,
+  `defend`, `grok-port` and `defend-page` targets moved to gents-ai/packs.
+
 - Every persistent store is encrypted at rest (DefraDB's AES-256-GCM value
   encryption): a gents home's data directory and the desktop client's store.
   `gents init` (including `--identity-only` and `gents provision`) creates a

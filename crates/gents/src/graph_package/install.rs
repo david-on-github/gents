@@ -1,4 +1,4 @@
-use super::{load_bundled_graph_package, LoadedGraphPackage};
+use super::LoadedGraphPackage;
 use crate::config_client::{
     apply_desired_state_plan, collection_schema_contract_digest, ConfigAccess,
     DesiredStateApplyPlan,
@@ -20,14 +20,6 @@ pub struct GraphPackageInstallBindings {
     pub agent_did: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub inference_slots: crate::pack::PackInferenceBindings,
-}
-
-impl GraphPackageInstallBindings {
-    fn scope(&self) -> crate::pack::PackInstallOptions {
-        crate::pack::PackInstallOptions {
-            agent_did: self.agent_did.clone(),
-        }
-    }
 }
 
 /// What an install/reinstall of a graph package puts in its
@@ -117,24 +109,9 @@ async fn validate_owner(access: &ConfigAccess, owner: &str) -> Result<()> {
         .await
 }
 
-/// Select an existing principal without inventing host, model, or role defaults.
-pub async fn default_bundled_graph_package_install_bindings(
-    access: &ConfigAccess,
-    package_name: &str,
-    owner_did: &str,
-    requested: &crate::pack::PackInferenceBindings,
-) -> Result<GraphPackageInstallBindings> {
-    let scope = crate::pack::PackInstallOptions {
-        agent_did: owner_did.to_owned(),
-    };
-    let package = load_bundled_graph_package(package_name, &scope)?;
-    default_graph_package_install_bindings(access, &package, owner_did, requested).await
-}
-
 /// Select an existing principal without inventing host, model, or role
 /// defaults, for a package already resolved from any source (a directory, a
-/// `.pack`, the home's store, or the registry). The bundled-only sibling
-/// above is the same lookup for a package this binary ships.
+/// `.pack`, the home's store, or the registry).
 pub async fn default_graph_package_install_bindings(
     access: &ConfigAccess,
     package: &LoadedGraphPackage,
@@ -288,27 +265,7 @@ fn same_install_configuration(active: &GraphPlan, base: &GraphPlan, package: &Pa
     active == candidate
 }
 
-pub async fn prepare_bundled_graph_package_install(
-    access: &ConfigAccess,
-    package_name: &str,
-    options: &GraphPackageInstallBindings,
-) -> Result<PreparedGraphPackageInstall> {
-    let package = load_bundled_graph_package(package_name, &options.scope())?;
-    prepare_package(access, &package, options, None).await
-}
-
-/// Explicit selection for packs containing more than one authored graph.
-pub async fn prepare_bundled_graph_package_install_for_graph(
-    access: &ConfigAccess,
-    package_name: &str,
-    options: &GraphPackageInstallBindings,
-    graph_id: &str,
-) -> Result<PreparedGraphPackageInstall> {
-    let package = load_bundled_graph_package(package_name, &options.scope())?;
-    prepare_package(access, &package, options, Some(graph_id)).await
-}
-
-/// Read-only canonical plan owner for an already resolved bundled graph.
+/// Read-only canonical plan owner for an already resolved graph.
 /// Callers pin the distribution digest before passing the package here; this
 /// function revalidates inference references and the complete desired state.
 pub(crate) async fn prepare_loaded_graph_package_install(
@@ -502,48 +459,7 @@ async fn ensure_package_schemas(access: &ConfigAccess, package: &LoadedGraphPack
     Ok(())
 }
 
-pub async fn install_bundled_graph_package(
-    access: &ConfigAccess,
-    actor_did: &str,
-    package_name: &str,
-    options: &GraphPackageInstallBindings,
-    record: &GraphInstallRecord,
-) -> Result<GraphPackageInstallReceipt> {
-    install_package(access, actor_did, package_name, options, None, record).await
-}
-
-pub async fn install_bundled_graph_package_for_graph(
-    access: &ConfigAccess,
-    actor_did: &str,
-    package_name: &str,
-    options: &GraphPackageInstallBindings,
-    graph_id: &str,
-    record: &GraphInstallRecord,
-) -> Result<GraphPackageInstallReceipt> {
-    install_package(
-        access,
-        actor_did,
-        package_name,
-        options,
-        Some(graph_id),
-        record,
-    )
-    .await
-}
-
-async fn install_package(
-    access: &ConfigAccess,
-    actor_did: &str,
-    package_name: &str,
-    options: &GraphPackageInstallBindings,
-    graph_id: Option<&str>,
-    record: &GraphInstallRecord,
-) -> Result<GraphPackageInstallReceipt> {
-    let package = load_bundled_graph_package(package_name, &options.scope())?;
-    install_loaded_graph_package(access, actor_did, &package, options, graph_id, record).await
-}
-
-/// Publication owner shared by named distributions and already resolved packs.
+/// Publication owner for an already resolved pack.
 pub async fn install_loaded_graph_package(
     access: &ConfigAccess,
     actor_did: &str,

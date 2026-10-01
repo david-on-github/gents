@@ -1,11 +1,10 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 use crate::graph_pipeline::{EntryBinding, ResultContract};
+use crate::pack::PackInstallOptions;
 pub use crate::pack::PackageExternalDependency;
-use crate::pack::{bundled_pack_asset, PackInstallOptions, BUNDLED_GRAPH_PACKAGE_NAMES};
 
 /// Graph packages use the common manifest and canonical configuration loader.
 pub type GraphPackageManifest = crate::pack::PackManifest;
@@ -44,7 +43,7 @@ impl LoadedGraphPackage {
 
     pub fn asset_text(&self, path: &str) -> Result<&str> {
         std::str::from_utf8(self.asset(path)?)
-            .with_context(|| format!("bundled asset {path:?} is not UTF-8"))
+            .with_context(|| format!("pack asset {path:?} is not UTF-8"))
     }
 
     pub fn catalog_entry(&self) -> GraphPackageCatalogEntry {
@@ -70,33 +69,6 @@ impl LoadedGraphPackage {
             capabilities: self.config.graph_capabilities.clone(),
         }
     }
-}
-
-pub(crate) fn digest_assets(package_name: &str, paths: &[String]) -> Result<String> {
-    let mut hasher = Sha256::new();
-    for path in paths {
-        let bytes = bundled_pack_asset(package_name, path)
-            .with_context(|| format!("bundled package references missing asset {path:?}"))?;
-        hasher.update((path.len() as u64).to_be_bytes());
-        hasher.update(path.as_bytes());
-        hasher.update((bytes.len() as u64).to_be_bytes());
-        hasher.update(bytes);
-    }
-    Ok(format!("sha256:{:x}", hasher.finalize()))
-}
-
-pub(crate) fn load_package(
-    distribution: &crate::pack::ResolvedPack,
-    options: &PackInstallOptions,
-    environment: &dyn Fn(&str) -> Option<String>,
-) -> Result<LoadedGraphPackage> {
-    load_package_from_assets(
-        distribution.manifest.clone(),
-        distribution.digest.clone(),
-        options,
-        &|path| Ok(distribution.asset(path)?.to_vec()),
-        environment,
-    )
 }
 
 pub fn load_archive_graph_package_with_environment(
@@ -268,43 +240,6 @@ fn load_package_from_assets(
         package_digest,
         assets,
     })
-}
-
-pub fn load_bundled_graph_package(
-    name: &str,
-    options: &PackInstallOptions,
-) -> Result<LoadedGraphPackage> {
-    anyhow::ensure!(
-        BUNDLED_GRAPH_PACKAGE_NAMES.contains(&name),
-        "unknown bundled graph package {name:?}"
-    );
-    load_package(&crate::pack::resolve_pack(name)?, options, &|name| {
-        std::env::var(name).ok()
-    })
-}
-
-pub fn load_resolved_graph_package(
-    distribution: &crate::pack::ResolvedPack,
-    options: &PackInstallOptions,
-) -> Result<LoadedGraphPackage> {
-    load_package(distribution, options, &|name| std::env::var(name).ok())
-}
-
-pub(crate) fn load_resolved_graph_package_with_environment(
-    distribution: &crate::pack::ResolvedPack,
-    options: &PackInstallOptions,
-    environment: &dyn Fn(&str) -> Option<String>,
-) -> Result<LoadedGraphPackage> {
-    load_package(distribution, options, environment)
-}
-
-pub fn graph_package_catalog(
-    options: &PackInstallOptions,
-) -> Result<Vec<GraphPackageCatalogEntry>> {
-    BUNDLED_GRAPH_PACKAGE_NAMES
-        .iter()
-        .map(|name| Ok(load_bundled_graph_package(name, options)?.catalog_entry()))
-        .collect()
 }
 
 #[cfg(test)]

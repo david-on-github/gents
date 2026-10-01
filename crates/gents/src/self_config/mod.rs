@@ -1604,13 +1604,29 @@ impl PackInstaller {
         Ok(distribution)
     }
 
+    /// The active graph of the installed pack with `manifest`'s namespace and
+    /// name. The install record is keyed by `namespace/name`, so a pack of the
+    /// same name from another namespace is never reported as installed.
+    // vertexia: graphs are looked up by bare package name, so two namespaces
+    // installed at once with the same name fail loud as ambiguous.
     async fn installed(
         &self,
-        package: &str,
+        manifest: &crate::pack::PackManifest,
     ) -> anyhow::Result<Option<crate::graph_pipeline::GraphPlan>> {
         let access = crate::config_client::ConfigAccess::Local(self.node.clone());
-        crate::graph_package::load_installed_package_plan(&access, package, self.core.agent_did())
-            .await
+        let coordinate = format!("{}/{}", manifest.metadata.namespace, manifest.name);
+        if crate::pack::read_installed_pack(&access, self.core.agent_did(), &coordinate)
+            .await?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        crate::graph_package::load_installed_package_plan(
+            &access,
+            &manifest.name,
+            self.core.agent_did(),
+        )
+        .await
     }
 
     /// One page of the packs the home's pack store holds, by `namespace/name`.
@@ -1644,11 +1660,25 @@ impl PackInstaller {
             let (Some(store), Some(preferred)) = (&store, versions.first()) else {
                 continue;
             };
-            let archive = store.open(&preferred.digest)?;
+            let archive = match store.open(&preferred.digest) {
+                Ok(archive) => archive,
+                Err(error) => {
+                    tracing::warn!(pack = %coordinate, %error, "a stored pack archive could not be opened");
+                    items.push(json!({
+                        "name": coordinate,
+                        "version": preferred.version,
+                        "versions": versions.iter().map(|stored| stored.version.as_str()).collect::<Vec<_>>(),
+                        "artifact_digest": preferred.digest,
+                        "installable": false,
+                        "error": format!("the stored archive could not be opened: {error:#}"),
+                    }));
+                    continue;
+                }
+            };
             let manifest = archive.manifest();
             let installable = manifest.metadata.kind == crate::pack::PackKind::Graph;
             let installed = if installable {
-                self.installed(&manifest.name).await?
+                self.installed(manifest).await?
             } else {
                 None
             };
@@ -1699,7 +1729,7 @@ impl PackInstaller {
         .await?;
         let installable = distribution.manifest().metadata.kind == crate::pack::PackKind::Graph;
         let installed = if installable {
-            self.installed(&distribution.manifest().name).await?
+            self.installed(distribution.manifest()).await?
         } else {
             None
         };
@@ -1800,7 +1830,7 @@ impl PackInstaller {
                 distribution.digest()
             );
         }
-        let installed = self.installed(&distribution.manifest().name).await?;
+        let installed = self.installed(distribution.manifest()).await?;
         anyhow::ensure!(
             operation != "update" || installed.is_some(),
             "pack {:?} is not installed; preview install instead",
@@ -1905,7 +1935,7 @@ impl PackInstaller {
             "pack digest changed: preview authorized {expected:?}, resolved {:?}; preview again",
             distribution.digest()
         );
-        let previous = self.installed(&distribution.manifest().name).await?;
+        let previous = self.installed(distribution.manifest()).await?;
         anyhow::ensure!(
             operation != "update" || previous.is_some(),
             "pack {:?} is not installed; use pack install",

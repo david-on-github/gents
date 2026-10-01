@@ -31,8 +31,6 @@ pub use provenance::{pack_document_digests, pack_origin_from_tags, pack_origin_t
 #[path = "pack_asset_path.rs"]
 mod asset_path;
 
-include!(concat!(env!("OUT_DIR"), "/bundled_packs.rs"));
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PackKind {
@@ -571,49 +569,11 @@ pub struct PackInstallOptions {
     pub agent_did: String,
 }
 
-pub struct ResolvedPack {
-    pub manifest: PackManifest,
-    pub digest: String,
-}
-
 /// Return whether `name` is admissible at the pack catalog and source-pack
 /// boundaries. Keep callers on this owner instead of growing parallel name
 /// validators in adapters.
 pub fn is_valid_pack_name(name: &str) -> bool {
     asset_path::is_snake_case_name(name)
-}
-
-impl ResolvedPack {
-    pub fn load_config(
-        &self,
-        options: &PackInstallOptions,
-    ) -> Result<crate::document_config::PackConfig> {
-        self.load_config_with_environment(options, &|name| std::env::var(name).ok())
-    }
-
-    /// Load a bundled pack with an explicit interpolation source. Runtime
-    /// owners use this to bind known package inputs without mutating the
-    /// process environment shared by concurrent requests.
-    pub(crate) fn load_config_with_environment(
-        &self,
-        options: &PackInstallOptions,
-        environment: &dyn Fn(&str) -> Option<String>,
-    ) -> Result<crate::document_config::PackConfig> {
-        load_pack_config(
-            &self.manifest,
-            options,
-            &|path| Ok(self.asset(path)?.to_vec()),
-            environment,
-        )
-    }
-
-    pub fn asset(&self, path: &str) -> Result<&'static [u8]> {
-        anyhow::ensure!(
-            path == "manifest.json" || self.manifest.metadata.assets.iter().any(|p| p == path),
-            "undeclared pack asset: {path}"
-        );
-        bundled_pack_asset(&self.manifest.name, path).context("missing bundled pack asset")
-    }
 }
 
 /// Whether a path may appear in a pack archive.
@@ -639,7 +599,7 @@ pub fn validate_manifest(name: &str, manifest: &PackManifest) -> Result<()> {
     validate_pack_manifest(manifest)
 }
 
-/// Distribution validation shared by bundled and source-pack loaders.
+/// Distribution validation shared by every pack loader.
 pub fn validate_pack_manifest(manifest: &PackManifest) -> Result<()> {
     anyhow::ensure!(
         manifest.manifest_version == 1,
@@ -903,25 +863,6 @@ impl PackDigester {
     pub fn finish(self) -> String {
         format!("sha256:{:x}", sha2::Digest::finalize(self.0))
     }
-}
-
-pub fn resolve_pack(name: &str) -> Result<ResolvedPack> {
-    anyhow::ensure!(
-        BUNDLED_PACK_NAMES.contains(&name),
-        "unknown pack {name:?}; use gents pack list"
-    );
-    let bytes = bundled_pack_asset(name, "manifest.json").context("missing manifest")?;
-    let manifest: PackManifest = serde_json::from_slice(bytes)?;
-    validate_manifest(name, &manifest)?;
-    let digest = crate::graph_package::digest_assets(name, &declared_paths(&manifest))?;
-    Ok(ResolvedPack { manifest, digest })
-}
-
-pub fn pack_catalog() -> Result<Vec<PackManifest>> {
-    BUNDLED_PACK_NAMES
-        .iter()
-        .map(|name| Ok(resolve_pack(name)?.manifest))
-        .collect()
 }
 
 #[cfg(test)]

@@ -120,7 +120,7 @@ pub struct VerifiedPack {
 /// Refuses, before reading further, anything over `bounds`; an entry that is
 /// not a regular file or whose path a pack may not carry; entries out of
 /// digest order or repeated; a missing or unknown header; a manifest that
-/// fails the rules a bundled pack is held to; any difference between the
+/// fails the rules every pack is held to; any difference between the
 /// entries and the manifest's declared paths; and a header whose digest,
 /// coordinate, version or kind differ from the contents.
 ///

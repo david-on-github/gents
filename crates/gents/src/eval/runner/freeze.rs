@@ -1151,7 +1151,7 @@ pub(crate) mod tests {
     /// The monitor behavior's system prompt in [`write_fixture_pack`].
     pub(crate) const FIXTURE_PROMPT: &str = "Watch the mailbox.\n";
 
-    /// The shape of `packs/pipeline`: a manifest, a README, the canonical
+    /// The shape of a documents pack: a manifest, a README, the canonical
     /// config bundle and one behavior sidecar holding [`FIXTURE_PROMPT`].
     pub(crate) fn write_fixture_pack(root: &Path, bash_mode: &str) {
         std::fs::create_dir_all(root.join("agent_behaviors/monitor")).unwrap();

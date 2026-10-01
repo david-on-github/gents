@@ -160,7 +160,7 @@ impl PackSource {
 }
 
 /// Shared by every gents-cli unit test that needs a resolved pack: the
-/// bundled-catalog fixtures live in the gents crate and open into a store
+/// fixture packs live in the gents crate and open into a store
 /// the same way any local pack spec does, so a test never has to spin up a
 /// fake registry just to get a [`PackSource`].
 #[cfg(test)]
@@ -234,8 +234,8 @@ pub(crate) mod test_support {
 }
 
 /// `{namespace}/{name}`, defaulting to the `gents` namespace when the given
-/// name carries none (every bundled pack name is bare, so this only matters
-/// for a registry lookup).
+/// name carries none (a store or registry name may be bare, so this only
+/// matters for a registry lookup).
 pub(crate) fn split_namespace(name: &str) -> (&str, &str) {
     gents::pack_registry::split_pack_coordinate(name)
 }

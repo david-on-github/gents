@@ -1097,7 +1097,7 @@ pub(crate) struct PackRunArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct PackInitArgs {
-    #[arg(help = "Pack directory, or a name resolved under packs/")]
+    #[arg(help = "Pack directory, or a pack name resolved as `gents pack install` resolves one")]
     pub(crate) pack: String,
     #[arg(long, help = "Home directory to initialize")]
     pub(crate) home: PathBuf,
@@ -1111,7 +1111,7 @@ pub(crate) struct PackInitArgs {
 
 #[derive(clap::Args)]
 pub(crate) struct PackSeedArgs {
-    #[arg(help = "Pack directory, or a name resolved under packs/")]
+    #[arg(help = "Pack directory, or a pack name resolved as `gents pack install` resolves one")]
     pub(crate) pack: String,
     #[arg(long, help = "Seed prompt. Defaults to the pack's default_prompt")]
     pub(crate) prompt: Option<String>,
@@ -4304,7 +4304,7 @@ pub(crate) struct EvalRunArgs {
     pub(crate) definition_id: String,
     /// `<id>=<pack>[:<behavior>]`, once per cell. `<pack>` is a pack name,
     /// resolved as `gents pack install` resolves one, or a pack directory
-    /// written as a path (`./subject`, `/packs/subject`).
+    /// written as a path (`./subject`, `/work/subject`).
     #[arg(long = "cell", value_parser = parse_cell, required = true)]
     pub(crate) cells: Vec<CellArg>,
     /// `<cell>=<inference_profile_id>`; a cell without one uses the home's
@@ -4345,7 +4345,7 @@ const EVAL_INIT_AFTER_HELP: &str = "Needs a terminal (this command is an intervi
 #[derive(clap::Args)]
 pub(crate) struct EvalInitArgs {
     /// A pack name, resolved as `gents pack install` resolves one, or a pack
-    /// directory written as a path (`./subject`, `/packs/subject`).
+    /// directory written as a path (`./subject`, `/work/subject`).
     pub(crate) subject: String,
     /// The behavior to draft cases for; implied when the pack has one.
     #[arg(long)]

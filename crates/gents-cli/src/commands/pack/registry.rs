@@ -2,7 +2,7 @@
 //! the download-verify-cache path `gents pack install` falls back to when a
 //! pack is not compiled into this binary.
 //!
-//! A pack fetched from the registry has to become the same pack a bundled
+//! A pack fetched from the registry has to become the same pack a local
 //! one is before it is trusted with anything: its raw bytes are checked
 //! against the digest the registry advertised before they are ever parsed,
 //! and only a match is cached and handed to [`gents::pack_archive::PackArchive`].

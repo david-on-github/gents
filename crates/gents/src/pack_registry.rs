@@ -319,7 +319,7 @@ impl RegistryClient {
 #[derive(Debug)]
 pub struct RegistryPack {
     pub archive: PackArchive,
-    /// Canonical digest over declared pack assets, shared with bundled packs.
+    /// Canonical digest over declared pack assets, shared with every pack loader.
     pub digest: String,
     /// Registry artifact digest over the exact compressed archive bytes.
     pub artifact_digest: String,
