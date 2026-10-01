@@ -21,6 +21,9 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
+            },
+            "enabled": {
+              "_eq": true
             }
           },
           "fields": [
@@ -356,6 +359,23 @@
             "enabled",
             "concurrency"
           ]
+        },
+        {
+          "kind": "documents",
+          "name": "all_behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
         }
       ],
       "checks": [
@@ -388,7 +408,7 @@
                 "category": "collections"
               },
               {
-                "capture": "behaviors",
+                "capture": "all_behaviors",
                 "min": 7,
                 "max": 7,
                 "category": "completeness"
@@ -1891,6 +1911,9 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
+            },
+            "enabled": {
+              "_eq": true
             }
           },
           "fields": [
@@ -2226,6 +2249,23 @@
             "enabled",
             "concurrency"
           ]
+        },
+        {
+          "kind": "documents",
+          "name": "all_behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
         }
       ],
       "checks": [
@@ -2258,7 +2298,7 @@
                 "category": "collections"
               },
               {
-                "capture": "behaviors",
+                "capture": "all_behaviors",
                 "min": 7,
                 "max": 7,
                 "category": "completeness"

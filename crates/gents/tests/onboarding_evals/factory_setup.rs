@@ -369,3 +369,94 @@ fn capstone_accepts_default_events_and_passes_keys_for_tool_backed_reads() {
         assert!(check.evaluate(&subset, &bad).score_bp.unwrap() < 10000);
     }
 }
+
+#[test]
+fn capstone_disabled_roles_fail_cleanup_without_shadowing_active_roles() {
+    use gents::eval::runner::CaptureResult;
+    use serde_json::json;
+
+    let definition = definition();
+    let registry = CheckRegistry::builtin();
+    let check = registry.get("crew_spec_match").unwrap();
+    for stage in &definition.cases[0].stages {
+        let captures = serde_json::to_value(&stage.capture).unwrap();
+        let captures = captures.as_array().unwrap();
+        let active = captures.iter().find(|c| c["name"] == "behaviors").unwrap();
+        let all = captures
+            .iter()
+            .find(|c| c["name"] == "all_behaviors")
+            .unwrap();
+        assert_eq!(active["filter"]["enabled"], json!({"_eq":true}));
+        assert!(all["filter"].get("enabled").is_none());
+        assert_eq!(all["collection"], active["collection"]);
+        assert_eq!(all["filter"]["agent_did"], active["filter"]["agent_did"]);
+
+        let params = &stage
+            .checks
+            .iter()
+            .find(|c| c.check == "crew_spec_match")
+            .unwrap()
+            .params;
+        let count = params["present"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["capture"] == "all_behaviors")
+            .unwrap();
+        let link = params["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|l| {
+                l["category"] == "inference" && l["source_match"]["matches"] == "(?i)\\bplanner\\b"
+            })
+            .unwrap();
+        let subset = json!({"present":[count],"links":[link]});
+        let planner = json!({"behavior_id":"planner-new","display_name":"Planner","enabled":true,"inference_profile_id":"profile"});
+        let mut all_rows = vec![planner.clone()];
+        all_rows.extend((0..6).map(|i| json!({"behavior_id":format!("other-{i}"),"enabled":true})));
+        all_rows.push(json!({"behavior_id":"planner-old","display_name":"Planner","enabled":false,"inference_profile_id":"wrong-profile"}));
+        let mut evidence =
+            ScriptedExecutor::passed_evidence(OWNER, &stage.stage_id, "unused", vec![])
+                .stages
+                .remove(0);
+        evidence.captures.clear();
+        for (name, rows) in [
+            ("behaviors", vec![planner.clone()]),
+            ("all_behaviors", all_rows.clone()),
+            (
+                "profiles",
+                vec![json!({"profile_id":"profile","reasoning_effort":"high"})],
+            ),
+        ] {
+            evidence
+                .captures
+                .insert(name.into(), CaptureResult::Documents { rows });
+        }
+        let verdict = check.evaluate(&subset, &evidence);
+        assert_eq!(verdict.raw["categories"]["inference"]["satisfied"], 2);
+        assert_eq!(verdict.raw["categories"]["inference"]["total"], 2);
+        assert_eq!(verdict.raw["categories"]["completeness"]["satisfied"], 0);
+        assert_eq!(verdict.raw["categories"]["completeness"]["total"], 1);
+        assert_eq!(verdict.raw["unmet"].as_array().unwrap().len(), 1);
+        assert!(verdict.raw["unmet"][0]
+            .as_str()
+            .unwrap()
+            .contains("all_behaviors"));
+
+        all_rows.pop();
+        evidence.captures.insert(
+            "all_behaviors".into(),
+            CaptureResult::Documents { rows: all_rows },
+        );
+        assert_eq!(check.evaluate(&subset, &evidence).score_bp, Some(10000));
+
+        evidence.captures.insert("behaviors".into(), CaptureResult::Documents { rows: vec![planner.clone(), json!({"behavior_id":"planner-duplicate","display_name":"Planner","enabled":true,"inference_profile_id":"profile"})] });
+        assert!(check.evaluate(&subset, &evidence).score_bp.unwrap() < 10000);
+        evidence.captures.insert(
+            "behaviors".into(),
+            CaptureResult::Documents { rows: vec![] },
+        );
+        assert!(check.evaluate(&subset, &evidence).score_bp.unwrap() < 10000);
+    }
+}
