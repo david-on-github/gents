@@ -2147,6 +2147,10 @@ mod tests {
             Vec::new(),
         );
         let surface = engineer_tools(&mut tools, "did:key:z-init", true);
+        assert_eq!(
+            tools.built_ins.as_ref().unwrap().enable_schema_tool,
+            Some(true)
+        );
         assert!(tools.validation_violations().is_empty());
         assert_eq!(tools.subagents.as_ref().unwrap().enabled, Some(true));
         assert_eq!(

@@ -215,7 +215,7 @@ async fn init_bootstraps_backend_default_behavior_and_tools_idempotently() -> Re
         tools
             .pointer("/built_ins/enable_schema_tool")
             .and_then(Value::as_bool),
-        Some(true)
+        None
     );
     let preset: Value = serde_json::from_str(gents_protocol::SETUP_SELF_CONFIG_JSON)?;
     for (field, expected) in preset.as_object().context("preset object")? {
