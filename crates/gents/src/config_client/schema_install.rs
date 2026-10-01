@@ -10,6 +10,12 @@ use sha2::{Digest, Sha256};
 use super::schema_contract::{collection_schema_field_delta, SchemaFieldDelta};
 use super::{collection_schema_contract_digest, ConfigAccess};
 
+#[derive(Debug, thiserror::Error)]
+#[error("existing collection {collection:?} does not match requested schema")]
+pub(crate) struct SchemaInstallMismatch {
+    pub collection: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SchemaInstallPlan {
     pub artifact_digest: String,
@@ -77,17 +83,15 @@ async fn preview_schema(
                 existing = true;
                 let delta =
                     collection_schema_field_delta(&serde_json::to_value(&collection)?, &live)
-                        .with_context(|| {
-                            format!(
-                                "existing collection {:?} does not match requested schema",
-                                collection.name
-                            )
+                        .with_context(|| SchemaInstallMismatch {
+                            collection: collection.name.clone(),
                         })?;
-                ensure!(
-                    additive || (delta.pending.is_empty() && delta.extra.is_empty()),
-                    "existing collection {:?} does not match requested schema",
-                    collection.name
-                );
+                if !additive && (!delta.pending.is_empty() || !delta.extra.is_empty()) {
+                    return Err(SchemaInstallMismatch {
+                        collection: collection.name,
+                    }
+                    .into());
+                }
                 field_deltas.insert(collection.name.clone(), delta);
             }
             None => missing = true,

@@ -151,6 +151,9 @@ impl ConfigCommandTool {
             parse_patch(&rest, target)?
         };
         if target == SelfConfigTarget::SubagentTarget {
+            if create && !patch.iter().any(|(field, _)| field == "target_agent_did") {
+                patch.push(("target_agent_did".into(), Some(json!(self.agent_did))));
+            }
             self.resolve_target_behavior(&id, &mut patch).await?;
         }
         let mut core = if matches!(
@@ -410,7 +413,7 @@ impl ConfigCommandTool {
             match result {
                 Ok(text) => results.push(json!({"index":index,"ok":true,"result":serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)),"config_execution":receipt})),
                 Err(error) => {
-                    results.push(json!({"index":index,"ok":false,"error":format!("{error:#}"),"config_execution":receipt}));
+                    results.push(json!({"index":index,"ok":false,"error":format!("{error:#}"),"recovery":error.downcast_ref::<CommandGuidance>().map(|hint| json!({"next_call":hint.next_call})),"config_execution":receipt}));
                     return Err(BatchFailure { results, failed_index:index, unattempted:commands.len()-index-1 }.into());
                 }
             }

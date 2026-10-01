@@ -110,13 +110,10 @@ impl ConfigCommandTool {
         let mut out = String::from(
             "config resources. [\"help\",RESOURCE] explains one; [RESOURCE,VERB,\"--help\"] gives field shapes. Commands go in argv; IDs may follow the verb or use target_id.\n",
         );
-        let connected_preview = !self.connected_preview_contract().is_null();
         for (resource, line) in HELP_INDEX {
-            let granted = *resource == "get"
-                || (*resource != "plan" || connected_preview)
-                    && enabled
-                        .iter()
-                        .any(|name| name.split(' ').next() == Some(*resource));
+            let granted = enabled
+                .iter()
+                .any(|name| name.split(' ').next() == Some(*resource));
             if granted {
                 let _ = writeln!(out, "  {resource}: {line}");
             }
@@ -231,11 +228,15 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "compaction" => Page { what: "context compaction settings selected by a Context.", commands: &[], notes: "Create a separate document for different compaction settings.", next: "context update with set.compaction_id." },
         "task" | "trigger" | "schedule" | "event-source" => Page {
             what: match resource { "task" => "work performed by a behavior.", "trigger" => "routes an event source or schedule to a task.", "schedule" => "a timer that starts work.", _ => "watches collection changes and starts work." },
-            commands: &[], notes: "task create: options.behavior selects its owner (default: you); behavior_id is protected. Trigger creation resolves its task’s owner; updates resolve the saved owner. options.behavior may assert that owner. Create Task before Trigger. For wiring and completion records see help automation.", next: "get the saved document and verify its references.",
+            commands: &[], notes: match resource {
+                "task" => "Create uses options.behavior (default: you); behavior_id is protected. Updates resolve the saved owner. A reply can finish a task; writing another input fires the workflow again. For stored outputs and completion records see help automation.",
+                "trigger" => "Create the source and Task first. The Task determines who handles the event. concurrency controls overlap; session_id_template controls the destination independently. To continue a known session, set its ID as session_id_template. Omit it for a new session per fire. See help automation for the full workflow.",
+                _ => "A source alone starts no work: create a Task, then a Trigger linking it to this source. See help automation for the full workflow.",
+            }, next: "get the saved document and verify its references.",
         },
         "batch" => Page { what: "run ordered config calls in one tool call.", commands: &["batch  options.operations: [{argv, target_id?, set?, clear?, options?}, ...]"], notes: "1–64 calls, at most 128 KiB; no nested batches. Each call uses its usual grants and validation and commits separately. Stops at the first failure, returns each attempted result, and leaves earlier changes committed. Fix the failed call and resume there; do not repeat successful creates. Use cleanup for atomic multi-document deletion.", next: "inspect each result; references must exist when its call runs." },
         "get" => Page {
-            what: "the effective configuration of one behavior. Use it to read before any change.",
+            what: "effective configuration read alias. Prefer behavior get [ID]; without an ID it inspects you.",
             commands: &["get  options.behavior (default: the invoking behavior)"],
             notes: "Shows behavior, context, Tools, the profile chain, automation, runtime_effective and self_config grants. Reads never change anything.",
             next: "change one part with its resource, e.g. [\"help\",\"tools\"].",
@@ -246,11 +247,11 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             notes: "Graph tools (when granted): list_graphs shows installed graphs; run_graph starts one, so keep its run_id; get_graph_run and get_graph_result inspect it; cancel_graph_run stops it. preview_graph checks a proposed intent's syntax and topology only; nothing publishes it. Loops such as retry are document automation (help automation), because graphs are acyclic. Workspaces for coding stages (RepositoryPlacement, workspace callbacks, sealed worktrees and integration) come with packs such as repo_maintenance; config does not author callbacks.",
             next: "[\"help\",\"pack\"] to install one, then list_graphs.",
         },
-        "plan" => Page {
-            what: "preview a connected set of NEW documents that reference each other before any exists (behavior catalog grant and preview).",
-            commands: &["plan preview  options.documents: [{collection, document}, ...]"],
-            notes: "Every document needs agent_did and an exact ID; existing same-principal references may be reused; existing documents cannot be replaced. For a mailbox surface put mailbox: POLICY beside document and omit entries. It does not register schemas or prove runtime readiness. Never create temporary documents to make a preview pass.",
-            next: "create each document with its own resource command.",
+        "validate" => Page {
+            what: "audit saved configuration for your authenticated principal; read-only (behavior catalog grant).",
+            commands: &["validate"],
+            notes: "Uses the same canonical fields, references and publication checks as writes. Reports document counts and errors; fix them with resource update/create, then validate again. References to remote principals are not locally verified. This does not test credentials, running helpers, application-schema readiness or whether the setup meets the user's goal. Inspect selections with behavior get; exercise tools to test runtime behavior.",
+            next: "fix reported errors before reporting completion; state what remains untested.",
         },
         "schema" => Page {
             what: "register a collection schema for the whole node (automation grant). Use it before a datastore surface or event source that needs the collection.",
@@ -284,7 +285,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "datastore [preview] create|edit  set: surface fields, or options.mailbox",
             ],
             notes: concat!(
-                "Surface create fields: writable {name} arguments; omitted or empty means none. Query fields: returned columns; filter_fields: exact-match arguments as {name} objects. Tool descriptions state use, inputs and side effects.\nfill: correlation uses the request/trigger correlation ID; fill: {source_field: F} copies trigger field F. Omit fill for caller-supplied values. Filled fields cannot be required.\nCaller value: {\"name\":\"correlation\"}. Runtime ID: {\"name\":\"request_correlation\",\"fill\":\"correlation\"}.\nInstall schemas before selection. Selection checks names, not schemas.\nGrant only the requested operations. Mailbox: options.mailbox builds file_mailbox_item for existing MailboxItem and replaces entries. Put other tools on another surface. Never replace the mailbox collection.\n",
+                "Create fields: {name} arguments; omitted or empty means none. Query fields: columns; filter_fields: exact-match {name} arguments. Describe use, inputs and effects.\nfill: correlation uses the request/trigger correlation ID; fill: {source_field: F} copies trigger field F. Omit fill for caller-supplied values. Filled fields cannot be required.\nCaller value: {\"name\":\"correlation\"}. Runtime ID: {\"name\":\"request_correlation\",\"fill\":\"correlation\"}.\nInstall schemas before selection. Selection checks names, not schemas. Omit output_obligation for inbox writers: it requires handler writes too, which retrigger inputs.\nGrant requested operations only. options.mailbox replaces entries with file_mailbox_item for existing MailboxItem. Put other tools on another surface. Never replace MailboxItem.\n",
                 mailbox_identity_choice!(),
                 " A monitor uses condition identity: {\"argv\":[\"datastore\",\"create\"],\"target_id\":\"monitor-mailbox\",\"options\":{\"mailbox\":{\"identity\":{\"mode\":\"condition\",\"key\":\"host-health\"},\"kind\":\"flag\",\"action\":\"ack\"}}}"
             ),
@@ -293,7 +294,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "subagent-target" => Page {
             what: "a named route to a behavior for agent_new (tools grant). TARGET_ID goes in target_id or argv.",
             commands: &["subagent-target list", "subagent-target get TARGET_ID", "subagent-target [preview] create|edit TARGET_ID  set: target fields"],
-            notes: "name is the name passed to agent_new. For local helpers, use agent_did from [\"get\"] as target_agent_did. The target behavior selects its inference profile. The local behavior_id must exist; its short slug resolves. Multiple callers can select a target.",
+            notes: "Choose an existing behavior or create a helper. A new session does not require cloning the role. name is passed to agent_new; behavior_id selects the helper. Omit target_agent_did on create for a local helper; set it explicitly for a remote principal. Updates preserve the destination when omitted. Local slugs resolve; never copy a DID from another document ID. Dispatch acceptance does not prove the helper started or replied.",
             next: "read tools get, then tools update: preserve set.subagents, set enabled true and add this ID to target_ids. Selecting targets alone leaves delegation disabled. Use options.behavior to grant another caller; tools apply next request.",
         },
         "execution" => Page {
@@ -303,7 +304,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             next: "bind it as in the recipe, then read it back with profile get execution and options.behavior.",
         },
         "behavior" => Page {
-            what: "a behavior is one agent: a Context (prompt, skills), a Tools document and a profile. Use it to list, create, clone, disable or re-point agents.",
+            what: "an agent role. create bundles its Context and Tools; a profile supplies inference settings. get without an ID inspects your current role.",
             commands: &[
                 "behavior list  options: limit, cursor",
                 "behavior get [BEHAVIOR_ID]",
@@ -331,7 +332,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "profile get PROFILE_ID",
                 "profile get|preview|edit [TARGET]  options.behavior; TARGET is profile (default), sampling, execution, retry-policy or compaction",
             ],
-            notes: "Create requires backend_id and model_name; it selects nothing. Update by exact profile ID. Editing a shared profile affects every behavior selecting it; create another profile for different settings, reusing backend and sampling. Without an ID, get/update use options.behavior to select the bound profile.",
+            notes: "Create requires backend_id and model_name; it selects nothing. To change your future requests, update your current behavior’s inference_profile_id; cloning creates another role instead. Update profiles by exact ID. Editing a shared profile affects every behavior selecting it; create another profile for different settings, reusing backend and sampling. Without an ID, get/update use options.behavior to select the bound profile.",
             next: "select a new profile with behavior update BEHAVIOR_ID and set.inference_profile_id.",
         },
         "backend" => Page {
@@ -355,7 +356,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "automation" => Page {
             what: "documents that start work without a user: event-source or schedule, trigger, task (automation grant). Use it to run a behavior on new documents or on a timer.",
             commands: &["task|trigger|schedule|event-source [preview] create|update|delete ID", "task|trigger|schedule|event-source list|get ID"],
-            notes: "Use each resource’s CRUD verbs. task create uses options.behavior (default: you); behavior_id is protected. Trigger creation follows its task’s owner; updates resolve the saved owner. Create Task before Trigger. A reply can finish a task; writing to its input collection fires it again.\nfilter: GraphQL object literal string with unquoted keys. Templates: doc, event, args, session, request, group. Missing values fail the fire. Render needed source data separately from instructions.\nFor a standard run record, Task.emit_outcome=true records each input’s success or failure in FireOutcome. False (default) writes no completion record. For emit_outcome, source documents need a nonempty String handoff_id: declare it before schema installation and populate it in writers (help schema/datastore).\nConcurrency: parallel (default); queued_serial runs in order; serial skips while busy; latest_only supersedes. queued_serial, session_id_template (existing session) and emit_outcome require an event source.\nPipelines: writing output triggers the next collection’s event source. Fan-in: group waits for expected_count documents sharing correlation_field.",
+            notes: "task create uses options.behavior (default: you); behavior_id is protected. Triggers use their Task’s owner; updates retain it. Create Task before Trigger. A reply can finish a task; writing to its input collection fires it again.\nfilter: GraphQL object literal string with unquoted keys. Templates: doc, event, args, session, request, group. Missing values fail the fire. Render needed source data separately from instructions.\nFor a standard run record, Task.emit_outcome=true records each input’s success or failure in FireOutcome. False (default) writes no completion record. For emit_outcome, source documents need a nonempty String handoff_id: declare it before schema installation and populate it in writers (help schema/datastore).\nConcurrency: parallel (default); queued_serial runs in order; serial skips while busy; latest_only supersedes. Session destination is separate: session_id_template names an existing session; omit for a new one per fire. queued_serial, session_id_template and emit_outcome require an event source.\nPipelines: writing output triggers the next collection’s event source. Fan-in: group waits for expected_count documents sharing correlation_field.",
             next: "create one source document, inspect the request with sessions, and query the output through its datastore tool.",
         },
         "cleanup" => Page {
@@ -430,7 +431,7 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
                     Some("the receipt's behavior_id is <DID>:lead; lead also works"),
                 ),
                 (
-                    json!({"argv":["subagent-target","create"],"target_id":"lead","set":{"name":"lead","target_agent_did":"<DID>","behavior_id":"lead"}}),
+                    json!({"argv":["subagent-target","create"],"target_id":"lead","set":{"name":"lead","behavior_id":"lead"}}),
                     None,
                 ),
                 (
@@ -439,7 +440,16 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
                 ),
             ],
         )],
-        "execution" | "profile" => vec![(
+        "profile" => vec![(
+            "separate settings for your current role",
+            vec![
+                (json!({"argv":["behavior","get"]}), Some("copy the current behavior ID and the backend/model/settings you want to preserve")),
+                (json!({"argv":["execution","create"],"target_id":"research-exec","set":{"max_turns":60,"max_total_tokens":400000,"deadline_duration_secs":1800}}), None),
+                (json!({"argv":["profile","create"],"target_id":"research-profile","set":{"backend_id":"<BACKEND_ID>","model_name":"<MODEL>","execution_id":"research-exec"}}), Some("carry over sampling and reasoning settings when requested; the receipt's select_with call selects this profile without deleting the old one")),
+                (json!({"argv":["behavior","update"],"target_id":"<BEHAVIOR_ID>","set":{"inference_profile_id":"research-profile"}}), Some("behavior get verifies the selected profile and effective limits; later requests use them")),
+            ],
+        )],
+        "execution" => vec![(
             "run limits for an existing behavior",
             vec![
                 (

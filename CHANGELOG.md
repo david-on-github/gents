@@ -48,9 +48,12 @@ source consistency checks, not a separate runtime compatibility version.
   EventSources that target itself. With `self_config_no_lockout` it is refused
   only a lockout: disabling its behavior or backend, turning off its
   self-config tool, or turning off an agents tool group it had. `config` gains
-  `subagent-target` and `execution` resources (list, get, preview, create,
-  edit; delete through `cleanup`), and `plan preview` accepts `SubagentTarget`
-  and `InferenceExecution` (#2058, #2059). `gents init --setup-steward` (the
+  `subagent-target` and `execution` resources (#2058, #2059). Configuration
+  documents share list/get/create/update/delete; ordered batches retain earlier
+  successful writes. `config validate` audits saved configuration and references
+  for the authenticated principal, replacing the proposed-document `plan preview`
+  workflow. Schema installation and deletion retain preview digests (#2152).
+  `gents init --setup-steward` (the
   desktop first run) ships the Engineer with the agents tools, the sessions
   tool, read-only query and an `engineer-mailbox` escalation surface (#2060).
   `agent_message`, `agent_interrupt` and `agent_list` now follow

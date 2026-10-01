@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, bail, Context, Result};
 use defra_node::EmbeddedNode;
 use identity::Did;
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
 
 use crate::config_client::patch::{
     apply_patch, diff_docs, ensure_admissible, FieldDelta, SelfConfigPatch, SelfConfigTarget,
@@ -81,10 +81,43 @@ pub struct PatchOutcome {
     /// behavior targets the invoking one, so the receipt names it rather than
     /// leaving that default implicit.
     pub behavior_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<Value>,
     pub created: bool,
     pub changed: Vec<FieldDelta>,
     pub effect: &'static str,
     pub doc_id: Option<String>,
+}
+
+pub(super) fn target_destination(document: &Map<String, Value>, owner: &str) -> Value {
+    json!({
+        "kind": if document.get("target_agent_did").and_then(Value::as_str) == Some(owner) { "local" } else { "remote" },
+        "target_agent_did": document.get("target_agent_did"),
+        "behavior_id": document.get("behavior_id"),
+        "runtime_verified": false
+    })
+}
+
+fn connection_view(
+    target: SelfConfigTarget,
+    anchor: &BehaviorAnchor,
+    document: &Map<String, Value>,
+    owner: &str,
+) -> Option<Value> {
+    match target {
+        SelfConfigTarget::InferenceProfile => {
+            let selected_id = anchor.ref_id("inference_profile_id");
+            let profile_id = document.get("profile_id")?.as_str()?;
+            let selected = selected_id.as_deref() == Some(profile_id);
+            let mut view = json!({"behavior_id": anchor.doc.get("behavior_id"), "selected_profile_id": selected_id, "selected": selected});
+            if !selected {
+                view["select_with"] = json!({"argv":["behavior","update"],"target_id":anchor.doc.get("behavior_id"),"set":{"inference_profile_id":profile_id}});
+            }
+            Some(view)
+        }
+        SelfConfigTarget::SubagentTarget => Some(target_destination(document, owner)),
+        _ => None,
+    }
 }
 
 /// Behavior anchor loaded fresh per call, so a prior `config behavior` edit
@@ -288,7 +321,7 @@ impl SelfConfigCore {
         let stored = read_owned_doc(txn, request.target, &self.agent_did, &unique_value).await?;
         let (_doc_id, stored_doc, creating) = match stored {
             Some(_) if request.require_create => bail!(
-                "{} {unique_value:?} already exists; use edit with its exact ID",
+                "{} {unique_value:?} already exists; use update with its exact ID",
                 request.target.collection_name()
             ),
             Some((doc_id, doc)) => (Some(doc_id), doc, false),
@@ -326,6 +359,7 @@ impl SelfConfigCore {
         Ok(PatchOutcome {
             collection: request.target.collection_name(),
             behavior_id: self.behavior_id.clone(),
+            connection: connection_view(request.target, &anchor, &merged, &self.agent_did),
             target_id: unique_value,
             doc_id: Some(doc_id),
             created: creating,
@@ -334,7 +368,7 @@ impl SelfConfigCore {
             effect: if request.target == SelfConfigTarget::DatastoreToolSurface {
                 "Install its collection schemas before selecting this surface. Read tools get, then add its ID to set.datastore.datastore_tool_surface_ids, preserving existing selections. Tools apply after reconciliation to later requests."
             } else if creating && request.target == SelfConfigTarget::InferenceProfile {
-                "Creating a profile does not select it for a behavior. To use it, call behavior edit with set.inference_profile_id equal to this target_id. Selecting it preserves the previous profile and its settings. The selection applies to later requests after reconciliation."
+                "Creating a profile does not select it for a behavior. To use it, call behavior update with set.inference_profile_id equal to this target_id. Selecting it preserves the previous profile and its settings. The selection applies to later requests after reconciliation."
             } else if request.target == SelfConfigTarget::Tools
                 && request.patch.iter().any(|(field, _)| field == "subagents")
                 && merged.get("subagents").is_some_and(|group| {
@@ -345,7 +379,7 @@ impl SelfConfigCore {
                             .is_some_and(|ids| !ids.is_empty())
                 })
             {
-                "Selected targets are inactive: subagents.enabled is not true. To enable delegation, call tools edit with options.behavior set to this behavior_id and set.subagents containing enabled:true plus the existing target_ids. Tools apply after reconciliation to later requests."
+                "Selected targets are inactive: subagents.enabled is not true. To enable delegation, call tools update with options.behavior set to this behavior_id and set.subagents containing enabled:true plus the existing target_ids. Tools apply after reconciliation to later requests."
             } else {
                 EFFECT_TIMING_NOTE
             },
@@ -485,7 +519,7 @@ impl SelfConfigCore {
         let stored = read_owned_doc(txn, request.target, &self.agent_did, &unique_value).await?;
         let (stored_doc, creating) = match stored {
             Some(_) if request.require_create => bail!(
-                "{} {unique_value:?} already exists; use edit with its exact ID",
+                "{} {unique_value:?} already exists; use update with its exact ID",
                 request.target.collection_name()
             ),
             Some((_, doc)) => (doc, false),
@@ -513,11 +547,12 @@ impl SelfConfigCore {
             collection: request.target.collection_name(),
             behavior_id: self.behavior_id.clone(),
             changed: safe_diff(request.target, &stored_doc, &merged),
+            connection: connection_view(request.target, &anchor, &merged, &self.agent_did),
             target_id: unique_value,
             doc_id: None,
             created: creating,
             committed: false,
-            effect: "preview: nothing was written; send the same call with edit (or without preview) to apply",
+            effect: "preview: nothing was written; send the same create/update call without preview to apply",
         })
     }
 }

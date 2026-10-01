@@ -107,7 +107,7 @@ async fn behavior_ids_resolve_from_their_principal_local_slug() {
     )
     .await;
     assert!(
-        error.contains("[\\\"behavior\\\",\\\"list\\\"]") && !error.contains("recovery"),
+        error.contains("[\\\"behavior\\\",\\\"list\\\"]") && error.contains("next_call"),
         "{error}"
     );
 
@@ -531,7 +531,7 @@ async fn help_is_layered_and_its_recipes_run_as_written() {
         "cleanup",
         "skill",
         "discovery",
-        "plan",
+        "validate",
     ] {
         let page = call_config_tool(&tools, vec!["help".into(), resource.into()])
             .await
@@ -568,12 +568,19 @@ async fn help_is_layered_and_its_recipes_run_as_written() {
         let text = call
             .to_string()
             .replace("<BACKEND_ID>", "setup:backend")
+            .replace("<BEHAVIOR_ID>", "setup")
             .replace("<MODEL>", "test-model")
             .replace("<PROMPT>", "Lead the work.")
             .replace("<DID>", &owner);
         serde_json::from_str(&text).unwrap()
     };
-    for resource in ["behavior", "execution", "datastore", "automation"] {
+    for resource in [
+        "behavior",
+        "execution",
+        "datastore",
+        "automation",
+        "profile",
+    ] {
         for (title, steps) in command::help::recipes(resource) {
             for (call, _) in steps {
                 let call = substitute(&call);
@@ -726,34 +733,6 @@ async fn target_id_fills_a_positional_id() {
     )
     .await;
     assert_eq!(recovered["document"]["tools_id"], "beh-test:tools");
-}
-
-/// Ladder finding: an unknown plan collection is named and classified.
-#[tokio::test]
-async fn plan_names_an_unknown_collection_and_what_it_is() {
-    let (_node, owner, tools) = setup("plan-collection", &["persona", "tools"]).await;
-    let plan = |collection: &str| json!({"argv":["plan","preview"],"options":{"documents":[{"collection":collection,"document":{"agent_did":owner,"tools_id":"t"}}]}});
-    for (collection, expected) in [
-        (
-            "agent_behavior",
-            r#"unknown collection \"agent_behavior\"; did you mean \"AgentBehavior\"?"#,
-        ),
-        (
-            "Behavior",
-            r#"unknown collection \"Behavior\"; did you mean \"AgentBehavior\"?"#,
-        ),
-        (
-            "AgentRequest",
-            r#"\"AgentRequest\" is an application collection, not configuration; plan preview stages only AgentBehavior"#,
-        ),
-        (
-            "Handoff",
-            r#"\"Handoff\" is neither a configuration collection nor an installed schema"#,
-        ),
-    ] {
-        let error = refused(&tools, plan(collection)).await;
-        assert!(error.contains(expected), "{collection}: {error}");
-    }
 }
 
 /// Mailbox suite: help states the identity choice where a policy is written,
@@ -911,12 +890,17 @@ async fn crud_documents_share_verbs_and_preserve_reference_and_identity_checks()
         json!({"argv":["profile","update"],"target_id":id,"set":{"sampling_id":"selected"}}),
     )
     .await;
-    assert!(refused(
+    let refused_delete = refused(
         &tools,
-        json!({"argv":["sampling","preview","delete","selected"]})
+        json!({"argv":["sampling","preview","delete","selected"]}),
     )
-    .await
-    .contains("selected"));
+    .await;
+    assert!(
+        refused_delete.contains("Deletion would leave a broken reference"),
+        "{refused_delete}"
+    );
+    assert!(refused_delete.contains("remove or redirect the reference"));
+    assert!(!refused_delete.contains("create it"));
     let before = ok(&tools, json!({"argv":["profile","get",id]})).await;
     assert!(refused(
         &tools,
@@ -1176,4 +1160,202 @@ async fn crud_help_exposes_parameters_for_the_named_resource_and_verb() {
             .await
             .contains("unknown config resource"));
     }
+}
+
+#[tokio::test]
+async fn local_target_creation_defaults_identity_but_updates_preserve_remote_destination() {
+    let (node, owner, tools) = setup("target-default", &["persona", "tools"]).await;
+    let helper = format!("{owner}:helper");
+    crate::test_support::install_test_behavior(&node, &owner, &helper).await;
+    let receipt = ok(&tools, json!({"argv":["subagent-target","create"],"target_id":"local","set":{"name":"helper","behavior_id":"helper"}})).await;
+    assert_eq!(receipt["connection"]["kind"], "local");
+    assert_eq!(receipt["connection"]["target_agent_did"], owner);
+    assert_eq!(receipt["connection"]["behavior_id"], helper);
+    assert_eq!(receipt["connection"]["runtime_verified"], false);
+    let local = ok(&tools, json!({"argv":["subagent-target","get","local"]})).await;
+    assert_eq!(local["document"]["target_agent_did"], owner);
+    assert_eq!(local["document"]["behavior_id"], helper);
+
+    assert!(call(&tools, json!({"argv":["subagent-target","create"],"target_id":"missing","set":{"name":"missing","behavior_id":"does-not-exist"}})).await.is_err());
+    assert!(
+        call(&tools, json!({"argv":["subagent-target","get","missing"]}))
+            .await
+            .is_err()
+    );
+    let remote = persona_identity("remote-target-owner").did().to_string();
+    ok(&tools, json!({"argv":["subagent-target","create"],"target_id":"remote","set":{"name":"remote","target_agent_did":remote,"behavior_id":"helper"}})).await;
+    let changed = ok(&tools, json!({"argv":["subagent-target","update"],"target_id":"remote","set":{"description":"Remote helper"}})).await;
+    assert_eq!(changed["connection"]["kind"], "remote");
+    assert_eq!(changed["connection"]["target_agent_did"], remote);
+    assert_eq!(changed["connection"]["behavior_id"], "helper");
+    let changed = ok(&tools, json!({"argv":["subagent-target","update"],"target_id":"remote","set":{"behavior_id":"helper-2"}})).await;
+    assert_eq!(changed["connection"]["target_agent_did"], remote);
+    assert_eq!(changed["connection"]["behavior_id"], "helper-2");
+    assert!(call(&tools, json!({"argv":["subagent-target","update"],"target_id":"remote","clear":["target_agent_did"]})).await.is_err());
+    let retained = ok(&tools, json!({"argv":["subagent-target","get","remote"]})).await;
+    assert_eq!(retained["document"]["target_agent_did"], remote);
+}
+
+#[tokio::test]
+async fn profile_receipt_selects_current_behavior_without_changing_original_profile() {
+    let (_node, _owner, tools) = setup("selection-receipt", &["persona", "profile"]).await;
+    let before = ok(
+        &tools,
+        json!({"argv":["profile","get","beh-test:inference"]}),
+    )
+    .await;
+    let receipt = ok(&tools, json!({"argv":["profile","create"],"target_id":"research","set":{"backend_id":"beh-test:backend","model_name":"test-model"}})).await;
+    assert_eq!(receipt["connection"]["behavior_id"], "beh-test");
+    assert_eq!(
+        receipt["connection"]["selected_profile_id"],
+        "beh-test:inference"
+    );
+    assert_eq!(receipt["connection"]["selected"], false);
+    ok(&tools, receipt["connection"]["select_with"].clone()).await;
+    let changed = ok(&tools, json!({"argv":["profile","update"],"target_id":"research","set":{"display_name":"Research"}})).await;
+    assert_eq!(changed["connection"]["selected"], true);
+    assert!(changed["connection"].get("select_with").is_none());
+    let after = ok(
+        &tools,
+        json!({"argv":["profile","get","beh-test:inference"]}),
+    )
+    .await;
+    assert_eq!(before["document"], after["document"]);
+}
+
+async fn structured_failure(tools: &Tools, args: Value) -> Value {
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == CONFIG_TOOL_NAME)
+        .unwrap();
+    match tool.call(args.to_string()).await {
+        Err(crate::llm::tool::ToolError::ToolCallError(error)) => {
+            serde_json::from_str(&error.to_string()).unwrap()
+        }
+        other => panic!("expected structured failure for {args}: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn config_usage_errors_return_executable_resource_verb_recovery() {
+    let (_node, _owner, tools) = setup("usage-recovery", &["persona", "tools", "automation"]).await;
+    for args in [
+        json!({"argv":["get"],"target_id":"beh-test"}),
+        json!({"argv":["get","beh-test"]}),
+        json!({"argv":["trigger","state","t"]}),
+        json!({"argv":["schema","list"]}),
+        json!({"argv":["behavior","clone","beh-test"]}),
+        json!({"argv":["behavior","clone"],"options":{"source":"beh-test"}}),
+    ] {
+        let failure = structured_failure(&tools, args).await;
+        assert_eq!(failure["config_execution"]["mutation_entered"], false);
+        let recovery = &failure["recovery"]["next_call"];
+        assert_ne!(recovery["argv"][0], "get");
+        ok(&tools, recovery.clone()).await;
+    }
+    let failure = structured_failure(
+        &tools,
+        json!({"argv":["batch"],"options":{"operations":[{"argv":["get","beh-test"]}]}}),
+    )
+    .await;
+    ok(
+        &tools,
+        failure["batch"]["results"][0]["recovery"]["next_call"].clone(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn saved_config_audit_reports_broken_references_without_mutation_and_accepts_repair() {
+    let (node, owner, tools) = setup("saved-audit", &["persona", "tools"]).await;
+    let valid = ok(&tools, json!({"argv":["validate"]})).await;
+    assert_eq!(valid["valid"], true);
+    assert!(valid["checked_documents"].as_u64().unwrap() > 0);
+    assert_eq!(valid["collections"]["AgentBehavior"], 1);
+    let owner = crate::graphql::escape_graphql_string(&owner);
+    crate::ConfigAccess::write_local(&node, "test.audit.corrupt", &format!(
+        r#"mutation {{ update_AgentContext(filter: {{agent_did: {{_eq: "{owner}"}}, context_id: {{_eq: "beh-test:context"}}}}, input: {{tools_id: "absent-tools"}}) {{context_id}} }}"#
+    )).await.unwrap();
+    let access = crate::ConfigAccess::Local(node.clone());
+    let query = format!(
+        r#"{{ AgentContext(filter: {{agent_did: {{_eq: "{owner}"}}}}) {{context_id tools_id}} }}"#
+    );
+    let before = access.execute(&query).await.unwrap();
+    let invalid = ok(&tools, json!({"argv":["validate"]})).await;
+    assert_eq!(invalid["valid"], false, "{invalid}");
+    assert_eq!(invalid["committed"], false);
+    assert_eq!(invalid["config_execution"]["mutation_entered"], false);
+    assert_eq!(invalid["errors"][0]["collection"], "AgentContext");
+    assert_eq!(invalid["errors"][0]["field"], "tools_id");
+    assert_eq!(invalid["errors"][0]["missing"]["id"], "absent-tools");
+    assert_eq!(before, access.execute(&query).await.unwrap());
+    ok(&tools, invalid["errors"][0]["inspect_with"].clone()).await;
+    ok(&tools, json!({"argv":["context","update"],"target_id":"beh-test:context","set":{"tools_id":"beh-test:tools"}})).await;
+    assert_eq!(
+        ok(&tools, json!({"argv":["validate"]})).await["valid"],
+        true
+    );
+}
+
+#[tokio::test]
+async fn saved_config_audit_is_principal_scoped_and_does_not_require_preview() {
+    let (node, owner, tools) = setup("audit-scope", &["persona"]).await;
+    let foreign = persona_identity("audit-foreign").did().to_string();
+    crate::ConfigAccess::write_local(&node, "test.audit.foreign", &format!(
+        r#"mutation {{create_AgentContext(input: {{agent_did: "{}", context_id: "foreign-context", tools_id: "missing-foreign-tools"}}) {{context_id}}}}"#,
+        crate::graphql::escape_graphql_string(&foreign)
+    )).await.unwrap();
+    let valid = ok(&tools, json!({"argv":["validate"]})).await;
+    assert_eq!(valid["valid"], true, "{valid}");
+    assert_eq!(valid["collections"]["AgentContext"], 1);
+    assert!(!valid.to_string().contains("foreign-context"));
+    let identity = persona_identity("audit-scope");
+    for (categories, allowed) in [(&["persona"][..], true), (&["tools"][..], false)] {
+        let mut grants = config(categories);
+        grants.preview = false;
+        let tools =
+            build_self_config_tools(node.clone(), owner.clone(), Some(identity.clone()), &grants);
+        assert_eq!(
+            call(&tools, json!({"argv":["validate"]})).await.is_ok(),
+            allowed
+        );
+        let help = ok(&tools, json!({"argv":["help"]})).await;
+        assert_eq!(help.as_str().unwrap().contains("  validate:"), allowed);
+        assert!(!help.as_str().unwrap().contains("  plan:"));
+    }
+    assert!(call(
+        &tools,
+        json!({"argv":["validate"],"set":{"display_name":"ignored"}})
+    )
+    .await
+    .is_err());
+    crate::ConfigAccess::write_local(&node, "test.audit.restricted", &format!(
+        r#"mutation {{update_InferenceProfile(filter: {{agent_did: {{_eq: "{}"}}, profile_id: {{_eq: "beh-test:inference"}}}}, input: {{backend_id: "missing-backend"}}) {{profile_id}}}}"#,
+        crate::graphql::escape_graphql_string(&owner)
+    )).await.unwrap();
+    let invalid = ok(&tools, json!({"argv":["validate"]})).await;
+    assert_eq!(invalid["valid"], false);
+    assert_eq!(invalid["errors"][0]["collection"], "InferenceProfile");
+    assert!(invalid["errors"][0].get("inspect_with").is_none());
+}
+
+#[tokio::test]
+async fn schema_mismatch_recovery_reads_the_saved_contract_without_replacing_it() {
+    let (_node, _owner, tools) = setup("schema-recovery", &["automation"]).await;
+    let sdl = "type AuditInput { body: String }";
+    let preview = ok(
+        &tools,
+        json!({"argv":["schema","preview","install"],"options":{"sdl":sdl}}),
+    )
+    .await;
+    ok(&tools, json!({"argv":["schema","install"],"options":{"sdl":sdl,"digest":preview["plan"]["artifact_digest"]}})).await;
+    let before = ok(&tools, json!({"argv":["schema","get","AuditInput"]})).await;
+    let failure = structured_failure(&tools, json!({"argv":["schema","preview","install"],"options":{"sdl":"type AuditInput { body: String handoff_id: String }"}})).await;
+    assert!(failure["error"]
+        .as_str()
+        .unwrap()
+        .contains("Existing schemas cannot be replaced"));
+    assert_eq!(failure["config_execution"]["mutation_entered"], false);
+    let after = ok(&tools, failure["recovery"]["next_call"].clone()).await;
+    assert_eq!(before, after);
 }
