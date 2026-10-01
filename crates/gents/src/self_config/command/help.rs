@@ -263,13 +263,13 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             next: "a surface ([\"help\",\"datastore\"]) or automation ([\"help\",\"automation\"]).",
         },
         "skill" => Page {
-            what: "import a SKILL.md procedure and attach it to a Context (tools grant).",
+            what: "reusable instructions selected by a Context (tools grant). Create from fields or import a SKILL.md.",
             commands: &[
                 "skill get SKILL_ID",
                 "skill [preview] import SKILL_ID PATH  PATH is a skill directory or its SKILL.md inside the invoking behavior's file root",
             ],
-            notes: "Frontmatter supplies name and description, the body the instructions, optional agents/openai.yaml interface metadata and tool dependencies. Files are limited to 1 MiB. Import creates an unused ID and never overwrites. Skills grant no tools; supporting files are neither copied nor run.",
-            next: "attach it once imported: behavior context preview, then edit, with options.behavior and set.skill_ids = the current IDs plus this one (a context preview resolves only imported skills, so before import skill preview import is the whole preview); verify with load_skill in a fresh session.",
+            notes: "On import, frontmatter supplies name and description, the body the instructions, optional agents/openai.yaml interface metadata and tool dependencies. Files are limited to 1 MiB. Import creates an unused ID and never overwrites. Skills grant no tools; supporting files are neither copied nor run.",
+            next: "create or import the Skill, then context update with set.skill_ids = the current IDs plus this one. Verify with load_skill in a fresh request.",
         },
         "discovery" => Page {
             what: "scan external Claude, Codex or Grok configuration read-only (tools grant and file read authority).",
@@ -293,7 +293,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "subagent-target" => Page {
             what: "a named route to a behavior for agent_new (tools grant). TARGET_ID goes in target_id or argv.",
             commands: &["subagent-target list", "subagent-target get TARGET_ID", "subagent-target [preview] create|edit TARGET_ID  set: target fields"],
-            notes: "name is the name passed to agent_new. For local helpers, use agent_did from [\"get\"] as target_agent_did; The target behavior selects its inference profile. The local behavior_id must exist; its short slug resolves. Multiple callers can select a target.",
+            notes: "name is the name passed to agent_new. For local helpers, use agent_did from [\"get\"] as target_agent_did. The target behavior selects its inference profile. The local behavior_id must exist; its short slug resolves. Multiple callers can select a target.",
             next: "read tools get, then tools update: preserve set.subagents, set enabled true and add this ID to target_ids. Selecting targets alone leaves delegation disabled. Use options.behavior to grant another caller; tools apply next request.",
         },
         "execution" => Page {
@@ -314,7 +314,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "behavior [preview] edit BEHAVIOR_ID  set/clear: behavior fields",
                 "behavior context get|preview|edit  options.behavior; set/clear: context fields",
             ],
-            notes: "Create derives behavior_id <DID>:<slug of display-name> (a collision appends -2) and returns it; it takes no id. The slug alone resolves wherever a behavior ID is accepted. set.system_prompt replaces the whole prompt.",
+            notes: "Create derives behavior_id <DID>:<slug of display-name> (a collision appends -2) and returns it; it takes no id. The slug alone resolves wherever a behavior ID is accepted. Change the prompt through context update; set.system_prompt replaces it.",
             next: "give it tools ([\"help\",\"tools\"]) and test it in a fresh session.",
         },
         "tools" => Page {
@@ -354,9 +354,9 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         },
         "automation" => Page {
             what: "documents that start work without a user: event-source or schedule, trigger, task (automation grant). Use it to run a behavior on new documents or on a timer.",
-            commands: &["automation get|preview|edit KIND  target_id; options.behavior (default: you); KIND is event-source, trigger, task or schedule"],
-            notes: "preview/edit upsert. options.behavior selects the Task owner; set.behavior_id is protected. Create Task before Trigger. A reply can finish a task; writing to its input collection fires it again.\nfilter: GraphQL object literal string with unquoted keys. Templates: doc, event, args, session, request, group. Missing values fail the fire. Render needed source data separately from instructions.\nFor a standard run record, Task.emit_outcome=true records each input’s success or failure in FireOutcome. False (default) writes no completion record. For emit_outcome, source documents need a nonempty String handoff_id: declare it before schema installation and populate it in writers (help schema/datastore).\nConcurrency: parallel (default); queued_serial runs in order; serial skips while busy; latest_only supersedes. queued_serial, session_id_template (existing session) and emit_outcome require an event source.\nPipelines: writing output triggers the next collection’s event source. Fan-in: group waits for expected_count documents sharing correlation_field.",
-            next: "create one source document and read the resulting request and its output.",
+            commands: &["task|trigger|schedule|event-source [preview] create|update|delete ID", "task|trigger|schedule|event-source list|get ID"],
+            notes: "Use each resource’s CRUD verbs. task create uses options.behavior (default: you); behavior_id is protected. Trigger creation follows its task’s owner; updates resolve the saved owner. Create Task before Trigger. A reply can finish a task; writing to its input collection fires it again.\nfilter: GraphQL object literal string with unquoted keys. Templates: doc, event, args, session, request, group. Missing values fail the fire. Render needed source data separately from instructions.\nFor a standard run record, Task.emit_outcome=true records each input’s success or failure in FireOutcome. False (default) writes no completion record. For emit_outcome, source documents need a nonempty String handoff_id: declare it before schema installation and populate it in writers (help schema/datastore).\nConcurrency: parallel (default); queued_serial runs in order; serial skips while busy; latest_only supersedes. queued_serial, session_id_template (existing session) and emit_outcome require an event source.\nPipelines: writing output triggers the next collection’s event source. Fan-in: group waits for expected_count documents sharing correlation_field.",
+            next: "create one source document, inspect the request with sessions, and query the output through its datastore tool.",
         },
         "cleanup" => Page {
             what: "remove documents atomically by exact ID, checking every reference.",
@@ -541,7 +541,7 @@ fn crud_help(
             "behavior preview create|update|delete ID",
             "behavior preview create (same options) | update|delete ID",
         );
-        writeln!(out, "Also: behavior clone, disable, default; behavior context get|edit addresses its selected Context.")?;
+        writeln!(out, "Also: behavior clone, disable, default. Use context get/update for its selected Context.")?;
     }
     if resource == "backend" {
         writeln!(out, "Create requires set.endpoint; optional set.name/openai_wire_api. Only enabled unauthenticated OpenAI-compatible endpoints can be created. Also: backend discover ID.")?;

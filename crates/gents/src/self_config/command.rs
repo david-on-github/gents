@@ -2184,13 +2184,13 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
         Some("skill") => vec![patch_contract(
             SelfConfigTarget::Skill,
             json!({
-                "name":"string|null; imported from SKILL.md frontmatter, default SKILL_ID",
-                "description":"string|null; imported from SKILL.md frontmatter",
-                "instructions":"string|null; imported from the Markdown body",
+                "name":"string|null; skill name",
+                "description":"string|null; when to use this skill",
+                "instructions":"string|null; Markdown instructions",
                 "source_directory":"string|null; resolved local SKILL.md parent; supporting-file base, never an access grant",
-                "tool_refs":"array<string>; dependencies from agents/openai.yaml, default []; never tool grants",
-                "display_name":"string|null; from agents/openai.yaml interface.display_name",
-                "interface_json":"string|null; serialized agents/openai.yaml interface",
+                "tool_refs":"array<string>; tool dependencies, default []; never tool grants",
+                "display_name":"string|null; display label",
+                "interface_json":"string|null; serialized interface metadata",
                 "enabled":"boolean; default true",
                 "tags":"array<string>; default []"
             }),
