@@ -1108,6 +1108,46 @@ pub(crate) enum PluginCommand {
     Remove(PluginRemoveArgs),
     /// Run an installed plugin once and print what it returned.
     Run(PluginRunArgs),
+    /// Choose the folders plugins may read or write when an agent or a graph names a path.
+    /// The session's working folder is readable without asking (never `/` or your home); add folders or single files beyond it here.
+    Dirs {
+        #[command(subcommand)]
+        command: PluginDirsCommand,
+    },
+}
+
+#[derive(clap::Subcommand)]
+pub(crate) enum PluginDirsCommand {
+    /// Show the folders you allowed.
+    List(PluginDirsListArgs),
+    /// Allow a folder or one file, read-only unless --access read_write is given.
+    Add(PluginDirsAddArgs),
+    /// Stop allowing a folder or file.
+    Remove(PluginDirsRemoveArgs),
+}
+
+#[derive(clap::Args)]
+pub(crate) struct PluginDirsListArgs {
+    #[arg(long, help = "Home to read the list from; defaults to ~/.gents")]
+    pub(crate) home: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct PluginDirsAddArgs {
+    #[arg(help = "Folder or file to allow")]
+    pub(crate) path: PathBuf,
+    #[arg(long, default_value = "read", help = "read or read_write")]
+    pub(crate) access: gents::pack::BindAccess,
+    #[arg(long, help = "Home to write the list to; defaults to ~/.gents")]
+    pub(crate) home: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct PluginDirsRemoveArgs {
+    #[arg(help = "Folder or file to stop allowing")]
+    pub(crate) path: PathBuf,
+    #[arg(long, help = "Home to write the list to; defaults to ~/.gents")]
+    pub(crate) home: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]

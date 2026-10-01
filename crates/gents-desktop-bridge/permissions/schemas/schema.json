@@ -307,6 +307,42 @@
           "markdownDescription": "Denies the desktop_agent_config_save command without any pre-configured scope."
         },
         {
+          "description": "Enables the desktop_allowed_dirs_add command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-desktop-allowed-dirs-add",
+          "markdownDescription": "Enables the desktop_allowed_dirs_add command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the desktop_allowed_dirs_add command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-desktop-allowed-dirs-add",
+          "markdownDescription": "Denies the desktop_allowed_dirs_add command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the desktop_allowed_dirs_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-desktop-allowed-dirs-list",
+          "markdownDescription": "Enables the desktop_allowed_dirs_list command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the desktop_allowed_dirs_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-desktop-allowed-dirs-list",
+          "markdownDescription": "Denies the desktop_allowed_dirs_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the desktop_allowed_dirs_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-desktop-allowed-dirs-remove",
+          "markdownDescription": "Enables the desktop_allowed_dirs_remove command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the desktop_allowed_dirs_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-desktop-allowed-dirs-remove",
+          "markdownDescription": "Denies the desktop_allowed_dirs_remove command without any pre-configured scope."
+        },
+        {
           "description": "Enables the desktop_app_quit command without any pre-configured scope.",
           "type": "string",
           "const": "allow-desktop-app-quit",
@@ -1075,6 +1111,30 @@
           "markdownDescription": "Denies the desktop_peer_status_fetch command without any pre-configured scope."
         },
         {
+          "description": "Enables the desktop_plugin_approval_decide command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-desktop-plugin-approval-decide",
+          "markdownDescription": "Enables the desktop_plugin_approval_decide command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the desktop_plugin_approval_decide command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-desktop-plugin-approval-decide",
+          "markdownDescription": "Denies the desktop_plugin_approval_decide command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the desktop_plugin_approvals_pending command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-desktop-plugin-approvals-pending",
+          "markdownDescription": "Enables the desktop_plugin_approvals_pending command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the desktop_plugin_approvals_pending command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-desktop-plugin-approvals-pending",
+          "markdownDescription": "Denies the desktop_plugin_approvals_pending command without any pre-configured scope."
+        },
+        {
           "description": "Enables the desktop_probe_inference_endpoint command without any pre-configured scope.",
           "type": "string",
           "const": "allow-desktop-probe-inference-endpoint",
@@ -1543,6 +1603,18 @@
           "markdownDescription": "Install, update and remove packs, and sign in to the registry\n#### This permission set includes:\n\n- `allow-desktop-pack-install`\n- `allow-desktop-pack-update`\n- `allow-desktop-pack-remove`\n- `allow-desktop-pack-login`\n- `allow-desktop-pack-logout`"
         },
         {
+          "description": "The folders plugins may read or write, and the plugin questions waiting for an answer\n#### This permission set includes:\n\n- `allow-desktop-allowed-dirs-list`\n- `allow-desktop-plugin-approvals-pending`",
+          "type": "string",
+          "const": "allowed-dirs-read",
+          "markdownDescription": "The folders plugins may read or write, and the plugin questions waiting for an answer\n#### This permission set includes:\n\n- `allow-desktop-allowed-dirs-list`\n- `allow-desktop-plugin-approvals-pending`"
+        },
+        {
+          "description": "Allow, change and remove plugin folders, and answer a plugin question\n#### This permission set includes:\n\n- `allow-desktop-allowed-dirs-add`\n- `allow-desktop-allowed-dirs-remove`\n- `allow-desktop-plugin-approval-decide`",
+          "type": "string",
+          "const": "allowed-dirs-admin",
+          "markdownDescription": "Allow, change and remove plugin folders, and answer a plugin question\n#### This permission set includes:\n\n- `allow-desktop-allowed-dirs-add`\n- `allow-desktop-allowed-dirs-remove`\n- `allow-desktop-plugin-approval-decide`"
+        },
+        {
           "description": "Authenticated peer enrollment, removal/rename, and P2P repair\n#### This permission set includes:\n\n- `allow-desktop-peer-enroll-status`\n- `allow-desktop-peer-remove`\n- `allow-desktop-peer-rename`\n- `allow-desktop-p2p-repair`",
           "type": "string",
           "const": "fleet-admin",
@@ -1591,10 +1663,10 @@
           "markdownDescription": "Debug-only native E2E commands\n#### This permission set includes:\n\n- `allow-desktop-native-e2e-config`\n- `allow-desktop-native-e2e-status`"
         },
         {
-          "description": "Full Gents Desktop production surface (excludes native-e2e)\n#### This permission set includes:\n\n- `default`\n- `session-read`\n- `session-control`\n- `trace-read`\n- `tool-surface-read`\n- `chat-write`\n- `mailbox-read`\n- `mailbox-control`\n- `resend-control`\n- `fleet-read`\n- `workspace-read`\n- `fleet-admin`\n- `operations-read`\n- `interrupt-control`\n- `config-write`\n- `provider-accounts-read`\n- `tasks`\n- `external-links`\n- `packs-read`\n- `packs-admin`",
+          "description": "Full Gents Desktop production surface (excludes native-e2e)\n#### This permission set includes:\n\n- `default`\n- `session-read`\n- `session-control`\n- `trace-read`\n- `tool-surface-read`\n- `chat-write`\n- `mailbox-read`\n- `mailbox-control`\n- `resend-control`\n- `fleet-read`\n- `workspace-read`\n- `fleet-admin`\n- `operations-read`\n- `interrupt-control`\n- `config-write`\n- `provider-accounts-read`\n- `tasks`\n- `external-links`\n- `packs-read`\n- `packs-admin`\n- `allowed-dirs-read`\n- `allowed-dirs-admin`",
           "type": "string",
           "const": "full",
-          "markdownDescription": "Full Gents Desktop production surface (excludes native-e2e)\n#### This permission set includes:\n\n- `default`\n- `session-read`\n- `session-control`\n- `trace-read`\n- `tool-surface-read`\n- `chat-write`\n- `mailbox-read`\n- `mailbox-control`\n- `resend-control`\n- `fleet-read`\n- `workspace-read`\n- `fleet-admin`\n- `operations-read`\n- `interrupt-control`\n- `config-write`\n- `provider-accounts-read`\n- `tasks`\n- `external-links`\n- `packs-read`\n- `packs-admin`"
+          "markdownDescription": "Full Gents Desktop production surface (excludes native-e2e)\n#### This permission set includes:\n\n- `default`\n- `session-read`\n- `session-control`\n- `trace-read`\n- `tool-surface-read`\n- `chat-write`\n- `mailbox-read`\n- `mailbox-control`\n- `resend-control`\n- `fleet-read`\n- `workspace-read`\n- `fleet-admin`\n- `operations-read`\n- `interrupt-control`\n- `config-write`\n- `provider-accounts-read`\n- `tasks`\n- `external-links`\n- `packs-read`\n- `packs-admin`\n- `allowed-dirs-read`\n- `allowed-dirs-admin`"
         }
       ]
     }

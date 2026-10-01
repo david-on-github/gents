@@ -10,6 +10,7 @@
 //! `gents pack` uses ([`crate::commands::pack::registry::RegistryClient`]).
 
 mod build;
+mod dirs;
 mod install;
 mod run;
 pub(crate) use gents::plugin::store;
@@ -27,6 +28,7 @@ pub(crate) async fn dispatch(command: PluginCommand) -> Result<()> {
         PluginCommand::List(args) => list(args),
         PluginCommand::Remove(args) => remove(args),
         PluginCommand::Run(args) => run::run(args).await,
+        PluginCommand::Dirs { command } => dirs::dispatch(command),
     }
 }
 

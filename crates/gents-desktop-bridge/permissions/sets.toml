@@ -104,6 +104,16 @@ description = "Install, update and remove packs, and sign in to the registry"
 permissions = ["allow-desktop-pack-install", "allow-desktop-pack-update", "allow-desktop-pack-remove", "allow-desktop-pack-login", "allow-desktop-pack-logout"]
 
 [[set]]
+identifier = "allowed-dirs-read"
+description = "The folders plugins may read or write, and the plugin questions waiting for an answer"
+permissions = ["allow-desktop-allowed-dirs-list", "allow-desktop-plugin-approvals-pending"]
+
+[[set]]
+identifier = "allowed-dirs-admin"
+description = "Allow, change and remove plugin folders, and answer a plugin question"
+permissions = ["allow-desktop-allowed-dirs-add", "allow-desktop-allowed-dirs-remove", "allow-desktop-plugin-approval-decide"]
+
+[[set]]
 identifier = "fleet-admin"
 description = "Authenticated peer enrollment, removal/rename, and P2P repair"
 permissions = [
@@ -235,4 +245,6 @@ permissions = [
   "external-links",
   "packs-read",
   "packs-admin",
+  "allowed-dirs-read",
+  "allowed-dirs-admin",
 ]

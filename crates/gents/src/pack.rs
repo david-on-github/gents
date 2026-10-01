@@ -22,7 +22,7 @@ pub use installation::{
     InstallReport, InstalledPack, InstalledPackPlugin, PackIdentity, RemoveReport, Retained,
 };
 pub(crate) use installation::{observe_graph_install_in_txn, record_graph_install_in_txn};
-pub use loader::{decode_pack_config, load_pack_config};
+pub use loader::{decode_pack_config, load_pack_config, pin_pack_plugins};
 pub(crate) use provenance::{pack_artifact_document_digest, prepare_pack_plan_in_txn};
 pub use provenance::{pack_document_digests, pack_origin_from_tags, pack_origin_tag};
 
@@ -160,9 +160,11 @@ pub struct PackPlugin {
     /// `plugins/<name>/TOOL.md`. Absent, the description is all it gets.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
-    /// Lets an operator bind one read-only directory into this call, named
-    /// fresh at every call site rather than granted once at install (see
-    /// `crate::plugin::BoundDir`). Absent means the plugin can never be
+    /// Lets one directory (or a file inside one) be bound into a call, named
+    /// fresh at every call site rather than granted once at install: an
+    /// operator flag, or a path in a graph node's source document or a model's
+    /// tool arguments that must resolve inside a folder the operator allowed
+    /// (see `crate::plugin::allowed`). Absent means the plugin can never be
     /// bound. No `deny_unknown_fields` on [`PackPlugin`] itself, so an
     /// older gents ignores this field entirely on a manifest that declares
     /// it.
@@ -176,8 +178,45 @@ pub struct PackPlugin {
     pub limits: Option<PluginLimits>,
 }
 
+/// How much of a bound directory a plugin uses. Ordered: `ReadWrite`
+/// includes `Read`, so a folder allowed `ReadWrite` also serves a reader.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BindAccess {
+    #[default]
+    Read,
+    ReadWrite,
+}
+
+impl BindAccess {
+    /// The manifest and operator spelling: `read` or `read_write`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::ReadWrite => "read_write",
+        }
+    }
+
+    fn is_read(&self) -> bool {
+        *self == Self::Read
+    }
+}
+
+impl std::str::FromStr for BindAccess {
+    type Err = anyhow::Error;
+
+    fn from_str(text: &str) -> anyhow::Result<Self> {
+        match text {
+            "read" => Ok(Self::Read),
+            "read_write" => Ok(Self::ReadWrite),
+            other => anyhow::bail!("{other:?} is not an access; use read or read_write"),
+        }
+    }
+}
+
 /// Where a plugin's `bind_dir` binds: which input field carries the
-/// canonical bound path, and what a consenting operator is shown for it.
+/// canonical bound path, what a consenting operator is shown for it, and
+/// how much of the directory the plugin uses.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginDirBinding {
@@ -187,8 +226,19 @@ pub struct PluginDirBinding {
     /// canonical bound path, so a plugin can never point itself at a
     /// different directory than the one its caller named.
     pub input_field: String,
+    /// A second string property of `input_schema` that the call fills with the
+    /// canonical path the caller named, overwriting anything passed. For a
+    /// single file `input_field` holds a short-lived link to it, so a plugin
+    /// that hands the path on (a graph node writing the next stage's input)
+    /// reads the real one here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_field: Option<String>,
     /// Shown to an operator deciding whether to bind this plugin.
     pub description: String,
+    /// `read` (the default) or `read_write`. A caller may bind it only
+    /// where the operator allowed at least this much.
+    #[serde(default, skip_serializing_if = "BindAccess::is_read")]
+    pub access: BindAccess,
 }
 
 /// A plugin's declared resource ceiling: what
@@ -357,6 +407,16 @@ impl PackPlugin {
                 self.name,
                 bind_dir.input_field
             );
+            if let Some(original) = &bind_dir.original_field {
+                anyhow::ensure!(
+                    original != &bind_dir.input_field
+                        && schema_declares_string_property(&self.input_schema, original),
+                    "plugin {:?} bind_dir.original_field {:?} must be a string property of \
+                     input_schema other than input_field",
+                    self.name,
+                    original
+                );
+            }
             // The directory a caller binds is authority granted fresh at
             // every call (see `crate::plugin::BoundDir`), never a standing
             // one; a plugin that also declared its own `fs` grant would
@@ -955,10 +1015,32 @@ mod tests {
             input_schema: serde_json::json!({"type": "object", "properties": {"root": {"type": "string"}}}),
             bind_dir: Some(PluginDirBinding {
                 input_field: "root".to_owned(),
+                original_field: None,
                 description: "the directory to scan".to_owned(),
+                access: BindAccess::Read,
             }),
             ..valid_plugin()
         }
+    }
+
+    #[test]
+    fn bind_dir_access_defaults_to_read_and_names_only_read_or_read_write() {
+        let parse = |access: &str| {
+            serde_json::from_str::<PluginDirBinding>(&format!(
+                r#"{{"input_field":"root","description":"d"{access}}}"#
+            ))
+        };
+        assert_eq!(parse("").unwrap().access, BindAccess::Read);
+        assert_eq!(
+            parse(r#","access":"read_write""#).unwrap().access,
+            BindAccess::ReadWrite
+        );
+        assert!(parse(r#","access":"write""#).is_err());
+        let plain = serde_json::to_value(parse("").unwrap()).unwrap();
+        assert!(
+            plain.get("access").is_none(),
+            "the default is not written out"
+        );
     }
 
     #[test]
@@ -971,6 +1053,23 @@ mod tests {
         missing.input_schema = serde_json::json!({"type": "object"});
         let error = missing.validate().expect_err("root is not declared");
         assert!(format!("{error:#}").contains("root"));
+    }
+
+    #[test]
+    fn bind_dir_original_field_is_a_second_string_property() {
+        let mut plugin = bindable_plugin();
+        plugin.input_schema = serde_json::json!({"type": "object", "properties": {
+            "root": {"type": "string"}, "root_original": {"type": "string"}}});
+        plugin.bind_dir.as_mut().unwrap().original_field = Some("root_original".into());
+        plugin
+            .validate()
+            .expect("a declared second string property");
+
+        plugin.bind_dir.as_mut().unwrap().original_field = Some("root".into());
+        assert!(plugin.validate().is_err(), "it cannot be the input field");
+        plugin.bind_dir.as_mut().unwrap().original_field = Some("elsewhere".into());
+        let error = plugin.validate().expect_err("it must be declared");
+        assert!(format!("{error:#}").contains("original_field"));
     }
 
     #[test]
