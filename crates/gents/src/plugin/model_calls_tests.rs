@@ -577,3 +577,29 @@ fn binding_slots_survives_a_reinstall_and_unbinding_clears_it() {
     store::write_record(home.path(), &plain).unwrap();
     assert!(crate::plugin::install::set_model_binding(home.path(), "team/plugin", None).is_err());
 }
+
+#[tokio::test]
+async fn a_model_tool_gets_its_model_answers_through_the_same_path() {
+    use crate::document_config::PluginToolRef;
+    use crate::llm::tool::ToolDyn;
+    use crate::plugin::tool::PluginTool;
+
+    let fake = Arc::new(Fake::start(Reply::Text, Duration::ZERO).await);
+    let (home, record) = installed(&asking(vec![request("a")]), false, true);
+    let executor = Arc::new(executor(
+        &home,
+        Fixed(fake.clone(), 1, Duration::from_secs(30)),
+    ));
+    let tool = PluginTool::resolve(
+        executor,
+        &PluginToolRef {
+            plugin: "team/plugin".into(),
+            digest: Some(record.digest.clone()),
+        },
+        None,
+    )
+    .unwrap();
+    let output: Value = serde_json::from_str(&tool.call("{}".to_owned()).await.unwrap()).unwrap();
+    assert_eq!(output["model_results"]["a"]["text"], "answer:pa");
+    assert_eq!(fake.requests(), 1);
+}
