@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Button } from "@gents/ui/components/button";
 import { Input } from "@gents/ui/components/input";
 import { toast } from "sonner";
+import { call, message } from "./bridgeCall";
 import { Group, Row } from "./rows";
 
 type Edited = "refuse" | "overwrite" | "keep";
@@ -22,22 +23,6 @@ interface FoundPack {
   description?: string | null;
   latest?: string | null;
   kind?: string;
-}
-
-async function call<T>(
-  command: string,
-  args: Record<string, unknown> = {},
-): Promise<T> {
-  const { invoke } = await import("@tauri-apps/api/core");
-  const { bridgeCommand } = await import("@source-inc/gents-desktop-client");
-  return (await invoke(bridgeCommand(command as never), args)) as T;
-}
-
-function message(error: unknown): string {
-  if (error && typeof error === "object" && "message" in error) {
-    return String((error as { message: unknown }).message);
-  }
-  return String(error);
 }
 
 /* An install or update that would replace documents someone edited stops

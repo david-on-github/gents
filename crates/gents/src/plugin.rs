@@ -79,7 +79,7 @@ use afterburner::wasi::embedder_vm::NanMode;
 use afterburner_core::manifold::{EnvAccess, FsAccess, ListenAccess, NetAccess};
 use anyhow::{Context, Result};
 
-use crate::pack::PackPlugin;
+use crate::pack::{BindAccess, PackPlugin};
 
 /// Default bytes of a plugin's JSON result kept before the call is judged
 /// [`PluginVerdict::BadOutput`] for running past this bound. A result is a
@@ -398,17 +398,21 @@ impl PluginRunner {
                 plugin.name
             );
         }
-        if plugin.bind_dir.is_some() {
-            // `bind_dir` grants a read-only directory per call ([`Self::call_bound`]),
+        if let Some(binding) = &plugin.bind_dir {
+            // `bind_dir` grants a directory per call ([`Self::call_bound`]),
             // outside the declared/ceiling manifold this admission just
             // narrowed - so the one axis that matters for it is whether
-            // this artifact's dispatch path can honour a read-only grant at
-            // all, independent of whether one was declared here.
+            // this artifact's dispatch path can honour that grant at all,
+            // independent of whether one was declared here.
             let supported = afterburner::afb_run::bounds_for(&afb);
+            let (enforced, kind) = match binding.access {
+                BindAccess::Read => (supported.manifold_fs_ro, "read-only"),
+                BindAccess::ReadWrite => (supported.manifold_fs_rw, "read-write"),
+            };
             anyhow::ensure!(
-                supported.manifold_fs_ro,
+                enforced,
                 "plugin {:?} declares bind_dir, but its dispatch path cannot enforce a \
-                 read-only filesystem grant, so a caller-bound directory would not actually be \
+                 {kind} filesystem grant, so a caller-bound directory would not actually be \
                  contained",
                 plugin.name
             );
@@ -432,21 +436,22 @@ impl PluginRunner {
     }
 
     /// Runs it once, binding `bound` into `plugin.bind_dir`'s declared
-    /// input field: read-only, and only for this one call. Refuses outright
-    /// when the plugin declares no `bind_dir` - the field it would
-    /// overwrite does not exist, so there is nothing this call could bind.
+    /// input field, with the access the plugin declared, and only for this
+    /// one call. Refuses outright when the plugin declares no `bind_dir`
+    /// (the field it would overwrite does not exist) or when `bound` was
+    /// allowed less access than the plugin declared.
     ///
     /// `arguments[bind_dir.input_field]` is overwritten with `bound`'s own
-    /// canonical path regardless of what the caller passed, so a plugin can
-    /// never point the binding at a directory other than the one its
-    /// caller named. `arguments` may be `Value::Null` (an omitted
-    /// `--input`, for instance): the binding itself can be the only field a
-    /// call needs, so a missing operator input is treated as an empty
-    /// object rather than refused; any other non-object value is still
-    /// refused. The manifold this call actually runs under is the admitted
-    /// one with `fs` replaced by exactly `bound`'s directory, read-only -
-    /// never wider, and never recorded as a standing grant (the install
-    /// record's `granted` is untouched; see [`BoundDir`]'s own doc).
+    /// canonical target regardless of what the caller passed, so a plugin
+    /// can never point the binding at a path other than the one its caller
+    /// named. `arguments` may be `Value::Null` (an omitted `--input`, for
+    /// instance): the binding itself can be the only field a call needs, so
+    /// a missing operator input is treated as an empty object rather than
+    /// refused; any other non-object value is still refused. The manifold
+    /// this call actually runs under is the admitted one with `fs` replaced
+    /// by exactly `bound`'s directory - never wider, and never recorded as a
+    /// standing grant (the install record's `granted` is untouched; see
+    /// [`BoundDir`]'s own doc).
     pub fn call_bound(
         &self,
         arguments: &serde_json::Value,
@@ -459,11 +464,17 @@ impl PluginRunner {
                 self.plugin.name
             )
         })?;
-        let canonical = bound.path().to_str().with_context(|| {
-            format!(
-                "bound directory {} is not valid UTF-8",
-                bound.path().display()
-            )
+        anyhow::ensure!(
+            bound.access >= bind_dir.access,
+            "plugin {:?} needs {} access, but {} is only allowed {}",
+            self.plugin.name,
+            bind_dir.access.as_str(),
+            bound.path().display(),
+            bound.access.as_str()
+        );
+        bound.recheck()?;
+        let canonical = bound.target().to_str().with_context(|| {
+            format!("bound path {} is not valid UTF-8", bound.target().display())
         })?;
         let mut arguments = if arguments.is_null() {
             serde_json::Value::Object(serde_json::Map::new())
@@ -480,8 +491,12 @@ impl PluginRunner {
             bind_dir.input_field.clone(),
             serde_json::Value::String(canonical.to_owned()),
         );
+        let roots = vec![bound.path().to_path_buf()];
         let manifold = Manifold {
-            fs: FsAccess::ReadOnly(vec![bound.path().to_path_buf()]),
+            fs: match bind_dir.access {
+                BindAccess::Read => FsAccess::ReadOnly(roots),
+                BindAccess::ReadWrite => FsAccess::ReadWrite(roots),
+            },
             ..self.manifold.clone()
         };
         self.call_with_manifold(&arguments, budget, manifold)
@@ -612,24 +627,41 @@ fn plugin_run_request(stdin: Vec<u8>, manifold: Manifold, budget: &PluginBudget)
 /// The macOS startup must select this same engine mode before installing handlers.
 const PLUGIN_NAN_MODE: NanMode = NanMode::Native;
 
-/// A single directory an operator named for one plugin call, admitted
-/// read-only and never wider than the ceiling [`Self::new`]'s `within`
-/// names.
+/// A single directory, or one file, admitted for one plugin call, never wider
+/// than the ceiling [`Self::new`]'s `within` names or what [`allowed::bind`]
+/// was granted.
 ///
-/// The inner path is private: the only way to build one is [`Self::new`],
-/// which canonicalizes and validates it, so nothing downstream can hand
-/// [`PluginRunner::call_bound`] an unverified or non-canonical path. Binding
-/// grants nothing standing - it is authority for exactly one call, decided
-/// fresh by whichever operator call site asks for it (`gents plugin run
-/// --bind-dir`, a `gents pack test` case's own `bind` field, or a scenario
-/// `prepare` step), never recorded in an install's `granted` manifold.
+/// A file is exposed alone: the guest's one preopen is a private directory
+/// that holds a hard link to the file and nothing else, so its siblings are
+/// invisible and no byte is copied. The private directory lives as long as
+/// the binding.
+///
+/// The inner paths are private: the only ways to build one are [`Self::new`]
+/// and [`allowed::bind`], which canonicalize and validate, so nothing
+/// downstream can hand [`PluginRunner::call_bound`] an unverified or
+/// non-canonical path. Binding grants nothing standing - it is authority for
+/// exactly one call, decided fresh by the call site that asks for it and
+/// never recorded in an install's `granted` manifold. Operator call sites
+/// (`gents plugin run --bind-dir`, a `gents pack test` case's own `bind`
+/// field, a scenario `prepare` step) name the directory themselves. A path
+/// that comes from data (a graph node's source document, a model's tool
+/// arguments) is bound only through [`allowed::bind`]: it must resolve
+/// inside the working folder or an allowed folder, or be approved by the
+/// operator for that one call.
 #[derive(Debug, Clone)]
-pub struct BoundDir(PathBuf);
+pub struct BoundDir {
+    dir: PathBuf,
+    target: PathBuf,
+    access: BindAccess,
+    /// Keeps the private folder of a single-file binding alive.
+    _private: Option<std::sync::Arc<tempfile::TempDir>>,
+}
 
 impl BoundDir {
     /// Canonicalizes `requested` (resolving it against the process's
     /// current directory first when it is relative, and resolving symlinks),
-    /// and requires it to be a directory.
+    /// and requires it to be a directory. The operator named it, so it
+    /// permits whatever access the plugin declares.
     ///
     /// When `within` is given, the canonical path must have `within`'s own
     /// canonical form as a component-wise prefix: a `..` or a symlink that
@@ -659,12 +691,88 @@ impl BoundDir {
                 within.display()
             );
         }
-        Ok(Self(canonical))
+        Ok(Self {
+            target: canonical.clone(),
+            dir: canonical,
+            access: BindAccess::ReadWrite,
+            _private: None,
+        })
     }
 
-    /// The canonical, absolute path this binding grants read-only access to.
+    /// Exposes the canonical regular file `file` alone through a private
+    /// directory holding a hard link to it. The directory is made on the
+    /// system temp volume, then beside the file when that is another
+    /// filesystem; a file that can be linked on neither is refused so the
+    /// caller can name its folder instead.
+    pub(crate) fn for_file(file: &Path, access: BindAccess) -> Result<Self> {
+        let name = file
+            .file_name()
+            .with_context(|| format!("{} has no file name", file.display()))?;
+        let mut last = None;
+        let beside = file.parent();
+        for base in [Some(std::env::temp_dir()), beside.map(Path::to_path_buf)]
+            .into_iter()
+            .flatten()
+        {
+            let private = tempfile::Builder::new()
+                .prefix(".gents-bind-")
+                .tempdir_in(&base)
+                .with_context(|| format!("creating a private folder in {}", base.display()))?;
+            let dir = private.path().canonicalize()?;
+            let link = dir.join(name);
+            match std::fs::hard_link(file, &link) {
+                Ok(()) => {
+                    return Ok(Self {
+                        dir,
+                        target: link,
+                        access,
+                        _private: Some(std::sync::Arc::new(private)),
+                    })
+                }
+                Err(error) => last = Some(error),
+            }
+        }
+        let error = last.map(|error| format!(": {error}")).unwrap_or_default();
+        anyhow::bail!(
+            "{} cannot be shared on its own{error}; name its folder instead",
+            file.display()
+        )
+    }
+
+    /// Fails when the directory or target is no longer the canonical path it
+    /// was validated as, for instance a component swapped for a symlink since
+    /// it was resolved. Run immediately before the preopen; a swap between
+    /// this check and the guest's first read remains possible, and only
+    /// WASI's own preopen resolution contains it then.
+    pub fn recheck(&self) -> Result<()> {
+        for path in [&self.dir, &self.target] {
+            let now = path.canonicalize().with_context(|| {
+                format!("{} no longer exists or cannot be read", path.display())
+            })?;
+            anyhow::ensure!(
+                &now == path,
+                "{} now resolves to {}; the bound path changed after it was validated",
+                path.display(),
+                now.display()
+            );
+        }
+        Ok(())
+    }
+
+    /// The canonical, absolute directory this binding grants access to.
     pub fn path(&self) -> &Path {
-        &self.0
+        &self.dir
+    }
+
+    /// The canonical path the plugin's input field carries: the directory
+    /// itself, or the one file inside it the caller named.
+    pub fn target(&self) -> &Path {
+        &self.target
+    }
+
+    /// The most access a plugin may use of this directory.
+    pub fn access(&self) -> BindAccess {
+        self.access
     }
 }
 
@@ -969,6 +1077,8 @@ fn narrow_manifold(declared: &Manifold, ceiling: &Manifold) -> Manifold {
     }
 }
 
+pub mod allowed;
+pub mod approval;
 pub mod authority;
 
 /// The attempts a plugin call gets in all when its caller configured

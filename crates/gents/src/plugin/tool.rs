@@ -63,7 +63,7 @@ impl ToolDyn for PluginTool {
             let input: serde_json::Value = crate::llm::tool::parse_tool_args(&args)?;
             let call = self
                 .executor
-                .call(&self.record, input)
+                .call_data_bound(&self.record, input)
                 .await
                 .map_err(|error| tool_error(format!("{error:#}")))?;
             match call.outcome.verdict {

@@ -50,6 +50,84 @@ Denies the desktop_agent_config_save command without any pre-configured scope.
 <tr>
 <td>
 
+`gents-desktop-bridge:allow-desktop-allowed-dirs-add`
+
+</td>
+<td>
+
+Enables the desktop_allowed_dirs_add command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:deny-desktop-allowed-dirs-add`
+
+</td>
+<td>
+
+Denies the desktop_allowed_dirs_add command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:allow-desktop-allowed-dirs-list`
+
+</td>
+<td>
+
+Enables the desktop_allowed_dirs_list command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:deny-desktop-allowed-dirs-list`
+
+</td>
+<td>
+
+Denies the desktop_allowed_dirs_list command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:allow-desktop-allowed-dirs-remove`
+
+</td>
+<td>
+
+Enables the desktop_allowed_dirs_remove command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:deny-desktop-allowed-dirs-remove`
+
+</td>
+<td>
+
+Denies the desktop_allowed_dirs_remove command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `gents-desktop-bridge:allow-desktop-app-quit`
 
 </td>
@@ -1714,6 +1792,58 @@ Denies the desktop_peer_status_fetch command without any pre-configured scope.
 <tr>
 <td>
 
+`gents-desktop-bridge:allow-desktop-plugin-approval-decide`
+
+</td>
+<td>
+
+Enables the desktop_plugin_approval_decide command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:deny-desktop-plugin-approval-decide`
+
+</td>
+<td>
+
+Denies the desktop_plugin_approval_decide command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:allow-desktop-plugin-approvals-pending`
+
+</td>
+<td>
+
+Enables the desktop_plugin_approvals_pending command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:deny-desktop-plugin-approvals-pending`
+
+</td>
+<td>
+
+Denies the desktop_plugin_approvals_pending command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `gents-desktop-bridge:allow-desktop-probe-inference-endpoint`
 
 </td>
@@ -2708,6 +2838,32 @@ Installed packs, registry search and package pages, and the signed-in account
 <td>
 
 Install, update and remove packs, and sign in to the registry
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:allowed-dirs-read`
+
+</td>
+<td>
+
+The folders plugins may read or write, and the plugin questions waiting for an answer
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:allowed-dirs-admin`
+
+</td>
+<td>
+
+Allow, change and remove plugin folders, and answer a plugin question
 
 </td>
 </tr>

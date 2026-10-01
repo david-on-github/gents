@@ -1074,6 +1074,7 @@ fn call_bound_overwrites_the_declared_input_field_with_the_canonical_bound_path(
     plugin.bind_dir = Some(crate::pack::PluginDirBinding {
         input_field: "root".to_owned(),
         description: "a directory".to_owned(),
+        access: Default::default(),
     });
     let runner = PluginRunner::compile(&afb, &plugin).unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -1106,6 +1107,7 @@ fn call_bound_treats_null_arguments_as_an_empty_object() {
     plugin.bind_dir = Some(crate::pack::PluginDirBinding {
         input_field: "root".to_owned(),
         description: "a directory".to_owned(),
+        access: Default::default(),
     });
     let runner = PluginRunner::compile(&afb, &plugin).unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -1133,6 +1135,7 @@ fn admission_refuses_a_bind_dir_plugin_whose_dispatch_path_cannot_enforce_read_o
     plugin.bind_dir = Some(crate::pack::PluginDirBinding {
         input_field: "root".to_owned(),
         description: "a directory".to_owned(),
+        access: Default::default(),
     });
 
     let error = PluginRunner::compile(&afb_bytes, &plugin)
@@ -1229,6 +1232,31 @@ fn path_open_probe(path: &str, create: bool) -> String {
     )
 }
 
+/// A guest that creates `path` in its one preopen (fd 3) holding `{}`, then
+/// writes `{}` to stdout; stdout stays empty when the create fails, so a
+/// refusal shows as `BadOutput`.
+pub(crate) fn create_file_wat(path: &str) -> String {
+    format!(
+        r#"(module
+          (import "wasi_snapshot_preview1" "path_open"
+            (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+          (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 512) "{path}")
+          (data (i32.const 600) "{{}}")
+          (func (export "_start")
+            (if (call $path_open (i32.const 3) (i32.const 0) (i32.const 512) (i32.const {len})
+                  (i32.const 1) (i64.const 64) (i64.const 0) (i32.const 0) (i32.const 272))
+              (then (return)))
+            i32.const 256  i32.const 600  i32.store
+            i32.const 260  i32.const 2    i32.store
+            (drop (call $fd_write (i32.load (i32.const 272)) (i32.const 256) (i32.const 1) (i32.const 268)))
+            (drop (call $fd_write (i32.const 1) (i32.const 256) (i32.const 1) (i32.const 268)))))"#,
+        len = path.len()
+    )
+}
+
 #[test]
 #[cfg(unix)]
 fn bound_guest_can_read_inside_but_cannot_write_or_follow_a_symlink_out() {
@@ -1249,6 +1277,8 @@ fn bound_guest_can_read_inside_but_cannot_write_or_follow_a_symlink_out() {
         plugin.bind_dir = Some(crate::pack::PluginDirBinding {
             input_field: "root".into(),
             description: "test root".into(),
+            access: crate::pack::BindAccess::Read,
+            original_field: None,
         });
         let runner = PluginRunner::compile(&afb, &plugin).unwrap();
         let result = runner
@@ -1258,4 +1288,84 @@ fn bound_guest_can_read_inside_but_cannot_write_or_follow_a_symlink_out() {
         assert_eq!(result.output, serde_json::json!(denied), "{path}");
     }
     assert!(!inside.join("created.txt").exists());
+}
+
+#[test]
+fn call_bound_read_write_lets_the_guest_create_a_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let bound = BoundDir::new(dir.path(), None).unwrap();
+    let (mut plugin, afb) = build_plugin_pack("writer", &create_file_wat("new.json"), None);
+    plugin.bind_dir = Some(crate::pack::PluginDirBinding {
+        input_field: "root".to_owned(),
+        description: "a directory".to_owned(),
+        access: crate::pack::BindAccess::ReadWrite,
+    });
+    let runner = PluginRunner::compile(&afb, &plugin).unwrap();
+    let outcome = call_bound_verdict(&runner, &bound);
+    assert_eq!(outcome.verdict, PluginVerdict::Success);
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("new.json")).unwrap(),
+        "{}"
+    );
+}
+
+/// A guest that opens `path` (relative to its one preopen, fd 3) with
+/// `oflags`, then copies the file to stdout; stdout stays empty when the
+/// open fails, so a refusal shows as `BadOutput`.
+pub(crate) fn open_and_copy_wat(path: &str, oflags: u32) -> String {
+    format!(
+        r#"(module
+          (import "wasi_snapshot_preview1" "path_open"
+            (func $path_open (param i32 i32 i32 i32 i32 i64 i64 i32 i32) (result i32)))
+          (import "wasi_snapshot_preview1" "fd_read"
+            (func $fd_read (param i32 i32 i32 i32) (result i32)))
+          (import "wasi_snapshot_preview1" "fd_write"
+            (func $fd_write (param i32 i32 i32 i32) (result i32)))
+          (memory (export "memory") 1)
+          (data (i32.const 512) "{path}")
+          (func (export "_start")
+            (if (call $path_open (i32.const 3) (i32.const 0) (i32.const 512) (i32.const {len})
+                  (i32.const {oflags}) (i64.const {rights}) (i64.const 0) (i32.const 0) (i32.const 272))
+              (then (return)))
+            i32.const 256  i32.const 0    i32.store
+            i32.const 260  i32.const 128  i32.store
+            (drop (call $fd_read (i32.load (i32.const 272)) (i32.const 256) (i32.const 1) (i32.const 264)))
+            i32.const 260  i32.const 264 i32.load  i32.store
+            (drop (call $fd_write (i32.const 1) (i32.const 256) (i32.const 1) (i32.const 268)))))"#,
+        len = path.len(),
+        rights = if oflags == 0 { 2 } else { 66 }
+    )
+}
+
+fn call_bound_verdict(runner: &PluginRunner, bound: &BoundDir) -> PluginOutcome {
+    runner
+        .call_bound(&serde_json::json!({}), &PluginBudget::default(), bound)
+        .expect("the call runs at the VM level")
+}
+
+#[test]
+fn call_bound_reads_inside_and_never_writes_for_a_read_plugin() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.json"), r#"{"read":true}"#).unwrap();
+    let bound = BoundDir::new(dir.path(), None).unwrap();
+    let bind = |access| crate::pack::PluginDirBinding {
+        input_field: "root".to_owned(),
+        description: "a directory".to_owned(),
+        access,
+    };
+    let runner = |wat: &str| {
+        let (mut plugin, afb) = build_plugin_pack("bound", wat, None);
+        plugin.bind_dir = Some(bind(crate::pack::BindAccess::Read));
+        PluginRunner::compile(&afb, &plugin).unwrap()
+    };
+    let read = call_bound_verdict(&runner(&open_and_copy_wat("a.json", 0)), &bound);
+    assert_eq!(read.output, serde_json::json!({"read": true}));
+    let create = call_bound_verdict(&runner(&open_and_copy_wat("new.json", 1)), &bound);
+    assert_eq!(create.verdict, PluginVerdict::BadOutput);
+    assert!(!dir.path().join("new.json").exists());
+    let outside = runner(&open_and_copy_wat("../a.json", 0));
+    assert_eq!(
+        call_bound_verdict(&outside, &bound).verdict,
+        PluginVerdict::BadOutput
+    );
 }

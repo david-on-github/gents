@@ -65,8 +65,16 @@ pub fn describe_manifold(manifold: &Manifold) -> Option<String> {
 /// manifold grant, no `bind_dir`, no `limits`.
 pub fn describe_plugin_authority(plugin: &PackPlugin, manifold: &Manifold) -> Option<String> {
     let mut parts: Vec<String> = describe_manifold(manifold).into_iter().collect();
-    if plugin.bind_dir.is_some() {
-        parts.push("reads one directory its caller binds, per call".to_owned());
+    if let Some(binding) = &plugin.bind_dir {
+        parts.push(
+            match binding.access {
+                crate::pack::BindAccess::Read => "reads one directory its caller binds, per call",
+                crate::pack::BindAccess::ReadWrite => {
+                    "reads and writes one directory its caller binds, per call"
+                }
+            }
+            .to_owned(),
+        );
     }
     if let Some(limits) = &plugin.limits {
         if let Some(description) = describe_limits(limits) {
@@ -192,6 +200,7 @@ mod tests {
         declaration.bind_dir = Some(crate::pack::PluginDirBinding {
             input_field: "root".to_owned(),
             description: "The directory to scan".to_owned(),
+            access: Default::default(),
         });
         declaration.limits = Some(crate::pack::PluginLimits {
             memory_mib: Some(512),
@@ -212,6 +221,7 @@ mod tests {
         declaration.bind_dir = Some(crate::pack::PluginDirBinding {
             input_field: "root".to_owned(),
             description: "scan target".to_owned(),
+            access: Default::default(),
         });
         let manifold = Manifold {
             net: NetAccess::OutboundHttp(None),
