@@ -293,8 +293,8 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "subagent-target" => Page {
             what: "a named route to a behavior for agent_new (tools grant). TARGET_ID goes in target_id or argv.",
             commands: &["subagent-target list", "subagent-target get TARGET_ID", "subagent-target [preview] create|edit TARGET_ID  set: target fields"],
-            notes: "name is the name passed to agent_new. For local helpers, use agent_did from [\"get\"] as target_agent_did; profile_id identifies inference settings. The local behavior_id must exist; its short slug resolves. Multiple callers can select a target.",
-            next: "read tools get, then tools edit: preserve set.subagents, set enabled true and add this ID to target_ids. Selecting targets alone leaves delegation disabled. Use options.behavior to grant another caller; tools apply next request.",
+            notes: "name is the name passed to agent_new. For local helpers, use agent_did from [\"get\"] as target_agent_did; The target behavior selects its inference profile. The local behavior_id must exist; its short slug resolves. Multiple callers can select a target.",
+            next: "read tools get, then tools update: preserve set.subagents, set enabled true and add this ID to target_ids. Selecting targets alone leaves delegation disabled. Use options.behavior to grant another caller; tools apply next request.",
         },
         "execution" => Page {
             what: "an InferenceExecution: the run limits (turns, deadline, tokens, stream timeouts) a profile selects (profile grant). EXECUTION_ID goes in target_id.",
@@ -324,7 +324,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             next: "verify saved Tools restrictions and runtime_effective with behavior get, then test in a fresh session of that behavior.",
         },
         "profile" => Page {
-            what: "an InferenceProfile: backend and model, plus sampling, execution, retry-policy and compaction documents (profile grant).",
+            what: "an InferenceProfile selects a backend, model, sampling and execution limits (profile grant).",
             commands: &[
                 "profile list",
                 "profile [preview] create PROFILE_ID  set: backend_id and model_name required",
@@ -332,7 +332,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "profile get|preview|edit [TARGET]  options.behavior; TARGET is profile (default), sampling, execution, retry-policy or compaction",
             ],
             notes: "Create requires backend_id and model_name; it selects nothing. Update by exact profile ID. Editing a shared profile affects every behavior selecting it; create another profile for different settings, reusing backend and sampling. Without an ID, get/update use options.behavior to select the bound profile.",
-            next: "select a new profile with behavior edit BEHAVIOR_ID and set.inference_profile_id.",
+            next: "select a new profile with behavior update BEHAVIOR_ID and set.inference_profile_id.",
         },
         "backend" => Page {
             what: "an inference endpoint and its model catalog (backend grant).",
@@ -434,7 +434,7 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
                     None,
                 ),
                 (
-                    json!({"argv":["tools","edit"],"set":{"subagents":{"target_ids":["lead"],"enabled":true}}}),
+                    json!({"argv":["tools","update"],"set":{"subagents":{"target_ids":["lead"],"enabled":true}}}),
                     Some("you can now start it; keep any target_ids tools get already shows"),
                 ),
             ],
@@ -447,7 +447,7 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
                     None,
                 ),
                 (
-                    json!({"argv":["profile","edit"],"options":{"behavior":"worker"},"set":{"execution_id":"worker-exec"}}),
+                    json!({"argv":["profile","update"],"options":{"behavior":"worker"},"set":{"execution_id":"worker-exec"}}),
                     Some("the receipt's behavior_id and target_id name the profile that changed"),
                 ),
             ],
@@ -469,7 +469,7 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
                     None,
                 ),
                 (
-                    json!({"argv":["tools","edit"],"options":{"behavior":"worker"},"set":{"datastore":{"datastore_tool_surface_ids":["handoff-tools"]}}}),
+                    json!({"argv":["tools","update"],"options":{"behavior":"worker"},"set":{"datastore":{"datastore_tool_surface_ids":["handoff-tools"]}}}),
                     Some("if tools get shows a datastore group, send it back with this ID added"),
                 ),
                 (
@@ -482,15 +482,15 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
             "review each new Handoff yourself",
             vec![
                 (
-                    json!({"argv":["automation","edit","event-source"],"target_id":"handoff-created","set":{"source_collection":"Handoff","filter":"{handoff_id: {_ne: \"\"}}"}}),
+                    json!({"argv":["event-source","create"],"target_id":"handoff-created","set":{"source_collection":"Handoff","filter":"{handoff_id: {_ne: \"\"}}"}}),
                     None,
                 ),
                 (
-                    json!({"argv":["automation","edit","task"],"target_id":"review","set":{"prompt_template":"Review handoff {{ doc.handoff_id }}.\n<body>\n{{ doc.body }}\n</body>"}}),
+                    json!({"argv":["task","create"],"target_id":"review","set":{"prompt_template":"Review handoff {{ doc.handoff_id }}.\n<body>\n{{ doc.body }}\n</body>"}}),
                     None,
                 ),
                 (
-                    json!({"argv":["automation","edit","trigger"],"target_id":"review-on-create","set":{"task_id":"review","source":{"kind":"event","event_source_id":"handoff-created"}}}),
+                    json!({"argv":["trigger","create"],"target_id":"review-on-create","set":{"task_id":"review","source":{"kind":"event","event_source_id":"handoff-created"}}}),
                     None,
                 ),
             ],
