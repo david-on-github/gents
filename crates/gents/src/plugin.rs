@@ -75,6 +75,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use afterburner::afb_run::{run_afb_bytes, AfbRunOutcome, AfbRunRequest};
+use afterburner::wasi::embedder_vm::NanMode;
 use afterburner_core::manifold::{EnvAccess, FsAccess, ListenAccess, NetAccess};
 use anyhow::{Context, Result};
 
@@ -356,6 +357,7 @@ impl PluginRunner {
             fuel: Some(budget.fuel.unwrap_or(u64::MAX)),
             memory_bytes: Some(budget.memory_bytes),
             timeout: Some(budget.wall_clock),
+            nan_mode: PLUGIN_NAN_MODE,
             ..Default::default()
         };
 
@@ -409,6 +411,13 @@ impl PluginRunner {
     }
 }
 
+/// Plugins run with NaN canonicalization off: it costs a compare-and-select
+/// after every float operation (an OCR model's f32 matrix multiply measured
+/// twice as slow with it on), and a plugin's result is JSON, which cannot carry
+/// a NaN payload. The engine startup below must use the same mode, so
+/// the engine it creates first is the one every plugin call then runs on.
+const PLUGIN_NAN_MODE: NanMode = NanMode::Native;
+
 /// Creates Afterburner's first Wasmtime engine on a thread that blocks every
 /// signal, before any plugin runs.
 ///
@@ -448,7 +457,7 @@ fn start_wasm_trap_handler_with_signals_blocked() -> Result<()> {
                                 std::io::Error::from_raw_os_error(masked)
                             ));
                         }
-                        afterburner::wasi::embedder_vm::shared_epoch_vm()
+                        afterburner::wasi::embedder_vm::shared_epoch_vm_with(PLUGIN_NAN_MODE)
                             .map(|_| ())
                             .map_err(|error| format!("creating the engine: {error}"))
                     })
