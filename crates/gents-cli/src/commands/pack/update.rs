@@ -134,8 +134,11 @@ pub(crate) async fn update(args: PackUpdateArgs) -> Result<()> {
             current.push(coordinate);
             continue;
         }
+        // Pinned: an unpinned install resolves installed-first and would
+        // reinstall the version already there.
+        let latest = pack["latest"].as_str().unwrap_or_default();
         let install_args = PackInstallArgs {
-            package: coordinate.clone(),
+            package: format!("{coordinate}@{latest}"),
             bindings: args.bindings.clone(),
             inference_slots: args.inference_slots.clone(),
             preview: false,
