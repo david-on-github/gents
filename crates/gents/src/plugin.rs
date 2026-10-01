@@ -105,7 +105,7 @@ pub const MAX_DECLARED_WALL_CLOCK_SECS: u32 = 900;
 /// needs a change to that fixed pipe in the external `afterburner` engine,
 /// outside this crate; until then, a guest that traps having filled the
 /// pipe is reclassified as [`PluginVerdict::BadOutput`] rather than
-/// surfaced as an opaque trap (see [`STDOUT_CAPTURE_PIPE_BYTES`]).
+/// surfaced as an opaque trap (see `STDOUT_CAPTURE_PIPE_BYTES`).
 pub const MAX_DECLARED_OUTPUT_MIB: u32 = 4;
 
 /// [`MAX_DECLARED_OUTPUT_MIB`]'s own fixed pipe, in bytes: the real hard
@@ -150,8 +150,8 @@ pub struct PluginBudget {
     pub wall_clock: std::time::Duration,
     /// Bytes of a plugin's JSON result kept before the call is judged
     /// [`PluginVerdict::BadOutput`] for running past this bound (see
-    /// [`outcome_from_exit`]). [`Self::default`] carries
-    /// [`DEFAULT_MAX_OUTPUT_BYTES`]; [`Self::for_plugin`] raises it to a
+    /// `outcome_from_exit`). [`Self::default`] carries
+    /// `DEFAULT_MAX_OUTPUT_BYTES`; [`Self::for_plugin`] raises it to a
     /// plugin's declared `limits.max_output_mib`.
     pub max_output_bytes: usize,
 }
