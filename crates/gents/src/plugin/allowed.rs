@@ -77,6 +77,7 @@ pub fn add(home: &Path, path: &Path, access: BindAccess) -> Result<AllowedDir> {
         "{} is not a file or folder",
         path.display()
     );
+    ensure_scope_path(&path, user_home().as_deref(), home)?;
     let entry = AllowedDir { path, access };
     let mut dirs = list(home)?;
     dirs.retain(|existing| existing.path != entry.path);
@@ -167,6 +168,18 @@ fn too_broad(dir: &Path, user_home: Option<&Path>, gents_home: &Path) -> bool {
             .is_ok_and(|home| home.starts_with(dir))
 }
 
+fn ensure_scope_path(path: &Path, user_home: Option<&Path>, gents_home: &Path) -> Result<()> {
+    anyhow::ensure!(
+        !too_broad(path, user_home, gents_home)
+            && !gents_home
+                .canonicalize()
+                .is_ok_and(|home| path.starts_with(home)),
+        "{} is too broad or includes the gents home; allow a specific file or folder",
+        path.display()
+    );
+    Ok(())
+}
+
 /// What a session reaches without asking: its working folder read-only and
 /// the operator's list.
 #[derive(Clone, Debug)]
@@ -181,6 +194,13 @@ impl Scope {
         user_home: Option<&Path>,
     ) -> Result<Self> {
         let mut entries = list(gents_home)?;
+        for entry in &entries {
+            let path = entry
+                .path
+                .canonicalize()
+                .with_context(|| format!("allowed path {} is unavailable", entry.path.display()))?;
+            ensure_scope_path(&path, user_home, gents_home)?;
+        }
         let working = workdir
             .and_then(|dir| dir.canonicalize().ok())
             .filter(|dir| !too_broad(dir, user_home, gents_home));

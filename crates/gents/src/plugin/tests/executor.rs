@@ -356,7 +356,7 @@ mod bound {
             .await
             .contains("does not exist"));
 
-        allowed::add(fx.home.path(), fx.home.path(), BindAccess::Read).unwrap();
+        assert!(allowed::add(fx.home.path(), fx.home.path(), BindAccess::Read).is_err());
         let error = refusal(&tool, &fx.home.path().join("plugins")).await;
         assert!(error.contains("gents home"), "{error}");
     }

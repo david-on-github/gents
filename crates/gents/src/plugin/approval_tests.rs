@@ -72,7 +72,8 @@ async fn a_deny_reaches_the_waiting_call() {
 #[tokio::test]
 async fn always_allow_adds_the_folder_and_keeps_wider_access() {
     let home = tempfile::tempdir().unwrap();
-    let request = request(home.path());
+    let documents = tempfile::tempdir().unwrap();
+    let request = request(documents.path());
     allowed::add(home.path(), &request.folder, BindAccess::ReadWrite).unwrap();
     let waiting = {
         let home = home.path().to_owned();
@@ -110,7 +111,8 @@ fn only_a_waiting_question_can_be_answered() {
 #[tokio::test]
 async fn always_allow_this_file_adds_only_the_file() {
     let home = tempfile::tempdir().unwrap();
-    let request = request(home.path());
+    let documents = tempfile::tempdir().unwrap();
+    let request = request(documents.path());
     let waiting = {
         let home = home.path().to_owned();
         let request = request.clone();

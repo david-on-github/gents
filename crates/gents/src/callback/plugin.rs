@@ -177,12 +177,11 @@ pub(super) async fn execute(
         Err(error) => return deny(node, invocation, &format!("{error:#}")).await,
     };
     let input = crate::callback::documents::strip_secret_fields(source.clone());
-    let workdir = std::env::current_dir().ok();
     let bound = match plugins
         .bind_input(
             &record,
             &input,
-            &crate::plugin::executor::BindContext::headless(workdir.as_deref()),
+            &crate::plugin::executor::BindContext::headless(None),
         )
         .await
     {

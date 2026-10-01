@@ -169,7 +169,11 @@ impl PluginExecutor {
                 return Err(refuse(not_allowed(&resolved, binding.access, context)));
             }
         }
-        allowed::bind(&resolved, binding.access, covered)
+        let folder_allowed = allowed::Scope::load(home, context.workdir, user_home.as_deref())
+            .map_err(|error| refuse(format!("{error:#}")))?
+            .granted(resolved.folder())
+            .is_some();
+        allowed::bind(&resolved, binding.access, folder_allowed)
             .map(Some)
             .map_err(refuse)
     }

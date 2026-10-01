@@ -229,3 +229,35 @@ fn the_file_tools_refuse_the_allowed_folders_file_and_the_approval_queue() {
     assert!(!is_protected(&world.gents.join("plugins/x")));
     assert!(!is_protected(&world.root.join("work/a.txt")));
 }
+
+#[test]
+fn an_allowed_file_does_not_authorize_its_parent_or_sibling() {
+    let world = world();
+    let file = world.root.join("work/a.txt");
+    add(&world.gents, &file, BindAccess::Read).unwrap();
+    let scope = Scope::load(&world.gents, None, Some(&world.root)).unwrap();
+    assert_eq!(scope.granted(&file), Some(BindAccess::Read));
+    assert_eq!(scope.granted(file.parent().unwrap()), None);
+    assert_eq!(scope.granted(&world.root.join("work/b.txt")), None);
+}
+
+#[test]
+fn persisted_allowances_apply_the_same_breadth_rules_as_working_folders() {
+    let world = world();
+    for path in [Path::new("/"), world.root.as_path(), world.gents.as_path()] {
+        assert!(
+            add(&world.gents, path, BindAccess::Read).is_err(),
+            "{}",
+            path.display()
+        );
+    }
+    save(
+        &world.gents,
+        vec![AllowedDir {
+            path: world.root.clone(),
+            access: BindAccess::Read,
+        }],
+    )
+    .unwrap();
+    assert!(Scope::load(&world.gents, None, Some(&world.root)).is_err());
+}

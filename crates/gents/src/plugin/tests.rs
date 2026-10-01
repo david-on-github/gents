@@ -988,7 +988,6 @@ fn masked_trap_startup_uses_the_plugin_request_engine() {
     assert!(std::ptr::eq(startup, selected));
 }
 
-
 #[test]
 fn generated_plugin_resource_cases_bind_budget_and_consent() {
     let cases = &crate::lean_vocab_test::lean_contract_snapshot().plugin_resource_cases;

@@ -4,8 +4,9 @@
 //! allowed folders waits here when its request came from an interactive chat.
 //! The question is one request file in the gents home, the answer one decision
 //! file; the desktop app and `gents chat` list the pending questions and write
-//! the decision, so the same home is the only channel and no pack, document or
-//! model can answer for the operator. "Always allow" is applied by [`decide`]
+//! the decision. This is operator consent within the existing host trust
+//! boundary, not isolation from shell commands running as the same OS user.
+//! Sandboxed plugins cannot access this queue. "Always allow" is applied by [`decide`]
 //! on the answering side, adding the folder to the operator's list; the
 //! waiting call only learns allow or deny.
 
