@@ -27,6 +27,13 @@ use crate::tool_surface::SelfConfigProcessCeiling;
 use crate::toolset::CommandNetworkMode;
 
 #[derive(Debug, thiserror::Error)]
+#[error("no owned {} with ID {id:?}. This is a document ID, not a behavior name. List this resource to find its exact IDs; behavior get shows a role's selected Context, Tools and profile", target.collection_name())]
+pub(super) struct MissingConfigDocument {
+    pub target: SelfConfigTarget,
+    pub id: String,
+}
+
+#[derive(Debug, thiserror::Error)]
 pub(super) struct MissingBehavior {
     pub behavior_id: String,
     /// Behavior IDs whose slug or display name equals the requested ID
@@ -326,10 +333,13 @@ impl SelfConfigCore {
             ),
             Some((doc_id, doc)) => (Some(doc_id), doc, false),
             None if request.allow_create => (None, Map::new(), true),
-            None => bail!(
-                "{} {unique_value:?} not found",
-                request.target.collection_name()
-            ),
+            None => {
+                return Err(MissingConfigDocument {
+                    target: request.target,
+                    id: unique_value,
+                }
+                .into())
+            }
         };
 
         let mut merged = apply_patch(request.target, &stored_doc, &request.patch);
@@ -526,10 +536,13 @@ impl SelfConfigCore {
             ),
             Some((_, doc)) => (doc, false),
             None if request.allow_create => (Map::new(), true),
-            None => bail!(
-                "{} {unique_value:?} not found",
-                request.target.collection_name()
-            ),
+            None => {
+                return Err(MissingConfigDocument {
+                    target: request.target,
+                    id: unique_value,
+                }
+                .into())
+            }
         };
         let mut merged = apply_patch(request.target, &stored_doc, &request.patch);
         if creating {

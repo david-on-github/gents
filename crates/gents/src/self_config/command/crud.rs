@@ -23,6 +23,13 @@ impl ConfigCommandTool {
         let exact = args.first().is_some_and(|word| !word.starts_with('-'));
         if verb == "delete" {
             let id = required_resource_id(args.first(), "document ID")?;
+            let parsed = ParsedArgs::parse(&args[1..])?;
+            if !preview && parsed.one("digest")?.is_none() {
+                return Err(CommandGuidance {
+                    message: format!("{resource} delete requires options.digest from preview delete; review that result before applying its returned delete call"),
+                    next_call: json!({"argv":[resource,"preview","delete"],"target_id":id}),
+                }.into());
+            }
             let mut cleanup = vec![
                 if preview { "preview" } else { "remove" }.into(),
                 "--target".into(),
@@ -91,8 +98,13 @@ impl ConfigCommandTool {
         if verb == "create" && !exact {
             bail!("{resource} create requires a new document ID in target_id or after create in argv; fields go in set");
         }
-        if !exact && verb == "update" && matches!(resource, "context" | "tools") {
-            self.ensure_resource(target.category())?;
+        if !exact
+            && (verb == "update" && matches!(resource, "context" | "tools")
+                || verb == "get" && resource == "context")
+        {
+            if resource != "context" {
+                self.ensure_resource(target.category())?;
+            }
         } else {
             self.ensure_crud_resource(target)?;
         }
@@ -113,10 +125,16 @@ impl ConfigCommandTool {
                 .await
                 .map(Some);
         }
+        if verb == "get" && !exact && resource == "context" {
+            anyhow::ensure!(!preview, "get is read-only; omit preview");
+            let mut bound = vec!["get".into()];
+            bound.extend_from_slice(args);
+            return self.behavior_context(&bound).await.map(Some);
+        }
         if verb == "get" {
             anyhow::ensure!(
                 !preview && args.len() == 1,
-                "{resource} get requires one ID"
+                "{resource} get requires target_id or one document ID after get in argv; use {resource} list to discover IDs"
             );
             return self.exact_read(target, &args[0]).await.map(Some);
         }

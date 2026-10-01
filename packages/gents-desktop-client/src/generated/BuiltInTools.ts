@@ -16,4 +16,11 @@ enable_goal_tools?: boolean | null,
 /**
  * Additional opt-in for model-facing goal creation. Unset is disabled.
  */
-enable_goal_creation?: boolean | null, enable_memory?: boolean | null, enable_session_history_tool?: boolean | null, enable_context_budget?: boolean | null, };
+enable_goal_creation?: boolean | null, enable_memory?: boolean | null, enable_session_history_tool?: boolean | null,
+/**
+ * Node-wide schema administration, independent of config and document access.
+ * DefraDB remains the schema authorization owner. Unset is disabled.
+ * Tools writers may configure this capability like other built-ins; an
+ * operator that must forbid it must clamp the tool-policy ceiling.
+ */
+enable_schema_tool?: boolean | null, enable_context_budget?: boolean | null, };

@@ -526,7 +526,7 @@ async fn validate_outcome_source_fields(
                 declared.type_name
             ),
             None => anyhow::bail!(
-                "Trigger {trigger_id} delivers {collection} to Task {task_id}, which sets emit_outcome, but {collection} has no handoff_id field; a FireOutcome copies the delivered document's handoff_id, so every fire would be refused. Config cannot add fields to an installed schema. Preserve valid configuration and report this limitation; deleting Tasks, Triggers or sources cannot change the schema. For a new setup, declare handoff_id before installation and populate it in the write tool"
+                "Trigger {trigger_id} delivers {collection} to Task {task_id}, which sets emit_outcome, but {collection} has no handoff_id field; a FireOutcome copies the delivered document's handoff_id, so every fire would be refused. Use the schema tool to add handoff_id: String (collection update), then update the write tool to populate it. Existing rows need meaningful values before delivery. Preserve Tasks, Triggers and sources; deleting them cannot repair the schema"
             ),
         }
     }

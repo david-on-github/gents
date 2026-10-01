@@ -8,6 +8,13 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Breaking
 
+- Schema administration moves from `config schema` to the independent `schema`
+  tool, explicitly granted by `Tools.built_ins.enable_schema_tool`. It exposes
+  application collection creation and patches, version inspection/activation,
+  inline WASM migrations, views, and materialization through DefraDB. Mutations
+  require a preview digest; configuration and document permissions stay separate.
+  The Engineer receives the schema grant on initialization.
+
 - Every persistent store is encrypted at rest (DefraDB's AES-256-GCM value
   encryption): a gents home's data directory and the desktop client's store.
   `gents init` (including `--identity-only` and `gents provision`) creates a

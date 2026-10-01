@@ -1,0 +1,175 @@
+use anyhow::{Context, Result};
+use serde_json::{json, Value};
+
+use super::{graphql_api_base, ConfigAccess};
+
+impl ConfigAccess {
+    pub async fn collection_versions(&self) -> Result<Vec<Value>> {
+        match self {
+            Self::Local(node) => node
+                .get_all_collection_versions()
+                .await?
+                .into_iter()
+                .map(|v| serde_json::to_value(v).map_err(Into::into))
+                .collect(),
+            Self::Graphql(_) => serde_json::from_value(
+                self.schema_request(reqwest::Method::GET, "collections/versions", None)
+                    .await?,
+            )
+            .map_err(Into::into),
+        }
+    }
+
+    /// Native DefraDB patch semantics, shared by CLI and model-facing schema administration.
+    /// DefraDB owns version creation, activation, validation and node authorization.
+    pub async fn patch_collection_schema(&self, collection: &str, patch: &Value) -> Result<Value> {
+        match self {
+            Self::Local(node) => Ok(serde_json::to_value(
+                node.patch_collection(collection, &serde_json::to_string(patch)?)
+                    .await?,
+            )?),
+            Self::Graphql(_) => {
+                self.schema_request(
+                    reqwest::Method::PATCH,
+                    "collections",
+                    Some(json!({"Patch":patch})),
+                )
+                .await?;
+                // The HTTP endpoint returns no version receipt. Reading the active
+                // version would misidentify a patch that created an inactive one.
+                Ok(
+                    json!({"committed":true,"collection":collection,"VersionID":null,
+                    "note":"HTTP publication returns no version ID; inspect collection versions for the resulting definition"}),
+                )
+            }
+        }
+    }
+
+    pub async fn activate_collection_version(&self, version_id: &str) -> Result<()> {
+        match self {
+            Self::Local(node) => node.set_active_collection_version(version_id).await,
+            Self::Graphql(endpoint) => {
+                let url = format!("{}/collections/default", graphql_api_base(endpoint.url())?);
+                endpoint
+                    .authorize(reqwest::Client::new().post(&url))?
+                    .timeout(std::time::Duration::from_secs(120))
+                    .body(version_id.to_owned())
+                    .send()
+                    .await?
+                    .error_for_status()?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Inline modules keep local and HTTP schema administration within the same
+    /// file-access boundary. A schema grant never grants host filesystem access.
+    pub async fn set_schema_migration(
+        &self,
+        config: crate::defra_node::LensConfig,
+    ) -> Result<Value> {
+        config.validate_for_http()?;
+        match self {
+            Self::Local(node) => {
+                Ok(json!({"lensId":node.set_migration(config).await?.to_string()}))
+            }
+            Self::Graphql(_) => {
+                self.schema_request(
+                    reqwest::Method::POST,
+                    "lens/set",
+                    Some(serde_json::to_value(config)?),
+                )
+                .await
+            }
+        }
+    }
+
+    pub async fn add_schema_view(&self, query: &str, sdl: &str) -> Result<()> {
+        match self {
+            Self::Local(node) => node.add_view(query, sdl).await,
+            Self::Graphql(_) => {
+                self.schema_request(
+                    reqwest::Method::POST,
+                    "view",
+                    Some(json!({"Query":query,"SDL":sdl})),
+                )
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
+    pub async fn materialize_schema_collection(&self, collection: &str) -> Result<usize> {
+        match self {
+            Self::Local(node) => node.materialize_collection(collection).await,
+            Self::Graphql(_) => anyhow::bail!("the pinned DefraDB HTTP API does not expose collection materialization; use the schema tool on the runtime node"),
+        }
+    }
+
+    async fn schema_request(
+        &self,
+        method: reqwest::Method,
+        route: &str,
+        body: Option<Value>,
+    ) -> Result<Value> {
+        let Self::Graphql(endpoint) = self else {
+            anyhow::bail!("schema HTTP request requires an HTTP endpoint")
+        };
+        let url = format!("{}/{}", graphql_api_base(endpoint.url())?, route);
+        let mut request = endpoint
+            .authorize(reqwest::Client::new().request(method, &url))?
+            .timeout(std::time::Duration::from_secs(120));
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        let response = request
+            .send()
+            .await
+            .with_context(|| format!("schema operation at {url}"))?;
+        let status = response.status();
+        let bytes = response.bytes().await?;
+        anyhow::ensure!(
+            status.is_success(),
+            "schema operation failed ({status}): {}",
+            String::from_utf8_lossy(&bytes)
+        );
+        if bytes.is_empty() {
+            Ok(Value::Null)
+        } else {
+            Ok(serde_json::from_slice(&bytes)?)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn http_patch_does_not_substitute_the_active_version_for_an_inactive_publication() {
+        use axum::{routing::patch, Json, Router};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/api/v0/graphql", listener.local_addr().unwrap());
+        let app = Router::new().route(
+            "/api/v0/collections",
+            patch(|Json(body): Json<Value>| async move {
+                assert_eq!(body["Patch"][0]["value"], false);
+                axum::http::StatusCode::OK
+            }),
+        );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        let access = ConfigAccess::Graphql(super::super::GraphqlEndpoint::anonymous(endpoint));
+        let result = access
+            .patch_collection_schema(
+                "Example",
+                &json!([{"op":"replace","path":"/Example/IsActive","value":false}]),
+            )
+            .await;
+        server.abort();
+        let receipt = result.unwrap();
+        assert_eq!(receipt["committed"], true);
+        assert!(receipt["VersionID"].is_null());
+    }
+}

@@ -4,7 +4,6 @@ mod crud;
 mod datastore;
 mod discovery;
 pub(super) mod help;
-mod schema;
 mod skill;
 mod validate;
 
@@ -41,10 +40,6 @@ const HELP_INDEX: &[(&str, &str)] = &[
         "automation",
         "connect sources, tasks and triggers; wiring recipes",
     ),
-    (
-        "schema",
-        "collection schemas: get, preview install, install; no list/update/delete",
-    ),
     ("pack", "pack and graph installation"),
     ("discovery", "external configuration scan"),
     ("cleanup", "atomic multi-document deletion"),
@@ -54,7 +49,7 @@ const HELP_INDEX: &[(&str, &str)] = &[
 
 /// Where `preview` goes, and the help aliases, stated once in the index.
 const HELP_GRAMMAR: &str = "Documents: list, get, create, update, delete. target_id names the document; set writes fields, clear removes optional fields. list takes options.limit/cursor. create requires a new ID; update requires an existing ID. behavior create takes options instead of set and allocates its ID and Context/Tools.
-Preview: [RESOURCE,preview,VERB]. Delete needs options.digest from preview. batch takes options.operations: ordered config calls; each commits separately, stopping on error. Schemas/packs use installation workflows; graph authoring is unavailable.";
+Preview: [RESOURCE,preview,VERB]. Delete needs options.digest from preview. batch takes options.operations: ordered config calls; each commits separately, stopping on error. Packs use installation workflows. Collections and migrations use the separate schema tool; graph authoring is unavailable.";
 
 #[derive(Debug, thiserror::Error)]
 #[error("{message}")]
@@ -113,13 +108,16 @@ impl ConfigCommandParams {
                 | ["behavior", "get" | "edit" | "default", ..]
                 | ["backend", "get" | "create" | "discover", ..]
                 | ["profile", "create", ..]
-                | ["skill" | "schema", "get", ..]
+                | ["skill", "get", ..]
                 | ["pack", "get" | "install" | "update" | "remove", ..] => 2,
                 ["automation", "get" | "preview" | "edit", _, ..] => 3,
                 ["get", ..] => return Err(CommandGuidance {
                     message: "Put the resource before the verb: use behavior get to inspect a behavior.".into(),
                     next_call: json!({"argv":["behavior","get"],"target_id":id}),
                 }.into()),
+                ["behavior", "create" | "clone", ..] | ["behavior", "preview", "create" | "clone", ..] => bail!(
+                    "behavior create/clone allocates the ID from options.display-name; omit target_id. The receipt returns the new behavior, Context and Tools IDs; use resource update for later changes"
+                ),
                 ["tools", ..] => bail!(
                     "target_id is not accepted by tools; omit it and select the owning behavior with options.behavior, e.g. {{\"argv\":[\"tools\",\"get\"],\"options\":{{\"behavior\":\"BEHAVIOR_ID\"}}}}"
                 ),
@@ -137,6 +135,20 @@ impl ConfigCommandParams {
             }
         }
         for (name, value) in self.options {
+            let verb = argv.iter().skip(1).find(|word| word.as_str() != "preview");
+            let composition = argv.first().is_some_and(|r| r == "behavior")
+                && verb.is_some_and(|v| matches!(v.as_str(), "create" | "clone"));
+            if !composition
+                && matches!(verb.map(String::as_str), Some("create" | "update" | "edit"))
+            {
+                if let Some(target) = argv.first().and_then(|r| crud::resource_target(r)) {
+                    let backend_option = target == SelfConfigTarget::InferenceBackend
+                        && verb.is_some_and(|v| v == "create")
+                        && matches!(name.as_str(), "endpoint" | "name");
+                    anyhow::ensure!(backend_option || !target.is_writable(&name),
+                        "{name:?} is a {} field: put it in set.{name}, not options; field names keep their underscores", target.collection_name());
+                }
+            }
             anyhow::ensure!(
                 name.bytes().next().is_some_and(|c| c.is_ascii_lowercase())
                     && name.bytes().all(|c| c.is_ascii_lowercase() || c == b'-')
@@ -170,7 +182,7 @@ impl ConfigCommandParams {
                     && field
                         .bytes()
                         .all(|c| c.is_ascii_alphanumeric() || c == b'_'),
-                "invalid patch field {field:?}"
+                "invalid patch field {field:?}; set/clear field names use underscores, not hyphens (e.g. system_prompt). Read resource update --help for writable fields"
             );
             argv.extend([
                 "--set".into(),
@@ -271,7 +283,7 @@ impl Tool for ConfigCommandTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_owned(),
-            description: r#"Read and change configuration through a native API, not a shell.
+            description: r#"Read and change Gents configuration through a native API, not a shell. Collection definitions and migrations use the separate schema tool.
 Call {"argv":[RESOURCE,VERB],"target_id"?:ID,"set"?:{field:value},"clear"?:[field],"options"?:{name:value}}. Documents share list, get, create, update, delete. Writes validate and commit immediately. ["validate"] audits saved configuration; fix reported errors before reporting completion. Preview writes nothing.
 Behavior IDs are "<DID>:<slug>"; the slug alone works. ["help"] lists granted resources; ["help",RESOURCE] explains fields and exceptions."#.to_owned(),
             parameters: json!({
@@ -486,7 +498,6 @@ fn model_resources(categories: &BTreeSet<String>, pack: bool) -> Vec<&'static st
         ("automation", "trigger"),
         ("automation", "schedule"),
         ("automation", "event-source"),
-        ("automation", "schema"),
     ] {
         if categories.contains(category) {
             resources.push(resource);
@@ -528,6 +539,14 @@ impl ConfigCommandTool {
         if let Some(hint) = error.downcast_ref::<CommandGuidance>() {
             return (message, json!({"next_call":hint.next_call}));
         }
+        if let Some(missing) = error.downcast_ref::<super::ops::MissingConfigDocument>() {
+            if let Some((resource, _)) = HELP_INDEX
+                .iter()
+                .find(|(r, _)| crud::resource_target(r) == Some(missing.target))
+            {
+                return (message, json!({"next_call":{"argv":[resource,"list"]}}));
+            }
+        }
         let resources = model_resources(&self.categories, self.allow_pack_install);
         if error
             .downcast_ref::<super::ops::MissingBehavior>()
@@ -553,6 +572,12 @@ impl ConfigCommandTool {
                 };
                 return (message, json!({"next_call":next}));
             }
+        }
+        if argv.first().is_some_and(|word| word == "schema") {
+            return (
+                message,
+                json!({"tool":"schema","next_call":{"argv":["help"]}}),
+            );
         }
         let resource = argv.first().map(String::as_str).unwrap_or("help");
         let next = if resources
@@ -581,15 +606,34 @@ impl ConfigCommandTool {
         let Some(command) = argv.first().map(String::as_str) else {
             bail!("missing config command; see [\"help\"]");
         };
+        if command == "schema" {
+            bail!("Schema management uses the separate schema tool. Call schema with argv:[\"help\"]. Enable it through Tools.built_ins.enable_schema_tool; config grants do not imply schema access");
+        }
         if argv.get(1).is_some_and(|verb| verb == "apply") {
             if let Some(refusal) = apply_refusal(command) {
                 bail!(refusal);
             }
         }
         if crud::resource_target(command).is_some() {
-            if let Some(verb) = argv.get(1) {
+            let preview = argv.get(1).is_some_and(|v| v == "preview");
+            let preview_operand = argv.get(2).map(String::as_str);
+            let bound_preview = preview
+                && (preview_operand.is_none_or(|v| v.starts_with('-'))
+                    || command == "profile"
+                        && matches!(
+                            preview_operand,
+                            Some(
+                                "profile"
+                                    | "sampling"
+                                    | "execution"
+                                    | "retry-policy"
+                                    | "compaction"
+                            )
+                        )
+                    || command == "mcp-service");
+            if let Some(verb) = argv.get(if preview && !bound_preview { 2 } else { 1 }) {
                 let common = [
-                    "list", "get", "create", "update", "delete", "preview", "edit",
+                    "list", "get", "create", "update", "delete", "edit", "preview",
                 ];
                 let extra = match command {
                     "behavior" => {
@@ -639,7 +683,6 @@ impl ConfigCommandTool {
             "pack" => self.pack(&argv[1..]).await,
             "skill" => self.skill(&argv[1..]).await,
             "discovery" => self.discovery(&argv[1..]).await,
-            "schema" => self.schema(&argv[1..]).await,
             "validate" => self.validate_saved(&argv[1..]).await,
             other => bail!(
                 "unknown config resource or command {other:?}; put the resource first, e.g. [\"profile\",\"list\"]. Accepted: help, get, {}. See [\"help\"]",
@@ -1849,15 +1892,7 @@ impl ConfigCommandTool {
         )
         .await?
         .map(|(_, document)| document)
-        .ok_or_else(|| {
-            let resource = HELP_INDEX.iter().find_map(|(resource, _)|
-                (crud::resource_target(resource) == Some(target)).then_some(*resource)
-            ).expect("config target has a resource");
-            CommandGuidance {
-                message: format!("no owned {} with ID {id:?}. This is a document ID, not a behavior name. List this resource to find its exact IDs; behavior get shows a role's selected Context, Tools and profile", target.collection_name()),
-                next_call: json!({"argv":[resource,"list"]}),
-            }
-        })?;
+        .ok_or_else(|| super::ops::MissingConfigDocument { target, id })?;
         if target == SelfConfigTarget::InferenceBackend {
             document.remove("auth");
             document.insert(
@@ -2081,7 +2116,6 @@ fn normalize_verbs(argv: &mut Vec<String>) {
 /// The exact call that applies a preview, for a model that guessed `apply`.
 fn apply_refusal(resource: &str) -> Option<String> {
     let form = match resource {
-        "schema" => "[\"schema\",\"install\"] with options.sdl and options.digest from [\"schema\",\"preview\",\"install\"]".to_owned(),
         "pack" => "[\"pack\",\"install\",PACKAGE] with options.digest from [\"pack\",\"preview\",\"install\",PACKAGE]".to_owned(),
         "cleanup" => "[\"cleanup\",\"remove\"] with options.target and options.digest from [\"cleanup\",\"preview\"]".to_owned(),
         "skill" => "[\"skill\",\"import\",SKILL_ID,PATH]".to_owned(),
@@ -2316,7 +2350,7 @@ pub(super) fn help_patch_contracts(resource: Option<&str>) -> Value {
                 "host": {"root":"string|null; absent uses runtime cwd", "files":{"mode":"Off|ReadOnly|ReadWrite (default Off)","max_read_chars":"integer 1..1000000|null; default 32000; read_file bytes, default and maximum","max_list_entries":"integer 1..5000|null; default 200","max_matches":"integer 1..5000|null; default 200; glob and grep"}, "bash":{"mode":"Off|ReadOnly|Unrestricted; default Off; ReadOnly still runs shell commands","execution_mode":"read_only|workspace_write|artifact_write|unrestricted|null","network_mode":"inherit|disabled|enabled|null","allowed_argv_prefixes":"array<array<string>>|null","forbidden_argv_prefixes":"array<array<string>>|null","read_only_commands":"array<string>|null","background_enabled":"boolean; default false","timeout_secs":"positive integer|null; default host --command-timeout-secs (120); clamped to the host maximum","max_timeout_secs":"positive integer|null; default timeout_secs if set, else host maximum; clamped to host --command-timeout-max-secs","background_timeout_secs":"positive integer|null; default 36000; clamped to 36000","wait_timeout_secs":"positive integer|null; default 30","max_wait_timeout_secs":"positive integer|null; default 600; clamped to 600","max_output_chars":"integer 1..1000000|null; default 16000; stdout and stderr each"}, "cli":[{"name":"string; host-registered CLI tool name (cli default [])","timeout_secs":"positive integer|null; default host registration (10); clamped to host --command-timeout-max-secs","max_output_chars":"integer 1..1000000|null; default host registration (16000); stdout and stderr each"}]},
                 "remote": {"services":"array<{mcp_service_id:string,tool_names:array<string>,style:flat|discovery(default),required:boolean(default false),background_tool_names:array<string>,connect_timeout_secs?:integer,discovery_timeout_secs?:integer,timeout_secs?:integer,stale_timeout_secs?:integer,background_timeout_secs?:integer (default 36000; clamped to 36000),wait_timeout_secs?:integer (default 30),max_wait_timeout_secs?:integer (default 600; clamped to 600)}>; default []"},
                 "subagents": {"target_ids":"array<existing same-principal SubagentTarget ID>; default []; the agents agent_new may address (create them with subagent-target)","enabled":"boolean|null; enables the agents tools: agent_message, agent_interrupt and agent_list, plus agent_new when target_ids selects a target"},
-                "built_ins": {"enable_graph_tools":"boolean|null","enable_goal_tools":"boolean|null","enable_goal_creation":"boolean|null","enable_memory":"boolean|null","enable_session_history_tool":"boolean|null","enable_context_budget":"boolean|null"},
+                "built_ins": {"enable_graph_tools":"boolean|null","enable_goal_tools":"boolean|null","enable_goal_creation":"boolean|null","enable_memory":"boolean|null","enable_session_history_tool":"boolean|null","enable_schema_tool":"boolean|null","enable_context_budget":"boolean|null"},
                 "datastore": {"enable_defra_query":"boolean|null","defra_query_collections":"array<string>|null","datastore_tool_surface_ids":"array<existing same-principal DatastoreToolSurface ID>|null"},
                 "integrations": {"lsp":{"config":"JSON encoded as a string|null","timeout_secs":"positive integer|null; default 20","max_timeout_secs":"positive integer|null; default 300; clamped to 300"},"eth_tool_ids":"array<existing same-principal EthTool ID>|null","plugins":"array<{plugin: installed namespace/name, digest: sha256:<hex>|null}>|null"},
                 "self_config": {"enable_self_config":"boolean|null; absent is disabled","self_config_categories":"array<behavior|tools|profile|backend|mcp_service|automation|persona>|null; absent selects behavior, tools, profile; persona is the behavior catalog grant (every behavior, not only the current one)","self_config_no_lockout":"boolean|null","self_config_preview":"boolean|null; grants the preview verb","enable_pack_install":"boolean|null; cannot be self-granted"},

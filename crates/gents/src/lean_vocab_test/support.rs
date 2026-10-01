@@ -35,6 +35,7 @@ pub(crate) struct LeanContractVocabulary<'a> {
 #[serde(deny_unknown_fields)]
 pub(crate) struct LeanContractSnapshot {
     pub(crate) generated_by: String,
+    pub(crate) schema_publication_cases: Vec<serde_json::Value>,
     pub(crate) root_admission_cases: Vec<LeanRootAdmissionCase>,
     pub(crate) vocabularies: Vec<LeanVocabularyContract>,
     pub(crate) state_machines: Vec<LeanStateMachineContract>,

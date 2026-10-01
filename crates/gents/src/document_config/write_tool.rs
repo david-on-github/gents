@@ -439,6 +439,7 @@ pub fn is_reserved_builtin_tool_name(name: &str) -> bool {
         DEFRA_QUERY_TOOL_NAME,
         CONTEXT_BUDGET_TOOL_NAME,
         SESSION_HISTORY_TOOL_NAME,
+        crate::schema_tool::SCHEMA_TOOL_NAME,
         crate::goal::CREATE_GOAL_TOOL_NAME,
         crate::goal::GET_GOAL_TOOL_NAME,
         crate::goal::UPDATE_GOAL_TOOL_NAME,

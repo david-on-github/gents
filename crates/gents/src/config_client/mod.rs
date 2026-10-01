@@ -31,6 +31,7 @@ mod inference_profile;
 mod retry;
 mod schema_contract;
 mod schema_install;
+mod schema_management;
 mod txn;
 pub(crate) mod write_telemetry;
 

@@ -179,10 +179,7 @@ async fn guessed_verbs_resolve_or_name_the_working_form() {
         json!({"argv":["schema","apply","install"],"options":{"sdl":"type A { a: String }"}}),
     )
     .await;
-    assert!(
-        schema.contains(r#"schema has no apply verb; use [\"schema\",\"install\"] with options.sdl and options.digest"#),
-        "{schema}"
-    );
+    assert!(schema.contains("schema tool"), "{schema}");
     let automation = refused(&tools, json!({"argv":["automation","apply","task"]})).await;
     assert!(
         automation.contains(r#"automation has no apply verb; use the previewed call with its target_id, options and set, removing \"preview\" from argv and putting \"edit\" in its place when no create or edit follows it"#),
@@ -527,7 +524,6 @@ async fn help_is_layered_and_its_recipes_run_as_written() {
         "profile",
         "execution",
         "automation",
-        "schema",
         "cleanup",
         "skill",
         "discovery",
@@ -584,14 +580,23 @@ async fn help_is_layered_and_its_recipes_run_as_written() {
         for (title, steps) in command::help::recipes(resource) {
             for (call, _) in steps {
                 let call = substitute(&call);
-                let result = ok(&tools, call.clone()).await;
-                // The schema step previews; install it as its note says.
-                if call["argv"] == json!(["schema", "preview", "install"]) {
-                    let mut install = call.clone();
-                    install["argv"] = json!(["schema", "install"]);
-                    install["options"]["digest"] = result["plan"]["artifact_digest"].clone();
-                    ok(&tools, install).await;
-                }
+                let result = if call["tool"] == "schema" {
+                    let args = call["args"].clone();
+                    let schema_tool = crate::schema_tool::SchemaTool::new(node.clone());
+                    let preview = Tool::call(&schema_tool, serde_json::from_value(args).unwrap())
+                        .await
+                        .unwrap();
+                    let preview: Value = serde_json::from_str(&preview).unwrap();
+                    let applied = Tool::call(
+                        &schema_tool,
+                        serde_json::from_value(preview["next_call"]["args"].clone()).unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                    serde_json::from_str(&applied).unwrap()
+                } else {
+                    ok(&tools, call.clone()).await
+                };
                 assert!(!result.is_null(), "{resource} recipe {title}");
             }
         }
@@ -854,7 +859,7 @@ async fn crud_documents_share_verbs_and_preserve_reference_and_identity_checks()
             json!({"argv":[resource,"update"],"target_id":"absent","set":{"tags":["no"]}})
         )
         .await
-        .contains("not found"));
+        .contains("no owned"));
         let preview = ok(
             &tools,
             json!({"argv":[resource,"preview","delete"],"target_id":id}),
@@ -1343,27 +1348,6 @@ async fn saved_config_audit_is_principal_scoped_and_does_not_require_preview() {
 }
 
 #[tokio::test]
-async fn schema_mismatch_recovery_reads_the_saved_contract_without_replacing_it() {
-    let (_node, _owner, tools) = setup("schema-recovery", &["automation"]).await;
-    let sdl = "type AuditInput { body: String }";
-    let preview = ok(
-        &tools,
-        json!({"argv":["schema","preview","install"],"options":{"sdl":sdl}}),
-    )
-    .await;
-    ok(&tools, json!({"argv":["schema","install"],"options":{"sdl":sdl,"digest":preview["plan"]["artifact_digest"]}})).await;
-    let before = ok(&tools, json!({"argv":["schema","get","AuditInput"]})).await;
-    let failure = structured_failure(&tools, json!({"argv":["schema","preview","install"],"options":{"sdl":"type AuditInput { body: String handoff_id: String }"}})).await;
-    assert!(failure["error"]
-        .as_str()
-        .unwrap()
-        .contains("Existing schemas cannot be replaced"));
-    assert_eq!(failure["config_execution"]["mutation_entered"], false);
-    let after = ok(&tools, failure["recovery"]["next_call"].clone()).await;
-    assert_eq!(before, after);
-}
-
-#[tokio::test]
 async fn config_error_recovery_is_executable_for_single_and_batch_calls() {
     let (_node, _owner, tools) = setup(
         "error-guidance",
@@ -1374,9 +1358,11 @@ async fn config_error_recovery_is_executable_for_single_and_batch_calls() {
     for args in [
         json!({"argv":["behavior","create"],"set":{"display_name":"Helper"}}),
         json!({"argv":["context","get"],"target_id":"absent-context"}),
+        json!({"argv":["tools","update"],"target_id":"absent-tools","set":{"display_name":"Missing"}}),
+        json!({"argv":["tools","preview","update"],"target_id":"absent-tools","set":{"display_name":"Missing"}}),
+        json!({"argv":["task","preview","remove","absent-task"]}),
         json!({"argv":["tools","update"],"set":{"bash":{}}}),
         json!({"argv":["behavior","update"],"target_id":"beh-test","set":{"system_prompt":"new instructions"}}),
-        json!({"argv":["schema","preview","install"],"options":{"sdl":"type Example { ready: Bool }"}}),
     ] {
         let failure = structured_failure(&tools, args.clone()).await;
         let recovery = failure["recovery"]["next_call"].clone();
@@ -1418,5 +1404,96 @@ async fn trigger_decode_errors_name_the_nested_field_and_offer_working_help() {
     assert!(
         saved["items"].as_array().unwrap().is_empty(),
         "invalid trigger was not published"
+    );
+}
+
+#[tokio::test]
+async fn delete_recovery_previews_the_same_resource_before_committing() {
+    let (_node, _owner, tools) = setup("delete-recovery", &["persona", "automation"]).await;
+    ok(&tools, json!({"argv":["task","create"],"target_id":"disposable","set":{"prompt_template":"Review the input"}})).await;
+    let failure = structured_failure(
+        &tools,
+        json!({"argv":["task","delete"],"target_id":"disposable"}),
+    )
+    .await;
+    assert_eq!(
+        failure["recovery"]["next_call"],
+        json!({"argv":["task","preview","delete"],"target_id":"disposable"})
+    );
+    let preview = ok(&tools, failure["recovery"]["next_call"].clone()).await;
+    ok(
+        &tools,
+        json!({"argv":["task","get"],"target_id":"disposable"}),
+    )
+    .await;
+    ok(&tools, preview["apply_with"].clone()).await;
+    assert!(call(
+        &tools,
+        json!({"argv":["task","get"],"target_id":"disposable"})
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test]
+async fn composition_help_and_field_placement_match_the_accepted_calls() {
+    let (_node, _owner, tools) = setup(
+        "composition-help",
+        &["persona", "tools", "profile", "automation"],
+    )
+    .await;
+    let bound = ok(
+        &tools,
+        json!({"argv":["context","get"],"options":{"behavior":"beh-test"}}),
+    )
+    .await;
+    let exact = ok(
+        &tools,
+        json!({"argv":["context","get"],"target_id":bound["document"]["context_id"]}),
+    )
+    .await;
+    assert_eq!(bound["document"], exact["document"]);
+    for call in [
+        json!({"argv":["execution","create"],"target_id":"limits","options":{"display_name":"Limits"}}),
+        json!({"argv":["context","update"],"target_id":"absent-context","set":{"system-prompt":"Instructions"}}),
+        json!({"argv":["behavior","create"],"target_id":"helper","options":{"display-name":"Helper"}}),
+    ] {
+        let error = structured_failure(&tools, call).await;
+        ok(&tools, error["recovery"]["next_call"].clone()).await;
+    }
+    for verb in ["create", "clone"] {
+        let help = ok(&tools, json!({"argv":["behavior",verb,"--help"]}))
+            .await
+            .to_string();
+        assert!(help.contains("ID is allocated"), "{help}");
+        assert!(
+            !help.contains("AgentBehavior fields") && !help.contains("AgentContext fields"),
+            "{help}"
+        );
+    }
+    for argv in [
+        json!(["help", "tools"]),
+        json!(["tools", "update", "--help"]),
+    ] {
+        let help = ok(&tools, json!({"argv":argv})).await.to_string();
+        assert!(help.contains("Do not combine them"), "{help}");
+    }
+    let error = structured_failure(&tools, json!({"argv":["execution","create"],"target_id":"limits","options":{"display_name":"Limits"}})).await;
+    assert!(
+        error["error"]
+            .as_str()
+            .unwrap()
+            .contains("set.display_name"),
+        "{error}"
+    );
+    ok(
+        &tools,
+        json!({"argv":["execution","create"],"target_id":"limits","set":{"display_name":"Limits"}}),
+    )
+    .await;
+    let error = structured_failure(&tools, json!({"argv":["event-source","create"],"target_id":"source","set":{"concurrency":"parallel"}})).await;
+    assert!(
+        error["error"].as_str().unwrap().contains("Trigger"),
+        "{error}"
     );
 }

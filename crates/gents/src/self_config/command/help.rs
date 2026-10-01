@@ -163,7 +163,7 @@ fn command_help(resource: &str, page: &Page, command: &[&str]) -> Option<String>
         verb,
         "create" | "edit" | "preview" | "clone" | "import" | "install" | "update"
     );
-    if writes {
+    if writes && !(resource == "behavior" && matches!(verb, "create" | "clone")) {
         let kind = (resource == "automation")
             .then(|| command.get(1).copied())
             .flatten();
@@ -176,6 +176,9 @@ fn command_help(resource: &str, page: &Page, command: &[&str]) -> Option<String>
                 contract["field_shapes"]
             );
         }
+    }
+    if resource == "behavior" && matches!(verb, "create" | "clone") {
+        let _ = writeln!(out, "ID is allocated from options.display-name and returned with Context/Tools IDs; omit target_id and set/clear. For later changes use behavior update or context update with the returned ID.");
     }
     if writes && resource == "datastore" {
         let _ = writeln!(out, "options.mailbox policy values: {}", mailbox_values());
@@ -253,16 +256,6 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             notes: "Uses the same canonical fields, references and publication checks as writes. Reports document counts and errors; fix them with resource update/create, then validate again. References to remote principals are not locally verified. This does not test credentials, running helpers, application-schema readiness or whether the setup meets the user's goal. Inspect selections with behavior get; exercise tools to test runtime behavior.",
             next: "fix reported errors before reporting completion; state what remains untested.",
         },
-        "schema" => Page {
-            what: "register a collection schema for the whole node (automation grant). Use it before a datastore surface or event source that needs the collection.",
-            commands: &[
-                "schema get COLLECTION",
-                "schema preview install  options.sdl",
-                "schema install  options.sdl (the identical string) and options.digest (the preview's artifact_digest)",
-            ],
-            notes: "SDL uses GraphQL scalar names: String, Int, Float, Boolean (not Bool). Choose fields before installation: existing collection shapes cannot be changed here. Deleting config documents does not remove or change a schema. Only tasks with emit_outcome need handoff_id: String on their source collections; those writers must populate it. Keep this runtime metadata separate from business keys. See help datastore for fills. At most 64 KiB; schemas grant no document access.",
-            next: "a surface ([\"help\",\"datastore\"]) or automation ([\"help\",\"automation\"]).",
-        },
         "skill" => Page {
             what: "reusable instructions selected by a Context (tools grant). Create from fields or import a SKILL.md.",
             commands: &[
@@ -309,7 +302,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "behavior list  options: limit, cursor",
                 "behavior get [BEHAVIOR_ID]",
                 "behavior [preview] create  options: display-name, system-prompt, preset (readonly|write), profile; readonly permits shell commands; to forbid shell set host.bash.mode Off; optional description, root; argv switch --default",
-                "behavior [preview] clone  options: from, display-name, profile; optional overrides",
+                "behavior [preview] clone  options: from, display-name; optional profile, system-prompt, root, preset",
                 "behavior [preview] disable  options.id",
                 "behavior [preview] default BEHAVIOR_ID",
                 "behavior [preview] edit BEHAVIOR_ID  set/clear: behavior fields",
@@ -356,7 +349,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "automation" => Page {
             what: "documents that start work without a user: event-source or schedule, trigger, task (automation grant). Use it to run a behavior on new documents or on a timer.",
             commands: &["task|trigger|schedule|event-source [preview] create|update|delete ID", "task|trigger|schedule|event-source list|get ID"],
-            notes: "task create uses options.behavior (default: you); behavior_id is protected. Triggers use their Task’s owner; updates retain it. Create Task before Trigger. A reply can finish a task; writing to its input collection fires it again.\nfilter: GraphQL object literal string with unquoted keys. Templates: doc, event, args, session, request, group. Missing values fail the fire. Render needed source data separately from instructions.\nFor a standard run record, Task.emit_outcome=true records each input’s success or failure in FireOutcome. False (default) writes no completion record. For emit_outcome, source documents need a nonempty String handoff_id: declare it before schema installation and populate it in writers (help schema/datastore).\nConcurrency: parallel (default); queued_serial runs in order; serial skips while busy; latest_only supersedes. Session destination is separate: session_id_template names an existing session; omit for a new one per fire. queued_serial, session_id_template and emit_outcome require an event source.\nPipelines: writing output triggers the next collection’s event source. Fan-in: group waits for expected_count documents sharing correlation_field.",
+            notes: "task create uses options.behavior (default: you); behavior_id is protected. Triggers use their Task’s owner; updates retain it. Create Task before Trigger. A reply can finish a task; writing to its input collection fires it again.\nfilter: GraphQL object literal string with unquoted keys. Templates: doc, event, args, session, request, group. Missing values fail the fire. Render needed source data separately from instructions.\nTask.emit_outcome=true records success or failure in FireOutcome; false (default) records neither. For emit_outcome, source documents need a nonempty String handoff_id: declare it before schema installation and populate it in writers (schema tool and help datastore).\nConcurrency: parallel (default); queued_serial runs in order; serial skips while busy; latest_only supersedes. Session destination is separate: session_id_template names an existing session; omit for a new one per fire. queued_serial, session_id_template and emit_outcome require an event source.\nPipelines: writing output triggers the next collection’s event source. Fan-in: group waits for expected_count documents sharing correlation_field.",
             next: "create one source document, inspect the request with sessions, and query the output through its datastore tool.",
         },
         "cleanup" => Page {
@@ -466,9 +459,9 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
             "publish, select, and exercise handoff tools",
             vec![
                 (
-                    json!({"argv":["schema","preview","install"],"options":{"sdl":"type Handoff { handoff_id: String @index(unique: true) body: String }"}}),
+                    json!({"tool":"schema","args":{"argv":["collection","create"],"options":{"sdl":"type Handoff { handoff_id: String @index(unique: true) body: String }"},"preview":true}}),
                     Some(
-                        "schema install with the same sdl and options.digest = the artifact_digest",
+                        "Use the schema tool, then apply its returned next_call",
                     ),
                 ),
                 (
@@ -552,6 +545,9 @@ fn crud_help(
             "behavior preview create (same options) | update|delete ID",
         );
         writeln!(out, "Also: behavior clone, disable, default. Use context get/update for its selected Context.")?;
+    }
+    if matches!(resource, "tools" | "context" | "profile" | "backend") {
+        writeln!(out, "For get/update, choose one: target_id names the exact document; or omit target_id and use options.behavior to select the behavior's bound document (default: you). Do not combine them. behavior get shows the selected document IDs.")?;
     }
     if resource == "backend" {
         writeln!(out, "Create requires set.endpoint; optional set.name/openai_wire_api. Only enabled unauthenticated OpenAI-compatible endpoints can be created. Also: backend discover ID.")?;

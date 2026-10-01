@@ -23,6 +23,7 @@ pub(crate) struct LeanToolPolicySurfaceView {
     pub(crate) defra_query: bool,
     pub(crate) self_config: bool,
     pub(crate) memory: bool,
+    pub(crate) schema_management: bool,
     pub(crate) session_history: bool,
     pub(crate) context_budget: bool,
     pub(crate) session_messages: bool,

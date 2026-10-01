@@ -379,6 +379,11 @@ fn explain_builtin_reads(
         builder.exclude("built_in_read", CONTEXT_BUDGET_TOOL_NAME);
     }
 
+    if surface.enable_schema_tool {
+        builder.include_many("schema", [crate::schema_tool::SCHEMA_TOOL_NAME.to_string()]);
+    } else {
+        builder.exclude("schema", crate::schema_tool::SCHEMA_TOOL_NAME);
+    }
     if surface.enable_session_history_tool {
         builder.include_many("built_in_read", [SESSION_HISTORY_TOOL_NAME.to_string()]);
     } else {
@@ -432,6 +437,10 @@ fn policy_summary(policy: &ToolPolicySurface) -> BTreeMap<String, Vec<String>> {
             format!("bash_network:{:?}", policy.bash.network_mode),
             format!("bash_allowed:{}", policy.bash.allowed_argv_prefixes.kind()),
         ],
+    );
+    summary.insert(
+        "schema".to_string(),
+        vec![format!("enabled:{}", policy.schema_management)],
     );
     summary.insert(
         "built_in_read".to_string(),
