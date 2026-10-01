@@ -241,6 +241,9 @@
             },
             "behavior_id": {
               "_like": "%:review-helper"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

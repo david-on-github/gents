@@ -1896,6 +1896,62 @@ mod tests {
         assert_eq!(provider_reason_from_failure("model gpt-4o-500k"), None);
     }
 
+    #[tokio::test]
+    async fn delegation_case_capture_excludes_session_title_requests() {
+        let home = EmbeddedHome::create_temp("eval-normal-request-capture")
+            .await
+            .unwrap();
+        let did = escape_graphql_string(home.did());
+        for purpose in ["normal", "title-audit"] {
+            let purpose = escape_graphql_string(purpose);
+            ConfigAccess::write_local(
+                &home.node,
+                "eval.test.normal_request_capture",
+                &format!(r#"mutation {{ create_AgentRequest(input: {{request_id: "{purpose}", purpose: "{purpose}", agent_did: "{did}", behavior_id: "{did}:research-helper", content: "TRAIN-111"}}) {{ _docID }} }}"#),
+            )
+            .await
+            .unwrap();
+        }
+        let case: Value = serde_json::from_slice(
+            &std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "tests/fixtures/configurator_evals/ladder/l5_agents_tools/cases/train_minimal_self_target.json",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let capture = case["stages"][1]["capture"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|capture| capture["name"] == "helper-request")
+            .unwrap();
+        let fields: Vec<String> = serde_json::from_value(capture["fields"].clone()).unwrap();
+        let mut all_purposes = capture["filter"].clone();
+        all_purposes.as_object_mut().unwrap().remove("purpose");
+        let all = capture_documents(
+            &home.node,
+            "AgentRequest",
+            &all_purposes,
+            &fields,
+            home.did(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 2);
+        let normal = capture_documents(
+            &home.node,
+            "AgentRequest",
+            &capture["filter"],
+            &fields,
+            home.did(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(normal.len(), 1);
+        assert_eq!(normal[0]["request_id"], "normal");
+        home.node.shutdown().await;
+    }
+
     #[test]
     fn capture_query_renders_filter_and_escapes_strings() {
         let query = documents_capture_query(

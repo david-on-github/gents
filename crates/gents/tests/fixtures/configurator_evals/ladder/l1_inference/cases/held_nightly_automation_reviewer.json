@@ -347,6 +347,9 @@
             },
             "lifecycle_state": {
               "_eq": "completed"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

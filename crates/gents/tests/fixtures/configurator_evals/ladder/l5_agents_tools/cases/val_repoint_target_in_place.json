@@ -363,6 +363,9 @@
             },
             "behavior_id": {
               "_like": "%:specialist"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

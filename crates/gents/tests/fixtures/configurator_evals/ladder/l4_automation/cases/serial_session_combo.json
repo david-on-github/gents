@@ -328,6 +328,9 @@
             },
             "lifecycle_state": {
               "_eq": "completed"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [
@@ -351,6 +354,9 @@
             },
             "content": {
               "_like": "%combo-echo-71%"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

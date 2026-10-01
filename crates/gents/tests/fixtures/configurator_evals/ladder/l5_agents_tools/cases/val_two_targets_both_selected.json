@@ -243,6 +243,9 @@
             },
             "behavior_id": {
               "_like": "%:reviewer"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

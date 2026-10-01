@@ -242,6 +242,9 @@
             },
             "behavior_id": {
               "_like": "%:research-helper"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [
@@ -400,6 +403,9 @@
             },
             "content": {
               "_like": "%FOLLOW-222%"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

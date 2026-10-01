@@ -371,6 +371,9 @@
             },
             "behavior_id": {
               "_like": "%:checking-helper"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

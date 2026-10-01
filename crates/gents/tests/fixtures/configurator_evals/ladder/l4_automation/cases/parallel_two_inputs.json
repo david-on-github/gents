@@ -304,6 +304,9 @@
             },
             "lifecycle_state": {
               "_eq": "completed"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [
@@ -327,6 +330,9 @@
             },
             "content": {
               "_like": "%multi-echo-61%"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [
@@ -471,6 +477,9 @@
             },
             "lifecycle_state": {
               "_eq": "completed"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [
@@ -494,6 +503,9 @@
             },
             "content": {
               "_like": "%multi-echo-62%"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

@@ -238,6 +238,9 @@
             },
             "subagent_depth": {
               "_gt": 0
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

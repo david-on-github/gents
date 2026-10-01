@@ -242,6 +242,9 @@
             },
             "behavior_id": {
               "_like": "%:available-helper"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

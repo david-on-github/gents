@@ -247,6 +247,9 @@
                   }
                 }
               ]
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [
@@ -2114,6 +2117,9 @@
                   }
                 }
               ]
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [

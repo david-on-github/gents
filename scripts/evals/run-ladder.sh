@@ -108,7 +108,7 @@ else
   BUILD_REF=$(git -C "$ROOT" rev-parse --abbrev-ref HEAD)
   BUILD_DIRTY=false
   [ -z "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ] || BUILD_DIRTY=true
-  GENTS_BUILD_GIT_SHA="$BUILD_SOURCE" GENTS_BUILD_GIT_REF="$BUILD_REF" GENTS_BUILD_GIT_DIRTY="$BUILD_DIRTY" GENTS_BUILD_GIT_TAG= \
+  env -u GENTS_BUILD_GIT_TAG GENTS_BUILD_GIT_SHA="$BUILD_SOURCE" GENTS_BUILD_GIT_REF="$BUILD_REF" GENTS_BUILD_GIT_DIRTY="$BUILD_DIRTY" \
     cargo build --quiet --manifest-path "$ROOT/Cargo.toml" -p gents-cli --bin gents -p gents-fs-runner --bin gents-fs-runner
   GENTS="$ROOT/target/debug/gents"
   BUILT_VERSION=$("$GENTS" version)
