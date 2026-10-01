@@ -11,7 +11,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "I need you to keep results for my workflow. The records are EvalAutomationInput { correlation: string, message: string } and EvalAutomationOutput { correlation: string, result: string }. The correlation is a caller-supplied business key: preserve it exactly, and find records using that key alone. The record types already exist. Give yourself a tool to add output records, with no ability to read stored records or access other collections.",
+      "prompt": "I need you to keep results for my workflow. The records are EvalAutomationInput { correlation: string, message: string } and EvalAutomationOutput { correlation: string, result: string }. The correlation is a caller-supplied business key: preserve it exactly. The record types already exist. Give yourself a tool to add output records, with no ability to read stored records or access other collections.",
       "deadline_secs": 600,
       "checks": [
         {

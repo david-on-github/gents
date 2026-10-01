@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "discover",
-      "prompt": "I want more careful answers on difficult problems. Check which model we are using and whether it supports a higher thinking effort. Explain the tradeoff and our current limits before changing anything.",
+      "prompt": "I want more careful answers on difficult problems. Check which model we are using and whether it supports a higher thinking effort. Explain the tradeoff and our current limits; do not change anything yet.",
       "deadline_secs": 600,
       "capture": [
         {

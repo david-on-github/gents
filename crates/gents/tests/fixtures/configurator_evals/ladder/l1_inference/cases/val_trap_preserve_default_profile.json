@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "discover",
-      "prompt": "I want a separate set of settings for long research sessions, while keeping my everyday setup available unchanged. What model and limits do we use now, and how would you arrange that? Explain first.",
+      "prompt": "I want a separate set of settings for long research sessions, while keeping my everyday setup available unchanged. What model and limits do we use now, and how would you arrange that? Explain your plan; do not change anything yet.",
       "deadline_secs": 600,
       "capture": [
         {
@@ -232,7 +232,8 @@
                 "expect": [
                   {
                     "field": "display_name",
-                    "matches": "(?i)^research$"
+                    "matches": "(?i)^research$",
+                    "fallback_field": "profile_id"
                   }
                 ]
               },

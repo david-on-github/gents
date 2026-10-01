@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "discover",
-      "prompt": "I want to put a sensible spending and time limit on our work together. What model are you using, what limits do we have now, and what would you recommend? Explain before changing anything.",
+      "prompt": "I want to put a sensible spending and time limit on our work together. What model are you using, what limits do we have now, and what would you recommend? Explain your recommendation; do not change anything yet.",
       "deadline_secs": 600,
       "capture": [
         {

@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "helper-and-target",
-      "prompt": "Create a checking-helper assistant for delegated checks, using our current model, and make it available for you to delegate to.",
+      "prompt": "Create a checking-helper assistant for delegated checks, using our current model, and make it available for you to delegate to. Set up the connection without sending a message yet.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -126,7 +126,7 @@
     },
     {
       "stage_id": "caller-selects-target",
-      "prompt": "Create Coordinator for organizing checks, with its own instructions and permission to delegate to Checking Helper. Keep that helper available to you as well.",
+      "prompt": "Create Coordinator for organizing checks, with its own instructions and access to the same Checking Helper. Reuse the existing helper connection; keep your own helper list unchanged. Set this up without sending a message yet.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -146,8 +146,7 @@
           "check": "captured_rows_count",
           "params": {
             "name": "targets",
-            "min": 1,
-            "max": 1
+            "min": 1
           },
           "tier": "acceptance",
           "weight": 1

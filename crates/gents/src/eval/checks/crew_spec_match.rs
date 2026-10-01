@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::eval::checks::captured_fields_match::{test, Expectation, Test};
+use crate::eval::checks::captured_fields_match::{test, Expectation, FieldPath, Test};
 use crate::eval::checks::{
     bounded, excerpt, graded, graded_reason_codes, grader, Check, CheckDescription, CheckVerdict,
     EXCERPT_CHARS,
@@ -321,10 +321,10 @@ impl Tally {
         category: Option<&str>,
         subject: &str,
         row: Option<&Value>,
-        tests: &[(String, Test)],
+        tests: &[(FieldPath, Test)],
     ) {
         for (field, test) in tests {
-            let actual = row.map(|row| lookup(row, field));
+            let actual = row.and_then(|row| field.resolve(|path| Some(lookup(row, path))));
             let met = actual.as_ref().is_some_and(|actual| test.holds(actual));
             self.record(category, met, || {
                 format!(
@@ -340,7 +340,7 @@ impl Tally {
     }
 }
 
-fn tests(expectations: Vec<Expectation>) -> Result<Vec<(String, Test)>, String> {
+fn tests(expectations: Vec<Expectation>) -> Result<Vec<(FieldPath, Test)>, String> {
     expectations.into_iter().map(test).collect()
 }
 
@@ -358,6 +358,7 @@ impl Check for CrewSpecMatch {
             "type": "object",
             "properties": {
                 "field": {"type": "string"},
+                "fallback_field": {"type": "string", "description": "path used only when field is absent or null"},
                 "equals": {},
                 "contains": {"type": "string"},
                 "matches": {"type": "string"}
@@ -524,9 +525,11 @@ impl Check for CrewSpecMatch {
                     Err(detail) => return grader("bad_params", detail),
                 };
                 rows(&spec.capture).and_then(|rows| {
-                    let mut matches = rows
-                        .iter()
-                        .filter(|row| matcher.holds(&lookup(row, &field)));
+                    let mut matches = rows.iter().filter(|row| {
+                        field
+                            .resolve(|path| Some(lookup(row, path)))
+                            .is_some_and(|actual| matcher.holds(&actual))
+                    });
                     let first = matches.next();
                     if matches.next().is_some() {
                         None
@@ -607,9 +610,11 @@ impl Check for CrewSpecMatch {
                         Ok(test) => test,
                         Err(detail) => return grader("bad_params", detail),
                     };
-                    let mut matches = behaviors
-                        .iter()
-                        .filter(|row| matcher.holds(&lookup(row, &field)));
+                    let mut matches = behaviors.iter().filter(|row| {
+                        field
+                            .resolve(|path| Some(lookup(row, path)))
+                            .is_some_and(|actual| matcher.holds(&actual))
+                    });
                     let first = matches.next();
                     let unique = if matches.next().is_none() {
                         first
@@ -1142,6 +1147,41 @@ mod tests {
             feedback.contains("tasks \"ack\": emit_outcome"),
             "{feedback}"
         );
+    }
+
+    #[test]
+    fn selected_profile_label_uses_its_id_only_when_the_name_is_null() {
+        let params = json!({"links":[{"capture":"behaviors","key":"behavior_id","id":"engineer","field":"inference_profile_id","target_capture":"profiles","target_key":"profile_id","expect":[{"field":"display_name","fallback_field":"profile_id","equals":"Research"}]}]});
+        for (profile, met) in [
+            (json!({"profile_id":"Research"}), true),
+            (json!({"profile_id":"Research","display_name":null}), true),
+            (
+                json!({"profile_id":"Research","display_name":"Wrong"}),
+                false,
+            ),
+            (json!({"profile_id":"Research","display_name":""}), false),
+        ] {
+            let evidence = stage(&[
+                (
+                    "behaviors",
+                    vec![json!({"behavior_id":"engineer","inference_profile_id":"Research"})],
+                ),
+                (
+                    "profiles",
+                    vec![
+                        profile.clone(),
+                        json!({"profile_id":"unused","display_name":"Research"}),
+                    ],
+                ),
+            ]);
+            let verdict = CrewSpecMatch.evaluate(&params, &evidence);
+            assert_eq!(
+                verdict.score_bp == Some(10000),
+                met,
+                "{profile}: {}",
+                verdict.raw
+            );
+        }
     }
 
     #[test]
