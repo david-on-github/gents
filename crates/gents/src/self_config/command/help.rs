@@ -298,7 +298,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             what: "a behavior's Tools: what it may use, in groups (tools grant).",
             commands: &["tools get|preview|edit  options.behavior (default: the invoking behavior); set/clear: groups"],
             notes: "A group in set replaces that whole group: read it with tools get and send back what you keep. On your own Tools, a set that would drop existing settings is refused and names them; options.allow-drop with the group names drops them on purpose. host.bash.mode selects bash (Off by default); execution_mode, argv prefixes and background_enabled only constrain it. For one approved write command use mode Unrestricted with allowed_argv_prefixes holding only that prefix; the process ceiling still applies.",
-            next: "read runtime_effective from behavior get, then call the tool from a fresh session of that behavior.",
+            next: "verify saved Tools restrictions and runtime_effective with behavior get, then test in a fresh session of that behavior.",
         },
         "profile" => Page {
             what: "an InferenceProfile: backend and model, plus sampling, execution, retry-policy and compaction documents (profile grant).",

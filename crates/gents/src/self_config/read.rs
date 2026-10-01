@@ -262,6 +262,7 @@ impl SelfConfigCore {
                 "graph_readiness": "Selection does not install a pack or grant graph caller admission. Use native list_graphs/run_graph on this node; do not adopt another runtime home or rebuild a CLI.",
             },
             "runtime_effective": {
+                "meaning": "behavior_narrowing is saved permission; effective also applies this process's ceiling. Save lasting role restrictions in Tools even when this process already blocks access. Use tools edit with options.behavior to select the role.",
                 "process_ceiling": process_ceiling,
                 "behavior_narrowing": {
                     "requested_file_mode": requested_file_mode,
