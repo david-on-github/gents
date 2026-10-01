@@ -1028,12 +1028,15 @@ async fn crud_automation_keeps_strict_creation_and_selected_task_owner() {
     )
     .await
     .contains("belongs to behavior"));
-    assert!(refused(
+    let failure = structured_failure(
         &tools,
         json!({"argv":["trigger","update","tick"],"options":{"behavior":"beh-test"},"set":{"tags":["wrong"]}})
-    )
-    .await
-    .contains("selected behavior"));
+    ).await;
+    let message = failure["error"].as_str().unwrap();
+    assert!(message.contains("selected behavior"), "{failure}");
+    assert!(!message.contains("\"plan\""), "{failure}");
+    assert!(message.contains("separate Trigger"), "{failure}");
+    ok(&tools, failure["recovery"]["next_call"].clone()).await;
     assert!(
         refused(&tools, json!({"argv":["task","preview","delete","job"]}))
             .await
@@ -1358,4 +1361,62 @@ async fn schema_mismatch_recovery_reads_the_saved_contract_without_replacing_it(
     assert_eq!(failure["config_execution"]["mutation_entered"], false);
     let after = ok(&tools, failure["recovery"]["next_call"].clone()).await;
     assert_eq!(before, after);
+}
+
+#[tokio::test]
+async fn config_error_recovery_is_executable_for_single_and_batch_calls() {
+    let (_node, _owner, tools) = setup(
+        "error-guidance",
+        &["persona", "tools", "profile", "automation"],
+    )
+    .await;
+    let before = ok(&tools, json!({"argv":["behavior","get"]})).await;
+    for args in [
+        json!({"argv":["behavior","create"],"set":{"display_name":"Helper"}}),
+        json!({"argv":["context","get"],"target_id":"absent-context"}),
+        json!({"argv":["tools","update"],"set":{"bash":{}}}),
+        json!({"argv":["behavior","update"],"target_id":"beh-test","set":{"system_prompt":"new instructions"}}),
+        json!({"argv":["schema","preview","install"],"options":{"sdl":"type Example { ready: Bool }"}}),
+    ] {
+        let failure = structured_failure(&tools, args.clone()).await;
+        let recovery = failure["recovery"]["next_call"].clone();
+        assert!(recovery.is_object(), "{failure}");
+        ok(&tools, recovery.clone()).await;
+        let batch = structured_failure(&tools, json!({"argv":["batch"],"options":{"operations":[args, {"argv":["behavior","update"],"target_id":"beh-test","set":{"display_name":"must not execute"}}]}})).await;
+        assert_eq!(batch["batch"]["failed_index"], 0);
+        assert_eq!(batch["batch"]["unattempted"], 1);
+        assert_eq!(
+            batch["batch"]["results"][0]["recovery"]["next_call"],
+            recovery
+        );
+        ok(
+            &tools,
+            batch["batch"]["results"][0]["recovery"]["next_call"].clone(),
+        )
+        .await;
+    }
+    let after = ok(&tools, json!({"argv":["behavior","get"]})).await;
+    assert_eq!(
+        before, after,
+        "failed calls and recovery reads must preserve configuration"
+    );
+}
+
+#[tokio::test]
+async fn trigger_decode_errors_name_the_nested_field_and_offer_working_help() {
+    let (_node, _owner, tools) = setup("nested-guidance", &["persona", "automation"]).await;
+    ok(&tools, json!({"argv":["task","create"],"target_id":"inspect","set":{"prompt_template":"Inspect the input"}})).await;
+    let failure = structured_failure(&tools, json!({"argv":["trigger","create"],"target_id":"inspect-trigger","set":{"task_id":"inspect","source":{"event_source_id":"input"}}})).await;
+    let error = failure["error"].as_str().unwrap();
+    assert!(
+        error.contains("source") && error.contains("kind"),
+        "{failure}"
+    );
+    let help = ok(&tools, failure["recovery"]["next_call"].clone()).await;
+    assert!(help.as_str().unwrap().contains("kind"), "{help}");
+    let saved = ok(&tools, json!({"argv":["trigger","list"]})).await;
+    assert!(
+        saved["items"].as_array().unwrap().is_empty(),
+        "invalid trigger was not published"
+    );
 }

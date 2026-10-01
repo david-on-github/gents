@@ -1949,7 +1949,13 @@ async fn config_errors_name_the_next_call() {
         message.contains("create it with skill create or import it with skill import"),
         "{message}"
     );
-    assert!(skill["recovery"].is_null(), "{skill}");
+    assert_eq!(
+        skill["recovery"]["next_call"],
+        json!({"argv":["skill","list"]})
+    );
+    tool.call(skill["recovery"]["next_call"].to_string())
+        .await
+        .unwrap();
     assert_eq!(skill["config_execution"]["mutation_entered"], false);
 
     let tools_ref = failure(json!({"argv":["behavior","context","preview"],"options":{"behavior":"builder"},"set":{"tools_id":"proposed-tools"}})).await;
@@ -1959,7 +1965,13 @@ async fn config_errors_name_the_next_call() {
         "{message}"
     );
     assert!(!message.contains("plan"), "{message}");
-    assert!(tools_ref["recovery"].is_null());
+    assert_eq!(
+        tools_ref["recovery"]["next_call"],
+        json!({"argv":["tools","list"]})
+    );
+    tool.call(tools_ref["recovery"]["next_call"].to_string())
+        .await
+        .unwrap();
 
     // preview edit is preview; a stray positional gets the whole correct call.
     let aliased = tool

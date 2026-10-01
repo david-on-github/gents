@@ -5,7 +5,7 @@ fn schema_recovery(error: anyhow::Error) -> anyhow::Error {
         return error;
     };
     CommandGuidance {
-        message: format!("{error:#}. Existing schemas cannot be replaced through schema install. Inspect the saved schema; preserve the user's collection names and report the limitation if the requested contract cannot be met."),
+        message: format!("{error:#}. Existing schemas cannot be replaced through schema install. Inspect the saved schema and report the limitation if the requested contract cannot be met. Preserve valid configuration and the user's collection names: deleting config documents cannot change installed schemas."),
         next_call: json!({"argv":["schema","get"],"target_id":mismatch.collection}),
     }.into()
 }
@@ -21,7 +21,7 @@ impl ConfigCommandTool {
                 &access
                     .collection_version(&argv[1])
                     .await?
-                    .context("collection is not registered")?,
+                    .with_context(|| format!("collection {:?} is not registered; check its exact GraphQL type name or use schema preview install with options.sdl before installing it", argv[1]))?,
             )?);
         }
         let preview = argv.first().is_some_and(|arg| arg == "preview");
@@ -43,7 +43,7 @@ impl ConfigCommandTool {
                 "unknown schema option --{name}"
             );
         }
-        let sdl = parsed.one("sdl")?.context("--sdl SDL is required")?;
+        let sdl = parsed.one("sdl")?.context("options.sdl is required: a string containing GraphQL type definitions. Scalar names include String, Int, Float and Boolean (not Bool)")?;
         anyhow::ensure!(
             sdl.len() <= 64 * 1024,
             "schema SDL exceeds 64 KiB; submit a smaller schema"

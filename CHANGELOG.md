@@ -314,6 +314,11 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Fixed
 
+- Config errors identify nested field paths, misplaced fields and missing document
+  selections, with executable help or discovery calls shared by single and batch
+  operations. Trigger ownership errors no longer recommend the removed plan
+  command. Schema-limit errors explain why deleting configuration cannot change
+  an installed schema; host-root errors name the exact Tools field.
 - A document trigger whose fire cannot be admitted no longer re-fires the same
   document without bound (#2094). A refused fire, such as an `emit_outcome`
   Task delivered a document without `handoff_id` or a template that fails to

@@ -41,7 +41,10 @@ const HELP_INDEX: &[(&str, &str)] = &[
         "automation",
         "connect sources, tasks and triggers; wiring recipes",
     ),
-    ("schema", "collection schema installation"),
+    (
+        "schema",
+        "collection schemas: get, preview install, install; no list/update/delete",
+    ),
     ("pack", "pack and graph installation"),
     ("discovery", "external configuration scan"),
     ("cleanup", "atomic multi-document deletion"),
@@ -50,7 +53,7 @@ const HELP_INDEX: &[(&str, &str)] = &[
 ];
 
 /// Where `preview` goes, and the help aliases, stated once in the index.
-const HELP_GRAMMAR: &str = "Documents: list, get, create, update, delete. target_id names the document; set writes fields, clear removes optional fields. list takes options.limit/cursor. create requires a new ID; update requires an existing ID. behavior create allocates its ID and Context/Tools.
+const HELP_GRAMMAR: &str = "Documents: list, get, create, update, delete. target_id names the document; set writes fields, clear removes optional fields. list takes options.limit/cursor. create requires a new ID; update requires an existing ID. behavior create takes options instead of set and allocates its ID and Context/Tools.
 Preview: [RESOURCE,preview,VERB]. Delete needs options.digest from preview. batch takes options.operations: ordered config calls; each commits separately, stopping on error. Schemas/packs use installation workflows; graph authoring is unavailable.";
 
 #[derive(Debug, thiserror::Error)]
@@ -318,26 +321,7 @@ Behavior IDs are "<DID>:<slug>"; the slug alone works. ["help"] lists granted re
             Ok(text) if help => Ok(text),
             Ok(text) => append_receipt(&text, &receipt).map_err(Into::into),
             Err(error) => {
-                let missing = error.downcast_ref::<crate::document_config::MissingReference>();
-                let recovery = if let Some(hint) = error.downcast_ref::<CommandGuidance>() {
-                    json!({"next_call": hint.next_call})
-                } else if error
-                    .downcast_ref::<super::ops::MissingBehavior>()
-                    .is_some()
-                {
-                    json!({"next_call":{"argv":["behavior","list"]}})
-                } else {
-                    Value::Null
-                };
-                let message = match missing {
-                    Some(missing) => {
-                        format!(
-                            "{} Cause: {error:#}",
-                            missing_reference_next_step(missing, deleting)
-                        )
-                    }
-                    None => format!("{error:#}"),
-                };
+                let (message, recovery) = call.failure_guidance(&error, &words, deleting);
                 let failure = ordered! {
                     "error": message,
                     "batch": error.downcast_ref::<crud::BatchFailure>().map(|failure| json!({"atomic":false,"results":failure.results,"failed_index":failure.failed_index,"unattempted":failure.unattempted})),
@@ -525,6 +509,71 @@ fn model_resources(categories: &BTreeSet<String>, pack: bool) -> Vec<&'static st
 }
 
 impl ConfigCommandTool {
+    fn failure_guidance(
+        &self,
+        error: &anyhow::Error,
+        argv: &[String],
+        deleting: bool,
+    ) -> (String, Value) {
+        let missing = error.downcast_ref::<crate::document_config::MissingReference>();
+        let message = missing.map_or_else(
+            || format!("{error:#}"),
+            |missing| {
+                format!(
+                    "{} Cause: {error:#}",
+                    missing_reference_next_step(missing, deleting)
+                )
+            },
+        );
+        if let Some(hint) = error.downcast_ref::<CommandGuidance>() {
+            return (message, json!({"next_call":hint.next_call}));
+        }
+        let resources = model_resources(&self.categories, self.allow_pack_install);
+        if error
+            .downcast_ref::<super::ops::MissingBehavior>()
+            .is_some()
+            && self.categories.contains("persona")
+        {
+            return (message, json!({"next_call":{"argv":["behavior","list"]}}));
+        }
+        if let Some(missing) = missing {
+            let collection = if deleting {
+                missing.collection
+            } else {
+                missing.target
+            };
+            if let Some(resource) = resources.iter().find(|resource| {
+                crud::resource_target(resource)
+                    .is_some_and(|target| target.collection() == collection)
+            }) {
+                let next = if deleting {
+                    json!({"argv":[resource,"get"],"target_id":missing.id})
+                } else {
+                    json!({"argv":[resource,"list"]})
+                };
+                return (message, json!({"next_call":next}));
+            }
+        }
+        let resource = argv.first().map(String::as_str).unwrap_or("help");
+        let next = if resources
+            .iter()
+            .any(|name| name.split(' ').next() == Some(resource))
+        {
+            let verb = argv.iter().skip(1).find(|word| word.as_str() != "preview");
+            match verb.map(String::as_str) {
+                Some(verb @ ("create" | "update" | "edit"))
+                    if crud::resource_target(resource).is_some() =>
+                {
+                    json!({"argv":[resource,verb,"--help"]})
+                }
+                _ => json!({"argv":["help",resource]}),
+            }
+        } else {
+            json!({"argv":["help"]})
+        };
+        (message, json!({"next_call":next}))
+    }
+
     async fn dispatch(&self, argv: &[String]) -> Result<String> {
         if let Some(resource) = config_help_resource(argv) {
             return self.help(resource, help_verb(argv));
@@ -670,7 +719,7 @@ impl ConfigCommandTool {
                 }
                 if operation == "edit" {
                     let behavior_id = argv.get(2).context(
-                        "behavior preview edit requires BEHAVIOR_ID followed by patch flags",
+                        "behavior preview update requires target_id and fields in set or clear",
                     )?;
                     let core = self.target_core(Some(behavior_id), "preview edit").await?;
                     let patch = parse_patch(&argv[3..], SelfConfigTarget::AgentBehavior)?;
@@ -691,7 +740,7 @@ impl ConfigCommandTool {
             "edit" => {
                 let behavior_id = argv
                     .get(1)
-                    .context("behavior edit requires BEHAVIOR_ID followed by patch flags")?;
+                    .context("behavior update requires target_id and fields in set or clear")?;
                 let core = self.target_core(Some(behavior_id), "edit").await?;
                 let patch = parse_patch(&argv[2..], SelfConfigTarget::AgentBehavior)?;
                 self.patch(
@@ -1011,7 +1060,9 @@ impl ConfigCommandTool {
             let profile_id = create_args
                 .first()
                 .filter(|value| !value.starts_with("--"))
-                .context("profile create requires PROFILE_ID followed by patch flags")?;
+                .context(
+                    "profile create requires target_id plus set.backend_id and set.model_name",
+                )?;
             let patch = parse_patch(&create_args[1..], SelfConfigTarget::InferenceProfile)?;
             let fields = patch
                 .iter()
@@ -1798,7 +1849,15 @@ impl ConfigCommandTool {
         )
         .await?
         .map(|(_, document)| document)
-        .with_context(|| format!("no owned {} with ID {id:?}", target.collection_name()))?;
+        .ok_or_else(|| {
+            let resource = HELP_INDEX.iter().find_map(|(resource, _)|
+                (crud::resource_target(resource) == Some(target)).then_some(*resource)
+            ).expect("config target has a resource");
+            CommandGuidance {
+                message: format!("no owned {} with ID {id:?}. This is a document ID, not a behavior name. List this resource to find its exact IDs; behavior get shows a role's selected Context, Tools and profile", target.collection_name()),
+                next_call: json!({"argv":[resource,"list"]}),
+            }
+        })?;
         if target == SelfConfigTarget::InferenceBackend {
             document.remove("auth");
             document.insert(
@@ -2435,17 +2494,17 @@ fn parse_patch(argv: &[String], target: SelfConfigTarget) -> Result<SelfConfigPa
 fn parse_patch_args(parsed: ParsedArgs, target: SelfConfigTarget) -> Result<SelfConfigPatch> {
     anyhow::ensure!(
         parsed.positionals.is_empty(),
-        "unexpected positional argument {:?}; use --set FIELD=JSON or --clear FIELD",
+        "unexpected positional argument {:?}; use top-level set for fields or clear for optional field names",
         parsed.positionals[0]
     );
     anyhow::ensure!(
         parsed.switches.is_empty(),
-        "unexpected switch; use --set FIELD=JSON or --clear FIELD"
+        "unexpected switch; use top-level set for fields or clear for optional field names"
     );
     for name in parsed.options.keys() {
         anyhow::ensure!(
             matches!(name.as_str(), "set" | "clear"),
-            "unknown patch option --{name}; accepted: --set FIELD=JSON, --clear FIELD"
+            "unknown patch option --{name}; put fields in top-level set or clear, not options"
         );
     }
     let mut seen = BTreeSet::new();
@@ -2473,7 +2532,7 @@ fn parse_patch_args(parsed: ParsedArgs, target: SelfConfigTarget) -> Result<Self
     }
     anyhow::ensure!(
         !patch.is_empty(),
-        "empty patch; use --set FIELD=JSON or --clear FIELD"
+        "empty patch; use top-level set for fields or clear for optional field names"
     );
     crate::config_client::patch::ensure_admissible(target, &patch)?;
     Ok(patch)
@@ -2572,10 +2631,16 @@ pub(super) fn behavior_params(
         "clear",
     ];
     let verb = operation.as_deref().unwrap_or(action);
+    let usage = match verb {
+        "create" => "behavior create takes options.display-name, system-prompt, preset and profile; it allocates the ID and Context/Tools. Use behavior update for an existing role",
+        "clone" => "behavior clone takes options.from and display-name, with optional profile, system-prompt, root and preset overrides; it allocates a new ID",
+        "disable" => "behavior disable takes options.id for the existing behavior",
+        _ => "behavior options use hyphenated names; see the command help",
+    };
     for option in parsed.options.keys() {
         if !allowed.contains(&option.as_str()) {
             return Err(CommandGuidance {
-                message: format!("unknown behavior option --{option}"),
+                message: format!("unknown behavior option --{option}. {usage}; do not supply set fields to this command"),
                 next_call: json!({"argv":["behavior",verb,"--help"]}),
             }
             .into());
@@ -2583,7 +2648,7 @@ pub(super) fn behavior_params(
     }
     if let Some(argument) = parsed.positionals.first() {
         return Err(CommandGuidance {
-            message: format!("unexpected positional argument {argument:?}"),
+            message: format!("unexpected positional argument {argument:?}. {usage}; do not supply a positional ID"),
             next_call: json!({"argv":["behavior",verb,"--help"]}),
         }
         .into());

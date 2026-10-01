@@ -413,7 +413,9 @@ impl ConfigCommandTool {
             match result {
                 Ok(text) => results.push(json!({"index":index,"ok":true,"result":serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text)),"config_execution":receipt})),
                 Err(error) => {
-                    results.push(json!({"index":index,"ok":false,"error":format!("{error:#}"),"recovery":error.downcast_ref::<CommandGuidance>().map(|hint| json!({"next_call":hint.next_call})),"config_execution":receipt}));
+                    let deleting = argv.first().is_some_and(|word| word == "cleanup") || argv.iter().take(3).any(|word| word == "delete");
+                    let (message, recovery) = child.failure_guidance(&error, argv, deleting);
+                    results.push(json!({"index":index,"ok":false,"error":message,"recovery":recovery,"config_execution":receipt}));
                     return Err(BatchFailure { results, failed_index:index, unattempted:commands.len()-index-1 }.into());
                 }
             }

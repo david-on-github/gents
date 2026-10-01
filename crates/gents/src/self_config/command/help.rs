@@ -229,8 +229,8 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "task" | "trigger" | "schedule" | "event-source" => Page {
             what: match resource { "task" => "work performed by a behavior.", "trigger" => "routes an event source or schedule to a task.", "schedule" => "a timer that starts work.", _ => "watches collection changes and starts work." },
             commands: &[], notes: match resource {
-                "task" => "Create uses options.behavior (default: you); behavior_id is protected. Updates resolve the saved owner. A reply can finish a task; writing another input fires the workflow again. For stored outputs and completion records see help automation.",
-                "trigger" => "Create the source and Task first. The Task determines who handles the event. concurrency controls overlap; session_id_template controls the destination independently. To continue a known session, set its ID as session_id_template. Omit it for a new session per fire. See help automation for the full workflow.",
+                "task" => "Create uses options.behavior (default: you); behavior_id is protected. Updates resolve the saved owner; behavior_id cannot be changed. To run a different behavior, create a separate Task and Trigger. A reply can finish a task; writing another input fires the workflow again. For stored outputs and completion records see help automation.",
+                "trigger" => "Create the source and Task first. The Task determines who handles the event. Updating a Trigger cannot change its Task’s behavior; create a separate Trigger for another owner. concurrency controls overlap; session_id_template controls the destination independently. To continue a known session, set its ID as session_id_template. Omit it for a new session per fire. See help automation for the full workflow.",
                 _ => "A source alone starts no work: create a Task, then a Trigger linking it to this source. See help automation for the full workflow.",
             }, next: "get the saved document and verify its references.",
         },
@@ -260,7 +260,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "schema preview install  options.sdl",
                 "schema install  options.sdl (the identical string) and options.digest (the preview's artifact_digest)",
             ],
-            notes: "Choose fields before installation: existing collection shapes cannot be changed here. Only tasks with emit_outcome need handoff_id: String on their source collections; those writers must populate it. Keep this runtime metadata separate from business keys. See help datastore for fills. At most 64 KiB; schemas grant no document access.",
+            notes: "SDL uses GraphQL scalar names: String, Int, Float, Boolean (not Bool). Choose fields before installation: existing collection shapes cannot be changed here. Deleting config documents does not remove or change a schema. Only tasks with emit_outcome need handoff_id: String on their source collections; those writers must populate it. Keep this runtime metadata separate from business keys. See help datastore for fills. At most 64 KiB; schemas grant no document access.",
             next: "a surface ([\"help\",\"datastore\"]) or automation ([\"help\",\"automation\"]).",
         },
         "skill" => Page {
@@ -321,7 +321,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         "tools" => Page {
             what: "a behavior's Tools: what it may use, in groups (tools grant).",
             commands: &["tools get|preview|edit  options.behavior (default: the invoking behavior); set/clear: groups"],
-            notes: "A group in set replaces that whole group: read it with tools get and send back what you keep. On your own Tools, a set that would drop existing settings is refused and names them; options.allow-drop with the group names drops them on purpose. host.bash.mode selects bash (Off by default); execution_mode, argv prefixes and background_enabled only constrain it. For one approved write command use mode Unrestricted with allowed_argv_prefixes holding only that prefix; the process ceiling still applies.",
+            notes: "A group in set replaces that whole group: read it with tools get and send back what you keep. host.root is the workspace path alongside host.files and host.bash; active host tools need an admitted root when workspace policy is configured. On your own Tools, a set that would drop existing settings is refused and names them; options.allow-drop with the group names drops them on purpose. host.bash.mode selects bash (Off by default); execution_mode, argv prefixes and background_enabled only constrain it. For one approved write command use mode Unrestricted with allowed_argv_prefixes holding only that prefix; the process ceiling still applies.",
             next: "verify saved Tools restrictions and runtime_effective with behavior get, then test in a fresh session of that behavior.",
         },
         "profile" => Page {

@@ -408,7 +408,7 @@ impl SelfConfigCore {
         let context_id = behavior
             .get("context_id")
             .and_then(Value::as_str)
-            .context("no-lockout: context missing")?;
+            .context("no-lockout: Behavior.context_id is missing; preserve the current Context selection or select an existing Context")?;
         let context = candidate_doc(
             txn,
             self.agent_did(),
@@ -421,7 +421,7 @@ impl SelfConfigCore {
         let tools_id = context
             .get("tools_id")
             .and_then(Value::as_str)
-            .context("no-lockout: tools missing")?;
+            .with_context(|| format!("no-lockout: Context {context_id:?} has no tools_id; select existing Tools that preserve your config access"))?;
         let tools = candidate_doc(
             txn,
             self.agent_did(),
@@ -435,7 +435,9 @@ impl SelfConfigCore {
         let profile_id = behavior
             .get("inference_profile_id")
             .and_then(Value::as_str)
-            .context("no-lockout: profile missing")?;
+            .context(
+                "no-lockout: Behavior.inference_profile_id is missing; select an existing profile",
+            )?;
         let profile = candidate_doc(
             txn,
             self.agent_did(),
@@ -743,7 +745,7 @@ pub fn guard_tools_keep_control(
     let [self_config, agents, guard, tools] = control(decode_merged("Tools", candidate)?);
     anyhow::ensure!(
         self_config,
-        "no-lockout guard: self-config must remain enabled"
+        "no-lockout guard: self-config must remain enabled in Tools.self_config.enable_self_config. Read tools get and preserve that group when updating Tools or selecting a replacement Context"
     );
     anyhow::ensure!(
         !had_agents || agents,
@@ -810,7 +812,7 @@ async fn candidate_doc(
     }
     Ok(read_owned_doc(txn, wanted, owner, id)
         .await?
-        .context("candidate chain reference missing")?
+        .with_context(|| format!("candidate chain references missing {} {id:?}; inspect the role with behavior get, then select an existing document or create this dependency before selecting it", wanted.collection_name()))?
         .1)
 }
 fn safe_diff(
