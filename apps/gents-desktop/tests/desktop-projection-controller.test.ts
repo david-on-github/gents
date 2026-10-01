@@ -245,4 +245,32 @@ describe("createDesktopProjectionController", () => {
 
     expect(calls).toEqual(["session", "session", "snapshot"]);
   });
+
+  it("keeps an unversioned session request queued beside a covered notice", async () => {
+    const started = deferred();
+    const gate = deferred();
+    const calls: string[] = [];
+    const projection = controller({
+      refreshSnapshot: vi.fn(async () => {
+        calls.push("snapshot");
+      }),
+      refreshSession: vi.fn(async () => {
+        calls.push("session");
+        started.resolve();
+        await gate.promise;
+        return {
+          projectionRevision: { storeVersion: 6, reconcileVersion: 1 },
+        } as DesktopSessionSnapshot;
+      }),
+    });
+
+    const first = projection.request("session");
+    await started.promise;
+    const unversioned = projection.request("session");
+    const covered = projection.request("full", 6);
+    gate.resolve();
+    await Promise.all([first, unversioned, covered]);
+
+    expect(calls).toEqual(["session", "session", "snapshot"]);
+  });
 });

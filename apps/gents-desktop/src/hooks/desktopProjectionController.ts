@@ -65,6 +65,10 @@ export function createDesktopProjectionController({
   let active: Promise<void> | null = null;
   let pending = 0;
   let pendingStoreVersion: number | null = null;
+  // A session request without a store version (selection, foreground, a
+  // delta that failed continuity) must stay pending: nothing proves the
+  // in-flight read covers it.
+  let pendingUnversioned = false;
   let disposed = false;
 
   const enqueue = (work: number) => {
@@ -79,6 +83,7 @@ export function createDesktopProjectionController({
       const work = pending;
       pending = 0;
       pendingStoreVersion = null;
+      pendingUnversioned = false;
       try {
         const sessionId = currentSessionId();
         if (work & SESSION) {
@@ -86,6 +91,7 @@ export function createDesktopProjectionController({
           const projected = next?.projectionRevision?.storeVersion;
           if (
             pending & SESSION &&
+            !pendingUnversioned &&
             pendingStoreVersion !== null &&
             typeof projected === "number" &&
             projected >= pendingStoreVersion
@@ -137,12 +143,14 @@ export function createDesktopProjectionController({
       const work = requestedWork(scope);
       enqueue(work);
       if (work & SESSION) {
-        pendingStoreVersion =
-          storeVersion === null
-            ? null
-            : pendingStoreVersion === null
+        if (storeVersion === null) {
+          pendingUnversioned = true;
+        } else {
+          pendingStoreVersion =
+            pendingStoreVersion === null
               ? storeVersion
               : Math.max(pendingStoreVersion, storeVersion);
+        }
       }
       if (!active) {
         active = Promise.resolve()
