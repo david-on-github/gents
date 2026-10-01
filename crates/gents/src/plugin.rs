@@ -960,6 +960,7 @@ pub fn retry_backoff(attempts: u32) -> std::time::Duration {
 }
 pub mod executor;
 pub mod install;
+pub mod model_calls;
 pub mod store;
 pub mod tool;
 

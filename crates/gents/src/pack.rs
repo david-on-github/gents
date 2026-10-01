@@ -14,8 +14,9 @@ pub use home_install::{
     forget_home_install, list_home_installs, read_home_install, write_home_install, HomePackInstall,
 };
 pub use inference::{
-    bind_pack_install_config, inspect_pack_inference_bindings, install_pack_documents,
-    preview_pack_inference_bindings, PackInferenceBindingPreview, PackInferenceProfileOption,
+    bind_pack_install_config, inference_profile_options, inspect_pack_inference_bindings,
+    install_pack_documents, preview_pack_inference_bindings, PackInferenceBindingPreview,
+    PackInferenceProfileOption,
 };
 pub use installation::{
     installed_packs, list_installed_packs, referenced_pack_digests, remove_pack, DriftPolicy,
@@ -96,7 +97,13 @@ pub struct PackInferenceSlot {
     pub name: String,
     pub description: String,
     /// Canonical behavior IDs whose authored profile reference names this slot.
+    /// Empty for a slot only plugins use ([`PackPlugin::model_slot`]).
+    #[serde(default)]
     pub behaviors: Vec<String>,
+    /// A slot an install may leave unbound, and bind later. Only a slot that
+    /// names no behavior can be optional: an unbound behavior has no profile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
 }
 
 /// Complete explicit slot-to-existing-profile selection supplied at install.
@@ -176,6 +183,13 @@ pub struct PackPlugin {
     /// module's host ceiling; see [`PackPlugin::validate`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<PluginLimits>,
+    /// The pack's inference slot this plugin may call a model through. While
+    /// the slot is bound for the installation the host adds `"model_calls":
+    /// true` to the plugin's input and answers its model requests (see
+    /// `crate::plugin::model_calls`); unbound, the plugin runs as it always
+    /// did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_slot: Option<String>,
 }
 
 /// How much of a bound directory a plugin uses. Ordered: `ReadWrite`
@@ -716,8 +730,9 @@ pub fn validate_pack_manifest(manifest: &PackManifest) -> Result<()> {
             slot.name
         );
         anyhow::ensure!(
-            !slot.behaviors.is_empty(),
-            "inference slot {:?} must name at least one behavior",
+            slot.optional == slot.behaviors.is_empty(),
+            "inference slot {:?} must name at least one behavior, unless it is optional, and \
+             an optional slot names none",
             slot.name
         );
         let mut local = BTreeSet::new();
@@ -736,9 +751,36 @@ pub fn validate_pack_manifest(manifest: &PackManifest) -> Result<()> {
     anyhow::ensure!(
         manifest.metadata.kind == PackKind::Documents
             || manifest.metadata.kind == PackKind::Graph
-            || manifest.metadata.inference_slots.is_empty(),
-        "asset and plugins packs cannot declare inference slots"
+            || manifest
+                .metadata
+                .inference_slots
+                .iter()
+                .all(|slot| slot.optional),
+        "asset and plugins packs can declare only optional inference slots"
     );
+    let mut plugin_slots = BTreeSet::new();
+    for plugin in &manifest.metadata.plugins {
+        if let Some(slot) = &plugin.model_slot {
+            anyhow::ensure!(
+                slot_names.contains(slot.as_str()),
+                "plugin {:?} names the model slot {slot:?}, which the pack does not declare",
+                plugin.name
+            );
+            plugin_slots.insert(slot.as_str());
+        }
+    }
+    for slot in manifest
+        .metadata
+        .inference_slots
+        .iter()
+        .filter(|slot| slot.optional)
+    {
+        anyhow::ensure!(
+            plugin_slots.contains(slot.name.as_str()),
+            "optional inference slot {:?} is used by no plugin",
+            slot.name
+        );
+    }
 
     match manifest.metadata.kind {
         PackKind::Documents | PackKind::Graph => {
@@ -930,6 +972,7 @@ mod tests {
             instructions: None,
             bind_dir: None,
             limits: None,
+            model_slot: None,
         }
     }
 
@@ -1008,6 +1051,48 @@ mod tests {
                 .validate()
                 .unwrap_or_else(|error| panic!("{language:?} must be accepted: {error:#}"));
         }
+    }
+
+    fn plugins_pack(slots: serde_json::Value, model_slot: Option<&str>) -> PackManifest {
+        let mut plugin = serde_json::to_value(valid_plugin()).unwrap();
+        plugin["model_slot"] = serde_json::json!(model_slot);
+        serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "name": "ocr",
+            "version": "1.0.0",
+            "description": "reads pages",
+            "authors": ["tests"],
+            "kind": "plugins",
+            "assets": ["README.md", "plugins/format_check.afb"],
+            "inference_slots": slots,
+            "plugins": [plugin],
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_plugin_may_name_an_optional_slot_the_pack_declares() {
+        let optional =
+            serde_json::json!([{"name": "remote_ocr", "description": "d", "optional": true}]);
+        validate_pack_manifest(&plugins_pack(optional.clone(), Some("remote_ocr"))).unwrap();
+        validate_pack_manifest(&plugins_pack(serde_json::json!([]), None)).unwrap();
+        let unknown = validate_pack_manifest(&plugins_pack(optional.clone(), Some("other")));
+        assert!(format!("{:#}", unknown.unwrap_err()).contains("does not declare"));
+        let unused = validate_pack_manifest(&plugins_pack(optional, None));
+        assert!(format!("{:#}", unused.unwrap_err()).contains("used by no plugin"));
+        let undeclared =
+            validate_pack_manifest(&plugins_pack(serde_json::json!([]), Some("remote_ocr")));
+        assert!(undeclared.is_err());
+    }
+
+    #[test]
+    fn only_a_slot_without_behaviors_can_be_optional() {
+        let required = serde_json::json!([{"name": "remote_ocr", "description": "d"}]);
+        assert!(validate_pack_manifest(&plugins_pack(required, Some("remote_ocr"))).is_err());
+        let with_behavior = serde_json::json!([{
+            "name": "remote_ocr", "description": "d", "optional": true, "behaviors": ["scan"]
+        }]);
+        assert!(validate_pack_manifest(&plugins_pack(with_behavior, Some("remote_ocr"))).is_err());
     }
 
     fn bindable_plugin() -> PackPlugin {

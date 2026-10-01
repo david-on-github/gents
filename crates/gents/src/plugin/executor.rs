@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 
+use super::model_calls::{self, ModelResolver};
 use super::store::{self, InstalledPlugin};
 use super::{allowed, approval};
 use super::{BoundDir, Manifold, PluginBudget, PluginOutcome, PluginRunner};
@@ -85,6 +86,7 @@ pub struct PluginCall {
 /// Calls installed plugins from one gents home.
 pub struct PluginExecutor {
     home: Option<PathBuf>,
+    models: Option<Arc<dyn ModelResolver>>,
     admitted: kovan_map::HopscotchMap<String, Arc<Admitted>>,
     admitted_bytes: AtomicU64,
 }
@@ -111,9 +113,38 @@ impl PluginExecutor {
         }
         Self {
             home,
+            models: None,
             admitted: kovan_map::HopscotchMap::new(),
             admitted_bytes: AtomicU64::new(0),
         }
+    }
+
+    /// Lets the plugins whose model slot is bound call a model through
+    /// `models` (see [`super::model_calls`]).
+    pub fn with_models(mut self, models: Arc<dyn ModelResolver>) -> Self {
+        self.models = Some(models);
+        self
+    }
+
+    /// The model session for `record`, when its `model_slot` is bound for
+    /// this installation; `None` when it is not, and the plugin then runs
+    /// exactly as it does without model calls.
+    async fn model_session(
+        &self,
+        record: &InstalledPlugin,
+    ) -> Result<Option<model_calls::Session>> {
+        let (Some(slot), Some(binding)) = (&record.declaration.model_slot, &record.model_binding)
+        else {
+            return Ok(None);
+        };
+        let coordinate = format!("{}/{}", record.namespace, record.name);
+        let resolver = self.models.as_ref().with_context(|| {
+            format!("plugin {coordinate} has its model slot {slot:?} bound, but this runtime cannot reach inference")
+        })?;
+        let endpoint = resolver.resolve(binding).await.with_context(|| {
+            format!("plugin {coordinate} cannot use its model slot {slot:?}; bind it to another profile with `gents plugin bind`, or unbind it")
+        })?;
+        model_calls::Session::new(endpoint).map(Some)
     }
 
     /// Binds the path in `input` under `record`'s declared `bind_dir` field
@@ -260,12 +291,19 @@ impl PluginExecutor {
     ) -> Result<PluginCall> {
         let admitted = self.admit(record)?;
         let coordinate = format!("{}/{}", record.namespace, record.name);
-        let outcome = tokio::task::spawn_blocking(move || match &bound {
-            Some(bound) => admitted.runner.call_bound(&input, &admitted.budget, bound),
-            None => admitted.runner.call(&input, &admitted.budget),
-        })
-        .await
-        .with_context(|| format!("plugin {coordinate} stopped unexpectedly"))??;
+        let session = self.model_session(record).await?;
+        let budget = admitted.budget;
+        let bound = bound.map(Arc::new);
+        let round: model_calls::Round = Arc::new(move |input, budget| match &bound {
+            Some(bound) => admitted.runner.call_bound(&input, &budget, bound),
+            None => admitted.runner.call(&input, &budget),
+        });
+        let outcome = match session {
+            Some(session) => model_calls::drive(session, input, budget, round).await?,
+            None => tokio::task::spawn_blocking(move || round(input, budget))
+                .await
+                .with_context(|| format!("plugin {coordinate} stopped unexpectedly"))??,
+        };
         Ok(PluginCall {
             coordinate,
             digest: record.digest.clone(),

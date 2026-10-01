@@ -118,6 +118,11 @@ pub struct InstalledPlugin {
     /// replaces its own record regardless of version or digest.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_pack_digest: Option<String>,
+    /// The inference profile this installation bound the plugin's
+    /// `model_slot` to. Absent means the slot is unbound and the plugin runs
+    /// without model calls.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_binding: Option<super::model_calls::ModelBinding>,
 }
 
 impl InstalledPlugin {
@@ -399,11 +404,13 @@ mod tests {
                 instructions: None,
                 bind_dir: None,
                 limits: None,
+                model_slot: None,
             },
             granted: None,
             instructions: None,
             owner_pack_coordinate: owner_pack_coordinate.map(str::to_owned),
             owner_pack_digest: owner_pack_coordinate.map(|_| "sha256:pack".to_owned()),
+            model_binding: None,
         }
     }
 
