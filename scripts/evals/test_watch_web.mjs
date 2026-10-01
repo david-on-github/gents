@@ -42,3 +42,22 @@ test('active view follows current runs; selected batch retains only its explicit
   assert.equal(run("JSON.stringify(selectedRunKeys(items,'active'))"),'[]');
   assert.equal(run("JSON.stringify(selectedRunKeys(items,'batch'))"),'["old-a","old-b"]');
 });
+
+test('failure distribution counts affected trials and keeps execution failures separate',()=>{
+ const run=viewer();
+ run(`globalThis.sample={live:{stages:{setup:{checks:[{check:'crew_spec_match',raw:{satisfied:9,total:10,categories:{automation:{satisfied:4,total:5},permissions:{satisfied:5,total:5}}}}]},repair:{checks:[{check:'crew_spec_match',raw:{satisfied:10,total:10,categories:{automation:{satisfied:5,total:5},permissions:{satisfied:5,total:5}}}}]}}},latest:{stages:[]}}`);
+ run(`globalThis.result=failureDistribution([sample,{...sample,live:{stages:{}},latest:{stages:[{stage_id:'setup',failure_kind:'tool'},{stage_id:'repair',failure_kind:'skipped_prerequisite'}]}}])`);
+ assert.equal(run('result.improved'),1);
+ assert.equal(run("result.categories.find(c=>c.stage==='setup'&&c.category==='automation').affected"),1);
+ assert.equal(run("result.categories.find(c=>c.stage==='setup'&&c.category==='permissions').affected"),0);
+ assert.equal(run('result.endings.length'),1);
+ assert.equal(run('result.endings[0].reason'),'tool');
+});
+
+
+test('settled token usage comes from the authoritative native result',()=>{
+ const run=viewer();
+ run(`globalThis.slot={state:'pass',latest:{usage:{input_tokens:12,output_tokens:3}}}`);
+ assert.equal(run('settledUsage(slot).input_tokens'),12);
+ assert.equal(run("Object.keys(settledUsage({...slot,state:'running'})).length"),0);
+});
