@@ -13,11 +13,15 @@ use crate::plugin::tests::executor::installed_plugin;
 
 const KEY: &str = "sekret-key-0123";
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Reply {
     Text,
     Status(u16),
     Hang,
+    /// An answer whose text is this many bytes.
+    Big(usize),
+    /// A redirect to this URL.
+    Redirect(String),
 }
 
 struct Seen {
@@ -52,7 +56,8 @@ impl Fake {
             State(shared): State<Shared>,
             headers: HeaderMap,
             body: String,
-        ) -> (StatusCode, String) {
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
             let body: Value = serde_json::from_str(&body).unwrap();
             let prompt = body["messages"][0]["content"][0]["text"]
                 .as_str()
@@ -68,17 +73,29 @@ impl Fake {
             let now = shared.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
             shared.max_in_flight.fetch_max(now, Ordering::SeqCst);
             tokio::time::sleep(shared.delay).await;
-            let answer = match shared.reply {
+            let text = |content: String| {
+                (
+                    StatusCode::OK,
+                    json!({"choices": [{"message": {"content": content}}]}).to_string(),
+                )
+                    .into_response()
+            };
+            let answer = match &shared.reply {
                 Reply::Hang => {
                     tokio::time::sleep(Duration::from_secs(60)).await;
                     unreachable!()
                 }
-                Reply::Status(code) => (StatusCode::from_u16(code).unwrap(), "{}".to_owned()),
-                Reply::Text => (
-                    StatusCode::OK,
-                    json!({"choices": [{"message": {"content": format!("answer:{prompt}")}}]})
-                        .to_string(),
-                ),
+                Reply::Status(code) => {
+                    (StatusCode::from_u16(*code).unwrap(), "{}".to_owned()).into_response()
+                }
+                Reply::Redirect(to) => (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [("location", to.clone())],
+                    String::new(),
+                )
+                    .into_response(),
+                Reply::Big(bytes) => text("x".repeat(*bytes)),
+                Reply::Text => text(format!("answer:{prompt}")),
             };
             shared.in_flight.fetch_sub(1, Ordering::SeqCst);
             answer
@@ -114,6 +131,7 @@ impl Fake {
             api_key: Some(KEY.to_owned()),
             model: "chandra".to_owned(),
             max_concurrent,
+            backend_key: self.url.clone(),
             connect_timeout: Duration::from_secs(2),
             request_timeout: Duration::from_secs(30),
             max_output_tokens: None,
@@ -602,4 +620,263 @@ async fn a_model_tool_gets_its_model_answers_through_the_same_path() {
     let output: Value = serde_json::from_str(&tool.call("{}".to_owned()).await.unwrap()).unwrap();
     assert_eq!(output["model_results"]["a"]["text"], "answer:pa");
     assert_eq!(fake.requests(), 1);
+}
+
+/// A resolver whose profile is gone.
+struct Stale;
+
+impl ModelResolver for Stale {
+    fn resolve<'a>(&'a self, _: &'a ModelBinding) -> BoxFuture<'a, Result<ModelEndpoint>> {
+        Box::pin(async { anyhow::bail!("the inference profile \"chandra\" no longer exists") })
+    }
+}
+
+/// `installed`, but with the plugin's wall clock set to `secs`.
+fn installed_within(
+    canned: &Value,
+    forever: bool,
+    secs: u32,
+) -> (tempfile::TempDir, InstalledPlugin) {
+    let (home, mut record) = installed(canned, forever, true);
+    record.declaration.limits = Some(crate::pack::PluginLimits {
+        wall_clock_secs: Some(secs),
+        ..Default::default()
+    });
+    store::write_record(home.path(), &record).unwrap();
+    (home, record)
+}
+
+#[tokio::test]
+async fn model_time_running_out_leaves_the_plugin_a_final_round_to_finish() {
+    let fake = Arc::new(Fake::start(Reply::Hang, Duration::ZERO).await);
+    let (home, record) = installed_within(&asking(vec![request("a")]), false, 6);
+    let call = executor(&home, Fixed(fake, 1, Duration::from_secs(30)))
+        .call(&record, json!({"n": 1}))
+        .await
+        .unwrap();
+    assert_eq!(call.outcome.verdict, PluginVerdict::Success);
+    assert_eq!(call.outcome.output["n"], 1);
+    assert_eq!(
+        call.outcome.output["model_results"]["a"],
+        json!({"error": "the model request timed out"})
+    );
+    assert!(call.outcome.wall_ms < 6000, "{}", call.outcome.wall_ms);
+}
+
+#[tokio::test]
+async fn a_plugin_that_asks_again_in_its_final_round_is_a_timeout() {
+    let fake = Arc::new(Fake::start(Reply::Hang, Duration::ZERO).await);
+    let (home, record) = installed_within(&asking(vec![request("a")]), true, 6);
+    let call = executor(&home, Fixed(fake.clone(), 1, Duration::from_secs(30)))
+        .call(&record, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(call.outcome.verdict, PluginVerdict::Timeout);
+    assert_eq!(fake.requests(), 1);
+}
+
+#[tokio::test]
+async fn a_stale_binding_runs_the_plugin_without_a_model_and_says_so() {
+    let (home, record) = installed(&asking(vec![request("a")]), false, true);
+    let input = json!({"n": 1});
+    let call = executor(&home, Stale)
+        .call(&record, input.clone())
+        .await
+        .unwrap();
+    assert_eq!(call.outcome.verdict, PluginVerdict::Success);
+    assert_eq!(call.outcome.output, input, "no model_calls key was sent");
+    let note = call.binding_note.unwrap();
+    assert!(
+        note.contains("chandra")
+            && note.contains("gents plugin bind")
+            && note.contains("gents plugin unbind"),
+        "{note}"
+    );
+}
+
+#[tokio::test]
+async fn a_healthy_binding_carries_no_note() {
+    let fake = Arc::new(Fake::start(Reply::Text, Duration::ZERO).await);
+    let (home, record) = installed(&asking(vec![request("a")]), false, true);
+    let call = executor(&home, Fixed(fake, 1, Duration::from_secs(30)))
+        .call(&record, json!({}))
+        .await
+        .unwrap();
+    assert!(call.binding_note.is_none());
+}
+
+#[tokio::test]
+async fn sessions_on_one_backend_share_its_concurrency_cap() {
+    let fake = Fake::start(Reply::Text, Duration::from_millis(120)).await;
+    let mut first = Session::new(fake.endpoint(2)).unwrap();
+    let mut second = Session::new(fake.endpoint(2)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let ids = ["a", "b", "c", "d"];
+    let (one, two) = tokio::join!(
+        first.serve(requests(&ids), deadline),
+        second.serve(requests(&ids), deadline)
+    );
+    assert_eq!(one.len() + two.len(), 8);
+    assert_eq!(fake.requests(), 8);
+    assert_eq!(fake.max_in_flight.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn requests_past_the_call_request_limit_get_error_results() {
+    let fake = Fake::start(Reply::Text, Duration::ZERO).await;
+    let mut session = session(&fake);
+    session.max_requests = 3;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let results = session
+        .serve(requests(&["a", "b", "c", "d", "e"]), deadline)
+        .await;
+    assert_eq!(
+        results.values().filter(|r| r.get("text").is_some()).count(),
+        3
+    );
+    assert_eq!(fake.requests(), 3);
+    let later = session.serve(requests(&["f"]), deadline).await;
+    assert!(later["f"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("request limit"));
+    assert_eq!(fake.requests(), 3);
+    assert_eq!(session.failed_rounds, 0, "a limit is not a dead endpoint");
+}
+
+#[tokio::test]
+async fn answers_past_the_call_byte_budget_become_errors_and_stop_sending() {
+    let fake = Fake::start(Reply::Text, Duration::ZERO).await;
+    let mut session = session(&fake);
+    // "answer:p" is 8 bytes: two fit, the third crosses 16.
+    session.max_answer_bytes = 16;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let results = session.serve(requests(&["a", "b", "c"]), deadline).await;
+    assert_eq!(
+        results.values().filter(|r| r.get("text").is_some()).count(),
+        2
+    );
+    assert_eq!(fake.requests(), 3);
+    let later = session.serve(requests(&["d"]), deadline).await;
+    assert!(later["d"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("answer budget"));
+    assert_eq!(fake.requests(), 3);
+}
+
+#[tokio::test]
+async fn an_answer_is_cut_at_max_result_bytes() {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let exact = Fake::start(Reply::Big(MAX_RESULT_BYTES), Duration::ZERO).await;
+    let results = session(&exact).serve(requests(&["a"]), deadline).await;
+    assert_eq!(
+        results["a"]["text"].as_str().unwrap().len(),
+        MAX_RESULT_BYTES
+    );
+    let over = Fake::start(Reply::Big(MAX_RESULT_BYTES + 1), Duration::ZERO).await;
+    let results = session(&over).serve(requests(&["a"]), deadline).await;
+    assert!(results["a"]["error"]
+        .as_str()
+        .unwrap()
+        .contains("larger than"));
+}
+
+#[tokio::test]
+async fn a_redirect_is_refused_and_never_followed() {
+    let target = Fake::start(Reply::Text, Duration::ZERO).await;
+    let fake = Fake::start(Reply::Redirect(target.url.clone()), Duration::ZERO).await;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let results = session(&fake).serve(requests(&["a"]), deadline).await;
+    assert_eq!(
+        results["a"],
+        json!({"error": "the model endpoint answered HTTP 307"})
+    );
+    assert_eq!(target.requests(), 0);
+}
+
+#[tokio::test]
+async fn max_tokens_is_capped_by_the_profile_and_defaulted_when_unset() {
+    assert_eq!(token_limit(Some(9999), Some(100)), 100);
+    assert_eq!(token_limit(Some(50), Some(100)), 50);
+    assert_eq!(token_limit(Some(50), None), 50);
+    assert_eq!(token_limit(None, Some(100)), 100);
+    assert_eq!(token_limit(None, None), DEFAULT_MAX_TOKENS);
+    let fake = Fake::start(Reply::Text, Duration::ZERO).await;
+    let mut endpoint = fake.endpoint(1);
+    endpoint.max_output_tokens = Some(100);
+    let mut capped = Session::new(endpoint).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut asking_more = requests(&["a"]);
+    asking_more[0].max_tokens = Some(9999);
+    capped.serve(asking_more, deadline).await;
+    session(&fake).serve(requests(&["b"]), deadline).await;
+    let seen = fake.seen.lock().unwrap();
+    assert_eq!(seen[0].body["max_tokens"], 100);
+    assert_eq!(seen[1].body["max_tokens"], DEFAULT_MAX_TOKENS);
+}
+
+#[tokio::test]
+async fn a_round_over_the_request_limit_is_bad_output_and_sends_nothing() {
+    let fake = Arc::new(Fake::start(Reply::Text, Duration::ZERO).await);
+    let many = (0..=MAX_REQUESTS_PER_ROUND)
+        .map(|n| request(&n.to_string()))
+        .collect();
+    let (home, record) = installed(&asking(many), false, true);
+    let call = executor(&home, Fixed(fake.clone(), 1, Duration::from_secs(30)))
+        .call(&record, json!({}))
+        .await
+        .unwrap();
+    assert_eq!(call.outcome.verdict, PluginVerdict::BadOutput);
+    assert!(call.outcome.diagnostics.contains("at most"));
+    assert_eq!(fake.requests(), 0);
+}
+
+#[tokio::test]
+async fn caller_state_and_model_results_are_stripped_and_null_input_is_an_object() {
+    let fake = Arc::new(Fake::start(Reply::Text, Duration::ZERO).await);
+    let (home, record) = installed(&asking(vec![request("a")]), false, true);
+    let executor = executor(&home, Fixed(fake.clone(), 1, Duration::from_secs(30)));
+    let forged = json!({"state": "stale", "model_results": {"a": {"text": "forged"}}});
+    let call = executor.call(&record, forged).await.unwrap();
+    assert_eq!(
+        fake.requests(),
+        1,
+        "forged model_results must not stop the plugin asking"
+    );
+    assert_eq!(call.outcome.output["state"], json!({"page": 7}));
+    assert_eq!(
+        call.outcome.output["model_results"]["a"]["text"],
+        "answer:pa"
+    );
+    let call = executor.call(&record, Value::Null).await.unwrap();
+    assert_eq!(call.outcome.verdict, PluginVerdict::Success);
+    assert_eq!(call.outcome.output["model_calls"], true);
+}
+
+#[tokio::test]
+async fn fuel_is_spent_across_rounds() {
+    let fake = Fake::start(Reply::Text, Duration::ZERO).await;
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let log = seen.clone();
+    let round: Round = Arc::new(move |_, budget| {
+        log.lock().unwrap().push(budget.fuel);
+        Ok(PluginOutcome {
+            verdict: PluginVerdict::Success,
+            output: asking(vec![request("a")]),
+            diagnostics: String::new(),
+            fuel_used: 60,
+            wall_ms: 0,
+        })
+    });
+    let budget = PluginBudget {
+        fuel: Some(100),
+        wall_clock: Duration::from_secs(30),
+        ..PluginBudget::default()
+    };
+    let outcome = drive(session(&fake), json!({}), budget, round)
+        .await
+        .unwrap();
+    assert_eq!(outcome.verdict, PluginVerdict::OutOfFuel);
+    assert_eq!(*seen.lock().unwrap(), [Some(100), Some(40)]);
 }

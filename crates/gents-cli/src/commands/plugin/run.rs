@@ -77,6 +77,9 @@ async fn run_plugin(
         None => executor.call(record, input).await,
     }
     .with_context(|| format!("calling plugin {coordinate}"))?;
+    if let Some(note) = &call.binding_note {
+        eprintln!("{note}");
+    }
     outcome_output(&coordinate, call.outcome)
 }
 

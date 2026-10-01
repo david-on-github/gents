@@ -81,6 +81,9 @@ pub struct PluginCall {
     /// `sha256:<hex>` of the artifact that ran.
     pub digest: String,
     pub outcome: PluginOutcome,
+    /// One sentence for the operator when the plugin's model binding could
+    /// not be used and the plugin ran without a model; `None` otherwise.
+    pub binding_note: Option<String>,
 }
 
 /// Calls installed plugins from one gents home.
@@ -128,23 +131,41 @@ impl PluginExecutor {
 
     /// The model session for `record`, when its `model_slot` is bound for
     /// this installation; `None` when it is not, and the plugin then runs
-    /// exactly as it does without model calls.
+    /// exactly as it does without model calls. A binding that no longer
+    /// resolves (profile or backend gone or disabled, key missing) also gives
+    /// `None`, with the sentence to show the operator, so a call that does
+    /// not need the model still works.
     async fn model_session(
         &self,
         record: &InstalledPlugin,
-    ) -> Result<Option<model_calls::Session>> {
+    ) -> Result<(Option<model_calls::Session>, Option<String>)> {
         let (Some(slot), Some(binding)) = (&record.declaration.model_slot, &record.model_binding)
         else {
-            return Ok(None);
+            return Ok((None, None));
         };
         let coordinate = format!("{}/{}", record.namespace, record.name);
         let resolver = self.models.as_ref().with_context(|| {
             format!("plugin {coordinate} has its model slot {slot:?} bound, but this runtime cannot reach inference")
         })?;
-        let endpoint = resolver.resolve(binding).await.with_context(|| {
-            format!("plugin {coordinate} cannot use its model slot {slot:?}; bind it to another profile with `gents plugin bind`, or unbind it")
-        })?;
-        model_calls::Session::new(endpoint).map(Some)
+        let resolved = resolver.resolve(binding).await;
+        match resolved {
+            Ok(endpoint) => Ok((Some(model_calls::Session::new(endpoint)?), None)),
+            Err(_) => {
+                // The error is not logged: it may name an endpoint or a key variable.
+                tracing::warn!(
+                    plugin = %coordinate,
+                    profile_id = %binding.profile_id,
+                    "a plugin's model binding is unusable; it runs without a model"
+                );
+                Ok((
+                    None,
+                    Some(format!(
+                        "plugin {coordinate} ran without a model: its slot {slot:?} is bound to profile {:?}, which cannot be used; bind it to another profile with `gents plugin bind`, or unbind it with `gents plugin unbind`",
+                        binding.profile_id
+                    )),
+                ))
+            }
+        }
     }
 
     /// Binds the path in `input` under `record`'s declared `bind_dir` field
@@ -291,7 +312,7 @@ impl PluginExecutor {
     ) -> Result<PluginCall> {
         let admitted = self.admit(record)?;
         let coordinate = format!("{}/{}", record.namespace, record.name);
-        let session = self.model_session(record).await?;
+        let (session, binding_note) = self.model_session(record).await?;
         let budget = admitted.budget;
         let bound = bound.map(Arc::new);
         let round: model_calls::Round = Arc::new(move |input, budget| match &bound {
@@ -308,6 +329,7 @@ impl PluginExecutor {
             coordinate,
             digest: record.digest.clone(),
             outcome,
+            binding_note,
         })
     }
 

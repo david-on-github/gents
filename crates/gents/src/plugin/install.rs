@@ -47,10 +47,20 @@ pub fn install_from_pack(
     let granted = store::grant_on_install(home, pack_namespace, plugin, consent)?;
     // A reinstall or upgrade keeps the operator's binding while the plugin
     // still names the same slot.
-    let model_binding = store::read_record(home, pack_namespace, &plugin.name)
-        .ok()
-        .filter(|previous| previous.declaration.model_slot == plugin.model_slot)
-        .and_then(|previous| previous.model_binding);
+    let model_binding = match store::read_record(home, pack_namespace, &plugin.name) {
+        Ok(previous) => Some(previous)
+            .filter(|previous| previous.declaration.model_slot == plugin.model_slot)
+            .and_then(|previous| previous.model_binding),
+        Err(error) if is_not_found(&error) => None,
+        Err(error) => {
+            tracing::warn!(
+                plugin = %plugin.name,
+                error = %format!("{error:#}"),
+                "the previous plugin record is unreadable; its model binding is not carried over"
+            );
+            None
+        }
+    };
     PluginRunner::compile(artifact_bytes, plugin)
         .with_context(|| format!("admitting pack plugin {}", plugin.name))?;
     let effective = granted.clone().unwrap_or_else(Manifold::sealed);
@@ -154,6 +164,15 @@ pub fn bind_plugin_slots(
         bound.push(coordinate);
     }
     Ok(bound)
+}
+
+/// Whether `error` is the plain absence of a file, a first install.
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound)
+    })
 }
 
 /// Binds (`Some`) or unbinds (`None`) the model slot of the installed plugin

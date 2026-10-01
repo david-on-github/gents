@@ -13,16 +13,26 @@
 //! - output: `{"model_calls": {"requests": [{"id", "prompt", "images":
 //!   [{"mime", "data_base64"}], "max_tokens"}], "state": ...}}`.
 //!
+//! A bound call is always driven with a JSON object: the caller's `"state"`
+//! and `"model_results"` keys are stripped (only the host sets them) and a
+//! null input becomes `{}`; a call whose slot is unbound runs untouched.
+//!
 //! The endpoint and the key live only in [`ModelEndpoint`], which this module
 //! never serialises, logs or puts in any error: a plugin sees answers, never
-//! where they came from. Bounds: [`MAX_ROUNDS`] rounds and the call's wall
-//! clock for the whole call, [`MAX_REQUESTS_PER_ROUND`] requests a round,
-//! [`MAX_RESULT_BYTES`] an answer, the backend's `max_concurrent` in flight,
-//! and after [`DEAD_ENDPOINT_ROUNDS`] rounds in a row that all failed every
-//! further request fails at once, so a dead endpoint costs seconds.
+//! where they came from. Bounds: [`MAX_ROUNDS`] rounds, the call's wall clock
+//! and fuel across all rounds, [`MAX_REQUESTS_PER_ROUND`] requests a round,
+//! [`MAX_REQUESTS_PER_CALL`] requests and [`MAX_ANSWER_BYTES_PER_CALL`] answer
+//! bytes for the whole call (a request past either gets an error result),
+//! [`MAX_RESULT_BYTES`] an answer, the backend's `max_concurrent` in flight
+//! across every call in the process, and after [`DEAD_ENDPOINT_ROUNDS`]
+//! rounds in a row that all failed every further request fails at once, so a
+//! dead endpoint costs seconds. When the wall clock runs out during model
+//! requests, the unanswered ones get error results and the plugin gets one
+//! final round (the last [`FINAL_ROUND_RESERVE_DIVISOR`]th of the clock) to
+//! finish with what it has; only a plugin that asks again is a timeout.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -30,6 +40,7 @@ use futures::future::BoxFuture;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use tokio::sync::Semaphore;
 
 use super::{PluginBudget, PluginOutcome, PluginVerdict};
 use crate::config_client::ConfigAccess;
@@ -43,6 +54,19 @@ pub const MAX_ROUNDS: u32 = 64;
 pub const MAX_REQUESTS_PER_ROUND: usize = 64;
 /// Bytes of one model answer handed back to the plugin.
 pub const MAX_RESULT_BYTES: usize = 1024 * 1024;
+/// Requests one call may send over all its rounds: eight full rounds, far
+/// above a page-per-request run over a few hundred pages.
+pub const MAX_REQUESTS_PER_CALL: usize = 512;
+/// Answer bytes one call may take in over all its rounds: 32 answers at the
+/// per-answer cap; real page answers are tens of KiB, so this only stops abuse.
+pub const MAX_ANSWER_BYTES_PER_CALL: usize = 32 * 1024 * 1024;
+/// Output tokens asked for when neither the plugin nor the profile sets a cap;
+/// room for a dense page of text without letting a runaway answer fill the
+/// byte limits.
+pub const DEFAULT_MAX_TOKENS: u64 = 8192;
+/// The plugin's final round after model time runs out gets this fraction of
+/// the call's wall clock (one eighth).
+pub const FINAL_ROUND_RESERVE_DIVISOR: u32 = 8;
 /// Consecutive failed rounds after which the endpoint is treated as dead.
 pub const DEAD_ENDPOINT_ROUNDS: u32 = 2;
 const DEFAULT_CONNECT_TIMEOUT_SECS: i64 = 10;
@@ -63,6 +87,9 @@ pub struct ModelEndpoint {
     pub api_key: Option<String>,
     pub model: String,
     pub max_concurrent: usize,
+    /// Names the backend for the process-wide concurrency limit, so every
+    /// call on one backend shares its `max_concurrent`.
+    pub backend_key: String,
     pub connect_timeout: Duration,
     /// Longest one request may take, inside the call's own wall clock.
     pub request_timeout: Duration,
@@ -178,6 +205,7 @@ pub fn endpoint_for(
         api_key,
         model: profile.model_name.clone(),
         max_concurrent,
+        backend_key: format!("{}/{}", backend.agent_did, backend.backend_id),
         connect_timeout: Duration::from_secs(connect.unsigned_abs()),
         request_timeout: REQUEST_TIMEOUT,
         max_output_tokens: profile
@@ -284,11 +312,60 @@ fn parse_batch(output: &Value) -> Result<Option<Batch>, String> {
     }))
 }
 
+/// In-flight limits by backend and cap, shared by every call in the process.
+/// The cap is part of the key, so an edited `max_concurrent` starts a fresh
+/// limit while calls already running finish under the old one.
+static LIMITERS: LazyLock<kovan_map::HopscotchMap<String, Arc<Semaphore>>> =
+    LazyLock::new(kovan_map::HopscotchMap::new);
+
+fn limiter(endpoint: &ModelEndpoint) -> Arc<Semaphore> {
+    LIMITERS.get_or_insert(
+        format!("{}#{}", endpoint.backend_key, endpoint.max_concurrent),
+        Arc::new(Semaphore::new(endpoint.max_concurrent)),
+    )
+}
+
+/// The `max_tokens` one request is sent with: the smaller of what the plugin
+/// asked and the profile allows, else [`DEFAULT_MAX_TOKENS`].
+fn token_limit(asked: Option<u64>, cap: Option<u64>) -> u64 {
+    match (asked, cap) {
+        (Some(asked), Some(cap)) => asked.min(cap),
+        (asked, cap) => asked.or(cap).unwrap_or(DEFAULT_MAX_TOKENS),
+    }
+}
+
+/// Why a request is answered with an error without being sent.
+#[derive(Clone, Copy)]
+enum Refusal {
+    Dead,
+    RequestLimit,
+    AnswerBudget,
+}
+
+impl Refusal {
+    fn message(self) -> &'static str {
+        match self {
+            Self::Dead => "the model endpoint is not answering; this request was not sent",
+            Self::RequestLimit => {
+                "this call used up its model request limit; this request was not sent"
+            }
+            Self::AnswerBudget => {
+                "this call used up its model answer budget; this request was not sent"
+            }
+        }
+    }
+}
+
 /// One bound slot's connection for the length of one plugin call.
 pub(super) struct Session {
     endpoint: ModelEndpoint,
     client: reqwest::Client,
+    limiter: Arc<Semaphore>,
     failed_rounds: u32,
+    requests_sent: usize,
+    answer_bytes: usize,
+    max_requests: usize,
+    max_answer_bytes: usize,
 }
 
 impl Session {
@@ -299,47 +376,82 @@ impl Session {
             .build()
             .context("building the model client")?;
         Ok(Self {
+            limiter: limiter(&endpoint),
             endpoint,
             client,
             failed_rounds: 0,
+            requests_sent: 0,
+            answer_bytes: 0,
+            max_requests: MAX_REQUESTS_PER_CALL,
+            max_answer_bytes: MAX_ANSWER_BYTES_PER_CALL,
         })
     }
 
-    /// Answers every request of one round, at most `max_concurrent` at a time.
-    // vertexia: the cap holds per call; a per-backend semaphore shared by
-    // concurrent plugin calls is the upgrade if they must share one backend.
+    /// Answers every request of one round. At most `max_concurrent` are in
+    /// flight per backend across the process; a request past the call's
+    /// request or answer-byte budget gets an error result without being sent.
     async fn serve(&mut self, requests: Vec<Request>, deadline: Instant) -> Map<String, Value> {
         let dead = self.failed_rounds >= DEAD_ENDPOINT_ROUNDS;
-        let this = &*self;
-        let answers: Vec<(String, Result<String, String>)> = futures::stream::iter(requests)
-            .map(|request| async move {
-                let answer = if dead {
-                    Err("the model endpoint is not answering; this request was not sent".to_owned())
+        let mut room = self.max_requests.saturating_sub(self.requests_sent);
+        let bytes_left = self.answer_bytes < self.max_answer_bytes;
+        let plan: Vec<(Request, Option<Refusal>)> = requests
+            .into_iter()
+            .map(|request| {
+                let refusal = if dead {
+                    Some(Refusal::Dead)
+                } else if room == 0 {
+                    Some(Refusal::RequestLimit)
+                } else if !bytes_left {
+                    Some(Refusal::AnswerBudget)
                 } else {
-                    this.ask(&request, deadline).await
+                    room -= 1;
+                    None
                 };
-                (request.id, answer)
+                (request, refusal)
             })
-            .buffer_unordered(self.endpoint.max_concurrent)
+            .collect();
+        let sent = plan.iter().filter(|(_, refusal)| refusal.is_none()).count();
+        self.requests_sent += sent;
+        let this = &*self;
+        let answers: Vec<(String, bool, Result<String, String>)> = futures::stream::iter(plan)
+            .map(|(request, refusal)| async move {
+                let answer = match refusal {
+                    Some(why) => Err(why.message().to_owned()),
+                    None => this.ask(&request, deadline).await,
+                };
+                (request.id, refusal.is_none(), answer)
+            })
+            .buffer_unordered(MAX_REQUESTS_PER_ROUND)
             .collect()
             .await;
-        if !dead && !answers.is_empty() {
-            if answers.iter().all(|(_, answer)| answer.is_err()) {
+        if sent > 0 {
+            if answers
+                .iter()
+                .all(|(_, was_sent, answer)| !was_sent || answer.is_err())
+            {
                 self.failed_rounds += 1;
             } else {
                 self.failed_rounds = 0;
             }
         }
-        answers
-            .into_iter()
-            .map(|(id, answer)| {
-                let value = match answer {
+        let mut results = Map::new();
+        for (id, _, answer) in answers {
+            let answer = answer.and_then(|text| {
+                if self.answer_bytes.saturating_add(text.len()) > self.max_answer_bytes {
+                    return Err("this call used up its model answer budget".to_owned());
+                }
+                self.answer_bytes += text.len();
+                Ok(text)
+            });
+            results.insert(
+                id,
+                match answer {
                     Ok(text) => json!({"text": text}),
                     Err(error) => json!({"error": error}),
-                };
-                (id, value)
-            })
-            .collect()
+                },
+            );
+        }
+        results
     }
 
     /// One request; the error is a fixed sentence that names neither the
@@ -355,15 +467,15 @@ impl Session {
             "messages": [{"role": "user", "content": content}],
             "temperature": 0,
         });
-        let limit = match (request.max_tokens, endpoint.max_output_tokens) {
-            (Some(asked), Some(cap)) => Some(asked.min(cap)),
-            (asked, cap) => asked.or(cap),
-        };
-        if let Some(limit) = limit {
-            body["max_tokens"] = json!(limit);
-        }
+        body["max_tokens"] = json!(token_limit(request.max_tokens, endpoint.max_output_tokens));
         let body = serde_json::to_vec(&body)
             .map_err(|_| "the model request could not be encoded".to_owned())?;
+        let wall = tokio::time::Instant::from_std(deadline);
+        let _permit = match tokio::time::timeout_at(wall, self.limiter.acquire()).await {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) => return Err("the model endpoint is not available".to_owned()),
+            Err(_) => return Err("the model request timed out".to_owned()),
+        };
         let mut call = self
             .client
             .post(&endpoint.url)
@@ -409,8 +521,7 @@ impl Session {
             }
             Ok(text)
         };
-        let limit = (tokio::time::Instant::now() + endpoint.request_timeout)
-            .min(tokio::time::Instant::from_std(deadline));
+        let limit = (tokio::time::Instant::now() + endpoint.request_timeout).min(wall);
         match tokio::time::timeout_at(limit, exchange).await {
             Ok(result) => result,
             Err(_) => Err("the model request timed out".to_owned()),
@@ -456,6 +567,8 @@ pub(super) async fn drive(
 ) -> Result<PluginOutcome> {
     let started = Instant::now();
     let deadline = started + budget.wall_clock;
+    // Model requests stop here; the plugin's final round runs on the rest.
+    let serve_deadline = deadline - budget.wall_clock / FINAL_ROUND_RESERVE_DIVISOR;
     let mut base = match input {
         Value::Null => Map::new(),
         Value::Object(object) => object,
@@ -467,6 +580,7 @@ pub(super) async fn drive(
     let mut next = Value::Object(base.clone());
     let mut fuel = 0u64;
     let mut served = 0u32;
+    let mut last_round = false;
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
@@ -477,8 +591,18 @@ pub(super) async fn drive(
                 "the call used its whole wall-clock budget across model rounds".to_owned(),
             ));
         }
+        let fuel_left = budget.fuel.map(|total| total.saturating_sub(fuel));
+        if fuel_left == Some(0) {
+            return Ok(refused(
+                started,
+                fuel,
+                PluginVerdict::OutOfFuel,
+                "the call used its whole fuel budget across model rounds".to_owned(),
+            ));
+        }
         let budget = PluginBudget {
             wall_clock: remaining,
+            fuel: fuel_left,
             ..budget
         };
         let run = round.clone();
@@ -504,6 +628,15 @@ pub(super) async fn drive(
             Ok(Some(batch)) => batch,
             Err(why) => return Ok(refused(started, fuel, PluginVerdict::BadOutput, why)),
         };
+        if last_round {
+            return Ok(refused(
+                started,
+                fuel,
+                PluginVerdict::Timeout,
+                "the plugin asked for more model calls after the call's model time ran out"
+                    .to_owned(),
+            ));
+        }
         if served == MAX_ROUNDS {
             return Ok(refused(
                 started,
@@ -518,7 +651,8 @@ pub(super) async fn drive(
             requests = batch.requests.len(),
             "serving plugin model calls"
         );
-        let results = session.serve(batch.requests, deadline).await;
+        let results = session.serve(batch.requests, serve_deadline).await;
+        last_round = Instant::now() >= serve_deadline;
         let mut object = base.clone();
         object.insert("model_results".to_owned(), Value::Object(results));
         if let Some(state) = batch.state {
