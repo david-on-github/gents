@@ -175,6 +175,10 @@
                     "behaviors": [
                       "checking-helper"
                     ]
+                  },
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bcoordinator\\b"
                   }
                 }
               ]

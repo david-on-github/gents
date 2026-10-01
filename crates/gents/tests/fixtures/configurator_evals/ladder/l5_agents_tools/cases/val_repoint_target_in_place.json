@@ -168,6 +168,13 @@
                       "specialist"
                     ]
                   }
+                },
+                {
+                  "behavior_id": "specialist",
+                  "source_match": {
+                    "field": "display_name",
+                    "matches": "(?i)\\bspecialist\\b"
+                  }
                 }
               ]
             }
@@ -302,8 +309,6 @@
             "links": [
               {
                 "capture": "repointed-request",
-                "key": "behavior_id",
-                "id": "specialist",
                 "field": "caused_by_parent_tool_call_doc_id",
                 "target_capture": "delegation_calls",
                 "target_key": "_docID",
@@ -315,6 +320,26 @@
                   {
                     "field": "completion_notification_delivered_at",
                     "matches": "^[0-9]{4}-"
+                  }
+                ],
+                "source_match": {
+                  "field": "content",
+                  "contains": "REP-555"
+                }
+              },
+              {
+                "capture": "repointed-request",
+                "source_match": {
+                  "field": "content",
+                  "contains": "REP-555"
+                },
+                "field": "behavior_id",
+                "target_capture": "role_behaviors",
+                "target_key": "behavior_id",
+                "expect": [
+                  {
+                    "field": "display_name",
+                    "matches": "(?i)\\bspecialist\\b"
                   }
                 ]
               }
@@ -344,7 +369,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:specialist"
+              "_ne": "engineer"
             }
           },
           "fields": [
@@ -362,7 +387,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:specialist"
+              "_ne": "engineer"
             },
             "purpose": {
               "_eq": "normal"
@@ -397,6 +422,20 @@
             "_docID",
             "lifecycle_state",
             "completion_notification_delivered_at"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "role_behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name"
           ]
         }
       ],

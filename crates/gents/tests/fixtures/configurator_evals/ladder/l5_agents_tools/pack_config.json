@@ -3,7 +3,7 @@
   "eval_definitions": [
     {
       "definition_id": "configurator-l5-agents-tools",
-      "comparability_version": 7,
+      "comparability_version": 8,
       "title": "The Engineer \u2014 SubagentTarget wiring and delegation",
       "subject": {
         "kind": "behavior",

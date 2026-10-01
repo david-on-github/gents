@@ -376,3 +376,106 @@ fn seeded_outcome_cases_supply_the_source_handoff_contract() {
     }
     assert!(covered_clerk, "the Clerk outcome fixture remains covered");
 }
+
+#[test]
+fn repointed_delegation_grades_the_named_role_and_its_delivered_reply() {
+    use serde_json::json;
+    let definition = definitions()
+        .into_iter()
+        .find(|d| d.definition_id == "configurator-l5-agents-tools")
+        .unwrap();
+    let case = definition
+        .cases
+        .iter()
+        .find(|c| c.case_id == "val-repoint-target-in-place")
+        .unwrap();
+    let check = |index: usize| {
+        case.stages[index]
+            .checks
+            .iter()
+            .find(|c| c.check == "crew_spec_match")
+            .unwrap()
+    };
+    let mut evidence = ScriptedExecutor::passed_evidence("did:x", "repoint", "unused", vec![])
+        .stages
+        .remove(0);
+    for (name, rows) in [
+        (
+            "behaviors",
+            vec![
+                json!({"behavior_id":"engineer","context_id":"context"}),
+                json!({"behavior_id":"did:x:the-specialist","display_name":"The Specialist"}),
+            ],
+        ),
+        (
+            "contexts",
+            vec![json!({"context_id":"context","tools_id":"tools"})],
+        ),
+        (
+            "tools",
+            vec![json!({"tools_id":"tools","subagents":{"enabled":true,"target_ids":["helper"]}})],
+        ),
+        (
+            "targets",
+            vec![
+                json!({"target_id":"helper","agent_did":"did:x","target_agent_did":"did:x","behavior_id":"did:x:the-specialist"}),
+            ],
+        ),
+        (
+            "role_behaviors",
+            vec![json!({"behavior_id":"did:x:the-specialist","display_name":"The Specialist"})],
+        ),
+        (
+            "repointed-request",
+            vec![
+                json!({"behavior_id":"did:x:the-specialist","content":"Reply REP-555","caused_by_parent_tool_call_doc_id":"call"}),
+            ],
+        ),
+        (
+            "delegation_calls",
+            vec![
+                json!({"_docID":"call","lifecycle_state":"completed","completion_notification_delivered_at":"2026-10-01T00:00:00Z"}),
+            ],
+        ),
+    ] {
+        evidence
+            .captures
+            .insert(name.into(), CaptureResult::Documents { rows });
+    }
+    let registry = CheckRegistry::builtin();
+    let grader = registry.get("crew_spec_match").unwrap();
+    for index in [1, 2] {
+        let verdict = grader.evaluate(&check(index).params, &evidence);
+        assert_eq!(verdict.score_bp, Some(10000), "{}", verdict.raw);
+    }
+    for (capture, field, wrong, index) in [
+        ("targets", "target_agent_did", json!("did:foreign"), 1),
+        ("role_behaviors", "display_name", json!("Publisher"), 2),
+        ("repointed-request", "behavior_id", json!("other"), 2),
+        (
+            "delegation_calls",
+            "completion_notification_delivered_at",
+            serde_json::Value::Null,
+            2,
+        ),
+    ] {
+        let mut bad = evidence.clone();
+        let CaptureResult::Documents { rows } = bad.captures.get_mut(capture).unwrap() else {
+            unreachable!()
+        };
+        rows[0][field] = wrong;
+        let verdict = grader.evaluate(&check(index).params, &bad);
+        assert!(
+            verdict.score_bp.unwrap() < 10000,
+            "{capture}.{field}: {}",
+            verdict.raw
+        );
+    }
+    let CaptureResult::Documents { rows } = evidence.captures.get_mut("repointed-request").unwrap()
+    else {
+        unreachable!()
+    };
+    rows.push(rows[0].clone());
+    let verdict = grader.evaluate(&check(2).params, &evidence);
+    assert!(verdict.score_bp.unwrap() < 10000, "{}", verdict.raw);
+}
