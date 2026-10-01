@@ -14,6 +14,7 @@
 //! optional, so a file written by an older runner still reads.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -352,7 +353,10 @@ fn write_atomically(path: &Path, progress: &Progress) -> Result<()> {
     let dir = path.parent().context("progress.json has a run directory")?;
     let mut staged = tempfile::NamedTempFile::new_in(dir)
         .with_context(|| format!("staging {}", path.display()))?;
-    serde_json::to_writer_pretty(&mut staged, progress).context("encoding progress")?;
+    // Serde emits small fragments; unbuffered file writes can exceed the
+    // runner's heartbeat interval and starve polling of completed trials.
+    let encoded = serde_json::to_vec_pretty(progress).context("encoding progress")?;
+    staged.write_all(&encoded).context("writing progress")?;
     staged
         .persist(path)
         .with_context(|| format!("replacing {}", path.display()))?;
