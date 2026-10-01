@@ -6,6 +6,7 @@ import { Button } from "@gents/ui/components/button";
 import { Input } from "@gents/ui/components/input";
 import { toast } from "sonner";
 import { call, message } from "./bridgeCall";
+import { ChoiceRow } from "./editors";
 import { Group, Row } from "./rows";
 
 type Edited = "refuse" | "overwrite" | "keep";
@@ -25,6 +26,21 @@ interface FoundPack {
   kind?: string;
 }
 
+/* An installed plugin that can call a model, and the profile it is bound to
+   (none leaves it running without model calls). */
+interface PluginSlot {
+  plugin: string;
+  slot: string;
+  profile: string | null;
+}
+
+interface SlotProfile {
+  profile_id: string;
+  display_name?: string | null;
+  model_name: string;
+  usable: boolean;
+}
+
 /* An install or update that would replace documents someone edited stops
    and names them; the person chooses to keep or overwrite. */
 function editedChoice(error: unknown): boolean {
@@ -40,6 +56,8 @@ export function PacksPanel() {
   const [hasMore, setHasMore] = useState(false);
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
+  const [slots, setSlots] = useState<PluginSlot[]>([]);
+  const [profiles, setProfiles] = useState<SlotProfile[]>([]);
 
   const refresh = useCallback(async () => {
     try {
@@ -47,6 +65,16 @@ export function PacksPanel() {
       setInstalled(report.packs);
     } catch (error) {
       setInstalled([]);
+      toast.error(message(error));
+    }
+    try {
+      const report = await call<{ plugins: PluginSlot[]; profiles: SlotProfile[] }>(
+        "desktop_pack_plugin_slots",
+      );
+      setSlots(report.plugins);
+      setProfiles(report.profiles.filter((profile) => profile.usable));
+    } catch (error) {
+      setSlots([]);
       toast.error(message(error));
     }
     try {
@@ -146,6 +174,20 @@ export function PacksPanel() {
     }
   }
 
+  async function bindSlot(plugin: string, profile: string) {
+    setBusy(plugin);
+    try {
+      await call("desktop_pack_plugin_bind", {
+        request: { plugin, profile: profile || null },
+      });
+      await refresh();
+    } catch (error) {
+      toast.error(message(error));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function signIn() {
     setBusy("account");
     try {
@@ -201,6 +243,27 @@ export function PacksPanel() {
           </Row>
         ))}
       </Group>
+
+      {slots.length > 0 && (
+        <Group title="Model calls">
+          {slots.map((slot) => (
+            <ChoiceRow
+              key={slot.plugin}
+              id={`slot-${slot.plugin}`}
+              label={slot.plugin}
+              description="Optional. Unset, the plugin runs without a model."
+              value={slot.profile ?? ""}
+              none="Not set"
+              disabled={busy !== null}
+              onChange={(profile) => void bindSlot(slot.plugin, profile)}
+              items={profiles.map((profile) => ({
+                value: profile.profile_id,
+                label: profile.display_name || profile.model_name,
+              }))}
+            />
+          ))}
+        </Group>
+      )}
 
       <Group title="Registry">
         <Row label="Search">

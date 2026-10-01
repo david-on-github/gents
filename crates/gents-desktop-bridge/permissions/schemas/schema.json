@@ -1015,6 +1015,30 @@
           "markdownDescription": "Denies the desktop_pack_logout command without any pre-configured scope."
         },
         {
+          "description": "Enables the desktop_pack_plugin_bind command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-desktop-pack-plugin-bind",
+          "markdownDescription": "Enables the desktop_pack_plugin_bind command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the desktop_pack_plugin_bind command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-desktop-pack-plugin-bind",
+          "markdownDescription": "Denies the desktop_pack_plugin_bind command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the desktop_pack_plugin_slots command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-desktop-pack-plugin-slots",
+          "markdownDescription": "Enables the desktop_pack_plugin_slots command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the desktop_pack_plugin_slots command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-desktop-pack-plugin-slots",
+          "markdownDescription": "Denies the desktop_pack_plugin_slots command without any pre-configured scope."
+        },
+        {
           "description": "Enables the desktop_pack_remove command without any pre-configured scope.",
           "type": "string",
           "const": "allow-desktop-pack-remove",
@@ -1591,16 +1615,16 @@
           "markdownDescription": "Open a web link in the person's own browser\n#### This permission set includes:\n\n- `allow-desktop-open-external-url`"
         },
         {
-          "description": "Installed packs, registry search and package pages, and the signed-in account\n#### This permission set includes:\n\n- `allow-desktop-pack-installed`\n- `allow-desktop-pack-search`\n- `allow-desktop-pack-info`\n- `allow-desktop-pack-whoami`",
+          "description": "Installed packs, registry search and package pages, the signed-in account, and which plugins can call a model\n#### This permission set includes:\n\n- `allow-desktop-pack-installed`\n- `allow-desktop-pack-search`\n- `allow-desktop-pack-info`\n- `allow-desktop-pack-whoami`\n- `allow-desktop-pack-plugin-slots`",
           "type": "string",
           "const": "packs-read",
-          "markdownDescription": "Installed packs, registry search and package pages, and the signed-in account\n#### This permission set includes:\n\n- `allow-desktop-pack-installed`\n- `allow-desktop-pack-search`\n- `allow-desktop-pack-info`\n- `allow-desktop-pack-whoami`"
+          "markdownDescription": "Installed packs, registry search and package pages, the signed-in account, and which plugins can call a model\n#### This permission set includes:\n\n- `allow-desktop-pack-installed`\n- `allow-desktop-pack-search`\n- `allow-desktop-pack-info`\n- `allow-desktop-pack-whoami`\n- `allow-desktop-pack-plugin-slots`"
         },
         {
-          "description": "Install, update and remove packs, and sign in to the registry\n#### This permission set includes:\n\n- `allow-desktop-pack-install`\n- `allow-desktop-pack-update`\n- `allow-desktop-pack-remove`\n- `allow-desktop-pack-login`\n- `allow-desktop-pack-logout`",
+          "description": "Install, update and remove packs, bind a plugin to an inference profile, and sign in to the registry\n#### This permission set includes:\n\n- `allow-desktop-pack-install`\n- `allow-desktop-pack-update`\n- `allow-desktop-pack-remove`\n- `allow-desktop-pack-login`\n- `allow-desktop-pack-logout`\n- `allow-desktop-pack-plugin-bind`",
           "type": "string",
           "const": "packs-admin",
-          "markdownDescription": "Install, update and remove packs, and sign in to the registry\n#### This permission set includes:\n\n- `allow-desktop-pack-install`\n- `allow-desktop-pack-update`\n- `allow-desktop-pack-remove`\n- `allow-desktop-pack-login`\n- `allow-desktop-pack-logout`"
+          "markdownDescription": "Install, update and remove packs, bind a plugin to an inference profile, and sign in to the registry\n#### This permission set includes:\n\n- `allow-desktop-pack-install`\n- `allow-desktop-pack-update`\n- `allow-desktop-pack-remove`\n- `allow-desktop-pack-login`\n- `allow-desktop-pack-logout`\n- `allow-desktop-pack-plugin-bind`"
         },
         {
           "description": "The folders plugins may read or write, and the plugin questions waiting for an answer\n#### This permission set includes:\n\n- `allow-desktop-allowed-dirs-list`\n- `allow-desktop-plugin-approvals-pending`",

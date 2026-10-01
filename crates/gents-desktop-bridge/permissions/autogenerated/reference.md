@@ -1584,6 +1584,58 @@ Denies the desktop_pack_logout command without any pre-configured scope.
 <tr>
 <td>
 
+`gents-desktop-bridge:allow-desktop-pack-plugin-bind`
+
+</td>
+<td>
+
+Enables the desktop_pack_plugin_bind command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:deny-desktop-pack-plugin-bind`
+
+</td>
+<td>
+
+Denies the desktop_pack_plugin_bind command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:allow-desktop-pack-plugin-slots`
+
+</td>
+<td>
+
+Enables the desktop_pack_plugin_slots command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
+`gents-desktop-bridge:deny-desktop-pack-plugin-slots`
+
+</td>
+<td>
+
+Denies the desktop_pack_plugin_slots command without any pre-configured scope.
+
+</td>
+</tr>
+
+<tr>
+<td>
+
 `gents-desktop-bridge:allow-desktop-pack-remove`
 
 </td>
@@ -2824,7 +2876,7 @@ Open a web link in the person's own browser
 </td>
 <td>
 
-Installed packs, registry search and package pages, and the signed-in account
+Installed packs, registry search and package pages, the signed-in account, and which plugins can call a model
 
 </td>
 </tr>
@@ -2837,7 +2889,7 @@ Installed packs, registry search and package pages, and the signed-in account
 </td>
 <td>
 
-Install, update and remove packs, and sign in to the registry
+Install, update and remove packs, bind a plugin to an inference profile, and sign in to the registry
 
 </td>
 </tr>
