@@ -659,6 +659,7 @@ mod tests {
             name: "proposer".to_owned(),
             description: String::new(),
             behaviors: vec!["terse".to_owned(), "verbose".to_owned()],
+            optional: false,
         };
         let error = proposer_behavior_id("p", &slot, None).unwrap_err();
         assert_eq!(
@@ -676,6 +677,7 @@ mod tests {
         );
         let one = gents::pack::PackInferenceSlot {
             behaviors: vec!["terse".to_owned()],
+            optional: false,
             ..slot
         };
         assert_eq!(proposer_behavior_id("p", &one, None).unwrap(), "terse");

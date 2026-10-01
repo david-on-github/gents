@@ -402,6 +402,58 @@ pub(crate) fn rollback_pack_plugin_records(
     gents::plugin::install::rollback_pack_plugin_records(home, previous)
 }
 
+/// The owner whose profiles `requested` names for a plugins pack's model
+/// slots, after checking each slot exists and its profile can serve a plugin;
+/// `None` when nothing is requested, which opens no store.
+async fn resolve_plugin_slot_owner(
+    scope: &GraphScopeArgs,
+    manifest: &PackManifest,
+    requested: &BTreeMap<String, String>,
+) -> Result<Option<String>> {
+    if requested.is_empty() {
+        return Ok(None);
+    }
+    for slot in requested.keys() {
+        anyhow::ensure!(
+            manifest
+                .metadata
+                .inference_slots
+                .iter()
+                .any(|declared| declared.name == *slot),
+            "pack {} has no inference slot {slot:?}",
+            manifest.name
+        );
+    }
+    let (access, owner) = resolve_scope_owner(scope).await?;
+    let models = gents::plugin::model_calls::AccessModels(access);
+    for (slot, profile_id) in requested {
+        let binding = gents::plugin::model_calls::ModelBinding {
+            agent_did: owner.clone(),
+            profile_id: profile_id.clone(),
+        };
+        gents::plugin::model_calls::ModelResolver::resolve(&models, &binding)
+            .await
+            .with_context(|| format!("profile {profile_id:?} cannot serve slot {slot:?}"))?;
+    }
+    Ok(Some(owner))
+}
+
+/// Binds each plugin's model slot to the profile `requested` names for it;
+/// a no-op when nothing is requested.
+fn bind_plugin_slots(
+    home: &std::path::Path,
+    manifest: &PackManifest,
+    owner: Option<&str>,
+    requested: &BTreeMap<String, String>,
+) -> Result<()> {
+    match owner {
+        Some(owner) => {
+            gents::plugin::install::bind_plugin_slots(home, manifest, owner, requested).map(|_| ())
+        }
+        None => Ok(()),
+    }
+}
+
 /// The node and the owner a pack command acts for.
 pub(crate) async fn resolve_scope_owner(
     scope: &GraphScopeArgs,
@@ -656,6 +708,13 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     args.grant_authority,
                 )
                 .inspect_err(|_| rollback_pack_plugin_records(&plugin_home, &rollback))?;
+                bind_plugin_slots(
+                    &plugin_home,
+                    pack.manifest(),
+                    Some(&owner),
+                    &inference.bindings,
+                )
+                .inspect_err(|_| rollback_pack_plugin_records(&plugin_home, &rollback))?;
                 (installed, rollback)
             };
             let mut identity = gents::pack::PackIdentity::new(
@@ -707,11 +766,11 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
         // way an assets pack does: into the home's content-addressed
         // cache, where the artifacts become admissible by digest.
         PackKind::Assets | PackKind::Plugins => {
+            let requested = parse_inference_slot_bindings(&args.inference_slots)?;
             anyhow::ensure!(
                 args.bindings.is_none()
-                    && args.inference_slots.is_empty()
                     && args.scope.graphql.is_none()
-                    && args.scope.agent_did.is_none()
+                    && (args.scope.agent_did.is_none() || !requested.is_empty())
                     && !args.force_rebind_concrete_did,
                 "asset and plugins packs install locally with --home; identity and graph binding flags do not apply"
             );
@@ -721,9 +780,12 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     "source": pack.label(),
                     "digest": pack.digest(),
                     "installed_plugins": pack.manifest().metadata.plugins,
+                    "inference_slots": pack.manifest().metadata.inference_slots,
                     "would_write": false,
                 }));
             }
+            let slot_owner =
+                resolve_plugin_slot_owner(&args.scope, pack.manifest(), &requested).await?;
             let home = args
                 .scope
                 .home
@@ -768,7 +830,9 @@ pub(crate) async fn install(args: PackInstallArgs) -> Result<()> {
                     .collect(),
                 installed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             };
-            if let Err(error) = gents::pack::write_home_install(&home, &record) {
+            if let Err(error) = gents::pack::write_home_install(&home, &record).and_then(|()| {
+                bind_plugin_slots(&home, pack.manifest(), slot_owner.as_deref(), &requested)
+            }) {
                 rollback_pack_plugin_records(&home, &rollback);
                 return Err(error);
             }
@@ -992,6 +1056,31 @@ mod tests {
     fn split_namespace_defaults_to_gents() {
         assert_eq!(split_namespace("mailbox"), ("gents", "mailbox"));
         assert_eq!(split_namespace("acme/widget"), ("acme", "widget"));
+    }
+
+    #[tokio::test]
+    async fn plugin_slot_bindings_need_a_declared_slot_and_open_no_store_without_one() {
+        let manifest: PackManifest = serde_json::from_value(json!({
+            "manifest_version": 1, "name": "ocr", "version": "1.0.0", "description": "d",
+            "authors": ["t"], "kind": "plugins", "assets": ["README.md"],
+            "inference_slots": [{"name": "remote_ocr", "description": "d", "optional": true}],
+        }))
+        .unwrap();
+        let scope = GraphScopeArgs {
+            home: Some(tempfile::tempdir().unwrap().path().to_owned()),
+            graphql: None,
+            agent_did: None,
+        };
+        let none = resolve_plugin_slot_owner(&scope, &manifest, &BTreeMap::new()).await;
+        assert_eq!(none.unwrap(), None);
+        let unknown = BTreeMap::from([("other".to_owned(), "p".to_owned())]);
+        let error = resolve_plugin_slot_owner(&scope, &manifest, &unknown)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("no inference slot"),
+            "{error:#}"
+        );
     }
 
     #[test]

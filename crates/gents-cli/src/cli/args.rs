@@ -1108,6 +1108,10 @@ pub(crate) enum PluginCommand {
     Remove(PluginRemoveArgs),
     /// Run an installed plugin once and print what it returned.
     Run(PluginRunArgs),
+    /// Point an installed plugin's optional model slot at an inference profile.
+    Bind(PluginBindArgs),
+    /// Leave an installed plugin's model slot unbound again.
+    Unbind(PluginUnbindArgs),
     /// Choose the folders plugins may read or write when an agent or a graph names a path.
     /// The session's working folder is readable without asking (never `/` or your home); add folders or single files beyond it here.
     Dirs {
@@ -1239,6 +1243,27 @@ pub(crate) struct PluginRunArgs {
         help = "Bind DIR read-only for this call; only a plugin that declares bind_dir may use it"
     )]
     pub(crate) bind_dir: Option<PathBuf>,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct PluginBindArgs {
+    #[arg(help = "Installed plugin, as `name` or `namespace/name`")]
+    pub(crate) name: String,
+    #[arg(help = "Existing inference profile (see `gents profile list`) the plugin calls through")]
+    pub(crate) profile: String,
+    #[command(flatten)]
+    pub(crate) scope: GraphScopeArgs,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct PluginUnbindArgs {
+    #[arg(help = "Installed plugin, as `name` or `namespace/name`")]
+    pub(crate) name: String,
+    #[arg(
+        long,
+        help = "Home the plugin is installed under; defaults to ~/.gents"
+    )]
+    pub(crate) home: Option<PathBuf>,
 }
 
 #[derive(clap::Args)]

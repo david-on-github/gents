@@ -9,6 +9,7 @@
 //! running one to prove it works ([`run`]). Registry access is the client
 //! `gents pack` uses ([`crate::commands::pack::registry::RegistryClient`]).
 
+mod bind;
 mod build;
 mod dirs;
 mod install;
@@ -28,6 +29,8 @@ pub(crate) async fn dispatch(command: PluginCommand) -> Result<()> {
         PluginCommand::List(args) => list(args),
         PluginCommand::Remove(args) => remove(args),
         PluginCommand::Run(args) => run::run(args).await,
+        PluginCommand::Bind(args) => bind::bind(args).await,
+        PluginCommand::Unbind(args) => bind::unbind(args),
         PluginCommand::Dirs { command } => dirs::dispatch(command),
     }
 }
@@ -153,6 +156,7 @@ pub(crate) fn declaration_from_artifact(
         instructions: None,
         bind_dir: None,
         limits: None,
+        model_slot: None,
     })
 }
 
