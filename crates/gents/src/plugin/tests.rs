@@ -766,3 +766,20 @@ fn tool_instructions_live_beside_the_plugin_and_stay_small_text() {
     let oversized = vec![b'a'; crate::pack::MAX_TOOL_INSTRUCTIONS_BYTES + 1];
     assert!(crate::pack::tool_instructions("lint", &oversized).is_err());
 }
+
+#[test]
+fn plugin_requests_select_native_nan_arithmetic() {
+    let request = plugin_run_request(Vec::new(), Manifold::sealed(), &PluginBudget::default());
+    assert_eq!(request.nan_mode, NanMode::Native);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn masked_trap_startup_uses_the_plugin_request_engine() {
+    let startup = start_wasm_trap_handler_with_signals_blocked()
+        .unwrap()
+        .unwrap();
+    let request = plugin_run_request(Vec::new(), Manifold::sealed(), &PluginBudget::default());
+    let selected = afterburner::wasi::embedder_vm::shared_epoch_vm_with(request.nan_mode).unwrap();
+    assert!(std::ptr::eq(startup, selected));
+}
