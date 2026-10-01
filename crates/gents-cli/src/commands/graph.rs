@@ -135,7 +135,7 @@ pub(crate) async fn install_with_access(
     };
     gents::plugin::install::bind_plugin_slots(
         &plugin_home,
-        &distribution.manifest,
+        &package.manifest,
         owner_did,
         &bindings.inference_slots,
     )

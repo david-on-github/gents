@@ -1980,6 +1980,17 @@ impl PackInstaller {
         let plugins = package.manifest.metadata.plugins.clone();
         let (plugin_rollback, installed_plugins) =
             self.install_plugins(&distribution, &package.package_digest)?;
+        if let Some(home) = self.home.as_deref() {
+            crate::plugin::install::bind_plugin_slots(
+                home,
+                distribution.manifest(),
+                self.core.agent_did(),
+                &bindings.inference_slots,
+            )
+            .inspect_err(|_| {
+                crate::plugin::install::rollback_pack_plugin_records(home, &plugin_rollback)
+            })?;
+        }
         let record = crate::graph_package::GraphInstallRecord {
             plugins: installed_plugins
                 .iter()

@@ -340,7 +340,8 @@ jobs:
           cargo test -p gents-cli --test cli_runtime cli_reconciliation::reconciled_runtime_sends_generation_two_tools_and_completes_tool_loop -- --nocapture --test-threads=1
           # gents pack check over the fixture packs: manifests, files,
           # configuration, graphs, filters, README and topology diagrams.
-          cargo test -p gents-cli --lib commands::pack::check::
+          env -u CARGO_TARGET_DIR cargo test --target-dir "$CARGO_TARGET_DIR" \
+            -p gents-cli --lib commands::pack::check::
 
       - name: Run full library and integration tests
         if: matrix.suite == 'runtime' && github.event_name != 'pull_request'
