@@ -331,7 +331,11 @@ impl SelfConfigCore {
             created: creating,
             committed: false,
             changed,
-            effect: EFFECT_TIMING_NOTE,
+            effect: if request.target == SelfConfigTarget::DatastoreToolSurface {
+                "A surface defines tools; it does not select them. To grant it, read tools get, then tools edit with its ID added to set.datastore.datastore_tool_surface_ids, preserving existing selections. Changes apply after reconciliation to later requests; the current request keeps its tools."
+            } else {
+                EFFECT_TIMING_NOTE
+            },
         })
     }
 

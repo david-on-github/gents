@@ -255,13 +255,13 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             next: "report what was found; import a skill only when asked.",
         },
         "datastore" => Page {
-            what: "DatastoreToolSurface: collection tools (tools grant). target_id is SURFACE_ID.",
+            what: "a surface defines collection tools; selecting it in Tools grants them (tools grant). target_id: SURFACE_ID.",
             commands: &[
                 "datastore get",
                 "datastore [preview] create|edit  set: surface fields, or options.mailbox",
             ],
             notes: concat!(
-                "Create fields: writable arguments as {name} objects; omitted or empty means none. Query fields: returned columns; filter_fields: exact-match arguments as {name} objects. Each entry’s description becomes tool help.\nfill: correlation uses the request/trigger correlation ID; fill: {source_field: F} copies trigger field F. Omit fill for caller-supplied values. Filled fields cannot be required.\nCaller value: {\"name\":\"correlation\"}. Runtime ID: {\"name\":\"request_correlation\",\"fill\":\"correlation\"}.\nWrites check syntax; selection checks name collisions; calls check collection and fields.\nMailbox: options.mailbox supplies the canonical file_mailbox_item entry for existing MailboxItem. It replaces entries; put other tools on another surface. Never create a replacement mailbox collection.\n",
+                "Create fields: writable {name} arguments; omitted or empty means none. Query fields: returned columns; filter_fields: exact-match arguments as {name} objects. Tool descriptions state use, inputs and side effects.\nfill: correlation uses the request/trigger correlation ID; fill: {source_field: F} copies trigger field F. Omit fill for caller-supplied values. Filled fields cannot be required.\nCaller value: {\"name\":\"correlation\"}. Runtime ID: {\"name\":\"request_correlation\",\"fill\":\"correlation\"}.\nSelection checks name collisions; calls validate schema.\nGrant only the requested operations. Mailbox: options.mailbox builds file_mailbox_item for existing MailboxItem and replaces entries. Put other tools on another surface. Never replace the mailbox collection.\n",
                 mailbox_identity_choice!(),
                 " A monitor uses condition identity: {\"argv\":[\"datastore\",\"create\"],\"target_id\":\"monitor-mailbox\",\"options\":{\"mailbox\":{\"identity\":{\"mode\":\"condition\",\"key\":\"host-health\"},\"kind\":\"flag\",\"action\":\"ack\"}}}"
             ),
@@ -331,7 +331,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         },
         "automation" => Page {
             what: "documents that start work without a user: event-source or schedule, trigger, task (automation grant). Use it to run a behavior on new documents or on a timer.",
-            commands: &["automation get|preview|edit KIND  target_id; options.behavior; KIND is event-source, trigger, task or schedule"],
+            commands: &["automation get|preview|edit KIND  target_id; options.behavior (default: you); KIND is event-source, trigger, task or schedule"],
             notes: "preview/edit are upserts. A trigger renders its behavior's Task into a request.\nfilter: GraphQL object literal string, keys unquoted (see recipe). Template roots: doc (the source document; its fields must exist in the schema), event, args, session, request, group; a missing value fails the fire. Render the data the task needs apart from its instructions.\nFor requested run records, Task.emit_outcome=true writes FireOutcome; default false writes none. Source documents need a nonempty String handoff_id: declare it before schema installation and populate it in write tools (help schema/datastore).\nConcurrency: parallel (default); queued_serial runs one at a time in order, never skipping; serial skips a fire while work runs; latest_only supersedes. queued_serial, session_id_template (deliver into an existing session) and emit_outcome need an event source.\nPipelines: tasks write output through a datastore surface; its collection's event source fires the next stage. Fan-in: an event source group waits for expected_count documents sharing correlation_field.",
             next: "create one source document and read the resulting request and its output.",
         },
@@ -456,18 +456,18 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
             ],
         )],
         "automation" => vec![(
-            "a new Handoff document starts a review request",
+            "review each new Handoff yourself",
             vec![
                 (
-                    json!({"argv":["automation","edit","event-source"],"target_id":"handoff-created","options":{"behavior":"worker"},"set":{"source_collection":"Handoff","filter":"{handoff_id: {_ne: \"\"}}"}}),
+                    json!({"argv":["automation","edit","event-source"],"target_id":"handoff-created","set":{"source_collection":"Handoff","filter":"{handoff_id: {_ne: \"\"}}"}}),
                     None,
                 ),
                 (
-                    json!({"argv":["automation","edit","task"],"target_id":"review","options":{"behavior":"worker"},"set":{"prompt_template":"Review handoff {{ doc.handoff_id }}.\n<body>\n{{ doc.body }}\n</body>"}}),
+                    json!({"argv":["automation","edit","task"],"target_id":"review","set":{"prompt_template":"Review handoff {{ doc.handoff_id }}.\n<body>\n{{ doc.body }}\n</body>"}}),
                     None,
                 ),
                 (
-                    json!({"argv":["automation","edit","trigger"],"target_id":"review-on-create","options":{"behavior":"worker"},"set":{"task_id":"review","source":{"kind":"event","event_source_id":"handoff-created"},"concurrency":"queued_serial"}}),
+                    json!({"argv":["automation","edit","trigger"],"target_id":"review-on-create","set":{"task_id":"review","source":{"kind":"event","event_source_id":"handoff-created"}}}),
                     None,
                 ),
             ],
