@@ -461,7 +461,7 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
                 (
                     json!({"tool":"schema","args":{"argv":["collection","create"],"options":{"sdl":"type Handoff { handoff_id: String @index(unique: true) body: String }"},"preview":true}}),
                     Some(
-                        "Use the schema tool, then apply its returned next_call",
+                        "Apply the schema tool’s returned next_call",
                     ),
                 ),
                 (
