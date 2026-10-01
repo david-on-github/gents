@@ -10,8 +10,6 @@
 !apps/**
 !third_party/
 !third_party/**
-!packs/
-!packs/**
 !schemas/
 !schemas/**
 !scripts/

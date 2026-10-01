@@ -19,8 +19,9 @@ pub use inference::{
     PackInferenceProfileOption,
 };
 pub use installation::{
-    installed_packs, list_installed_packs, referenced_pack_digests, remove_pack, DriftPolicy,
-    InstallReport, InstalledPack, InstalledPackPlugin, PackIdentity, RemoveReport, Retained,
+    installed_packs, list_installed_packs, read_installed_pack, referenced_pack_digests,
+    remove_pack, DriftPolicy, InstallReport, InstalledPack, InstalledPackPlugin, PackIdentity,
+    RemoveReport, Retained,
 };
 pub(crate) use installation::{observe_graph_install_in_txn, record_graph_install_in_txn};
 pub use loader::{decode_pack_config, load_pack_config, pin_pack_plugins};
@@ -29,8 +30,6 @@ pub use provenance::{pack_document_digests, pack_origin_from_tags, pack_origin_t
 
 #[path = "pack_asset_path.rs"]
 mod asset_path;
-
-include!(concat!(env!("OUT_DIR"), "/bundled_packs.rs"));
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -570,49 +569,11 @@ pub struct PackInstallOptions {
     pub agent_did: String,
 }
 
-pub struct ResolvedPack {
-    pub manifest: PackManifest,
-    pub digest: String,
-}
-
 /// Return whether `name` is admissible at the pack catalog and source-pack
 /// boundaries. Keep callers on this owner instead of growing parallel name
 /// validators in adapters.
 pub fn is_valid_pack_name(name: &str) -> bool {
     asset_path::is_snake_case_name(name)
-}
-
-impl ResolvedPack {
-    pub fn load_config(
-        &self,
-        options: &PackInstallOptions,
-    ) -> Result<crate::document_config::PackConfig> {
-        self.load_config_with_environment(options, &|name| std::env::var(name).ok())
-    }
-
-    /// Load a bundled pack with an explicit interpolation source. Runtime
-    /// owners use this to bind known package inputs without mutating the
-    /// process environment shared by concurrent requests.
-    pub(crate) fn load_config_with_environment(
-        &self,
-        options: &PackInstallOptions,
-        environment: &dyn Fn(&str) -> Option<String>,
-    ) -> Result<crate::document_config::PackConfig> {
-        load_pack_config(
-            &self.manifest,
-            options,
-            &|path| Ok(self.asset(path)?.to_vec()),
-            environment,
-        )
-    }
-
-    pub fn asset(&self, path: &str) -> Result<&'static [u8]> {
-        anyhow::ensure!(
-            path == "manifest.json" || self.manifest.metadata.assets.iter().any(|p| p == path),
-            "undeclared pack asset: {path}"
-        );
-        bundled_pack_asset(&self.manifest.name, path).context("missing bundled pack asset")
-    }
 }
 
 /// Whether a path may appear in a pack archive.
@@ -638,7 +599,7 @@ pub fn validate_manifest(name: &str, manifest: &PackManifest) -> Result<()> {
     validate_pack_manifest(manifest)
 }
 
-/// Distribution validation shared by bundled and source-pack loaders.
+/// Distribution validation shared by every pack loader.
 pub fn validate_pack_manifest(manifest: &PackManifest) -> Result<()> {
     anyhow::ensure!(
         manifest.manifest_version == 1,
@@ -648,6 +609,19 @@ pub fn validate_pack_manifest(manifest: &PackManifest) -> Result<()> {
         manifest.metadata.kind == PackKind::Documents || manifest.metadata.dependencies.is_empty(),
         "only document packs support package dependencies; nested graph/asset dependencies are unsupported"
     );
+    for dependency in &manifest.metadata.dependencies {
+        anyhow::ensure!(
+            !dependency.contains('@'),
+            "dependency {dependency:?} must be a coordinate (name or ns/name), not a pinned version"
+        );
+        let (namespace, name) = dependency
+            .split_once('/')
+            .unwrap_or((crate::pack_archive::DEFAULT_NAMESPACE, dependency.as_str()));
+        anyhow::ensure!(
+            is_valid_pack_name(namespace) && is_valid_pack_name(name),
+            "dependency {dependency:?} is not a valid pack coordinate"
+        );
+    }
     anyhow::ensure!(
         !manifest.description.trim().is_empty() && !manifest.metadata.authors.is_empty(),
         "pack needs description and authors"
@@ -891,79 +865,9 @@ impl PackDigester {
     }
 }
 
-pub fn resolve_pack(name: &str) -> Result<ResolvedPack> {
-    anyhow::ensure!(
-        BUNDLED_PACK_NAMES.contains(&name),
-        "unknown pack {name:?}; use gents pack list"
-    );
-    let bytes = bundled_pack_asset(name, "manifest.json").context("missing manifest")?;
-    let manifest: PackManifest = serde_json::from_slice(bytes)?;
-    validate_manifest(name, &manifest)?;
-    let digest = crate::graph_package::digest_assets(name, &declared_paths(&manifest))?;
-    Ok(ResolvedPack { manifest, digest })
-}
-
-pub fn pack_catalog() -> Result<Vec<PackManifest>> {
-    BUNDLED_PACK_NAMES
-        .iter()
-        .map(|name| Ok(resolve_pack(name)?.manifest))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn all_packs_resolve_with_declared_assets_and_dependencies() {
-        let catalog = pack_catalog().unwrap();
-        assert!(catalog.len() >= 11);
-        for pack in catalog {
-            for dependency in pack.metadata.dependencies {
-                resolve_pack(&dependency).unwrap();
-            }
-        }
-        assert!(resolve_pack("code-review").is_err());
-        assert!(resolve_pack("../code_review").is_err());
-        let proposer = resolve_pack("prompt_proposer").unwrap();
-        assert_eq!(
-            proposer.manifest.metadata.inference_slots[0].name,
-            "proposer"
-        );
-    }
-
-    #[test]
-    fn every_configuration_pack_declares_slots_and_authors_no_inference_documents() {
-        let options = PackInstallOptions {
-            agent_did: "did:key:catalog-owner".into(),
-        };
-        for manifest in pack_catalog().unwrap() {
-            if !matches!(
-                manifest.metadata.kind,
-                PackKind::Documents | PackKind::Graph
-            ) {
-                continue;
-            }
-            let pack = resolve_pack(&manifest.name).unwrap();
-            let config = pack
-                .load_config(&options)
-                .unwrap_or_else(|error| panic!("{}: {error:#}", manifest.name));
-            assert!(
-                !manifest.metadata.inference_slots.is_empty(),
-                "{}",
-                manifest.name
-            );
-            assert!(config.inference_backends.is_empty(), "{}", manifest.name);
-            assert!(config.inference_profiles.is_empty(), "{}", manifest.name);
-            assert!(config.inference_sampling.is_empty(), "{}", manifest.name);
-            assert!(config.inference_execution.is_empty(), "{}", manifest.name);
-            assert!(
-                config.inference_retry_policies.is_empty(),
-                "{}",
-                manifest.name
-            );
-        }
-    }
 
     /// A minimal, otherwise-valid plugin, so each test below changes
     /// exactly the one field it means to check.
@@ -1301,5 +1205,40 @@ mod tests {
         let message = format!("{error:#}");
         assert!(message.contains("at least 1"), "{message}");
         assert!(!message.contains("ceiling"), "{message}");
+    }
+
+    fn documents_manifest(dependencies: Vec<&str>) -> PackManifest {
+        serde_json::from_value(serde_json::json!({
+            "manifest_version": 1,
+            "name": "dep_test",
+            "version": "1.0.0",
+            "description": "a test documents pack",
+            "authors": ["gents"],
+            "kind": "documents",
+            "assets": ["README.md", "pack_config.json"],
+            "config": "pack_config.json",
+            "dependencies": dependencies,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn dependency_coordinates_are_bare_or_namespaced_names_never_pinned() {
+        validate_pack_manifest(&documents_manifest(vec!["acme/widget"])).unwrap();
+        validate_pack_manifest(&documents_manifest(vec!["widget"])).unwrap();
+
+        let pinned = validate_pack_manifest(&documents_manifest(vec!["acme/widget@1.0.0"]))
+            .expect_err("a dependency must not pin a version");
+        assert!(
+            format!("{pinned:#}").contains("must be a coordinate"),
+            "{pinned:#}"
+        );
+
+        let bad = validate_pack_manifest(&documents_manifest(vec!["Acme/Widget"]))
+            .expect_err("a dependency coordinate must be snake_case");
+        assert!(
+            format!("{bad:#}").contains("is not a valid pack coordinate"),
+            "{bad:#}"
+        );
     }
 }

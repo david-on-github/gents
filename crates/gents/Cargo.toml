@@ -81,6 +81,7 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 regex = "1"
 schemars = "1"
+jsonschema = { version = "0.46.5", default-features = false }
 sha2.workspace = true
 hmac.workspace = true
 thiserror.workspace = true
@@ -107,6 +108,10 @@ kovan-map = "0.1.22"
 # gzip-compressed tar; `tar`/`flate2` build and read it.
 tar = "0.4"
 flate2 = "1"
+
+# The pack store's name index (src/pack_store.rs): orders a name's stored
+# versions to resolve a bare `namespace/name` to its highest one.
+semver = "1"
 
 # `afterburner_afb::Afb` parses a plugin's compiled `.afb` (src/pack_archive.rs
 # reads a pack's declared assets, one of which may be a plugin's artifact;
@@ -154,7 +159,6 @@ tree-sitter = "0.25"
 tree-sitter-bash = "0.25.1"
 gents-lean-contract.workspace = true
 gents-callback-fixture-create-workspace = { path = "../gents-callbacks/fixture_create_workspace", default-features = false }
-jsonschema = { version = "0.46.5", default-features = false }
 syn = { version = "2", features = ["full", "visit"] }
 wat = "1.254"
 [build-dependencies]

@@ -9,13 +9,37 @@ fn wat(src: &str) -> Vec<u8> {
 /// `crate::pack::PLUGIN_ARTIFACT_PREFIX`'s own convention.
 const PLUGIN_ARTIFACT: &str = "plugins/plugin.afb";
 
+/// A guest that ignores stdin and writes exactly `json` to stdout: the
+/// prepare plugin fixture for tests that only need a deterministic
+/// result, not a real transformation of the host facts.
+pub(crate) fn constant_output_wat(json: &[u8]) -> String {
+    let mut escaped = String::with_capacity(json.len() * 4);
+    for byte in json {
+        escaped.push_str(&format!("\\{byte:02x}"));
+    }
+    let len = json.len();
+    format!(
+        r#"(module
+  (import "wasi_snapshot_preview1" "fd_write"
+(func $fd_write (param i32 i32 i32 i32) (result i32)))
+  (memory (export "memory") 1)
+  (data (i32.const 0) "{escaped}")
+  (func (export "_start")
+(i32.store (i32.const 8192) (i32.const 0))
+(i32.store (i32.const 8196) (i32.const {len}))
+(call $fd_write (i32.const 1) (i32.const 8192) (i32.const 1) (i32.const 8200))
+drop))
+"#
+    )
+}
+
 /// Builds a real Afterburner `.afb` around a compiled Wasm module,
 /// mirroring the minimal manifest `afterburner::afb_run`'s own tests use
 /// (`minimal_manifest` in its `tests.rs`) so `PluginRunner` sees exactly
 /// the shape `run_afb_bytes` dispatches through `run_wasm`: a
 /// `precompiled/wasm32-wasip1/main.wasm` member and a `[runtime]
 /// target = "wasm32-wasip1"`.
-fn build_plugin_afb(wat_source: &str) -> Vec<u8> {
+pub(crate) fn build_plugin_afb(wat_source: &str) -> Vec<u8> {
     use afterburner_afb::manifest::{Format, Manifest, Package, Runtime};
     use afterburner_afb::pack::Builder;
 

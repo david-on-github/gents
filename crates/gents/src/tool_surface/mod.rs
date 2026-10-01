@@ -343,6 +343,7 @@ impl ToolSurface {
             runtime.agent_did.clone(),
             runtime.identity.clone(),
             &self.self_config,
+            runtime.plugins.clone(),
         ));
         let mut registered_names: HashSet<String> = tools.iter().map(|tool| tool.name()).collect();
         for decl in &self.write_tools {
