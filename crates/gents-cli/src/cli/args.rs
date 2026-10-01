@@ -121,6 +121,11 @@ pub(crate) enum Command {
     Status(StatusArgs),
     #[command(about = "Run a read-only structured query against a DefraDB collection")]
     Query(QueryArgs),
+    #[command(about = "Create documents as the home principal")]
+    Document {
+        #[command(subcommand)]
+        command: DocumentCommand,
+    },
     #[command(
         about = "Inspect backgrounded tool calls",
         after_help = BACKGROUND_AFTER_HELP
@@ -1961,6 +1966,33 @@ pub(crate) struct QueryArgs {
         help = "Restrict the query to these collections (repeatable); omit for all"
     )]
     pub(crate) allow_collections: Vec<String>,
+}
+
+#[derive(Subcommand)]
+pub(crate) enum DocumentCommand {
+    #[command(
+        about = "Create one document in a collection and print its document id",
+        long_about = "Create one document in a collection and print its document id.\n\nThis is an operator command: it refuses protected eval/optimization and canonical configuration collections. Writes to the home runtime are signed as the home principal; an unrelated explicit endpoint uses anonymous access with a warning. The mutation input schema is validated before writing."
+    )]
+    Create(DocumentCreateArgs),
+}
+
+#[derive(clap::Args)]
+pub(crate) struct DocumentCreateArgs {
+    #[arg(long)]
+    pub(crate) home: Option<PathBuf>,
+    #[arg(long, help = "GraphQL endpoint for the live runtime")]
+    pub(crate) graphql: Option<String>,
+    #[arg(
+        value_name = "COLLECTION",
+        help = "Collection (GraphQL type), e.g. Goal"
+    )]
+    pub(crate) collection: String,
+    #[arg(
+        long,
+        help = r#"Document fields as a JSON object, e.g. '{"goal_id":"g1","status":"active"}'"#
+    )]
+    pub(crate) json: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
