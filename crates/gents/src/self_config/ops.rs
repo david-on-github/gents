@@ -333,6 +333,8 @@ impl SelfConfigCore {
             changed,
             effect: if request.target == SelfConfigTarget::DatastoreToolSurface {
                 "Install its collection schemas before selecting this surface. Read tools get, then add its ID to set.datastore.datastore_tool_surface_ids, preserving existing selections. Tools apply after reconciliation to later requests."
+            } else if creating && request.target == SelfConfigTarget::InferenceProfile {
+                "Creating a profile does not select it for a behavior. To use it, call behavior edit with set.inference_profile_id equal to this target_id. Selecting it preserves the previous profile and its settings. The selection applies to later requests after reconciliation."
             } else {
                 EFFECT_TIMING_NOTE
             },
