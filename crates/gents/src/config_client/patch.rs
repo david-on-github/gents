@@ -167,7 +167,9 @@ pub fn ensure_admissible(target: SelfConfigTarget, patch: &SelfConfigPatch) -> R
         if !target.is_writable(field) {
             if target.all_fields().contains(&field.as_str()) {
                 let recovery = if target == SelfConfigTarget::Task && field == "behavior_id" {
-                    "; choose the task owner with options.behavior when creating it, not set.behavior_id"
+                    "; choose the task owner with options.behavior when creating it, not set.behavior_id. To run a different behavior, create a separate Task and Trigger; keep the current workflow until the replacement is valid"
+                } else if field == target.unique_field() {
+                    "; put the document ID in target_id, not set. IDs cannot be changed by update"
                 } else {
                     ""
                 };
@@ -177,10 +179,28 @@ pub fn ensure_admissible(target: SelfConfigTarget, patch: &SelfConfigPatch) -> R
                     collection = target.collection_name(),
                 );
             }
-            let recovery = if target == SelfConfigTarget::InferenceProfile
+            let recovery = if target == SelfConfigTarget::AgentBehavior
+                && matches!(field.as_str(), "system_prompt" | "instructions")
+            {
+                "; prompts belong to Context.system_prompt: behavior get shows context_id, then context update that ID with set.system_prompt"
+            } else if target == SelfConfigTarget::Trigger && field == "emit_outcome" {
+                "; emit_outcome belongs to Task: trigger get shows task_id, then task update that ID with set.emit_outcome"
+            } else if target == SelfConfigTarget::DatastoreToolSurface
+                && field == "output_obligation"
+            {
+                "; output_obligation belongs inside an entries create declaration, not on the surface. It requires stored output; omit it for inbox writers. See help datastore"
+            } else if target == SelfConfigTarget::Tools
+                && matches!(field.as_str(), "root" | "files" | "bash")
+            {
+                "; host tool fields belong inside set.host. Read tools get first and preserve the other fields in that group"
+            } else if target == SelfConfigTarget::SubagentTarget && field == "display_name" {
+                "; use set.name for the name passed to agent_new"
+            } else if target == SelfConfigTarget::DatastoreToolSurface && field == "name" {
+                "; use set.display_name for the surface label; each entry has its own tool_name"
+            } else if target == SelfConfigTarget::InferenceProfile
                 && SelfConfigTarget::InferenceSampling.is_writable(field)
             {
-                "; sampling fields belong to InferenceSampling: use profile edit sampling with options.behavior"
+                "; sampling fields belong to InferenceSampling: profile get shows sampling_id, then sampling update that ID"
             } else {
                 ""
             };

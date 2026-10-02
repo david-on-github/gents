@@ -69,6 +69,7 @@ pub use inference_backend::{load_inference_backend_in_txn, write_inference_backe
 pub use inference_profile::write_inference_profile_document;
 pub(crate) use schema_contract::collection_schema_contract_digest;
 pub use schema_contract::SchemaFieldDelta;
+pub(crate) use schema_install::SchemaInstallMismatch;
 pub use schema_install::{
     apply_additive_schema_install, apply_schema_install, preview_additive_schema_install,
     preview_schema_install, SchemaInstallPlan,

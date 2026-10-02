@@ -55,8 +55,8 @@ fn project<T: DeserializeOwned + Serialize>(
     let fields = canonical_struct_fields::<T>()?;
     let normalized = value
         .map(|value| -> Result<Value> {
-            let config: T = serde_json::from_value(value.clone())
-                .context("decode canonical desired configuration")?;
+            let config: T = serde_path_to_error::deserialize(value.clone())
+                .context("decode canonical desired configuration (field path)")?;
             let mut config = serde_json::to_value(config)?;
             let object = config
                 .as_object_mut()
@@ -526,7 +526,7 @@ async fn validate_outcome_source_fields(
                 declared.type_name
             ),
             None => anyhow::bail!(
-                "Trigger {trigger_id} delivers {collection} to Task {task_id}, which sets emit_outcome, but {collection} has no handoff_id field; a FireOutcome copies the delivered document's handoff_id, so every fire would be refused. Config cannot add fields to an installed schema. Preserve the requested source and report the schema limitation. For a new setup, declare handoff_id before installation and populate it in the write tool"
+                "Trigger {trigger_id} delivers {collection} to Task {task_id}, which sets emit_outcome, but {collection} has no handoff_id field; a FireOutcome copies the delivered document's handoff_id, so every fire would be refused. Config cannot add fields to an installed schema. Preserve valid configuration and report this limitation; deleting Tasks, Triggers or sources cannot change the schema. For a new setup, declare handoff_id before installation and populate it in the write tool"
             ),
         }
     }

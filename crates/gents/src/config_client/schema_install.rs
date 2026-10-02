@@ -10,6 +10,12 @@ use sha2::{Digest, Sha256};
 use super::schema_contract::{collection_schema_field_delta, SchemaFieldDelta};
 use super::{collection_schema_contract_digest, ConfigAccess};
 
+#[derive(Debug, thiserror::Error)]
+#[error("existing collection {collection:?} does not match requested schema")]
+pub(crate) struct SchemaInstallMismatch {
+    pub collection: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SchemaInstallPlan {
     pub artifact_digest: String,
@@ -60,8 +66,8 @@ async fn preview_schema(
     let expected = query::parse_sdl(sdl)?;
     ensure!(!expected.is_empty(), "schema declares no collection");
     let mut contracts = BTreeMap::new();
-    let mut missing = false;
-    let mut existing = false;
+    let mut missing = Vec::new();
+    let mut existing = Vec::new();
     let mut field_deltas = BTreeMap::new();
     for collection in expected {
         let digest = collection_schema_contract_digest(&serde_json::to_value(&collection)?)?;
@@ -74,33 +80,31 @@ async fn preview_schema(
         );
         match access.collection_version(&collection.name).await? {
             Some(live) => {
-                existing = true;
+                existing.push(collection.name.clone());
                 let delta =
                     collection_schema_field_delta(&serde_json::to_value(&collection)?, &live)
-                        .with_context(|| {
-                            format!(
-                                "existing collection {:?} does not match requested schema",
-                                collection.name
-                            )
+                        .with_context(|| SchemaInstallMismatch {
+                            collection: collection.name.clone(),
                         })?;
-                ensure!(
-                    additive || (delta.pending.is_empty() && delta.extra.is_empty()),
-                    "existing collection {:?} does not match requested schema",
-                    collection.name
-                );
+                if !additive && (!delta.pending.is_empty() || !delta.extra.is_empty()) {
+                    return Err(SchemaInstallMismatch {
+                        collection: collection.name,
+                    }
+                    .into());
+                }
                 field_deltas.insert(collection.name.clone(), delta);
             }
-            None => missing = true,
+            None => missing.push(collection.name),
         }
     }
     ensure!(
-        !(missing && existing),
-        "schema mixes existing and missing collections"
+        missing.is_empty() || existing.is_empty(),
+        "schema mixes existing collections {existing:?} and missing collections {missing:?}. Preview/install the missing collections separately; do not repeat existing definitions in that installation"
     );
     Ok(SchemaInstallPlan {
         artifact_digest: format!("sha256:{:x}", Sha256::digest(sdl.as_bytes())),
         collection_contracts: contracts,
-        requires_publication: missing,
+        requires_publication: !missing.is_empty(),
         field_deltas,
     })
 }

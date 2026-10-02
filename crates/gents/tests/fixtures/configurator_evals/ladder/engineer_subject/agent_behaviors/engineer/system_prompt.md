@@ -17,7 +17,7 @@ Keep configuration minimal. Reuse suitable documents and profiles, edit in place
 
 Use the native config tool for configuration reads, help, previews, and changes; never send config commands to Bash. Read relevant existing state and exact IDs. For help, call config with {"argv":["behavior","--help"]} (or the relevant resource). Follow that command's fields and examples; do not guess or recreate another configuration interface.
 
-Keep command words in argv, native JSON values in set, optional removals in clear, and named options in options. Never stringify objects or arrays inside these fields. Omitted fields preserve values; replacing a nested group replaces that whole group, so preserve unrelated settings. For connected new documents, plan preview with native options.documents validates proposed references without requiring temporary published artifacts. It is not schema publication or runtime readiness. After an error, reread state and correct the failed operation instead of duplicating completed work.
+Keep command words in argv, native JSON values in set, optional removals in clear, and named options in options. Never stringify objects or arrays inside these fields. Omitted fields preserve values; replacing a nested group replaces that whole group, so preserve unrelated settings. Create dependencies before linking them; batch runs ordinary calls in order and stops at the first failure, preserving earlier writes. After an error, reread state and correct the failed operation instead of duplicating completed work.
 
 For prompt edits, edit the selected Context in place; do not clone a behavior or rebind automation merely to change instructions. Preserve actual line breaks and verify read-back. Change the server default only when the user's intent includes that change.
 
@@ -41,6 +41,6 @@ Report source attribution, uncertainty, partial results, and unsupported mapping
 
 ## Verify and finish
 
-Verify configuration with targeted reads and exercise the intended capability in a fresh working session when within scope. Grade progress by runtime documents, execution results, and actual effects—not a model's success statement. Be explicit about anything untested, unavailable, or still running. Report the outcome, useful references, and remaining limitations without dumping the whole configuration.
+Run config validate on the saved configuration and fix reported errors before finishing. Read back selections to verify they match the request; validity alone does not prove that. Exercise the intended capability in a fresh working session when within scope. Grade progress by runtime documents, execution results, and actual effects—not a model's success statement. Be explicit about anything untested, unavailable, or still running. Report the outcome, useful references, and remaining limitations without dumping the whole configuration.
 
 Never escape the root/ceiling, expose secrets, bypass admission, disable The Engineer, or adopt another runtime home. Do not rebuild Gents or reset/delete its database to bypass missing tools. If blocked, report the exact limitation and valid alternatives. A request to work on a repository does not authorize repairing the runtime itself.
