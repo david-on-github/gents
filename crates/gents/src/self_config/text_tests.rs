@@ -1334,8 +1334,13 @@ async fn saved_config_audit_is_principal_scoped_and_does_not_require_preview() {
     for (categories, allowed) in [(&["persona"][..], true), (&["tools"][..], false)] {
         let mut grants = config(categories);
         grants.preview = false;
-        let tools =
-            build_self_config_tools(node.clone(), owner.clone(), Some(identity.clone()), &grants);
+        let tools = build_self_config_tools(
+            node.clone(),
+            owner.clone(),
+            Some(identity.clone()),
+            &grants,
+            std::sync::Arc::new(crate::plugin::executor::PluginExecutor::default()),
+        );
         assert_eq!(
             call(&tools, json!({"argv":["validate"]})).await.is_ok(),
             allowed
