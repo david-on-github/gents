@@ -157,6 +157,8 @@ pub(crate) struct TrialVerdict {
     /// What the check observed against what it expected.
     pub(crate) detail: Option<String>,
     pub(crate) regrade_of: Option<String>,
+    pub(crate) raw: serde_json::Value,
+    pub(crate) feedback: Option<String>,
 }
 
 impl From<VerdictRecord> for TrialVerdict {
@@ -173,6 +175,8 @@ impl From<VerdictRecord> for TrialVerdict {
             score_bp: verdict.score_bp,
             weight: verdict.weight,
             regrade_of: verdict.regrade_of,
+            raw: verdict.raw,
+            feedback: verdict.feedback,
         }
     }
 }
@@ -432,6 +436,7 @@ mod tests {
         assert_eq!(json["slot"]["class"], "pass");
         assert_eq!(json["slot"]["trial_index"], 0);
         assert_eq!(json["verdicts"][0]["reason_code"], "in_range");
+        assert_eq!(json["verdicts"][0]["raw"]["count"], 1);
 
         let cancelled = CancellationToken::new();
         cancelled.cancel();

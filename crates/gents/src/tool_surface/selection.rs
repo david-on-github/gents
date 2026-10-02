@@ -168,6 +168,8 @@ pub struct ResolvedToolSelection {
     pub defra_query_collections: Vec<String>,
     pub write_tools: Vec<crate::document_config::WriteToolDecl>,
     pub query_tools: Vec<crate::document_config::QueryToolDecl>,
+    /// See [`crate::document_config::MergedSurfaceTools::surface_of_tool`].
+    pub surface_of_tool: std::collections::BTreeMap<String, String>,
     pub enable_self_config: bool,
     pub self_config_categories: Option<Vec<String>>,
     pub self_config_no_lockout: bool,
@@ -206,6 +208,7 @@ impl Default for ResolvedToolSelection {
             defra_query_collections: Vec::new(),
             write_tools: Vec::new(),
             query_tools: Vec::new(),
+            surface_of_tool: Default::default(),
             enable_self_config: false,
             self_config_categories: None,
             self_config_no_lockout: false,
@@ -374,6 +377,7 @@ impl ResolvedToolSelection {
             // DatastoreToolSurface/EthTool documents are expanded by the caller.
             write_tools: Vec::new(),
             query_tools: Vec::new(),
+            surface_of_tool: Default::default(),
             enable_self_config: self_config_group
                 .and_then(|group| group.enable_self_config)
                 .unwrap_or(false),

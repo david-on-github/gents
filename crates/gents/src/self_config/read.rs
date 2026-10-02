@@ -8,6 +8,31 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::Path;
 
+/// Displays execution defaults without changing the authored document or a running request.
+pub(super) fn execution_settings(document: Option<&Value>) -> Result<Value> {
+    use crate::config::*;
+    let mut document = document.cloned().unwrap_or_else(|| {
+        json!({
+            "agent_did": "", "execution_id": ""
+        })
+    });
+    if let Some(object) = document.as_object_mut() {
+        object.remove("_docID");
+    }
+    let execution: crate::document_config::InferenceExecution = serde_json::from_value(document)?;
+    execution.validate()?;
+    Ok(json!({
+        "max_turns": execution.max_turns.unwrap_or(DEFAULT_MAX_TURNS as i64),
+        "max_total_tokens": execution.max_total_tokens,
+        "stream_batch_ms": execution.stream_batch_ms.unwrap_or(DEFAULT_STREAM_BATCH_MS as i64),
+        "stream_liveness_timeout_secs": execution.stream_liveness_timeout_secs.unwrap_or(DEFAULT_STREAM_LIVENESS_TIMEOUT_SECS as i64),
+        "provider_idle_timeout_secs": execution.provider_idle_timeout_secs.unwrap_or(DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS as i64),
+        "deadline_duration_secs": execution.deadline_duration_secs.unwrap_or(DEFAULT_DEADLINE_DURATION_SECS as i64),
+        "retry_policy_id": execution.retry_policy_id,
+        "meaning": "Unset fields use the defaults shown. deadline_duration_secs caps elapsed time per request, including model and tool work; provider_idle_timeout_secs caps provider silence. max_total_tokens null means unlimited; retry_policy_id null uses the request-origin retry policy. stream_batch_ms batches persistence; stream_liveness_timeout_secs is the renewed execution lease, independent of provider output."
+    }))
+}
+
 impl SelfConfigCore {
     pub(crate) async fn read_effective_config(
         &self,
@@ -227,6 +252,7 @@ impl SelfConfigCore {
             "agent_did": self.agent_did(), "behavior_id": self.behavior_id(),
             "behavior": anchor.doc, "context": anchor.context, "inference_profile": anchor.profile,
             "documents": documents, "skills": skills, "automation": automation,
+            "execution_settings": execution_settings(documents.get("InferenceExecution"))?,
             "self_config": {"categories": categories, "no_lockout": no_lockout, "preview": preview},
             "tool_grants": {
                 "configured": { "lsp": lsp_selected, "native_graph_tools": graph_selected, "network_mode": configured_network_mode },
@@ -236,6 +262,7 @@ impl SelfConfigCore {
                 "graph_readiness": "Selection does not install a pack or grant graph caller admission. Use native list_graphs/run_graph on this node; do not adopt another runtime home or rebuild a CLI.",
             },
             "runtime_effective": {
+                "meaning": "behavior_narrowing is saved permission; effective also applies this process's ceiling. Save lasting role restrictions in Tools even when this process already blocks access. Use tools edit with options.behavior to select the role.",
                 "process_ceiling": process_ceiling,
                 "behavior_narrowing": {
                     "requested_file_mode": requested_file_mode,

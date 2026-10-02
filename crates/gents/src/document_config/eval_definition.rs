@@ -70,7 +70,8 @@ pub struct EvalSubject {
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 pub struct EvalFixtureDocument {
     pub collection: String,
-    /// An app-collection row. Its schema belongs to that collection.
+    /// A fixture row. String values equal to `$trial` bind to the trial's DID
+    /// when installed; object keys and strings containing it stay literal.
     #[cfg_attr(feature = "typescript", ts(type = "unknown"))]
     pub document: serde_json::Value,
 }
@@ -202,6 +203,11 @@ pub struct EvalStage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "typescript", ts(optional = nullable))]
     pub continuation: Option<EvalContinuation>,
+    /// Append the previous stage's check feedback to this prompt. This is an
+    /// explicit assisted-eval condition; ordinary stages receive no grader feedback.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "typescript", ts(as = "Option<bool>", optional = nullable))]
+    pub review_previous: bool,
     #[serde(
         default,
         deserialize_with = "super::serde_helpers::deserialize_default_on_null",
@@ -347,7 +353,7 @@ impl EvalDefinition {
             );
             let mut stage_ids = BTreeSet::new();
             let mut acceptance = 0usize;
-            for stage in &case.stages {
+            for (stage_index, stage) in case.stages.iter().enumerate() {
                 let stage_id = &stage.stage_id;
                 ensure!(
                     !stage_id.trim().is_empty(),
@@ -364,6 +370,11 @@ impl EvalDefinition {
                 ensure!(
                     stage.seed.is_some() != !stage.prompt.trim().is_empty(),
                     "eval definition {id} case {case_id} stage {stage_id} needs exactly one of seed or prompt"
+                );
+                ensure!(
+                    !stage.review_previous || (stage_index > 0 && stage.seed.is_none()
+                        && !case.stages[stage_index - 1].checks.is_empty()),
+                    "eval definition {id} case {case_id} stage {stage_id} review_previous requires a prompt and a preceding checked stage"
                 );
                 if let Some(seed) = &stage.seed {
                     ensure!(
@@ -672,6 +683,29 @@ mod tests {
         unknown["cases"][0]["stages"][0]["capture"] =
             json!([{"kind": "file", "name": "r", "glob": "*", "extra": 1}]);
         assert!(serde_json::from_value::<EvalDefinition>(unknown).is_err());
+    }
+
+    #[test]
+    fn assisted_review_requires_a_previous_checked_stage() {
+        invalid(
+            |v| v["cases"][0]["stages"][0]["review_previous"] = true.into(),
+            "review_previous requires a prompt and a preceding checked stage",
+        );
+        let mut value = definition();
+        let mut review = value["cases"][0]["stages"][0].clone();
+        review["stage_id"] = "repair".into();
+        review["review_previous"] = true.into();
+        value["cases"][0]["stages"]
+            .as_array_mut()
+            .unwrap()
+            .push(review);
+        parse(value.clone()).validate().unwrap();
+        value["cases"][0]["stages"][0]["checks"] = serde_json::json!([]);
+        assert!(parse(value)
+            .validate()
+            .unwrap_err()
+            .to_string()
+            .contains("review_previous"));
     }
 
     #[test]

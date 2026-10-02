@@ -51,7 +51,7 @@ pub use installation::{
     ProjectionAcpBinding, ProjectionAcpObservation, RepositoryPlacement, ToolServiceRegistry,
 };
 pub use pack_config::PackConfig;
-pub use references::ConfigReferences;
+pub use references::{ConfigReferences, MissingReference};
 
 #[allow(unused_imports)]
 pub(crate) use behavior::{list_agent_behavior_records, load_agent_behavior_record};
@@ -91,12 +91,12 @@ pub use tools::{
     LspTools, PluginToolRef, RemoteServiceTools, RemoteToolStyle, RemoteTools, SelfConfigTools,
     SubagentTools, Tools,
 };
-pub(crate) use write_tool::reject_protected_collection_name;
 pub use write_tool::{
-    is_reserved_builtin_tool_name, OutputObligationDecision, WriteToolDecl, WriteToolField,
-    WriteToolFieldFill, WriteToolOutputObligation, WriteToolOutputObligationScope,
+    is_reserved_builtin_tool_name, runtime_filled_refusal, OutputObligationDecision, WriteToolDecl,
+    WriteToolField, WriteToolFieldFill, WriteToolOutputObligation, WriteToolOutputObligationScope,
     PROTECTED_DATASTORE_COLLECTIONS,
 };
+pub(crate) use write_tool::{reject_protected_collection_name, undeclared_field_refusal};
 
 pub use subagent_target::SubagentTargetDocument;
 

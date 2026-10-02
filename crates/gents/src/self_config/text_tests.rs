@@ -127,7 +127,7 @@ async fn behavior_ids_resolve_from_their_principal_local_slug() {
 }
 
 #[tokio::test]
-async fn profile_receipts_name_the_default_target_and_preview_takes_no_edit_verb() {
+async fn profile_receipts_name_the_default_target_and_preview_edit_means_preview() {
     let (_node, _owner, tools) = setup("profile-target", &["persona", "profile"]).await;
     let receipt = ok(
         &tools,
@@ -136,15 +136,113 @@ async fn profile_receipts_name_the_default_target_and_preview_takes_no_edit_verb
     .await;
     assert_eq!(receipt["behavior_id"], "beh-test");
     assert_eq!(receipt["target_id"], "beh-test:inference");
-    let error = refused(
+    let aliased = ok(
         &tools,
         json!({"argv":["profile","preview","edit"],"set":{"display_name":"Mine"}}),
     )
     .await;
+    assert_eq!(aliased["committed"], false);
+    assert_eq!(aliased["target_id"], "beh-test:inference");
+}
+
+/// #2133: verbs a model guesses resolve to the command they mean, or the
+/// refusal shows the exact working form.
+#[tokio::test]
+async fn guessed_verbs_resolve_or_name_the_working_form() {
+    let (_node, _owner, tools) = setup("verbs", &["persona", "tools", "automation"]).await;
+    let task = |verb: &[&str]| {
+        let mut argv = vec!["automation"];
+        argv.extend_from_slice(verb);
+        argv.push("task");
+        json!({"argv":argv,"target_id":"review","set":{"prompt_template":"Review."}})
+    };
+    for verb in [&["preview", "edit"][..], &["preview", "create"][..]] {
+        let receipt = ok(&tools, task(verb)).await;
+        assert_eq!(receipt["committed"], false, "{verb:?}: {receipt}");
+    }
+    let created = ok(&tools, task(&["create"])).await;
+    assert_eq!(created["committed"], true, "{created}");
+    assert_eq!(created["target_id"], "review");
+
+    let tools_preview = ok(
+        &tools,
+        json!({"argv":["tools","preview","edit"],"set":{"tags":["x"]}}),
+    )
+    .await;
+    assert_eq!(tools_preview["committed"], false);
+    for argv in [
+        json!(["tools", "create"]),
+        json!(["tools", "preview", "create"]),
+    ] {
+        let error = refused(&tools, json!({"argv":argv,"set":{"tags":["x"]}})).await;
+        assert!(
+            error.contains(r#"tools are created with their behavior (behavior create); change a behavior's tools with {\"argv\":[\"tools\",\"edit\"],\"options\":{\"behavior\":\"BEHAVIOR_ID\"}"#),
+            "{error}"
+        );
+    }
+    let schema = refused(
+        &tools,
+        json!({"argv":["schema","apply","install"],"options":{"sdl":"type A { a: String }"}}),
+    )
+    .await;
     assert!(
-        error.contains("profile preview replaces edit")
-            && !error.contains("unknown profile target"),
+        schema.contains(r#"schema has no apply verb; use [\"schema\",\"install\"] with options.sdl and options.digest"#),
+        "{schema}"
+    );
+    let automation = refused(&tools, json!({"argv":["automation","apply","task"]})).await;
+    assert!(
+        automation.contains(r#"automation has no apply verb; use the previewed call with its target_id, options and set, removing \"preview\" from argv and putting \"edit\" in its place when no create or edit follows it"#),
+        "{automation}"
+    );
+}
+
+/// #2133: a decode error names the field path and its advertised shape, not
+/// the Rust type serde expected.
+#[tokio::test]
+async fn type_errors_name_the_field_path_and_shape() {
+    let (_node, _owner, tools) = setup("shapes", &["tools"]).await;
+    let error = refused(
+        &tools,
+        json!({"argv":["tools","preview"],"set":{"integrations":{"lsp":"gents-mailbox"}}}),
+    )
+    .await;
+    assert!(
+        error.contains(r#"Tools field integrations.lsp: invalid type: string \"gents-mailbox\"; expected {\"config\":\"JSON encoded as a string|null\""#),
         "{error}"
+    );
+    assert!(!error.contains("LspTools"), "{error}");
+    let nested = refused(
+        &tools,
+        json!({"argv":["tools","preview"],"set":{"host":{"cli":[{"name":7}]}}}),
+    )
+    .await;
+    assert!(
+        nested.contains(r#"Tools field host.cli[0].name: invalid type: integer `7`; expected string; host-registered CLI tool name"#),
+        "{nested}"
+    );
+}
+
+/// #2133: a target ID sent in argv and target_id is one ID when they agree.
+#[test]
+fn target_id_may_repeat_the_argv_id_but_not_conflict() {
+    let params = |target_id: &str| {
+        serde_json::from_value::<command::ConfigCommandParams>(json!({
+            "argv": ["datastore", "edit", "handoff-tools"],
+            "target_id": target_id,
+        }))
+        .unwrap()
+    };
+    assert_eq!(
+        json!(params("handoff-tools").into_argv_for_test().unwrap()),
+        json!(["datastore", "edit", "handoff-tools"])
+    );
+    let conflict = params("other")
+        .into_argv_for_test()
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        conflict,
+        r#"target ID "handoff-tools" in argv conflicts with target_id "other"; send one of them"#
     );
 }
 
@@ -587,5 +685,141 @@ fn a_list_of_strings_in_options_is_the_repeated_flag() {
             "--target",
             "trigger=b"
         ])
+    );
+}
+
+/// Ladder findings: reads a model guesses name the working read form.
+#[tokio::test]
+async fn guessed_lists_name_the_working_read() {
+    let (_node, _owner, tools) = setup("lists", &["persona", "tools", "automation"]).await;
+    for (args, form) in [
+        (
+            json!({"argv":["tools","list"]}),
+            r#"tools has no list: each behavior has one; read it with {\"argv\":[\"tools\",\"get\"],\"options\":{\"behavior\":\"BEHAVIOR_ID\"}}"#,
+        ),
+        (
+            json!({"argv":["automation","list","task"]}),
+            r#"automation has no list; a behavior's event sources, schedules, triggers and tasks are in {\"argv\":[\"get\"],\"options\":{\"behavior\":\"BEHAVIOR_ID\"}} under automation"#,
+        ),
+        (
+            json!({"argv":["datastore","get"]}),
+            r#"surface IDs are listed in a behavior's Tools: read {\"argv\":[\"tools\",\"get\"],\"options\":{\"behavior\":\"BEHAVIOR_ID\"}}, then [\"datastore\",\"get\",SURFACE_ID]"#,
+        ),
+        (
+            json!({"argv":["datastore","list"]}),
+            r#"surface IDs are listed in a behavior's Tools"#,
+        ),
+    ] {
+        let error = refused(&tools, args.clone()).await;
+        assert!(error.contains(form), "{args}: {error}");
+    }
+}
+
+/// Ladder finding: target_id on a command with a positional ID is that ID.
+#[tokio::test]
+async fn target_id_fills_a_positional_id() {
+    let (_node, _owner, tools) = setup("positional", &["persona", "tools"]).await;
+    for args in [
+        json!({"argv":["behavior","get"],"target_id":"beh-test"}),
+        json!({"argv":["behavior","get","beh-test"],"target_id":"beh-test"}),
+    ] {
+        let read = ok(&tools, args.clone()).await;
+        assert_eq!(read["behavior_id"], "beh-test", "{args}");
+    }
+    let conflict = refused(
+        &tools,
+        json!({"argv":["behavior","get","beh-test"],"target_id":"other"}),
+    )
+    .await;
+    assert!(
+        conflict.contains(r#"target ID \"beh-test\" in argv conflicts with target_id \"other\""#),
+        "{conflict}"
+    );
+    let unsupported = refused(&tools, json!({"argv":["tools","get"],"target_id":"x"})).await;
+    assert!(
+        unsupported.contains("target_id is not accepted by tools")
+            && unsupported.contains("options.behavior"),
+        "{unsupported}"
+    );
+    let recovered = ok(
+        &tools,
+        json!({"argv":["tools","get"],"options":{"behavior":"beh-test"}}),
+    )
+    .await;
+    assert_eq!(recovered["document"]["tools_id"], "beh-test:tools");
+}
+
+/// Ladder finding: an unknown plan collection is named and classified.
+#[tokio::test]
+async fn plan_names_an_unknown_collection_and_what_it_is() {
+    let (_node, owner, tools) = setup("plan-collection", &["persona", "tools"]).await;
+    let plan = |collection: &str| json!({"argv":["plan","preview"],"options":{"documents":[{"collection":collection,"document":{"agent_did":owner,"tools_id":"t"}}]}});
+    for (collection, expected) in [
+        (
+            "agent_behavior",
+            r#"unknown collection \"agent_behavior\"; did you mean \"AgentBehavior\"?"#,
+        ),
+        (
+            "Behavior",
+            r#"unknown collection \"Behavior\"; did you mean \"AgentBehavior\"?"#,
+        ),
+        (
+            "AgentRequest",
+            r#"\"AgentRequest\" is an application collection, not configuration; plan preview stages only AgentBehavior"#,
+        ),
+        (
+            "Handoff",
+            r#"\"Handoff\" is neither a configuration collection nor an installed schema"#,
+        ),
+    ] {
+        let error = refused(&tools, plan(collection)).await;
+        assert!(error.contains(expected), "{collection}: {error}");
+    }
+}
+
+/// Mailbox suite: help states the identity choice where a policy is written,
+/// and the monitor example uses condition identity.
+#[tokio::test]
+async fn mailbox_help_states_the_identity_choice() {
+    let (_node, _owner, tools) = setup("mailbox-help", &["tools"]).await;
+    let choice = "condition identity: one open item per stable finding, updated across requests; event identity: a new item for every request";
+    for argv in [
+        json!(["help", "datastore"]),
+        json!(["datastore", "create", "--help"]),
+    ] {
+        let help = ok(&tools, json!({"argv":argv})).await;
+        let help = help.as_str().unwrap();
+        assert!(help.contains(choice), "{argv}: {help}");
+    }
+    let page = ok(&tools, json!({"argv":["help","datastore"]})).await;
+    assert!(
+        page.as_str().unwrap().contains(r#"A monitor uses condition identity: {"argv":["datastore","create"],"target_id":"monitor-mailbox","options":{"mailbox":{"identity":{"mode":"condition","key":"host-health"}"#),
+        "{page}"
+    );
+}
+
+/// L3 datastore finding: the page says what fill means, with a caller key
+/// named correlation and a runtime-filled request_correlation.
+#[tokio::test]
+async fn datastore_help_says_what_fill_means() {
+    let (_node, _owner, tools) = setup("fill-help", &["tools"]).await;
+    let page = ok(&tools, json!({"argv":["help","datastore"]})).await;
+    let page = page.as_str().unwrap();
+    for line in [
+        "fill: correlation uses the request/trigger correlation ID",
+        "Omit fill for caller-supplied values",
+        "omitted or empty means none",
+        "current request keeps its existing tools",
+        r#"Caller value: {"name":"correlation"}. Runtime ID: {"name":"request_correlation","fill":"correlation"}"#,
+    ] {
+        assert!(page.contains(line), "{line}\n{page}");
+    }
+    let shapes = ok(&tools, json!({"argv":["datastore","create","--help"]})).await;
+    assert!(
+        shapes
+            .as_str()
+            .unwrap()
+            .contains(r#"fill fields are runtime-filled and never model arguments (what fill means: [\"help\",\"datastore\"])"#),
+        "{shapes}"
     );
 }

@@ -123,7 +123,7 @@ async fn collection_names(node: &std::sync::Arc<EmbeddedNode>) -> Result<BTreeSe
 
 /// Requests, model turns, tokens and tool calls across the whole home: every
 /// row in a trial home is the trial's.
-async fn activity(node: &EmbeddedNode) -> Result<LiveSnapshot> {
+async fn activity(node: &std::sync::Arc<EmbeddedNode>) -> Result<LiveSnapshot> {
     let requests = crate::session::public_request_filter("");
     let query = format!(
         r#"{{
@@ -156,6 +156,20 @@ async fn activity(node: &EmbeddedNode) -> Result<LiveSnapshot> {
         model_turns: evidence.inference_calls.len() as u64,
         input_tokens: usage.input_tokens,
         output_tokens: usage.output_tokens,
+        reported_input_tokens: Some(
+            evidence
+                .inference_calls
+                .iter()
+                .filter_map(|call| call.prompt_tokens)
+                .fold(0, u64::saturating_add),
+        ),
+        reported_output_tokens: Some(
+            evidence
+                .inference_calls
+                .iter()
+                .filter_map(|call| call.completion_tokens)
+                .fold(0, u64::saturating_add),
+        ),
         tool_calls: evidence.tool_calls.len() as u64,
         failed_tool_calls,
         tools,
@@ -166,8 +180,8 @@ async fn activity(node: &EmbeddedNode) -> Result<LiveSnapshot> {
 
 /// The tool call that started last, with the start of its result on one
 /// line; `None` when there is none or it cannot be read.
-async fn last_tool_call(node: &EmbeddedNode) -> Option<LastToolCall> {
-    let query = r#"{ AgentToolCall(order: { started_at: DESC }, limit: 1) { tool_name lifecycle_state result } }"#;
+async fn last_tool_call(node: &std::sync::Arc<EmbeddedNode>) -> Option<LastToolCall> {
+    let query = r#"{ AgentToolCall(order: { started_at: DESC }, limit: 1) { _docID agent_did session_id requester_did tool_name lifecycle_state } }"#;
     let response = graphql_with_transaction_retry(node, query, "eval trial last tool call")
         .await
         .map_err(|error| {
@@ -182,10 +196,23 @@ async fn last_tool_call(node: &EmbeddedNode) -> Option<LastToolCall> {
         .first()?
         .clone();
     let text = |key: &str| row.get(key).and_then(Value::as_str).map(str::to_owned);
+    let result = crate::tool_call_lifecycle::query::load_tool_call_presentation(
+        &ConfigAccess::Local(node.clone()),
+        row.get("_docID")?.as_str()?,
+        row.get("agent_did")?.as_str()?,
+        row.get("session_id")?.as_str()?,
+        row.get("requester_did").and_then(Value::as_str),
+    )
+    .await
+    .map_err(|error| {
+        tracing::debug!(error = %format!("{error:#}"), "eval last tool presentation was not read");
+    })
+    .ok()
+    .and_then(|read| read.result);
     Some(LastToolCall {
         tool_name: text("tool_name")?,
         state: text("lifecycle_state"),
-        result: text("result").map(|result| one_line(&result, LastToolCall::RESULT_CHARS)),
+        result: result.map(|result| one_line(&result, LastToolCall::RESULT_CHARS)),
     })
 }
 
@@ -216,5 +243,53 @@ async fn count(node: &EmbeddedNode, query: &str, collection: &str) -> Option<u64
             );
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pending_usage_keeps_reported_tokens_visible_without_claiming_an_exact_total() {
+        let home = super::super::home::EmbeddedHome::create_temp("live-partial-usage")
+            .await
+            .unwrap();
+        for mutation in [
+            r#"mutation { create_InferenceCall(input: { call_id: "done", call_seq: 0, call_state: "completed", prompt_tokens: 112, completion_tokens: 20 }) { _docID } }"#,
+            r#"mutation { create_InferenceCall(input: { call_id: "pending", call_seq: 1, call_state: "running" }) { _docID } }"#,
+        ] {
+            ConfigAccess::write_local(&home.node, "eval.test.live_usage", mutation)
+                .await
+                .unwrap();
+        }
+        let live = activity(&home.node).await.unwrap();
+        assert_eq!(live.input_tokens, None);
+        assert_eq!(live.output_tokens, None);
+        assert_eq!(live.reported_input_tokens, Some(112));
+        assert_eq!(live.reported_output_tokens, Some(20));
+        ConfigAccess::write_local(&home.node, "eval.test.live_usage_complete", r#"mutation { update_InferenceCall(filter: {call_id: {_eq: "pending"}}, input: {call_state: "completed", prompt_tokens: 8, completion_tokens: 3}) { _docID } }"#).await.unwrap();
+        let live = activity(&home.node).await.unwrap();
+        assert_eq!(live.input_tokens, Some(120));
+        assert_eq!(live.output_tokens, Some(23));
+        assert_eq!(live.reported_input_tokens, live.input_tokens);
+        assert_eq!(live.reported_output_tokens, live.output_tokens);
+        home.node.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn last_tool_reads_canonical_delivery_and_keeps_running_calls_visible() {
+        let (node, path, mut tool) =
+            crate::tool_call_lifecycle::admission_fixture::published_spawn_parent("eval-last-tool")
+                .await;
+        let running = last_tool_call(&node).await.expect("running tool");
+        assert_eq!(running.state.as_deref(), Some("running"));
+        assert_eq!(running.result, None);
+        tool.complete("saved\n  the record").await.unwrap();
+        let finished = last_tool_call(&node).await.expect("completed tool");
+        assert_eq!(finished.state.as_deref(), Some("completed"));
+        assert_eq!(finished.result.as_deref(), Some("saved the record"));
+        node.shutdown().await;
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

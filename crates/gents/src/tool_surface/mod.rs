@@ -75,6 +75,7 @@ pub struct ToolSurface {
     pub(super) defra_query_scope: CollectionScope,
     pub(super) write_tools: Vec<WriteToolDecl>,
     pub(super) query_tools: Vec<QueryToolDecl>,
+    pub(super) surface_of_tool: std::collections::BTreeMap<String, String>,
     pub(super) eth_queries: Vec<crate::eth::ResolvedEthQuery>,
     pub(super) eth_calls: Vec<crate::eth::ResolvedEthCall>,
     pub(super) plugin_tools: Vec<crate::document_config::PluginToolRef>,
@@ -368,7 +369,8 @@ impl ToolSurface {
                         .context("missing notification policy")?,
                 )) as Box<dyn ToolDyn>);
             } else {
-                let tool = BoundedWriteTool::new(runtime.node.clone(), decl.clone());
+                let tool = BoundedWriteTool::new(runtime.node.clone(), decl.clone())
+                    .declared_by(self.surface_of_tool.get(&decl.tool_name).cloned());
                 if !tool.is_well_formed() {
                     anyhow::bail!(
                         "write tool `{}` has an unavailable or unsupported collection schema",
@@ -379,7 +381,8 @@ impl ToolSurface {
             }
         }
         for decl in &self.query_tools {
-            let tool = BoundedQueryTool::new(runtime.node.clone(), decl.clone());
+            let tool = BoundedQueryTool::new(runtime.node.clone(), decl.clone())
+                .declared_by(self.surface_of_tool.get(&decl.tool_name).cloned());
             if !tool.is_well_formed() {
                 anyhow::bail!(
                     "query tool `{}` reached registration with an invalid declaration",

@@ -27,11 +27,26 @@ use crate::tool_surface::SelfConfigProcessCeiling;
 use crate::toolset::CommandNetworkMode;
 
 #[derive(Debug, thiserror::Error)]
-#[error(
-    "unknown behavior_id {behavior_id:?}; copy an exact ID from [\"behavior\",\"list\"] (behavior create returns \"<DID>:<slug>\")"
-)]
 pub(super) struct MissingBehavior {
     pub behavior_id: String,
+    /// Behavior IDs whose slug or display name equals the requested ID
+    /// ignoring case. Never resolved implicitly: display names are mutable
+    /// and not unique.
+    pub suggestions: Vec<String>,
+}
+
+impl std::fmt::Display for MissingBehavior {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unknown behavior_id {:?}; ", self.behavior_id)?;
+        match self.suggestions.as_slice() {
+            [] => write!(
+                f,
+                "copy an exact ID from [\"behavior\",\"list\"] (behavior create returns \"<DID>:<slug>\")"
+            ),
+            [only] => write!(f, "did you mean {only:?}?"),
+            several => write!(f, "did you mean one of {several:?}?"),
+        }
+    }
 }
 
 /// How a self-config write lands: config documents are watched by the control
@@ -171,6 +186,7 @@ impl SelfConfigCore {
         else {
             return Err(MissingBehavior {
                 behavior_id: self.behavior_id.clone(),
+                suggestions: Vec::new(),
             }
             .into());
         };
@@ -315,7 +331,24 @@ impl SelfConfigCore {
             created: creating,
             committed: false,
             changed,
-            effect: EFFECT_TIMING_NOTE,
+            effect: if request.target == SelfConfigTarget::DatastoreToolSurface {
+                "Install its collection schemas before selecting this surface. Read tools get, then add its ID to set.datastore.datastore_tool_surface_ids, preserving existing selections. Tools apply after reconciliation to later requests."
+            } else if creating && request.target == SelfConfigTarget::InferenceProfile {
+                "Creating a profile does not select it for a behavior. To use it, call behavior edit with set.inference_profile_id equal to this target_id. Selecting it preserves the previous profile and its settings. The selection applies to later requests after reconciliation."
+            } else if request.target == SelfConfigTarget::Tools
+                && request.patch.iter().any(|(field, _)| field == "subagents")
+                && merged.get("subagents").is_some_and(|group| {
+                    group.get("enabled").and_then(Value::as_bool) != Some(true)
+                        && group
+                            .get("target_ids")
+                            .and_then(Value::as_array)
+                            .is_some_and(|ids| !ids.is_empty())
+                })
+            {
+                "Selected targets are inactive: subagents.enabled is not true. To enable delegation, call tools edit with options.behavior set to this behavior_id and set.subagents containing enabled:true plus the existing target_ids. Tools apply after reconciliation to later requests."
+            } else {
+                EFFECT_TIMING_NOTE
+            },
         })
     }
 
@@ -595,13 +628,28 @@ impl<'a> ApplyRequest<'a> {
 }
 
 /// Decode a merged document projection into a typed document for structural
-/// validation; the error names the offending field/type for the model.
+/// validation. The error names the field path and its advertised shape, not
+/// the Rust type serde expected there.
 pub(crate) fn decode_merged<T: serde::de::DeserializeOwned>(
     collection: &str,
     merged: &Map<String, Value>,
 ) -> Result<T> {
-    serde_json::from_value(Value::Object(merged.clone()))
-        .map_err(|error| anyhow!("merged {collection} document is not valid: {error}"))
+    serde_path_to_error::deserialize(Value::Object(merged.clone())).map_err(|error| {
+        let path = error.path().to_string();
+        let inner = error.inner().to_string();
+        match super::command::field_shape(collection, &path) {
+            Some(shape) => {
+                let found = inner.split(", expected ").next().unwrap_or(&inner);
+                let shape = shape
+                    .as_str()
+                    .map(ToOwned::to_owned)
+                    .unwrap_or_else(|| shape.to_string());
+                anyhow!("{collection} field {path}: {found}; expected {shape}")
+            }
+            None if path != "." => anyhow!("{collection} field {path}: {inner}"),
+            None => anyhow!("merged {collection} document is not valid: {inner}"),
+        }
+    })
 }
 
 /// Lean `SelfConfig.keepsReach`: the invoking behavior stays enabled and keeps

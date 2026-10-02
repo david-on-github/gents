@@ -276,7 +276,7 @@ fn validate_root(root: Option<&str>, catalog: &PersonaCatalogView) -> Option<Str
     if root.is_empty() {
         if catalog.root_policy_configured {
             return Some(format!(
-                "root is required while explicit WorkspaceRoot policy is configured — pick a descendant of the published allowed_roots: {}",
+                "root is required while explicit WorkspaceRoot policy is configured — use an existing allowed root or directory within it; configuration does not create directories. allowed_roots: {}",
                 enumerate_bounded(&catalog.allowed_roots)
             ));
         }
@@ -284,7 +284,7 @@ fn validate_root(root: Option<&str>, catalog: &PersonaCatalogView) -> Option<Str
     }
     if !std::path::Path::new(root).is_absolute() {
         return Some(format!(
-            r#"root "{root}" must be absolute — pick a descendant of the published allowed_roots: {}"#,
+            r#"root "{root}" must be absolute — use an existing allowed root or directory within it; configuration does not create directories. allowed_roots: {}"#,
             enumerate_bounded(&catalog.allowed_roots)
         ));
     }
@@ -295,7 +295,7 @@ fn validate_root(root: Option<&str>, catalog: &PersonaCatalogView) -> Option<Str
     match policy.admit(std::path::Path::new(root)) {
         Ok(crate::tool_surface::RootAdmission::Admitted(_)) => None,
         Ok(denied @ crate::tool_surface::RootAdmission::Denied { .. }) => Some(format!(
-            r#"root "{root}" is not allowed ({}) — pick a descendant of the published allowed_roots: {}"#,
+            r#"root "{root}" is not allowed ({}) — use an existing allowed root or directory within it; configuration does not create directories. allowed_roots: {}"#,
             denied.denial_reason().expect("denied outcome has a reason"),
             enumerate_bounded(&catalog.allowed_roots)
         )),
@@ -1076,7 +1076,7 @@ mod tests {
         assert_eq!(
             verdict,
             PersonaVerdict::Reject(format!(
-                r#"root "{outside}" is not allowed (resolved path is outside the allowed roots) — pick a descendant of the published allowed_roots: [{allowed}]"#
+                r#"root "{outside}" is not allowed (resolved path is outside the allowed roots) — use an existing allowed root or directory within it; configuration does not create directories. allowed_roots: [{allowed}]"#
             ))
         );
     }

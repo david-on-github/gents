@@ -35,7 +35,7 @@ use crate::eval::runner::embedded::home::{
 use crate::eval::runner::embedded::live::LiveObserver;
 use crate::eval::runner::embedded::observe::{
     await_terminal, classify_request_outcome, collect_request_evidence, poll_request,
-    InferenceCallEvidence, RequestEvidence, TerminalObservation,
+    request_evidence_from_query_data, InferenceCallEvidence, RequestEvidence, TerminalObservation,
 };
 use crate::eval::runner::executor::{
     Capture, CaptureResult, FileRef, FixtureDocument, InferenceBinding, Isolation, StageEvidence,
@@ -207,8 +207,9 @@ impl EmbeddedExecutor {
                 "eval trial runtime did not shut down cleanly"
             );
         }
+        let usage = home_usage(&home.node).await;
         close(home).await;
-        let (usage, anchor) = (usage(&stages), anchor(&stages));
+        let anchor = anchor(&stages);
         TrialEvidence::new(locator, stages, usage, anchor)
     }
 }
@@ -447,8 +448,9 @@ impl TrialExecutor for EmbeddedExecutor {
                 captures: run_captures(&home.node, &at.trial_agent_did, &workspace, captures).await,
             });
         }
+        let usage = home_usage(&home.node).await;
         close(home).await;
-        let (usage, anchor) = (usage(&stages), anchor(&stages));
+        let anchor = anchor(&stages);
         Some(TrialEvidence::new(at.clone(), stages, usage, anchor))
     }
 }
@@ -605,7 +607,7 @@ async fn install(spec: &TrialSpec, home: &EmbeddedHome, workspace: &Path) -> Res
     .context("installing the trial pack")?;
 
     install_workspace_root(&home.node, workspace).await?;
-    install_fixtures(&access, &spec.fixtures, workspace).await
+    install_fixtures(&access, &spec.fixtures, workspace, &agent_did).await
 }
 
 /// Bind every inference slot the pack declares to the profile the run froze.
@@ -784,6 +786,7 @@ async fn install_fixtures(
     access: &ConfigAccess,
     fixtures: &TrialFixtures,
     workspace: &Path,
+    trial_did: &str,
 ) -> Result<()> {
     for sdl in &fixtures.schemas {
         access
@@ -796,7 +799,7 @@ async fn install_fixtures(
             access,
             "eval.trial.fixture_document",
             &fixture.collection,
-            &fixture.document,
+            &bind_fixture_owner(&fixture.document, trial_did),
         )
         .await?;
     }
@@ -810,6 +813,25 @@ async fn install_fixtures(
             .with_context(|| format!("writing {}", path.display()))?;
     }
     Ok(())
+}
+
+fn bind_fixture_owner(value: &Value, trial_did: &str) -> Value {
+    match value {
+        Value::String(text) if text == "$trial" => Value::String(trial_did.into()),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|v| bind_fixture_owner(v, trial_did))
+                .collect(),
+        ),
+        Value::Object(fields) => Value::Object(
+            fields
+                .iter()
+                .map(|(key, value)| (key.clone(), bind_fixture_owner(value, trial_did)))
+                .collect(),
+        ),
+        _ => value.clone(),
+    }
 }
 
 /// Writes one authored row and returns its `_docID`. The document is arbitrary
@@ -863,12 +885,43 @@ async fn run_stages(
     ready: &watch::Receiver<Reconciled>,
 ) -> Vec<StageEvidence> {
     let mut stages = Vec::new();
-    for stage in &spec.stages {
+    for authored in &spec.stages {
+        let mut reviewed = authored.clone();
+        if authored.review_previous {
+            let feedback = stages
+                .last()
+                .ok_or_else(|| anyhow::anyhow!("no previous stage"))
+                .and_then(|previous| spec.review.feedback(previous));
+            match feedback {
+                Ok(feedback) => reviewed.prompt.push_str(&format!("\n\n{feedback}")),
+                Err(error) => {
+                    tracing::warn!(%error, "eval review could not be prepared");
+                    stages.push(StageEvidence {
+                        stage_id: authored.stage_id.clone(),
+                        request_id: None,
+                        terminal_state: None,
+                        failure_kind: Some(OutcomeKind::Grader),
+                        provider_reason: None,
+                        messages: Vec::new(),
+                        tool_calls: Vec::new(),
+                        inference_calls: Vec::new(),
+                        captures: Default::default(),
+                        prods: 0,
+                    });
+                    break;
+                }
+            }
+        }
+        let stage = &reviewed;
         spec.progress.stage_started(&stage.stage_id);
         let evidence = run_stage(
             spec, cancel, home, runtime, locator, workspace, stage, ready,
         )
         .await;
+        let mut summary = spec.review.summarize(&evidence);
+        summary["usage"] =
+            serde_json::to_value(usage_of(&evidence.inference_calls)).unwrap_or(Value::Null);
+        spec.progress.stage_result(&stage.stage_id, summary);
         spec.progress.stage_ended(&stage.stage_id);
         let failed = evidence.failure_kind.is_some();
         stages.push(evidence);
@@ -1284,11 +1337,9 @@ async fn request_counts(node: &EmbeddedNode) -> Result<(usize, usize)> {
     Ok((rows.len(), running))
 }
 
-/// Append the assistant messages and inference calls of every request the
-/// trial session received after `request_id`, in session order. Tool calls
-/// need no merge: [`collect_request_evidence`] reads them from the request's
-/// run timeline, which spans its whole session, while messages and inference
-/// calls are read per request.
+/// Append evidence from requests the trial session received after this stage
+/// began. Each request contributes its own tool calls once; earlier setup
+/// requests and calls in child sessions remain outside the stage.
 async fn extend_with_later_requests(
     node: &Arc<EmbeddedNode>,
     session_id: &str,
@@ -1303,6 +1354,7 @@ async fn extend_with_later_requests(
     for request in later {
         let more = collect_request_evidence(node, &request.request_id).await?;
         evidence.messages.extend(more.messages);
+        evidence.tool_calls.extend(more.tool_calls);
         evidence.inference_calls.extend(more.inference_calls);
     }
     Ok(())
@@ -1520,7 +1572,7 @@ async fn seed_and_await_fire(
         &access,
         "eval.trial.seed_document",
         &seed.collection,
-        &seed.document,
+        &bind_fixture_owner(&seed.document, home.did()),
     )
     .await?;
     tracing::debug!(collection = %seed.collection, doc_id = %doc_id, "eval seed document written");
@@ -1818,14 +1870,26 @@ async fn session_requests(node: &EmbeddedNode, session_id: &str) -> Result<Vec<S
         .collect())
 }
 
-/// Step 6: totals over every inference call the trial made. A missing total is
-/// `None`, never zero: one call that never reported its tokens makes the sum
-/// unknown.
-fn usage(stages: &[StageEvidence]) -> TrialUsage {
-    usage_of(stages.iter().flat_map(|stage| &stage.inference_calls))
+/// Every inference call in an isolated home belongs to its trial, including
+/// automation, delegation and goal continuations outside the named stages.
+async fn home_usage(node: &EmbeddedNode) -> TrialUsage {
+    let result = async {
+        let response = graphql_with_transaction_retry(
+            node,
+            "{ InferenceCall { call_seq call_state failure_reason prompt_tokens completion_tokens } }",
+            "eval trial total usage",
+        ).await?;
+        let data = response.data.context("trial usage query omitted data")?;
+        anyhow::ensure!(data.get("InferenceCall").is_some_and(Value::is_array), "trial usage query omitted inference calls");
+        Ok::<_, anyhow::Error>(usage_of(&request_evidence_from_query_data(&data).inference_calls))
+    }.await;
+    result.unwrap_or_else(|error| {
+        tracing::warn!(error = %format!("{error:#}"), "eval trial usage could not be collected");
+        TrialUsage::default()
+    })
 }
 
-/// The totals over `calls`, by [`usage`]'s rule.
+/// Missing provider usage stays unknown; it is never counted as zero.
 pub(super) fn usage_of<'a>(
     calls: impl IntoIterator<Item = &'a InferenceCallEvidence>,
 ) -> TrialUsage {
@@ -1948,6 +2012,62 @@ mod tests {
         assert_eq!(provider_reason_from_failure("weird"), None);
         // A three-digit run inside a longer token is not a status.
         assert_eq!(provider_reason_from_failure("model gpt-4o-500k"), None);
+    }
+
+    #[tokio::test]
+    async fn delegation_case_capture_excludes_session_title_requests() {
+        let home = EmbeddedHome::create_temp("eval-normal-request-capture")
+            .await
+            .unwrap();
+        let did = escape_graphql_string(home.did());
+        for purpose in ["normal", "title-audit"] {
+            let purpose = escape_graphql_string(purpose);
+            ConfigAccess::write_local(
+                &home.node,
+                "eval.test.normal_request_capture",
+                &format!(r#"mutation {{ create_AgentRequest(input: {{request_id: "{purpose}", purpose: "{purpose}", agent_did: "{did}", behavior_id: "{did}:research-helper", content: "TRAIN-111"}}) {{ _docID }} }}"#),
+            )
+            .await
+            .unwrap();
+        }
+        let case: Value = serde_json::from_slice(
+            &std::fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                "tests/fixtures/configurator_evals/ladder/l5_agents_tools/cases/train_minimal_self_target.json",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let capture = case["stages"][1]["capture"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|capture| capture["name"] == "helper-request")
+            .unwrap();
+        let fields: Vec<String> = serde_json::from_value(capture["fields"].clone()).unwrap();
+        let mut all_purposes = capture["filter"].clone();
+        all_purposes.as_object_mut().unwrap().remove("purpose");
+        let all = capture_documents(
+            &home.node,
+            "AgentRequest",
+            &all_purposes,
+            &fields,
+            home.did(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.len(), 2);
+        let normal = capture_documents(
+            &home.node,
+            "AgentRequest",
+            &capture["filter"],
+            &fields,
+            home.did(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(normal.len(), 1);
+        assert_eq!(normal[0]["request_id"], "normal");
+        home.node.shutdown().await;
     }
 
     #[test]
@@ -2117,6 +2237,7 @@ mod tests {
             deadline_secs: 120,
             settle: false,
             continuation: None,
+            review_previous: false,
             captures: Vec::new(),
         };
         let locator = TrialLocator {
@@ -2356,6 +2477,33 @@ mod tests {
         reopened.node.shutdown().await;
     }
 
+    #[tokio::test]
+    async fn trial_usage_includes_child_requests_and_preserves_unknown_tokens() {
+        let home = EmbeddedHome::create_temp("trial-total-usage")
+            .await
+            .unwrap();
+        for (id, input, output) in [("stage-call", 11, 7), ("automation-call", 101, 13)] {
+            let id = escape_graphql_string(id);
+            crate::config_client::ConfigAccess::write_local(
+                &home.node,
+                "eval.test.usage",
+                &format!(r#"mutation {{ create_InferenceCall(input: {{ call_id: "{id}", request_id: "{id}", call_seq: 0, call_state: "completed", prompt_tokens: {input}, completion_tokens: {output} }}) {{ _docID }} }}"#),
+            ).await.unwrap();
+        }
+        let total = home_usage(&home.node).await;
+        assert_eq!(total.input_tokens, Some(112));
+        assert_eq!(total.output_tokens, Some(20));
+        crate::config_client::ConfigAccess::write_local(
+            &home.node,
+            "eval.test.usage_missing",
+            r#"mutation { create_InferenceCall(input: { call_id: "unreported", request_id: "child", call_seq: 1, call_state: "failed", prompt_tokens: null, completion_tokens: 3 }) { _docID } }"#,
+        ).await.unwrap();
+        let total = home_usage(&home.node).await;
+        assert_eq!(total.input_tokens, None);
+        assert_eq!(total.output_tokens, Some(23));
+        close(home).await;
+    }
+
     /// `home_hint` is read back from the database, so a hint that leaves the
     /// runs directory is refused before a home outside it is opened.
     #[tokio::test]
@@ -2481,6 +2629,7 @@ mod tests {
             deadline_secs: 1,
             settle: false,
             continuation: None,
+            review_previous: false,
             captures: vec![
                 Capture::Documents {
                     name: "requests".to_string(),
@@ -2550,6 +2699,7 @@ mod tests {
             deadline_secs: 600,
             settle: false,
             continuation: None,
+            review_previous: false,
             captures: Vec::new(),
         };
         let runtime = exited_runtime();
@@ -2702,6 +2852,7 @@ mod tests {
             deadline_secs: 600,
             settle: false,
             continuation: None,
+            review_previous: false,
             captures: Vec::new(),
         };
         // Completes the request once it is written, pauses the clock, exits.

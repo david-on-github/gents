@@ -51,12 +51,42 @@ fn some<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<Valu
 #[serde(deny_unknown_fields)]
 pub(super) struct Expectation {
     pub(super) field: String,
+    #[serde(default)]
+    fallback_field: Option<String>,
     #[serde(default, deserialize_with = "some")]
     equals: Option<Value>,
     #[serde(default)]
     contains: Option<String>,
     #[serde(default)]
     matches: Option<String>,
+}
+
+#[derive(Clone)]
+pub(super) struct FieldPath {
+    field: String,
+    fallback_field: Option<String>,
+}
+
+impl FieldPath {
+    /// A missing or null primary value uses the fallback. Empty strings and
+    /// other non-null values retain precedence, matching nullable UI labels.
+    pub(super) fn resolve(&self, mut lookup: impl FnMut(&str) -> Option<Value>) -> Option<Value> {
+        let actual = lookup(&self.field);
+        match &self.fallback_field {
+            Some(fallback) if actual.as_ref().is_none_or(Value::is_null) => lookup(fallback),
+            _ => actual,
+        }
+    }
+}
+
+impl std::fmt::Display for FieldPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.field)?;
+        if let Some(fallback) = &self.fallback_field {
+            write!(f, " (or {fallback} when absent or null)")?;
+        }
+        Ok(())
+    }
 }
 
 pub(super) enum Test {
@@ -91,8 +121,11 @@ fn text(value: &Value) -> String {
 }
 
 /// `expectation` as a test, or why it is not one.
-pub(super) fn test(expectation: Expectation) -> Result<(String, Test), String> {
-    let field = expectation.field;
+pub(super) fn test(expectation: Expectation) -> Result<(FieldPath, Test), String> {
+    let field = FieldPath {
+        field: expectation.field,
+        fallback_field: expectation.fallback_field,
+    };
     match (
         expectation.equals,
         expectation.contains,
@@ -138,6 +171,7 @@ impl Check for CapturedFieldsMatch {
                             "type": "object",
                             "properties": {
                                 "field": {"type": "string", "description": "dotted path of object keys into the row; no array indexing"},
+                                "fallback_field": {"type": "string", "description": "path used only when field is absent or null"},
                                 "equals": {},
                                 "contains": {"type": "string"},
                                 "matches": {"type": "string", "description": "a regex"}
@@ -216,8 +250,8 @@ impl Check for CapturedFieldsMatch {
         for (index, row) in rows.iter().take(max_rows).enumerate() {
             let mut mismatched = false;
             for (field, test) in &tests {
-                let actual = lookup(row, field);
-                if actual.is_some_and(|actual| test.holds(actual)) {
+                let actual = field.resolve(|path| lookup(row, path).cloned());
+                if actual.as_ref().is_some_and(|actual| test.holds(actual)) {
                     satisfied += 1;
                     continue;
                 }
@@ -271,6 +305,33 @@ mod tests {
 
     fn feedback(verdict: &CheckVerdict) -> &str {
         verdict.feedback.as_deref().unwrap_or_default()
+    }
+
+    #[test]
+    fn nullable_labels_fall_back_without_overriding_explicit_names() {
+        let params = json!({"name":"items","expect":[{"field":"display_name","fallback_field":"profile_id","equals":"Research"}]});
+        for (row, met) in [
+            (json!({"profile_id":"Research"}), true),
+            (json!({"profile_id":"Research","display_name":null}), true),
+            (
+                json!({"profile_id":"other","display_name":"Research"}),
+                true,
+            ),
+            (
+                json!({"profile_id":"Research","display_name":"Wrong"}),
+                false,
+            ),
+            (json!({"profile_id":"Research","display_name":""}), false),
+            (json!({"display_name":null}), false),
+        ] {
+            let verdict = CapturedFieldsMatch.evaluate(&params, &stage(vec![row.clone()]));
+            assert_eq!(
+                verdict.score_bp == Some(10000),
+                met,
+                "{row}: {:?}",
+                verdict.feedback
+            );
+        }
     }
 
     #[test]

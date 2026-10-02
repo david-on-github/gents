@@ -22,4 +22,9 @@ settle?: boolean | null,
  * Continuation prods for a settling stage whose subject ends its turn
  * before it is done.
  */
-continuation?: EvalContinuation | null, checks?: Array<EvalCheckRef> | null, capture?: Array<EvalCapture> | null, };
+continuation?: EvalContinuation | null,
+/**
+ * Append the previous stage's check feedback to this prompt. This is an
+ * explicit assisted-eval condition; ordinary stages receive no grader feedback.
+ */
+review_previous?: boolean | null, checks?: Array<EvalCheckRef> | null, capture?: Array<EvalCapture> | null, };

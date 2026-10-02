@@ -203,10 +203,23 @@ pub async fn collect_request_evidence(
 
 /// Map the evidence-query data object and the request's run timeline into
 /// [`RequestEvidence`]. Tool calls and assistant messages come from the
-/// timeline; the request failure reason and inference calls from the query.
+/// timeline, narrowed to this request’s physical document; the request failure
+/// reason and inference calls come from the query. The timeline also includes
+/// earlier session turns and child requests, which are not this stage’s calls.
 pub fn request_evidence_from_sources(data: &Value, timeline: &RunTimelineRows) -> RequestEvidence {
     let mut evidence = request_evidence_from_query_data(data);
-    evidence.tool_calls = timeline.tool_calls.iter().map(tool_call_evidence).collect();
+    evidence.tool_calls = timeline
+        .tool_calls
+        .iter()
+        .filter(|call| {
+            timeline
+                .request
+                .doc_id
+                .as_deref()
+                .is_some_and(|id| call.request_doc_id.as_deref() == Some(id))
+        })
+        .map(tool_call_evidence)
+        .collect();
     evidence.messages = assistant_messages(timeline);
     evidence
 }
@@ -465,6 +478,34 @@ mod tests {
             responses: vec![],
             failure_reason: failure_reason.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn stage_tools_exclude_earlier_turns_children_and_unbound_rows() {
+        let mut timeline = RunTimelineRows::default();
+        timeline.request.doc_id = Some("exercise-doc".into());
+        timeline.tool_calls = [
+            (Some("setup-doc"), "config"),
+            (Some("exercise-doc"), "save_record"),
+            (Some("child-doc"), "config"),
+            (None, "config"),
+        ]
+        .into_iter()
+        .map(|(doc, name)| TimelineToolCallRow {
+            request_doc_id: doc.map(str::to_owned),
+            tool_name: name.into(),
+            ..Default::default()
+        })
+        .collect();
+        let evidence = request_evidence_from_sources(&serde_json::json!({}), &timeline);
+        assert_eq!(evidence.tool_calls.len(), 1);
+        assert_eq!(evidence.tool_calls[0].tool_name, "save_record");
+        timeline.request.doc_id = None;
+        assert!(
+            request_evidence_from_sources(&serde_json::json!({}), &timeline)
+                .tool_calls
+                .is_empty()
+        );
     }
 
     #[test]

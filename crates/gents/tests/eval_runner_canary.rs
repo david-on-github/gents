@@ -281,6 +281,15 @@ async fn a_subject_profile_bound_to_an_execution_and_retry_policy_starts_its_tri
 
 #[tokio::test]
 async fn a_seed_stage_fires_the_pack_trigger_and_observes_the_task_request() {
+    seed_stage_routes_to_session(false).await;
+}
+
+#[tokio::test]
+async fn a_seed_stage_routes_to_the_session_supplied_by_the_fixture() {
+    seed_stage_routes_to_session(true).await;
+}
+
+async fn seed_stage_routes_to_session(existing_session: bool) {
     let backend = MockStreamingBackend::start_with_plans(
         MODEL,
         vec![StreamPlan::new(
@@ -290,16 +299,38 @@ async fn a_seed_stage_fires_the_pack_trigger_and_observes_the_task_request() {
     )
     .unwrap();
     let (canary, mut request) = canary_request(backend.endpoint(), "run-seed").await;
+    let mut definition = seed_definition_document(&canary.owner);
+    if existing_session {
+        definition["fixtures"]["documents"] = json!([{
+            "collection": "AgentSession",
+            "document": {
+                "session_id": "supplied-destination",
+                "agent_did": "$trial",
+                "requester_did": "$trial",
+                "behavior_id": "seeded",
+                "created_at": "2026-01-01T00:00:00Z"
+            }
+        }]);
+    }
     canary
-        .install(vec![(
-            Collection::EvalDefinition,
-            seed_definition_document(&canary.owner),
-        )])
+        .install(vec![(Collection::EvalDefinition, definition)])
         .await;
     request.definition_id = "seed".into();
-    request.cells[0].source = CellSource::Directory(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval_runner/trigger_pack"),
-    );
+    let source =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/eval_runner/trigger_pack");
+    let pack = tempfile::tempdir().unwrap();
+    if existing_session {
+        copy_tree(&source, pack.path());
+        let path = pack.path().join("pack_config.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        config["triggers"][0]["session_id_template"] = json!("supplied-destination");
+        std::fs::write(path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
+    }
+    request.cells[0].source = CellSource::Directory(if existing_session {
+        pack.path().to_path_buf()
+    } else {
+        source
+    });
     request.cells[0].behavior_id = "seeded".into();
     let executor = EmbeddedExecutor::new(DocumentRuntimeOptions::default(), canary.runs_dir());
 
@@ -313,11 +344,27 @@ async fn a_seed_stage_fires_the_pack_trigger_and_observes_the_task_request() {
     )
     .await
     .unwrap();
-    assert_eq!((outcome.completed, outcome.not_evidence), (1, 0));
 
     let trials = load_trials(&canary.access, &request.owner, &request.run_id)
         .await
         .unwrap();
+    if outcome.not_evidence != 0 {
+        let retained = canary
+            .runs_dir()
+            .join(locator(trial(&trials, "seeded")).home_hint.unwrap())
+            .join("home");
+        let home = EmbeddedHome::open_retained(&retained).await.unwrap();
+        let state = gents::graphql::graphql_with_transaction_retry(
+            &home.node,
+            "{ Trigger { trigger_id last_status last_error } AgentRequest { request_id lifecycle_state failure_reason session_id requester_did } AgentSession { session_id agent_did requester_did behavior_id } }",
+            "failed routing canary",
+        ).await.unwrap();
+        panic!(
+            "routing produced no evidence: {state:#?}; provider requests: {:?}",
+            backend.observed_completion_bodies()
+        );
+    }
+    assert_eq!(outcome.completed, 1);
     let completion = trial(&trials, "seeded").completion.clone().unwrap();
     assert_eq!(completion.anchor.requests, 1, "{completion:#?}");
     assert_eq!(
@@ -360,6 +407,28 @@ async fn a_seed_stage_fires_the_pack_trigger_and_observes_the_task_request() {
         Some(&json!([{"content": SEED_MARKER}])),
         "{fired:#?}"
     );
+    if existing_session {
+        let routed = gents::graphql::graphql_with_transaction_retry(
+            &home.node,
+            r#"{ AgentRequest(filter: { caused_by_trigger_id: { _eq: "seed-trigger" } }) { session_id } AgentSession { agent_did session_id created_at } }"#,
+            "canary supplied destination",
+        ).await.unwrap();
+        assert!(routed.errors.is_empty(), "{routed:#?}");
+        let data = routed.data.as_ref().unwrap();
+        assert_eq!(
+            data["AgentRequest"],
+            json!([{"session_id":"supplied-destination"}])
+        );
+        assert_eq!(
+            data["AgentSession"],
+            json!([{
+                "agent_did": home.did(),
+                "session_id": "supplied-destination",
+                "created_at": "2026-01-01T00:00:00Z"
+            }]),
+            "the request must reuse the fixture's session"
+        );
+    }
 }
 
 /// A seed stage whose collection no trigger watches: nothing fires, so the

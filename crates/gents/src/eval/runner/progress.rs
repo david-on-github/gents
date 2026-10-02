@@ -14,6 +14,7 @@
 //! optional, so a file written by an older runner still reads.
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -32,6 +33,9 @@ pub const PROGRESS_FILE: &str = "progress.json";
 pub struct LiveSnapshot {
     /// RFC 3339: when the home was read.
     pub observed_at: String,
+    /// Completed-stage checks and per-stage usage, retained while later stages run.
+    #[serde(default)]
+    pub stages: BTreeMap<String, serde_json::Value>,
     /// Since the trial's first stage started.
     pub elapsed_secs: u64,
     /// Public requests in the trial's home, the stages' own and every one
@@ -42,6 +46,12 @@ pub struct LiveSnapshot {
     /// Summed as the trial's usage is: `None` once one call did not report.
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
+    /// Reported usage remains a lower bound while any call lacks usage.
+    /// Exact totals above remain unknown; observers must label these bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_output_tokens: Option<u64>,
     pub tool_calls: u64,
     /// Tool calls that ended failed or timed out.
     pub failed_tool_calls: u64,
@@ -279,11 +289,25 @@ impl ProgressWriter {
         });
     }
 
-    fn live(&self, trial_id: &str, snapshot: LiveSnapshot) {
+    fn live(&self, trial_id: &str, mut snapshot: LiveSnapshot) {
         self.update(|progress| {
             if let Some(slot) = progress.slots.get_mut(trial_id) {
+                if let Some(previous) = &slot.live {
+                    snapshot.stages.extend(previous.stages.clone());
+                }
                 slot.live = Some(snapshot);
                 slot.written_at = now_millis();
+            }
+        });
+    }
+
+    fn stage_result(&self, trial_id: &str, stage_id: &str, result: serde_json::Value) {
+        self.update(|progress| {
+            if let Some(slot) = progress.slots.get_mut(trial_id) {
+                slot.live
+                    .get_or_insert_with(Default::default)
+                    .stages
+                    .insert(stage_id.into(), result);
             }
         });
     }
@@ -335,7 +359,10 @@ fn write_atomically(path: &Path, progress: &Progress) -> Result<()> {
     let dir = path.parent().context("progress.json has a run directory")?;
     let mut staged = tempfile::NamedTempFile::new_in(dir)
         .with_context(|| format!("staging {}", path.display()))?;
-    serde_json::to_writer_pretty(&mut staged, progress).context("encoding progress")?;
+    // Serde emits small fragments; unbuffered file writes can exceed the
+    // runner's heartbeat interval and starve polling of completed trials.
+    let encoded = serde_json::to_vec_pretty(progress).context("encoding progress")?;
+    staged.write_all(&encoded).context("writing progress")?;
     staged
         .persist(path)
         .with_context(|| format!("replacing {}", path.display()))?;
@@ -359,6 +386,12 @@ impl StageProgress {
     pub fn stage_started(&self, stage_id: &str) {
         if let Some((writer, trial_id)) = &self.sink {
             writer.stage(trial_id, Some(stage_id));
+        }
+    }
+
+    pub fn stage_result(&self, stage_id: &str, result: serde_json::Value) {
+        if let Some((writer, trial_id)) = &self.sink {
+            writer.stage_result(trial_id, stage_id, result);
         }
     }
 
@@ -415,6 +448,28 @@ mod tests {
             live: None,
             goal: Vec::new(),
         }
+    }
+
+    #[test]
+    fn stage_measurements_survive_later_live_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = ProgressWriter::new(dir.path());
+        writer.slot_started("t", in_flight(Some("setup")));
+        let progress = StageProgress::for_trial(&writer, "t");
+        let measured = serde_json::json!({"usage":{"input_tokens":123},"checks":[]});
+        progress.stage_result("setup", measured.clone());
+        progress.stage_started("repair");
+        progress.live(LiveSnapshot {
+            input_tokens: Some(456),
+            ..Default::default()
+        });
+        let live = writer.live_of("t").unwrap();
+        assert_eq!(live.stages["setup"], measured);
+        assert_eq!(live.input_tokens, Some(456));
+        assert_eq!(
+            read_progress(dir.path()).unwrap().slots["t"].live,
+            Some(live)
+        );
     }
 
     #[test]

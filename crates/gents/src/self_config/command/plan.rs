@@ -14,7 +14,72 @@ struct ProposedDocument {
     mailbox: Option<crate::mailbox::MailboxNotificationPolicy>,
 }
 
+/// The grant category a connected plan proposal of `collection` needs, or
+/// `None` when plan preview does not stage that collection.
+pub(super) fn plan_category(collection: Collection) -> Option<&'static str> {
+    Some(match collection {
+        Collection::AgentBehavior | Collection::AgentContext => "persona",
+        Collection::Tools | Collection::DatastoreToolSurface | Collection::SubagentTarget => {
+            "tools"
+        }
+        Collection::InferenceExecution => "profile",
+        Collection::Task | Collection::Schedule | Collection::Trigger | Collection::EventSource => {
+            "automation"
+        }
+        _ => return None,
+    })
+}
+
 impl ConfigCommandTool {
+    /// Names what an unknown plan collection is: a misspelled canonical name,
+    /// an installed application collection, or neither.
+    async fn unknown_plan_collection(&self, name: &str) -> String {
+        let supported = Collection::ALL
+            .iter()
+            .filter(|collection| plan_category(**collection).is_some())
+            .map(|collection| collection.graphql_type())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let canonical = Collection::ALL
+            .iter()
+            .map(|collection| collection.graphql_type().to_owned())
+            .collect::<Vec<_>>();
+        let installed = ConfigAccess::Local(self.node.clone())
+            .collection_version(name)
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+        if installed {
+            return format!(
+                "{name:?} is an application collection, not configuration; plan preview stages only {supported}. Its documents are written by datastore tools: [\"help\",\"datastore\"]"
+            );
+        }
+        let fold = |name: &str| name.replace(['_', '-', ' '], "").to_ascii_lowercase();
+        let near = canonical
+            .iter()
+            .find(|candidate| fold(candidate) == fold(name))
+            .or_else(|| {
+                canonical
+                    .iter()
+                    .find(|candidate| fold(candidate).ends_with(&fold(name)))
+            })
+            .cloned()
+            .or_else(|| {
+                crate::defra_query::schema::suggest_fields(name, &canonical)
+                    .into_iter()
+                    .next()
+            });
+        match near {
+            Some(near) => format!(
+                "unknown collection {name:?}; did you mean {near:?}? Plan collections: {supported}"
+            ),
+            None => format!(
+                "{name:?} is neither a configuration collection nor an installed schema; plan preview stages only {supported}. An application collection needs its schema installed first ([\"help\",\"schema\"]) and its documents are written by datastore tools, not plan preview"
+            ),
+        }
+    }
+
     pub(super) async fn plan(&self, argv: &[String]) -> Result<String> {
         anyhow::ensure!(self.preview, "preview is not granted for this behavior");
         self.ensure_behavior_catalog("plan", None)?;
@@ -40,25 +105,18 @@ impl ConfigCommandTool {
         );
         let mut documents = Vec::new();
         for mut item in proposed {
-            let collection = Collection::ALL
+            let Some(collection) = Collection::ALL
                 .iter()
                 .copied()
                 .find(|collection| collection.graphql_type() == item.collection)
-                .context("unknown canonical collection")?;
-            let category = match collection {
-                Collection::AgentBehavior | Collection::AgentContext => "persona",
-                Collection::Tools
-                | Collection::DatastoreToolSurface
-                | Collection::SubagentTarget => "tools",
-                Collection::InferenceExecution => "profile",
-                Collection::Task
-                | Collection::Schedule
-                | Collection::Trigger
-                | Collection::EventSource => "automation",
-                _ => bail!(
+            else {
+                bail!(self.unknown_plan_collection(&item.collection).await);
+            };
+            let Some(category) = plan_category(collection) else {
+                bail!(
                     "{} is not a supported plan resource; use its existing resource commands",
                     item.collection
-                ),
+                );
             };
             self.ensure_resource(category)?;
             if let Some(policy) = item.mailbox {

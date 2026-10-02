@@ -126,7 +126,11 @@ impl<'de> serde::Deserialize<'de> for WriteToolField {
             #[serde(default)]
             fill: Option<WriteToolFieldFill>,
         }
-        let raw = Raw::deserialize(deserializer)?;
+        let raw = Raw::deserialize(deserializer).map_err(|error| {
+            serde::de::Error::custom(format!(
+                "{error}; create fields and query filter_fields use objects: {{\"name\":\"correlation\"}}. Query fields use strings: \"correlation\""
+            ))
+        })?;
         Ok(WriteToolField {
             name: raw.name.trim().to_string(),
             required: raw.required,
@@ -534,4 +538,52 @@ mod tests {
             "every protected name must be a registered collection"
         );
     }
+}
+
+/// Refusal for a model-supplied value on a runtime-filled field. It names the
+/// declaring surface entry because the fix belongs to whoever configured it,
+/// not to the calling model.
+pub fn runtime_filled_refusal(
+    kind: &str,
+    field: &str,
+    tool_name: &str,
+    surface_id: Option<&str>,
+    fill: &WriteToolFieldFill,
+) -> String {
+    let source = match fill {
+        WriteToolFieldFill::Correlation => "the request/trigger correlation ID".to_owned(),
+        WriteToolFieldFill::SourceField(name) => format!("trigger document field {name:?}"),
+    };
+    format!(
+        "{kind} `{field}` is runtime-filled and must not be supplied to tool `{tool_name}`. The runtime uses {source}. For a caller-supplied value, remove fill from this field. {}",
+        surface_recovery(tool_name, surface_id)
+    )
+}
+
+pub(crate) fn undeclared_field_refusal(
+    kind: &str,
+    field: &str,
+    tool_name: &str,
+    surface_id: Option<&str>,
+    allowed: &[&str],
+) -> String {
+    let contract = if kind == "filter" {
+        "Query fields selects returned columns; filter_fields declares filter arguments."
+    } else {
+        "Create fields declares writable arguments; omitted or empty fields permits none. Schema fields are not inherited."
+    };
+    format!(
+        "{kind} `{field}` is not permitted by tool `{tool_name}`. Allowed {kind} arguments: {allowed:?}. {contract} To expose this argument, add {{\"name\":{field:?}}} to the declaration. {}",
+        surface_recovery(tool_name, surface_id)
+    )
+}
+
+fn surface_recovery(tool_name: &str, surface_id: Option<&str>) -> String {
+    let read = match surface_id {
+        Some(surface) => format!("Edit surface {surface:?}, entry {tool_name:?}."),
+        None => format!("Inspect the configuration declaring tool {tool_name:?}."),
+    };
+    format!(
+        "{read} Changes take effect next request; retrying in this request uses the old definition."
+    )
 }

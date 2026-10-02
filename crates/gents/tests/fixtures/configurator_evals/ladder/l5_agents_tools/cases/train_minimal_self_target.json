@@ -5,7 +5,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "Set up subagent delegation on this node. Create a helper behavior with the display name 'beh-helper-01' (a minimal behavior is fine). Then create a SubagentTarget with id 'tgt-train-01', name 'train-target', target_agent_did set to this node's own DID, and behavior 'beh-helper-01'. Select 'tgt-train-01' in your own Tools.subagents.",
+      "prompt": "Create a research-helper assistant for short research questions, using our current model. Make it available for you to delegate to. Set this up now; we will try it next.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -22,134 +22,123 @@
           "weight": 1
         },
         {
-          "check": "captured_fields_match",
+          "check": "captured_rows_count",
           "params": {
-            "name": "train-target",
-            "expect": [
-              {
-                "field": "name",
-                "equals": "train-target"
-              },
-              {
-                "field": "behavior_id",
-                "matches": ":beh\\-helper\\-01$"
-              }
-            ],
-            "max_rows": 1
+            "name": "targets",
+            "min": 1,
+            "max": 1
           },
           "tier": "acceptance",
-          "weight": 2
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "delegates": {
+                    "targets": "targets",
+                    "behaviors": [
+                      "research-helper"
+                    ]
+                  }
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
         {
           "kind": "documents",
-          "name": "train-target",
-          "collection": "SubagentTarget",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "target_id": {
-              "_eq": "tgt-train-01"
-            },
-            "target_agent_did": {
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "targets",
+          "collection": "SubagentTarget",
+          "filter": {
+            "agent_did": {
               "_eq": "$trial"
             }
           },
           "fields": [
             "target_id",
             "agent_did",
+            "name",
             "target_agent_did",
-            "behavior_id",
-            "name"
-          ]
-        }
-      ]
-    },
-    {
-      "stage_id": "verify-selection",
-      "prompt": "Report what you configured; change nothing.",
-      "deadline_secs": 600,
-      "checks": [
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "tools-row",
-            "expect": [
-              {
-                "field": "subagents",
-                "contains": "tgt-train-01"
-              }
-            ]
-          },
-          "tier": "acceptance",
-          "weight": 2
-        },
-        {
-          "check": "captured_rows_count",
-          "params": {
-            "name": "helper-behavior",
-            "min": 1
-          },
-          "tier": "acceptance",
-          "weight": 2
-        }
-      ],
-      "capture": [
-        {
-          "kind": "documents",
-          "name": "tools-row",
-          "collection": "Tools",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "tools_id": {
-              "_eq": "engineer-tools"
-            }
-          },
-          "fields": [
-            "tools_id",
-            "display_name",
-            "subagents"
-          ]
-        },
-        {
-          "kind": "documents",
-          "name": "helper-behavior",
-          "collection": "AgentBehavior",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "behavior_id": {
-              "_like": "%:beh-helper-01"
-            }
-          },
-          "fields": [
-            "behavior_id",
-            "display_name",
-            "enabled"
+            "behavior_id"
           ]
         }
       ]
     },
     {
       "stage_id": "delegate",
-      "prompt": "Delegate a task to subagent target 'tgt-train-01': have the helper reply with exactly TRAIN-111 and nothing else. Wait for the helper's result and tell me when it has arrived.",
+      "prompt": "Ask Research Helper to reply with exactly TRAIN-111 and report its reply when it arrives.",
       "deadline_secs": 600,
       "checks": [
         {
           "check": "tool_calls_expected",
           "params": {
             "required": [
-              "agent_new",
-              "agent_message"
+              "agent_new"
             ],
             "forbidden": [
               "bash"
-            ]
+            ],
+            "config_read_only": true
           },
           "tier": "acceptance",
           "weight": 1
@@ -169,13 +158,59 @@
             "name": "helper-request",
             "expect": [
               {
-                "field": "input",
+                "field": "content",
                 "contains": "TRAIN-111"
+              },
+              {
+                "field": "lifecycle_state",
+                "equals": "completed"
+              },
+              {
+                "field": "terminal_output",
+                "contains": "message_doc_id"
+              }
+            ],
+            "max_rows": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "links": [
+              {
+                "capture": "helper-request",
+                "key": "behavior_id",
+                "id": "research-helper",
+                "field": "caused_by_parent_tool_call_doc_id",
+                "target_capture": "delegation_calls",
+                "target_key": "_docID",
+                "expect": [
+                  {
+                    "field": "lifecycle_state",
+                    "equals": "completed"
+                  },
+                  {
+                    "field": "completion_notification_delivered_at",
+                    "matches": "^[0-9]{4}-"
+                  }
+                ]
               }
             ]
           },
           "tier": "acceptance",
           "weight": 2
+        },
+        {
+          "check": "final_message_matches",
+          "params": {
+            "all": [
+              "TRAIN-111"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
@@ -188,7 +223,7 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-helper-01"
+              "_like": "%:research-helper"
             }
           },
           "fields": [
@@ -206,18 +241,206 @@
               "_eq": "$trial"
             },
             "behavior_id": {
-              "_like": "%:beh-helper-01"
+              "_like": "%:research-helper"
+            },
+            "purpose": {
+              "_eq": "normal"
             }
           },
           "fields": [
             "request_id",
             "behavior_id",
             "session_id",
-            "input",
-            "lifecycle_state"
+            "content",
+            "lifecycle_state",
+            "terminal_output",
+            "caused_by_parent_tool_call_doc_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "delegation_calls",
+          "collection": "AgentToolCall",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tool_name": {
+              "_in": [
+                "agent_new",
+                "agent_message"
+              ]
+            }
+          },
+          "fields": [
+            "_docID",
+            "lifecycle_state",
+            "completion_notification_delivered_at"
           ]
         }
-      ]
+      ],
+      "settle": true
+    },
+    {
+      "stage_id": "follow_up",
+      "prompt": "Ask the same helper to reply with exactly FOLLOW-222. Keep using that conversation and report its reply when it arrives.",
+      "deadline_secs": 600,
+      "checks": [
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "required": [
+              "agent_message"
+            ],
+            "forbidden": [
+              "agent_new"
+            ],
+            "config_read_only": true
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "helper-session",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "captured_fields_match",
+          "params": {
+            "name": "helper-request",
+            "expect": [
+              {
+                "field": "content",
+                "contains": "FOLLOW-222"
+              },
+              {
+                "field": "lifecycle_state",
+                "equals": "completed"
+              },
+              {
+                "field": "terminal_output",
+                "contains": "message_doc_id"
+              }
+            ],
+            "max_rows": 1
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "links": [
+              {
+                "capture": "helper-request",
+                "key": "behavior_id",
+                "id": "research-helper",
+                "field": "caused_by_parent_tool_call_doc_id",
+                "target_capture": "delegation_calls",
+                "target_key": "_docID",
+                "expect": [
+                  {
+                    "field": "lifecycle_state",
+                    "equals": "completed"
+                  },
+                  {
+                    "field": "completion_notification_delivered_at",
+                    "matches": "^[0-9]{4}-"
+                  }
+                ]
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 2
+        },
+        {
+          "check": "final_message_matches",
+          "params": {
+            "all": [
+              "FOLLOW-222"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ],
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "helper-session",
+          "collection": "AgentSession",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:research-helper"
+            }
+          },
+          "fields": [
+            "session_id",
+            "behavior_id",
+            "agent_did"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "helper-request",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "behavior_id": {
+              "_like": "%:research-helper"
+            },
+            "content": {
+              "_like": "%FOLLOW-222%"
+            },
+            "purpose": {
+              "_eq": "normal"
+            }
+          },
+          "fields": [
+            "request_id",
+            "behavior_id",
+            "session_id",
+            "content",
+            "lifecycle_state",
+            "terminal_output",
+            "caused_by_parent_tool_call_doc_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "delegation_calls",
+          "collection": "AgentToolCall",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "tool_name": {
+              "_in": [
+                "agent_new",
+                "agent_message"
+              ]
+            }
+          },
+          "fields": [
+            "_docID",
+            "lifecycle_state",
+            "completion_notification_delivered_at"
+          ]
+        }
+      ],
+      "settle": true
     }
   ]
 }
