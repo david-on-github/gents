@@ -235,6 +235,7 @@ def snapshotJson : String :=
       ++ lspActionCasesJson ++ ","
     ++ "\"self_config_field_tables\":"
       ++ selfConfigFieldTablesJson ++ ","
+    ++ "\"schema_publication_cases\":" ++ schemaPublicationCasesJson ++ ","
     ++ "\"self_config_cases\":"
       ++ selfConfigCasesJson ++ ","
     ++ "\"session_recovery_cases\":"

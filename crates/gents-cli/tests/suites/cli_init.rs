@@ -211,6 +211,12 @@ async fn init_bootstraps_backend_default_behavior_and_tools_idempotently() -> Re
     );
     // Plain init enables the same self-config preset as the desktop first run.
     let tools = first_graphql_row(&tools_rows, "Tools")?;
+    assert_eq!(
+        tools
+            .pointer("/built_ins/enable_schema_tool")
+            .and_then(Value::as_bool),
+        None
+    );
     let preset: Value = serde_json::from_str(gents_protocol::SETUP_SELF_CONFIG_JSON)?;
     for (field, expected) in preset.as_object().context("preset object")? {
         assert_eq!(

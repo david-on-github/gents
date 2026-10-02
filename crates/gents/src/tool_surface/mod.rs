@@ -71,6 +71,7 @@ pub struct ToolSurface {
     pub(super) enable_memory: bool,
     pub(super) enable_context_budget_tool: bool,
     pub(super) enable_session_history_tool: bool,
+    pub(super) enable_schema_tool: bool,
     pub(super) enable_defra_query: bool,
     pub(super) defra_query_scope: CollectionScope,
     pub(super) write_tools: Vec<WriteToolDecl>,
@@ -231,6 +232,9 @@ impl ToolSurface {
         if self.enable_context_budget_tool {
             names.push(CONTEXT_BUDGET_TOOL_NAME.to_string());
         }
+        if self.enable_schema_tool {
+            names.push(crate::schema_tool::SCHEMA_TOOL_NAME.to_string());
+        }
         if self.enable_session_history_tool {
             names.push(SESSION_HISTORY_TOOL_NAME.to_string());
         }
@@ -318,6 +322,11 @@ impl ToolSurface {
                 runtime.agent_did.clone(),
             ));
         }
+        if self.enable_schema_tool {
+            tools.push(Box::new(crate::schema_tool::SchemaTool::new(
+                runtime.node.clone(),
+            )));
+        }
         if self.enable_session_history_tool {
             tools.push(build_session_history_tool(
                 runtime.node.clone(),
@@ -371,12 +380,12 @@ impl ToolSurface {
             } else {
                 let tool = BoundedWriteTool::new(runtime.node.clone(), decl.clone())
                     .declared_by(self.surface_of_tool.get(&decl.tool_name).cloned());
-                if !tool.is_well_formed() {
-                    anyhow::bail!(
-                        "write tool `{}` has an unavailable or unsupported collection schema",
-                        decl.tool_name
-                    );
-                }
+                tool.ensure_well_formed().map_err(|error| {
+                    anyhow::anyhow!(
+                        "write tool `{}` on collection `{}`: {error:#}. Declared by datastore surface `{}`; inspect with config datastore get, then use datastore update to correct its fields or schema collection update to correct the existing collection",
+                        decl.tool_name, decl.collection, self.surface_of_tool.get(&decl.tool_name).map(String::as_str).unwrap_or("unresolved")
+                    )
+                })?;
                 tools.push(Box::new(tool) as Box<dyn ToolDyn>);
             }
         }
@@ -461,6 +470,7 @@ impl std::fmt::Debug for ToolSurface {
                 "enable_context_budget_tool",
                 &self.enable_context_budget_tool,
             )
+            .field("enable_schema_tool", &self.enable_schema_tool)
             .field(
                 "enable_session_history_tool",
                 &self.enable_session_history_tool,

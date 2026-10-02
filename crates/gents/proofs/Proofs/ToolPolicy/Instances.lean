@@ -19,6 +19,7 @@ def Surface.meet (a b : Surface) : Surface :=
   , defraQuery := a.defraQuery && b.defraQuery
   , selfConfig := a.selfConfig && b.selfConfig
   , memory := a.memory && b.memory
+  , schemaManagement := a.schemaManagement && b.schemaManagement
   , sessionHistory := a.sessionHistory && b.sessionHistory
   , contextBudget := a.contextBudget && b.contextBudget
   , sessionMessages := a.sessionMessages && b.sessionMessages
@@ -111,6 +112,16 @@ theorem effective_memory_le_ceiling :
 
 theorem effective_memory_le_behavior :
     (effective behavior ceiling runtime).memory = true → behavior.memory = true := by
+  exact fun h => bool_and_left (bool_and_left h)
+
+/-- Schema administration is an explicit node-management capability, independent
+of config-document edits. DefraDB remains the schema authorization owner. -/
+theorem effective_schemaManagement_le_ceiling :
+    (effective behavior ceiling runtime).schemaManagement = true → ceiling.schemaManagement = true := by
+  exact fun h => bool_and_right (bool_and_left h)
+
+theorem effective_schemaManagement_le_behavior :
+    (effective behavior ceiling runtime).schemaManagement = true → behavior.schemaManagement = true := by
   exact fun h => bool_and_left (bool_and_left h)
 
 theorem effective_sessionHistory_le_ceiling :

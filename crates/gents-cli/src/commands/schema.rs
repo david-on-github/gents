@@ -4,12 +4,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::cli::args::{SchemaApplyArgs, SchemaCommand};
 use crate::config_writes::ConfigAccess;
-use crate::{graphql_api_base, print_json, resolve_config_access};
-use gents::config_client::GraphqlEndpoint;
+use crate::{print_json, resolve_config_access};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SchemaInputKind {
@@ -291,22 +290,13 @@ async fn apply_patch_file(access: &ConfigAccess, path: &Path) -> Result<SchemaAp
         });
     }
 
-    let version_id = match access {
-        ConfigAccess::Graphql(endpoint) => {
-            patch_collection_http(endpoint, &patch_to_apply).await?;
-            current_collection_version(access, &collection).await?
-        }
-        ConfigAccess::Local(node) => {
-            let patch_str = serde_json::to_string(&patch_to_apply)?;
-            let patched = node
-                .patch_collection(&collection, &patch_str)
-                .await
-                .with_context(|| {
-                    format!("patching collection {collection} from {}", path.display())
-                })?;
-            Some(patched.version_id)
-        }
-    };
+    let patched = access
+        .patch_collection_schema(&collection, &patch_to_apply)
+        .await?;
+    let version_id = patched
+        .get("VersionID")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
 
     Ok(SchemaApplyPatchResult {
         path: path.display().to_string(),
@@ -332,16 +322,15 @@ async fn current_collection_version(
     access: &ConfigAccess,
     collection: &str,
 ) -> Result<Option<String>> {
-    match access {
-        ConfigAccess::Local(node) => Ok(node
-            .get_collection(collection)?
-            .map(|collection| collection.version_id)),
-        ConfigAccess::Graphql(endpoint) => Ok(describe_collection_http(endpoint, collection)
-            .await?
-            .get("VersionID")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)),
-    }
+    Ok(access
+        .collection_version(collection)
+        .await?
+        .and_then(|version| {
+            version
+                .get("VersionID")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }))
 }
 
 fn normalize_patch_value(value: Value) -> Result<Value> {
@@ -434,52 +423,10 @@ fn filter_existing_field_adds(
     Ok((Value::Array(filtered), applied_fields, skipped_fields))
 }
 
-async fn patch_collection_http(endpoint: &GraphqlEndpoint, patch: &Value) -> Result<()> {
-    let api_base = graphql_api_base(endpoint.url())?;
-    let client = schema_http_client()?;
-    let url = format!("{api_base}/collections");
-    let response = endpoint
-        .authorize(client.patch(&url).json(&json!({ "Patch": patch })))?
-        .send()
-        .await
-        .with_context(|| format!("patching collection schema via {url}"))?;
-    ensure_success(response, "schema patch", &url).await
-}
-
-async fn describe_collection_http(endpoint: &GraphqlEndpoint, collection: &str) -> Result<Value> {
-    let api_base = graphql_api_base(endpoint.url())?;
-    let client = schema_http_client()?;
-    crate::http_get_json(
-        endpoint.authorize(client.get(format!("{api_base}/collections/{collection}/describe")))?,
-    )
-    .await
-}
-
-async fn ensure_success(response: reqwest::Response, operation: &str, url: &str) -> Result<()> {
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .with_context(|| format!("reading {operation} response body from {url}"))?;
-    if !status.is_success() {
-        anyhow::bail!(
-            "{operation} request to {url} failed with {status}: {}",
-            String::from_utf8_lossy(&bytes)
-        );
-    }
-    Ok(())
-}
-
-fn schema_http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .context("building schema HTTP client")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn classify_schema_input_accepts_sdl_and_patch_suffixes() {

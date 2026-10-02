@@ -163,6 +163,7 @@ pub struct ResolvedToolSelection {
     pub backgroundable_tool_names: Vec<String>,
     pub enable_memory: bool,
     pub enable_session_history_tool: bool,
+    pub enable_schema_tool: bool,
     pub enable_context_budget: bool,
     pub enable_defra_query: bool,
     pub defra_query_collections: Vec<String>,
@@ -203,6 +204,7 @@ impl Default for ResolvedToolSelection {
             backgroundable_tool_names: Vec::new(),
             enable_memory: false,
             enable_session_history_tool: false,
+            enable_schema_tool: false,
             enable_context_budget: true,
             enable_defra_query: false,
             defra_query_collections: Vec::new(),
@@ -355,6 +357,9 @@ impl ResolvedToolSelection {
             backgroundable_tool_names,
             enable_memory: built_ins
                 .and_then(|built| built.enable_memory)
+                .unwrap_or(false),
+            enable_schema_tool: built_ins
+                .and_then(|built| built.enable_schema_tool)
                 .unwrap_or(false),
             enable_session_history_tool: built_ins
                 .and_then(|built| built.enable_session_history_tool)

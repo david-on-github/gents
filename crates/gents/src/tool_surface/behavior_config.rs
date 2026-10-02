@@ -33,6 +33,7 @@ pub struct BehaviorToolConfig {
     enable_memory: bool,
     enable_context_budget_tool: bool,
     enable_session_history_tool: bool,
+    enable_schema_tool: bool,
     enable_defra_query: bool,
     defra_query_collections: Vec<String>,
     write_tools: Vec<WriteToolDecl>,
@@ -62,6 +63,7 @@ impl BehaviorToolConfig {
         behavior_policy.defra_query = false;
         behavior_policy.defra_collections = EndpointScope::none();
         behavior_policy.self_config = false;
+        behavior_policy.schema_management = false;
         behavior_policy.self_config_categories = EndpointScope::none();
         Self {
             host_tools: ToolSet::meta_only(),
@@ -78,6 +80,7 @@ impl BehaviorToolConfig {
             enable_memory: false,
             enable_context_budget_tool: true,
             enable_session_history_tool: false,
+            enable_schema_tool: false,
             enable_defra_query: false,
             defra_query_collections: Vec::new(),
             write_tools: Vec::new(),
@@ -221,6 +224,7 @@ impl BehaviorToolConfig {
             backgroundable_tool_names,
             enable_memory,
             enable_session_history_tool: _,
+            enable_schema_tool: _,
             enable_context_budget,
             enable_defra_query: _,
             defra_query_collections: _,
@@ -362,6 +366,7 @@ impl BehaviorToolConfig {
             enable_memory: static_policy.memory && enable_memory,
             enable_context_budget_tool: static_policy.context_budget && enable_context_budget,
             enable_session_history_tool: static_policy.session_history,
+            enable_schema_tool: static_policy.schema_management,
             enable_defra_query: static_policy.include_defra_query(),
             defra_query_collections: static_policy.defra_query_collections_for_runtime(),
             write_tools: static_policy.write_decls_for_runtime(&write_tools),
@@ -539,6 +544,7 @@ impl BehaviorToolConfig {
             enable_context_budget_tool: effective_policy.context_budget
                 && self.enable_context_budget_tool,
             enable_session_history_tool: effective_policy.session_history,
+            enable_schema_tool: effective_policy.schema_management,
             enable_defra_query: effective_policy.include_defra_query(),
             defra_query_scope: effective_policy.defra_query_collection_scope(),
             write_tools: effective_policy.write_decls_for_runtime(&self.write_tools),
@@ -730,6 +736,7 @@ impl std::fmt::Debug for BehaviorToolConfig {
                 "enable_context_budget_tool",
                 &self.enable_context_budget_tool,
             )
+            .field("enable_schema_tool", &self.enable_schema_tool)
             .field(
                 "enable_session_history_tool",
                 &self.enable_session_history_tool,

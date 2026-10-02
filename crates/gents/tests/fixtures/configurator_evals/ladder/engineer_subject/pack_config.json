@@ -41,6 +41,9 @@
         "self_config_preview": true,
         "enable_pack_install": true
       },
+      "built_ins": {
+        "enable_schema_tool": true
+      },
       "host": {
         "bash": {
           "mode": "Off"

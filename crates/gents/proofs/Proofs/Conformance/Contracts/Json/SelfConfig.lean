@@ -1,5 +1,6 @@
 import Proofs.Conformance.Contracts.Json.Helpers
 import Proofs.SelfConfig.Cases
+import Proofs.SelfConfig.Auth
 
 namespace Conformance.Contracts
 
@@ -61,5 +62,16 @@ def selfConfigCaseJson (w : CaseWitness) : String :=
 
 def selfConfigCasesJson : String :=
   jsonArray (selfConfigCases.map selfConfigCaseJson)
+
+def schemaPublicationCasesJson : String := Id.run do
+  let mut rows : List String := []
+  for grant in [false, true] do
+    for artifact in [false, true] do
+      for compatible in [false, true] do
+        rows := rows ++ ["{\"grant\":" ++ scBool grant
+          ++ ",\"artifact\":" ++ scBool artifact
+          ++ ",\"compatible\":" ++ scBool compatible
+          ++ ",\"accepted\":" ++ scBool (SelfConfig.schemaPublicationAllowed grant artifact compatible) ++ "}"]
+  return jsonArray rows
 
 end Conformance.Contracts
