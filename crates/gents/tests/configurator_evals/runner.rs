@@ -605,12 +605,32 @@ async fn verify_configuration(
     Ok(())
 }
 
+/// Pre-stores an offline copy of the code_review pack (a directory or a
+/// `.pack` file, named by `GENTS_CODE_REVIEW_PACK`) into the trial home's
+/// pack store, so an onboarding trial that installs it can do so without
+/// reaching the registry.
+fn seed_pack_store(home: &std::path::Path, pack_path: &std::path::Path) {
+    let bytes = if pack_path.is_dir() {
+        gents::pack_archive::pack_dir(pack_path)
+            .expect("packing GENTS_CODE_REVIEW_PACK")
+            .0
+    } else {
+        std::fs::read(pack_path).expect("reading GENTS_CODE_REVIEW_PACK")
+    };
+    gents::pack_store::PackStore::new(home)
+        .import(bytes.as_slice(), None)
+        .expect("importing GENTS_CODE_REVIEW_PACK into the trial home's store");
+}
+
 async fn run_eval_trial(
     target: &InferenceTarget,
     trial: usize,
     artifacts: &std::path::Path,
 ) -> reporting::TrialResult {
     let db = retained_trial_db(artifacts).await;
+    if let Ok(pack_path) = std::env::var("GENTS_CODE_REVIEW_PACK") {
+        seed_pack_store(db.data_path(), std::path::Path::new(&pack_path));
+    }
     let access = gents::ConfigAccess::Local(db.node.clone());
     let schema = gents::config_client::preview_schema_install(&access, stages::INPUT_SCHEMA)
         .await

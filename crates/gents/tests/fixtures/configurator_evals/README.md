@@ -46,3 +46,7 @@ faults and archive retention without inference. Live host images are pinned once
 per cohort and memory capacity is checked before trials start. Begin with one
 live trial before explicitly choosing larger `GENTS_LIVE_CONFIG_RUNS` and
 `GENTS_LIVE_CONFIG_CONCURRENCY` values.
+
+Set `GENTS_CODE_REVIEW_PACK` to a `code_review` pack directory or `.pack` file
+to seed each trial home's pack store with it; without it, a trial that installs
+`code_review` resolves it from the registry.
