@@ -1,5 +1,15 @@
 use super::*;
 
+fn schema_recovery(error: anyhow::Error) -> anyhow::Error {
+    let Some(mismatch) = error.downcast_ref::<crate::config_client::SchemaInstallMismatch>() else {
+        return error;
+    };
+    CommandGuidance {
+        message: format!("{error:#}. Existing schemas cannot be replaced through schema install. Inspect the saved schema and report the limitation if the requested contract cannot be met. Preserve valid configuration and the user's collection names: deleting config documents cannot change installed schemas."),
+        next_call: json!({"argv":["schema","get"],"target_id":mismatch.collection}),
+    }.into()
+}
+
 impl ConfigCommandTool {
     pub(super) async fn schema(&self, argv: &[String]) -> Result<String> {
         self.ensure_resource("automation")?;
@@ -11,15 +21,17 @@ impl ConfigCommandTool {
                 &access
                     .collection_version(&argv[1])
                     .await?
-                    .context("collection is not registered")?,
+                    .with_context(|| format!("collection {:?} is not registered; check its exact GraphQL type name or use schema preview install with options.sdl before installing it", argv[1]))?,
             )?);
         }
         let preview = argv.first().is_some_and(|arg| arg == "preview");
         let argv = if preview { &argv[1..] } else { argv };
-        anyhow::ensure!(
-            argv.first().is_some_and(|arg| arg == "install"),
-            "use [\"schema\",\"preview\",\"install\"] with options.sdl, then [\"schema\",\"install\"] with options.sdl and options.digest; see [\"help\",\"schema\"]"
-        );
+        if !argv.first().is_some_and(|arg| arg == "install") {
+            return Err(CommandGuidance {
+                message: "schema supports get COLLECTION and preview install/install; it does not support document CRUD or list.".into(),
+                next_call: json!({"argv":["schema","--help"]}),
+            }.into());
+        }
         let parsed = ParsedArgs::parse(&argv[1..])?;
         anyhow::ensure!(
             parsed.positionals.is_empty() && parsed.switches.is_empty(),
@@ -31,7 +43,7 @@ impl ConfigCommandTool {
                 "unknown schema option --{name}"
             );
         }
-        let sdl = parsed.one("sdl")?.context("--sdl SDL is required")?;
+        let sdl = parsed.one("sdl")?.context("options.sdl is required: a string containing GraphQL type definitions. Scalar names include String, Int, Float and Boolean (not Bool)")?;
         anyhow::ensure!(
             sdl.len() <= 64 * 1024,
             "schema SDL exceeds 64 KiB; submit a smaller schema"
@@ -43,11 +55,15 @@ impl ConfigCommandTool {
                 digest.is_none(),
                 "preview returns the digest; do not supply --digest"
             );
-            crate::config_client::preview_schema_install(&access, sdl).await?
+            crate::config_client::preview_schema_install(&access, sdl)
+                .await
+                .map_err(schema_recovery)?
         } else {
             let digest = digest.context("--digest from schema preview install is required")?;
             self.execution.enter_mutation();
-            crate::config_client::apply_schema_install(&access, sdl, digest).await?
+            crate::config_client::apply_schema_install(&access, sdl, digest)
+                .await
+                .map_err(schema_recovery)?
         };
         ordered! {
             "committed": !preview && plan.requires_publication,

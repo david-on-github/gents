@@ -63,9 +63,12 @@ source consistency checks, not a separate runtime compatibility version.
   EventSources that target itself. With `self_config_no_lockout` it is refused
   only a lockout: disabling its behavior or backend, turning off its
   self-config tool, or turning off an agents tool group it had. `config` gains
-  `subagent-target` and `execution` resources (list, get, preview, create,
-  edit; delete through `cleanup`), and `plan preview` accepts `SubagentTarget`
-  and `InferenceExecution` (#2058, #2059). `gents init --setup-steward` (the
+  `subagent-target` and `execution` resources (#2058, #2059). Configuration
+  documents share list/get/create/update/delete; ordered batches retain earlier
+  successful writes. `config validate` audits saved configuration and references
+  for the authenticated principal, replacing the proposed-document `plan preview`
+  workflow. Schema installation and deletion retain preview digests (#2152).
+  `gents init --setup-steward` (the
   desktop first run) ships the Engineer with the agents tools, the sessions
   tool, read-only query and an `engineer-mailbox` escalation surface (#2060).
   `agent_message`, `agent_interrupt` and `agent_list` now follow
@@ -345,6 +348,11 @@ source consistency checks, not a separate runtime compatibility version.
 
 ### Fixed
 
+- Config errors identify nested field paths, misplaced fields and missing document
+  selections, with executable help or discovery calls shared by single and batch
+  operations. Trigger ownership errors no longer recommend the removed plan
+  command. Schema-limit errors explain why deleting configuration cannot change
+  an installed schema; host-root errors name the exact Tools field.
 - A document trigger whose fire cannot be admitted no longer re-fires the same
   document without bound (#2094). A refused fire, such as an `emit_outcome`
   Task delivered a document without `handoff_id` or a template that fails to

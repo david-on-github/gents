@@ -361,8 +361,9 @@ async fn build_registers_gated_family() {
     for core in [
         "native API",
         "\"<DID>:<slug>\"",
-        "Preview writes nothing; apply, then read back.",
-        "[\"help\"] lists resources",
+        "Preview writes nothing.",
+        "[\"validate\"] audits saved configuration",
+        "[\"help\"] lists granted resources",
     ] {
         assert!(definition.description.contains(core), "missing {core}");
     }
@@ -2299,7 +2300,7 @@ async fn datastore_preview_create_and_sparse_edit_use_owned_patch_path() {
         .await
         .unwrap();
     assert!(
-        create_help.starts_with("datastore [preview] create|edit"),
+        create_help.starts_with("datastore:") && create_help.contains("create ID | update ID"),
         "{create_help}"
     );
     assert!(
@@ -2577,149 +2578,6 @@ pub(super) async fn call_config_tool(
         .map_err(|error| format!("{error:#}"))
 }
 
-#[tokio::test]
-async fn connected_plan_preview_validates_pending_references_without_writes() {
-    let node = build_persona_node().await;
-    let identity = persona_identity("connected-preview");
-    let owner = identity.did().to_string();
-    crate::test_support::install_test_behavior(&node, &owner, "beh-test").await;
-    let access = crate::ConfigAccess::Local(node.clone());
-    let query = "{ AgentBehavior { behavior_id context_id } AgentContext { context_id tools_id } Tools { tools_id } }";
-    let before = access.execute(query).await.unwrap();
-    let documents = json!([
-        {"collection":"AgentBehavior","document":{"agent_did":owner,"behavior_id":"proposed-behavior","context_id":"proposed-context","inference_profile_id":"beh-test:inference"}},
-        {"collection":"AgentContext","document":{"agent_did":owner,"context_id":"proposed-context","tools_id":"proposed-tools","system_prompt":"Observe the host."}},
-        {"collection":"Tools","document":{"agent_did":owner,"tools_id":"proposed-tools"}}
-    ]);
-    let mut grants = config(&["persona", "tools"]);
-    grants.preview = true;
-    let tools = build_self_config_tools(
-        node.clone(),
-        owner.clone(),
-        Some(identity.clone()),
-        &grants,
-        test_plugins(),
-    );
-    let tool = tools
-        .iter()
-        .find(|tool| tool.name() == CONFIG_TOOL_NAME)
-        .unwrap();
-    let args = |documents: Value| {
-        json!({"argv":["plan","preview"],"options":{"documents":documents}}).to_string()
-    };
-    // Connected preview is named once, in the index, not on every page.
-    let index = tool
-        .call(json!({"argv":["help"]}).to_string())
-        .await
-        .unwrap();
-    assert!(index.contains("  plan:"), "{index}");
-    for resource in ["behavior", "tools", "datastore", "subagent-target"] {
-        let help = tool
-            .call(json!({"argv":[resource,"--help"]}).to_string())
-            .await
-            .unwrap();
-        assert!(!help.contains("  plan:"), "{resource}: {help}");
-    }
-    let plan_help = tool
-        .call(json!({"argv":["plan","--help"]}).to_string())
-        .await
-        .unwrap();
-    assert!(plan_help.contains("options.documents"), "{plan_help}");
-    let error = tool.call(json!({"argv":["tools","preview"],"options":{"behavior":"proposed-behavior"},"set":{"host":{"bash":{"mode":"read_only"}}}}).to_string()).await.unwrap_err();
-    let crate::llm::tool::ToolError::ToolCallError(error) = error else {
-        panic!("missing typed config error: {error}");
-    };
-    let error: Value = serde_json::from_str(&error.to_string()).unwrap();
-    assert_eq!(error["config_execution"]["mutation_entered"], false);
-    assert_eq!(
-        error["recovery"]["preview_argv"],
-        json!(["plan", "preview"])
-    );
-    let response: Value =
-        serde_json::from_str(&tool.call(args(documents.clone())).await.unwrap()).unwrap();
-    assert_eq!(response["committed"], false);
-    assert_eq!(response["config_execution"]["mutation_entered"], false);
-    assert_eq!(response["documents"].as_array().unwrap().len(), 3);
-    let mut with_mailbox = documents.clone();
-    with_mailbox.as_array_mut().unwrap().push(json!({
-        "collection":"DatastoreToolSurface",
-        "document":{"agent_did":owner,"surface_id":"proposed-attention","enabled":true},
-        "mailbox":{"identity":{"mode":"condition","key":"host-health"},"kind":"flag","action":"ack"}
-    }));
-    let response: Value =
-        serde_json::from_str(&tool.call(args(with_mailbox.clone())).await.unwrap()).unwrap();
-    let surface = response["documents"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|entry| entry["collection"] == "DatastoreToolSurface")
-        .unwrap();
-    let mut canonical = crate::mailbox::canonical_mailbox_write_decl();
-    canonical.notification =
-        Some(serde_json::from_value(with_mailbox[3]["mailbox"].clone()).unwrap());
-    let surface: crate::document_config::DatastoreToolSurfaceDocument =
-        serde_json::from_value(surface["document"].clone()).unwrap();
-    assert_eq!(
-        surface.entries,
-        Some(vec![crate::document_config::SurfaceToolDecl::Create(
-            canonical
-        )])
-    );
-    with_mailbox[3]["document"]["entries"] = json!([]);
-    assert!(tool.call(args(with_mailbox)).await.is_err());
-    let mut missing = documents.clone();
-    missing.as_array_mut().unwrap().pop();
-    assert!(tool.call(args(missing)).await.is_err());
-    let mut foreign = documents.clone();
-    foreign[2]["document"]["agent_did"] = "another-principal".into();
-    assert!(tool.call(args(foreign)).await.is_err());
-    let mut existing = documents.clone();
-    existing[0]["document"]["behavior_id"] = "beh-test".into();
-    assert!(tool.call(args(existing)).await.is_err());
-    let mut duplicate = documents.clone();
-    duplicate.as_array_mut().unwrap().push(documents[0].clone());
-    assert!(tool.call(args(duplicate)).await.is_err());
-    for (categories, preview) in [
-        (&["persona"][..], true),
-        (&["tools"][..], true),
-        (&["persona", "tools"][..], false),
-    ] {
-        let mut denied = config(categories);
-        denied.preview = preview;
-        let denied = build_self_config_tools(
-            node.clone(),
-            owner.clone(),
-            Some(identity.clone()),
-            &denied,
-            test_plugins(),
-        );
-        assert!(denied
-            .iter()
-            .find(|tool| tool.name() == CONFIG_TOOL_NAME)
-            .unwrap()
-            .call(args(documents.clone()))
-            .await
-            .is_err());
-        let tool = denied
-            .iter()
-            .find(|tool| tool.name() == CONFIG_TOOL_NAME)
-            .unwrap();
-        let help = tool
-            .call(json!({"argv":["--help"]}).to_string())
-            .await
-            .unwrap();
-        assert_eq!(
-            help.contains("  plan:"),
-            preview && categories.contains(&"persona")
-        );
-    }
-    assert_eq!(
-        before,
-        access.execute(query).await.unwrap(),
-        "preview changed canonical documents"
-    );
-}
-
 /// Errors a model hit in the configurator skill-workflow eval name the call
 /// that can proceed, not only what failed.
 #[tokio::test]
@@ -2758,33 +2616,32 @@ async fn config_errors_name_the_next_call() {
         "{message}"
     );
     assert!(
-        message.contains(r#"After approval: ["skill","import","eval-coding-check",PATH], then ["behavior","context","preview"]"#),
-        "{message}"
-    );
-    assert!(skill["recovery"].is_null(), "{skill}");
-    assert_eq!(skill["config_execution"]["mutation_entered"], false);
-
-    // Plan preview cannot stage a skill either, so it names the same order.
-    let planned = failure(json!({"argv":["plan","preview"],"options":{"documents":[{"collection":"AgentContext","document":{"agent_did":owner,"context_id":"proposed-context","tools_id":"beh-test:tools","skill_ids":["eval-coding-check"]}}]}})).await;
-    assert!(
-        planned["error"]
-            .as_str()
-            .unwrap()
-            .starts_with("Skill \"eval-coding-check\" does not exist yet"),
-        "{planned}"
-    );
-
-    // A missing document plan preview can stage names connected preview.
-    let tools_ref = failure(json!({"argv":["behavior","context","preview"],"options":{"behavior":"builder"},"set":{"tools_id":"proposed-tools"}})).await;
-    let message = tools_ref["error"].as_str().unwrap();
-    assert!(
-        message.starts_with(r#"Tools "proposed-tools" does not exist yet; to preview new documents that reference each other, use a connected plan preview: ["help","plan"]; an existing document can reference it once it is created."#),
+        message.contains("create it with skill create or import it with skill import"),
         "{message}"
     );
     assert_eq!(
-        tools_ref["recovery"]["preview_argv"],
-        json!(["plan", "preview"])
+        skill["recovery"]["next_call"],
+        json!({"argv":["skill","list"]})
     );
+    tool.call(skill["recovery"]["next_call"].to_string())
+        .await
+        .unwrap();
+    assert_eq!(skill["config_execution"]["mutation_entered"], false);
+
+    let tools_ref = failure(json!({"argv":["behavior","context","preview"],"options":{"behavior":"builder"},"set":{"tools_id":"proposed-tools"}})).await;
+    let message = tools_ref["error"].as_str().unwrap();
+    assert!(
+        message.contains("create it with its own resource command first"),
+        "{message}"
+    );
+    assert!(!message.contains("plan"), "{message}");
+    assert_eq!(
+        tools_ref["recovery"]["next_call"],
+        json!({"argv":["tools","list"]})
+    );
+    tool.call(tools_ref["recovery"]["next_call"].to_string())
+        .await
+        .unwrap();
 
     // preview edit is preview; a stray positional gets the whole correct call.
     let aliased = tool
@@ -2954,11 +2811,11 @@ async fn persona_unknown_action_errors_cleanly() {
         test_plugins(),
     );
 
-    let error = call_config_tool(&tools, vec!["behavior".into(), "delete".into()])
+    let error = call_config_tool(&tools, vec!["behavior".into(), "unknown-action".into()])
         .await
         .expect_err("unknown action must error");
     assert!(
-        error.contains("unknown behavior command"),
+        error.contains("unknown behavior verb"),
         "error should name the bad action: {error}"
     );
 }
@@ -5275,17 +5132,6 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
             "--set",
             "prompt_template=\"Review {{ doc.message }}\"",
         ]),
-    )
-    .await);
-
-    // Connected plan preview accepts both new resource kinds.
-    let documents = json!([
-        {"collection":"SubagentTarget","document":{"agent_did":owner,"target_id":"planned","name":"planned","target_agent_did":owner,"behavior_id":"lead"}},
-        {"collection":"InferenceExecution","document":{"agent_did":owner,"execution_id":"planned-execution","max_turns":8}}
-    ]);
-    ok(call_config_tool(
-        &tools,
-        command(&["plan", "preview", "--documents", &documents.to_string()]),
     )
     .await);
 

@@ -170,8 +170,7 @@
                 "field": "terminal_output",
                 "contains": "message_doc_id"
               }
-            ],
-            "max_rows": 1
+            ]
           },
           "tier": "acceptance",
           "weight": 2

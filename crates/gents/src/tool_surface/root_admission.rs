@@ -207,7 +207,7 @@ pub(crate) fn canonicalize_tools_root(
     let Some(authored_root) = authored_root else {
         anyhow::ensure!(
             !policy.configured || !requires_root,
-            "active host tools require an explicit root while WorkspaceRoot policy is configured"
+            "active host tools require an explicit root in Tools.host.root while WorkspaceRoot policy is configured. Set host.root to an admitted absolute workspace path (a sibling of host.files and host.bash). In config, read tools get first, then tools update with set.host preserving its other fields; do not put root inside host.files"
         );
         if let Some(host) = tools.host.as_mut() {
             host.root = None;

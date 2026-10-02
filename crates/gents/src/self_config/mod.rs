@@ -591,10 +591,11 @@ fn automation_request(
                     let task = doc
                         .get("task_id")
                         .and_then(Value::as_str)
-                        .ok_or_else(|| anyhow!("trigger task is required"))?;
+                        .ok_or_else(|| anyhow!("Trigger.task_id must name an existing Task; inspect tasks with {{\"argv\":[\"task\",\"list\"]}}"))?;
                     anyhow::ensure!(
                         core.task_owned(txn, anchor, task).await?,
-                        "trigger task is not present on the selected behavior; create its task first, or preview connected documents together with [\"help\",\"plan\"]"
+                        "Trigger.task_id {task:?} must reference a Task owned by selected behavior {:?}. Inspect it with {{\"argv\":[\"task\",\"get\"],\"target_id\":{task:?}}}. Create a missing Task first with options.behavior set to that owner. An existing Trigger cannot switch task owners; create a separate Trigger for a different owner and preserve the current workflow until its replacement is valid",
+                        core.behavior_id()
                     );
                 }
             }

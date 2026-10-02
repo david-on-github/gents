@@ -9,7 +9,7 @@ pub(super) fn mailbox_entries(policy: crate::mailbox::MailboxNotificationPolicy)
     )]))
 }
 
-fn surface_patch(argv: &[String]) -> Result<SelfConfigPatch> {
+pub(super) fn surface_patch(argv: &[String]) -> Result<SelfConfigPatch> {
     let mut parsed = ParsedArgs::parse(argv)?;
     if let Some(policy) = parsed.one("mailbox")? {
         let policy: crate::mailbox::MailboxNotificationPolicy = serde_json::from_str(policy)
