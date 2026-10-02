@@ -37,6 +37,13 @@ fn scope_filter(agent_did: &str, requester_did: Option<&str>) -> String {
     format!("agent_did: {{ _eq: \"{agent_did}\" }}, requester_did: {{ _eq: {requester} }}")
 }
 
+fn in_clause(ids: &BTreeSet<String>) -> String {
+    ids.iter()
+        .map(|id| format!("\"{}\"", escape_graphql_string(id)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn insert_exact_header(
     headers: &mut BTreeMap<String, TranscriptMessageRow>,
     row: TranscriptMessageRow,
@@ -202,42 +209,57 @@ async fn load_page_canonical_dependencies(
         );
     }
 
-    let mut closures = Vec::new();
+    // Closures are immutable documents addressed by physical id, so one set
+    // read per authorization scope resolves a whole page.  Every row is still
+    // checked individually against the id and scope it was requested under.
+    let mut close_ids_by_scope = BTreeMap::<_, BTreeSet<String>>::new();
     for (close_id, agent_did, requester_did) in close_scopes {
-        let close_id_escaped = escape_graphql_string(&close_id);
+        close_ids_by_scope
+            .entry((agent_did, requester_did))
+            .or_default()
+            .insert(close_id);
+    }
+    let mut closures = Vec::new();
+    for ((agent_did, requester_did), close_ids) in close_ids_by_scope {
         let query = format!(
-            r#"query DesktopExactOutputClosure {{
-  AgentOutputSegment(filter: {{ _docID: {{ _eq: "{close_id_escaped}" }}, {} }}, limit: 2) {{ {AGENT_OUTPUT_SEGMENT_FIELDS} }}
+            r#"query DesktopExactOutputClosures {{
+  AgentOutputSegment(filter: {{ _docID: {{ _in: [{}] }}, {} }}, limit: {}) {{ {AGENT_OUTPUT_SEGMENT_FIELDS} }}
 }}"#,
+            in_clause(&close_ids),
             scope_filter(&agent_did, requester_did.as_deref()),
+            close_ids.len().saturating_mul(2),
         );
         let data = access
-            .execute(&query, "exact canonical output closure")
+            .execute(&query, "exact canonical output closures")
             .await?;
         query_count += 1;
         let rows =
             parse_canonical_rows(&data, AGENT_OUTPUT_SEGMENT_NAME, decode_output_segment_row)?;
         queried_rows = queried_rows.saturating_add(rows.len());
-        match rows.len() {
-            0 => {}
-            1 => {
-                let closure = rows.into_iter().next().expect("one row checked");
-                if closure.doc_id != close_id
-                    || closure.segment.agent_did != agent_did
-                    || closure.segment.requester_did != requester_did
-                {
-                    bail!("exact canonical output closure crossed its authorized scope");
-                }
-                closures.push(closure);
+        let mut seen = BTreeSet::new();
+        for closure in rows {
+            if !close_ids.contains(&closure.doc_id)
+                || closure.segment.agent_did != agent_did
+                || closure.segment.requester_did != requester_did
+            {
+                bail!("exact canonical output closure crossed its authorized scope");
             }
-            _ => bail!("exact canonical output closure has conflicting physical rows: {close_id}"),
+            if !seen.insert(closure.doc_id.clone()) {
+                bail!(
+                    "exact canonical output closure has conflicting physical rows: {}",
+                    closure.doc_id
+                );
+            }
+            closures.push(closure);
         }
+        // ACP-filtered absence is deliberately only absence, as for origins.
     }
 
     // The schema intentionally indexes request identity, rather than the JSON
-    // source value.  Read that bounded request slice, then retain exactly the
-    // source named by the closure.  The hard limit makes a malformed/high-volume
-    // request fail visibly instead of silently dropping a segment.
+    // source value.  Read the bounded request slices of one scope together,
+    // then retain exactly the sources named by each closure.  The per-request
+    // hard limit makes a malformed/high-volume request fail visibly instead
+    // of silently dropping a segment.
     let mut sources_by_request = BTreeMap::new();
     for closure in &closures {
         sources_by_request
@@ -253,33 +275,51 @@ async fn load_page_canonical_dependencies(
     for closure in closures {
         insert_exact_segment(&mut records, closure)?;
     }
-    for (request_scope, expected_sources) in sources_by_request {
-        let request_id = escape_graphql_string(&request_scope.0);
+    let mut requests_by_scope = BTreeMap::<_, BTreeMap<String, BTreeSet<String>>>::new();
+    for ((request_id, agent_did, requester_did), expected_sources) in sources_by_request {
+        requests_by_scope
+            .entry((agent_did, requester_did))
+            .or_default()
+            .insert(request_id, expected_sources);
+    }
+    for ((agent_did, requester_did), requests) in requests_by_scope {
+        let request_ids = requests.keys().cloned().collect::<BTreeSet<_>>();
         let query = format!(
-            r#"query DesktopReferencedOutputSource {{
+            r#"query DesktopReferencedOutputSources {{
   AgentOutputSegment(
-    filter: {{ request_doc_id: {{ _eq: "{request_id}" }}, {} }},
-    order: [{{ ordinal: ASC }}, {{ _docID: ASC }}],
+    filter: {{ request_doc_id: {{ _in: [{}] }}, {} }},
+    order: [{{ request_doc_id: ASC }}, {{ ordinal: ASC }}, {{ _docID: ASC }}],
     limit: {}
   ) {{ {AGENT_OUTPUT_SEGMENT_FIELDS} }}
 }}"#,
-            scope_filter(&request_scope.1, request_scope.2.as_deref()),
-            MAX_CANONICAL_DEPENDENCY_ROWS.saturating_add(1),
+            in_clause(&request_ids),
+            scope_filter(&agent_did, requester_did.as_deref()),
+            MAX_CANONICAL_DEPENDENCY_ROWS
+                .saturating_mul(requests.len())
+                .saturating_add(1),
         );
         let data = access
-            .execute(&query, "referenced canonical output source")
+            .execute(&query, "referenced canonical output sources")
             .await?;
         query_count += 1;
         let rows =
             parse_canonical_rows(&data, AGENT_OUTPUT_SEGMENT_NAME, decode_output_segment_row)?;
         queried_rows = queried_rows.saturating_add(rows.len());
-        if rows.len() > MAX_CANONICAL_DEPENDENCY_ROWS {
-            bail!(
-                "canonical output request {} exceeds bounded dependency read of {MAX_CANONICAL_DEPENDENCY_ROWS} rows",
-                request_scope.0
-            );
-        }
+        let mut rows_per_request = BTreeMap::<String, usize>::new();
         for row in rows {
+            let Some(expected_sources) = requests.get(&row.segment.request_doc_id) else {
+                bail!("referenced canonical output source crossed its requested scope");
+            };
+            let count = rows_per_request
+                .entry(row.segment.request_doc_id.clone())
+                .or_default();
+            *count += 1;
+            if *count > MAX_CANONICAL_DEPENDENCY_ROWS {
+                bail!(
+                    "canonical output request {} exceeds bounded dependency read of {MAX_CANONICAL_DEPENDENCY_ROWS} rows",
+                    row.segment.request_doc_id
+                );
+            }
             if expected_sources.contains(&serde_json::to_string(&row.segment.source)?) {
                 insert_exact_segment(&mut records, row)?;
             }

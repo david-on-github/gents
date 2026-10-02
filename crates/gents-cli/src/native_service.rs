@@ -1124,7 +1124,7 @@ fn render_launchd(config: &NativeServiceConfig) -> Result<String> {
   </array>{environment}{associated_bundle}{stderr}
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Interactive</string>
 </dict></plist>
 "#
     ))

@@ -11,7 +11,16 @@ const SESSION = 1 << 2;
 const INDEX_AFTER_TERMINAL = 1 << 3;
 
 export type DesktopProjectionController = {
-  request: (scope: DesktopUpdateRefreshScope) => Promise<void>;
+  /**
+   * `storeVersion` is the store revision a store notice carries. A session
+   * read already in flight merges the selected request and emits such a
+   * notice itself; when the snapshot it returns reflects that revision, the
+   * queued session reread is dropped and only the fleet index refreshes.
+   */
+  request: (
+    scope: DesktopUpdateRefreshScope,
+    storeVersion?: number | null,
+  ) => Promise<void>;
   dispose: () => void;
 };
 
@@ -55,6 +64,11 @@ export function createDesktopProjectionController({
 }: DesktopProjectionControllerOptions): DesktopProjectionController {
   let active: Promise<void> | null = null;
   let pending = 0;
+  let pendingStoreVersion: number | null = null;
+  // A session request without a store version (selection, foreground, a
+  // delta that failed continuity) must stay pending: nothing proves the
+  // in-flight read covers it.
+  let pendingUnversioned = false;
   let disposed = false;
 
   const enqueue = (work: number) => {
@@ -68,10 +82,23 @@ export function createDesktopProjectionController({
     while (!disposed && pending !== 0) {
       const work = pending;
       pending = 0;
+      pendingStoreVersion = null;
+      pendingUnversioned = false;
       try {
         const sessionId = currentSessionId();
         if (work & SESSION) {
           const next = await refreshSession(sessionId);
+          const projected = next?.projectionRevision?.storeVersion;
+          if (
+            pending & SESSION &&
+            !pendingUnversioned &&
+            pendingStoreVersion !== null &&
+            typeof projected === "number" &&
+            projected >= pendingStoreVersion
+          ) {
+            pending &= ~SESSION;
+            pendingStoreVersion = null;
+          }
           if (
             work & INDEX_AFTER_TERMINAL &&
             !(work & SNAPSHOT) &&
@@ -111,9 +138,20 @@ export function createDesktopProjectionController({
   };
 
   return {
-    request(scope) {
+    request(scope, storeVersion = null) {
       if (disposed) return Promise.resolve();
-      enqueue(requestedWork(scope));
+      const work = requestedWork(scope);
+      enqueue(work);
+      if (work & SESSION) {
+        if (storeVersion === null) {
+          pendingUnversioned = true;
+        } else {
+          pendingStoreVersion =
+            pendingStoreVersion === null
+              ? storeVersion
+              : Math.max(pendingStoreVersion, storeVersion);
+        }
+      }
       if (!active) {
         active = Promise.resolve()
           .then(drain)

@@ -1,4 +1,4 @@
-import { useEffect, type MutableRefObject } from "react";
+import { useEffect, useRef, type MutableRefObject } from "react";
 
 import type {
   DesktopClientUpdatedListenerFactory,
@@ -24,6 +24,8 @@ type DesktopProjectionEffectsArgs = {
   selectedSessionIdRef: MutableRefObject<string | null>;
   selectedTrackedRequestId: string | null;
   selectedTrackedRequestIdRef: MutableRefObject<string | null>;
+  /** Store version the projected session snapshot was built from, if any. */
+  projectedStoreVersionRef?: MutableRefObject<number | null>;
   setError: (error: string | null) => void;
 };
 
@@ -43,14 +45,23 @@ export function useDesktopProjectionEffects({
   selectedSessionIdRef,
   selectedTrackedRequestId,
   selectedTrackedRequestIdRef,
+  projectedStoreVersionRef,
   setError,
 }: DesktopProjectionEffectsArgs) {
+  // The selection whose bounded session projection this owner has already
+  // read. The first read changes the tracked request and agent DID that this
+  // effect depends on, which recreates the controller; only a new selection
+  // (or a restarted client) justifies reading the same session again.
+  const readSelectionRef = useRef<string | null>(null);
   useEffect(() => {
     // There is no bounded desktop projection to observe until the client is
     // running. Starting this owner during configuration bootstrap races the
     // lifecycle's authoritative snapshot read and can clear its failure while
     // leaving startupPhase at configuration-error.
-    if (!clientAvailable) return;
+    if (!clientAvailable) {
+      readSelectionRef.current = null;
+      return;
+    }
 
     let disposed = false;
     let unlisten: (() => void) | undefined;
@@ -79,7 +90,28 @@ export function useDesktopProjectionEffects({
           selectedSessionIdRef.current,
           selectedTrackedRequestIdRef.current,
         );
-        await controller.request(scope);
+        // A bounded session read merges the selected request into the store
+        // and so emits its own store notice. When the projected session was
+        // built from that revision or a later one, the session part of the
+        // refresh would only reread the same rows; the fleet index still
+        // observes the change.
+        const projected = projectedStoreVersionRef?.current ?? null;
+        if (
+          scope === "full" &&
+          event.reason === "store" &&
+          typeof event.storeVersion === "number" &&
+          projected !== null &&
+          event.storeVersion <= projected
+        ) {
+          await controller.request("snapshot");
+          return;
+        }
+        await controller.request(
+          scope,
+          event.reason === "store" && typeof event.storeVersion === "number"
+            ? event.storeVersion
+            : null,
+        );
       },
       reportListenerError,
       listenToUpdates,
@@ -93,7 +125,12 @@ export function useDesktopProjectionEffects({
       })
       .catch(reportListenerError);
 
-    void controller.request("session");
+    const selection = selectedSessionId ?? "";
+    if (readSelectionRef.current !== selection) {
+      void controller.request("session").then(() => {
+        readSelectionRef.current = selection;
+      });
+    }
 
     const pollMs = timingConfig().activeSessionPollMs;
     if (

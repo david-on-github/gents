@@ -106,8 +106,61 @@ pub async fn desktop_session_snapshot(
             operator_access.is_some(),
         )
     };
+    // The replica serves a session it has fully hydrated and whose latest
+    // request is terminal: no live turn can leave it behind the operator's
+    // node, and its rows carry the principal scope this read uses. A live or
+    // partially hydrated session, or one read under the agent's own scope,
+    // still reads from the operator endpoint, which is the exact source.
+    let replica_serves = if operator_access.is_some() {
+        match agent_did.as_deref() {
+            Some(agent) if requester_scope.as_deref() != Some(agent) => {
+                let terminal = request_id.as_deref().is_none_or(|request_id| {
+                    let store = core.store().snapshot();
+                    store
+                        .requests
+                        .iter()
+                        .find(|row| row.request_id == request_id)
+                        .is_some_and(|row| {
+                            row.lifecycle_state
+                                .as_ref()
+                                .is_some_and(|state| state.is_terminal())
+                        })
+                });
+                terminal
+                    && core
+                        .session_hydration_progress(&session_id, agent)
+                        .await
+                        .is_ok_and(|progress| {
+                            progress.phase
+                                == gents::agent::p2p_reconcile::session_hydration::ClientHydrationPhase::Complete
+                                && progress.served_count.is_some_and(|served| progress.covered_count >= served)
+                        })
+            }
+            _ => false,
+        }
+    } else {
+        false
+    };
+    let read_access = if replica_serves {
+        None
+    } else {
+        operator_access.as_ref()
+    };
+    tracing::debug!(
+        target: "gents_desktop::chat",
+        session_id = %session_id,
+        source = if replica_serves {
+            "replica"
+        } else if operator_access.is_some() {
+            "operator"
+        } else {
+            "local"
+        },
+        older = timeline_before_item_key.is_some(),
+        "session snapshot read source"
+    );
     let page_read = async {
-        match operator_access.as_ref() {
+        match read_access {
             Some(access) => {
                 gents_desktop_core::client::load_session_transcript_page_on(
                     access,
@@ -150,7 +203,7 @@ pub async fn desktop_session_snapshot(
             let Some(request) = request else {
                 return Ok(None);
             };
-            match operator_access.as_ref() {
+            match read_access {
                 Some(access) => {
                     gents_desktop_core::client::load_session_tip_store_on(access, &request)
                         .await
