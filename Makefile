@@ -167,27 +167,11 @@ test-agent-conformance:
 	$(CARGO) test -p gents --test conformance
 
 test-evals:
-	node --test scripts/evals/report.test.mjs scripts/evals/watch.test.mjs
-	$(CARGO) test -p gents --test e2e_configurator
+	$(CARGO) test -p gents --test onboarding_evals
+	$(CARGO) test -p gents --test eval_runner_canary
 
 live-configurator-eval:
-	GENTS_EVAL_TARGET=$${GENTS_EVAL_TARGET:-workstation-1} node scripts/evals/run-configurator.mjs $(CARGO)
-
-.PHONY: live-mailbox-eval
-.PHONY: live-host-steward-eval
-live-host-steward-eval:
-	GENTS_EVAL_SUITE=host-steward GENTS_EVAL_TARGET=$${GENTS_EVAL_TARGET:-workstation-1} GENTS_LIVE_CONFIG_RUNS=$${GENTS_LIVE_CONFIG_RUNS:-1} GENTS_LIVE_CONFIG_CONCURRENCY=$${GENTS_LIVE_CONFIG_CONCURRENCY:-1} node scripts/evals/run-configurator.mjs $(CARGO)
-
-.PHONY: test-host-eval-environment
-.PHONY: live-host-maintenance-eval
-live-host-maintenance-eval:
-	GENTS_EVAL_SUITE=host-maintenance GENTS_EVAL_TARGET=$${GENTS_EVAL_TARGET:-workstation-1} GENTS_LIVE_CONFIG_RUNS=$${GENTS_LIVE_CONFIG_RUNS:-1} GENTS_LIVE_CONFIG_CONCURRENCY=$${GENTS_LIVE_CONFIG_CONCURRENCY:-1} node scripts/evals/run-configurator.mjs $(CARGO)
-
-test-host-eval-environment:
-	GENTS_HOST_FIXTURE_TEST=1 node --test scripts/evals/host-environment.test.mjs
-
-live-mailbox-eval:
-	GENTS_EVAL_SUITE=monitor-mailbox GENTS_EVAL_TARGET=$${GENTS_EVAL_TARGET:-workstation-1} GENTS_LIVE_CONFIG_RUNS=$${GENTS_LIVE_CONFIG_RUNS:-10} GENTS_LIVE_CONFIG_CONCURRENCY=$${GENTS_LIVE_CONFIG_CONCURRENCY:-10} node scripts/evals/run-configurator.mjs $(CARGO)
+	GENTS_EVAL_TARGET=$${GENTS_EVAL_TARGET:-workstation-1} scripts/evals/run-ladder.sh $${GENTS_EVAL_SUITE:-all} $${GENTS_EVAL_TRIALS:-3} $${GENTS_EVAL_CONCURRENCY:-4}
 
 test-agent-e2e:
 	$(CARGO) test -p gents --test e2e_lifecycle

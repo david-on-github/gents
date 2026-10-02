@@ -47,11 +47,22 @@ pub struct BoundedQueryParams(pub Map<String, Value>);
 pub struct BoundedQueryTool {
     node: Arc<EmbeddedNode>,
     decl: QueryToolDecl,
+    surface_id: Option<String>,
 }
 
 impl BoundedQueryTool {
     pub fn new(node: Arc<EmbeddedNode>, decl: QueryToolDecl) -> Self {
-        Self { node, decl }
+        Self {
+            node,
+            decl,
+            surface_id: None,
+        }
+    }
+
+    /// The DatastoreToolSurface that declared this tool, named by refusals.
+    pub fn declared_by(mut self, surface_id: Option<String>) -> Self {
+        self.surface_id = surface_id;
+        self
     }
 
     pub fn is_well_formed(&self) -> bool {
@@ -163,16 +174,35 @@ impl BoundedQueryTool {
             if key == "fields" || key == "limit" {
                 continue;
             }
-            if self.filled_filter_fields().any(|field| field.name == *key) {
+            if let Some(fill) = self
+                .filled_filter_fields()
+                .find(|field| field.name == *key)
+                .and_then(|field| field.fill.as_ref())
+            {
                 bail!(
-                    "filter `{key}` is runtime-filled and must not be supplied to tool `{}`",
-                    self.decl.tool_name
+                    "{}",
+                    crate::document_config::runtime_filled_refusal(
+                        "filter",
+                        key,
+                        &self.decl.tool_name,
+                        self.surface_id.as_deref(),
+                        fill,
+                    )
                 );
             }
             if !self.model_filter_fields().any(|field| field.name == *key) {
                 bail!(
-                    "filter `{key}` is not permitted by tool `{}`",
-                    self.decl.tool_name
+                    "{}",
+                    crate::document_config::undeclared_field_refusal(
+                        "filter",
+                        key,
+                        &self.decl.tool_name,
+                        self.surface_id.as_deref(),
+                        &self
+                            .model_filter_fields()
+                            .map(|field| field.name.as_str())
+                            .collect::<Vec<_>>(),
+                    )
                 );
             }
         }
@@ -467,6 +497,25 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err:#}").contains("protected"), "{err:#}");
+    }
+
+    #[tokio::test]
+    async fn projection_fields_do_not_grant_filter_arguments() {
+        let node = node_with_findings().await;
+        let tool = BoundedQueryTool::new(node, decl()).declared_by(Some("findings".into()));
+        let args = serde_json::from_value(json!({"title":"graphql"})).unwrap();
+        let error = Tool::call(&tool, BoundedQueryParams(args))
+            .await
+            .unwrap_err()
+            .to_string();
+        for detail in [
+            "filter `title` is not permitted",
+            "filter_fields declares filter arguments",
+            r#"surface "findings", entry "query_candidate_finding""#,
+            "next request",
+        ] {
+            assert!(error.contains(detail), "{error}");
+        }
     }
 
     #[tokio::test]

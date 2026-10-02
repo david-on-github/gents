@@ -2,6 +2,13 @@ use std::fmt::Write as _;
 
 use super::*;
 
+/// The mailbox identity choice, stated wherever a mailbox policy is written.
+macro_rules! mailbox_identity_choice {
+    () => {
+        "condition identity: one open item per stable finding, updated across requests; event identity: a new item for every request."
+    };
+}
+
 /// One recipe step: a native call and an optional note on what to carry into
 /// the next step. Placeholders are `<UPPER_CASE>`.
 type Step = (Value, Option<&'static str>);
@@ -164,6 +171,7 @@ fn command_help(resource: &str, page: &Page, command: &[&str]) -> Option<String>
     }
     if writes && resource == "datastore" {
         let _ = writeln!(out, "options.mailbox policy values: {}", mailbox_values());
+        let _ = writeln!(out, "{}", mailbox_identity_choice!());
     }
     let _ = write!(out, "Page and recipe: [\"help\",\"{resource}\"]");
     Some(out)
@@ -228,7 +236,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "schema preview install  options.sdl",
                 "schema install  options.sdl (the identical string) and options.digest (the preview's artifact_digest)",
             ],
-            notes: "Schemas are additive: an existing collection must match exactly; no migration or deletion; at most 64 KiB. Registration grants no document access. Give a handoff key @index(unique: true), e.g. type Handoff { handoff_id: String @index(unique: true) body: String }.",
+            notes: "Choose fields before installation: existing collection shapes cannot be changed here. Only tasks with emit_outcome need handoff_id: String on their source collections; those writers must populate it. Keep this runtime metadata separate from business keys. See help datastore for fills. At most 64 KiB; schemas grant no document access.",
             next: "a surface ([\"help\",\"datastore\"]) or automation ([\"help\",\"automation\"]).",
         },
         "skill" => Page {
@@ -238,7 +246,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "skill [preview] import SKILL_ID PATH  PATH is a skill directory or its SKILL.md inside the invoking behavior's file root",
             ],
             notes: "Frontmatter supplies name and description, the body the instructions, optional agents/openai.yaml interface metadata and tool dependencies. Files are limited to 1 MiB. Import creates an unused ID and never overwrites. Skills grant no tools; supporting files are neither copied nor run.",
-            next: "attach it: behavior context edit with options.behavior and set.skill_ids = the current IDs plus this one; verify with load_skill in a fresh session.",
+            next: "attach it once imported: behavior context preview, then edit, with options.behavior and set.skill_ids = the current IDs plus this one (a context preview resolves only imported skills, so before import skill preview import is the whole preview); verify with load_skill in a fresh session.",
         },
         "discovery" => Page {
             what: "scan external Claude, Codex or Grok configuration read-only (tools grant and file read authority).",
@@ -247,24 +255,28 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             next: "report what was found; import a skill only when asked.",
         },
         "datastore" => Page {
-            what: "a DatastoreToolSurface: model tools that create or query documents of installed collections (tools grant). SURFACE_ID goes in target_id.",
+            what: "a surface defines collection tools; selecting it in Tools grants them (tools grant). target_id: SURFACE_ID.",
             commands: &[
                 "datastore get",
                 "datastore [preview] create|edit  set: surface fields, or options.mailbox",
             ],
-            notes: "A create entry writes one document; a query entry (kind query) matches filter_fields exactly. Give every entry a description; it is the tool's description. Runtime-filled fields must not be required. Writing the surface checks syntax only, selecting it checks tool-name collisions, and only a call proves the collection and fields.\nMailbox: for the existing MailboxItem collection set options.mailbox to a notification policy; the runtime supplies the canonical file_mailbox_item entry. It replaces entries, so keep other tools on another surface. Never create a replacement mailbox collection.",
-            next: "call the new tool from a fresh session of the selected behavior.",
+            notes: concat!(
+                "Create fields: writable {name} arguments; omitted or empty means none. Query fields: returned columns; filter_fields: exact-match arguments as {name} objects. Tool descriptions state use, inputs and side effects.\nfill: correlation uses the request/trigger correlation ID; fill: {source_field: F} copies trigger field F. Omit fill for caller-supplied values. Filled fields cannot be required.\nCaller value: {\"name\":\"correlation\"}. Runtime ID: {\"name\":\"request_correlation\",\"fill\":\"correlation\"}.\nInstall schemas before selection. Selection checks names, not schemas.\nGrant only the requested operations. Mailbox: options.mailbox builds file_mailbox_item for existing MailboxItem and replaces entries. Put other tools on another surface. Never replace the mailbox collection.\n",
+                mailbox_identity_choice!(),
+                " A monitor uses condition identity: {\"argv\":[\"datastore\",\"create\"],\"target_id\":\"monitor-mailbox\",\"options\":{\"mailbox\":{\"identity\":{\"mode\":\"condition\",\"key\":\"host-health\"},\"kind\":\"flag\",\"action\":\"ack\"}}}"
+            ),
+            next: "call the tool in the next request; the current request keeps its existing tools.",
         },
         "subagent-target" => Page {
-            what: "an agent that agent_new may start (tools grant). TARGET_ID goes in target_id.",
-            commands: &["subagent-target list|get", "subagent-target [preview] create|edit  set: target fields"],
-            notes: "name is the agent name the model sees; target_agent_did owns the behavior. A local behavior_id must exist; its short slug resolves when target_agent_did is this principal.",
-            next: "select it: tools get, then tools edit with set.subagents = the current object with this ID added to target_ids.",
+            what: "a named route to a behavior for agent_new (tools grant). TARGET_ID goes in target_id or argv.",
+            commands: &["subagent-target list", "subagent-target get TARGET_ID", "subagent-target [preview] create|edit TARGET_ID  set: target fields"],
+            notes: "name is the name passed to agent_new. For local helpers, use agent_did from [\"get\"] as target_agent_did; profile_id identifies inference settings. The local behavior_id must exist; its short slug resolves. Multiple callers can select a target.",
+            next: "read tools get, then tools edit: preserve set.subagents, set enabled true and add this ID to target_ids. Selecting targets alone leaves delegation disabled. Use options.behavior to grant another caller; tools apply next request.",
         },
         "execution" => Page {
             what: "an InferenceExecution: the run limits (turns, deadline, tokens, stream timeouts) a profile selects (profile grant). EXECUTION_ID goes in target_id.",
-            commands: &["execution list|get", "execution [preview] create|edit  set: execution fields"],
-            notes: "Omitted fields use defaults. A profile selects it through execution_id.",
+            commands: &["execution list", "execution get EXECUTION_ID", "execution [preview] create|edit EXECUTION_ID  set: execution fields"],
+            notes: "deadline_duration_secs limits one request across model/tool turns; provider_idle_timeout_secs limits provider silence. Omitted fields use defaults. A profile selects it through execution_id.",
             next: "bind it as in the recipe, then read it back with profile get execution and options.behavior.",
         },
         "behavior" => Page {
@@ -272,7 +284,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             commands: &[
                 "behavior list  options: limit, cursor",
                 "behavior get [BEHAVIOR_ID]",
-                "behavior [preview] create  options: display-name, system-prompt, preset (readonly|write), profile; optional description, root; argv switch --default",
+                "behavior [preview] create  options: display-name, system-prompt, preset (readonly|write), profile; readonly permits shell commands; to forbid shell set host.bash.mode Off; optional description, root; argv switch --default",
                 "behavior [preview] clone  options: from, display-name, profile; optional overrides",
                 "behavior [preview] disable  options.id",
                 "behavior [preview] default BEHAVIOR_ID",
@@ -286,7 +298,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
             what: "a behavior's Tools: what it may use, in groups (tools grant).",
             commands: &["tools get|preview|edit  options.behavior (default: the invoking behavior); set/clear: groups"],
             notes: "A group in set replaces that whole group: read it with tools get and send back what you keep. On your own Tools, a set that would drop existing settings is refused and names them; options.allow-drop with the group names drops them on purpose. host.bash.mode selects bash (Off by default); execution_mode, argv prefixes and background_enabled only constrain it. For one approved write command use mode Unrestricted with allowed_argv_prefixes holding only that prefix; the process ceiling still applies.",
-            next: "read runtime_effective from behavior get, then call the tool from a fresh session of that behavior.",
+            next: "verify saved Tools restrictions and runtime_effective with behavior get, then test in a fresh session of that behavior.",
         },
         "profile" => Page {
             what: "an InferenceProfile: backend and model, plus sampling, execution, retry-policy and compaction documents (profile grant).",
@@ -308,7 +320,7 @@ pub(super) fn page(resource: &str) -> Option<Page> {
                 "backend get [BACKEND_ID]",
                 "backend get|preview|edit  options.behavior: the backend that behavior's profile uses",
             ],
-            notes: "Create makes an enabled, unauthenticated OpenAI-compatible backend and never takes a credential. list, get and discover show the last credential-free catalog; discover contacts only an unauthenticated backend. Credentials and OAuth are operator-owned and never readable.",
+            notes: "Create makes an enabled, unauthenticated OpenAI-compatible backend and never takes a credential. list and get read the cached credential-free catalog. discover probes an unauthenticated backend and writes its refreshed catalog; it is not read-only. Credentials and OAuth are operator-owned and never readable.",
             next: "create a profile on it with a discovered model ([\"help\",\"profile\"]).",
         },
         "mcp-service" => Page {
@@ -319,8 +331,8 @@ pub(super) fn page(resource: &str) -> Option<Page> {
         },
         "automation" => Page {
             what: "documents that start work without a user: event-source or schedule, trigger, task (automation grant). Use it to run a behavior on new documents or on a timer.",
-            commands: &["automation get|preview|edit KIND  target_id; options.behavior; KIND is event-source, trigger, task or schedule"],
-            notes: "preview and edit are upserts. A task belongs to the selected behavior and its triggers use only its tasks; each fire renders the task into a request of that behavior.\nfilter is a GraphQL object literal in a string, keys unquoted, as in the recipe. Template roots: doc (the source document; its fields must exist in the schema), event, args, session, request, group; a missing value fails the fire. Render the data the task needs apart from its instructions.\nConcurrency: parallel (default); queued_serial runs one at a time in order, never skipping; serial skips a fire while work runs; latest_only supersedes. queued_serial, session_id_template (deliver into an existing session) and emit_outcome need an event source.\nPipelines: a stage's task writes its output through a datastore surface, and that collection's event source fires the next stage. Fan-in: an event source group waits for expected_count documents sharing correlation_field.",
+            commands: &["automation get|preview|edit KIND  target_id; options.behavior (default: you); KIND is event-source, trigger, task or schedule"],
+            notes: "preview/edit upsert. options.behavior selects the Task owner; set.behavior_id is protected. Create Task before Trigger. A reply can finish a task; writing to its input collection fires it again.\nfilter: GraphQL object literal string with unquoted keys. Templates: doc, event, args, session, request, group. Missing values fail the fire. Render needed source data separately from instructions.\nFor a standard run record, Task.emit_outcome=true records each input’s success or failure in FireOutcome. False (default) writes no completion record. For emit_outcome, source documents need a nonempty String handoff_id: declare it before schema installation and populate it in writers (help schema/datastore).\nConcurrency: parallel (default); queued_serial runs in order; serial skips while busy; latest_only supersedes. queued_serial, session_id_template (existing session) and emit_outcome require an event source.\nPipelines: writing output triggers the next collection’s event source. Fan-in: group waits for expected_count documents sharing correlation_field.",
             next: "create one source document and read the resulting request and its output.",
         },
         "cleanup" => Page {
@@ -418,7 +430,7 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
             ],
         )],
         "datastore" => vec![(
-            "a handoff collection with model tools; four checks, each proving only itself",
+            "publish, select, and exercise handoff tools",
             vec![
                 (
                     json!({"argv":["schema","preview","install"],"options":{"sdl":"type Handoff { handoff_id: String @index(unique: true) body: String }"}}),
@@ -444,18 +456,18 @@ pub(crate) fn recipes(resource: &str) -> Vec<(&'static str, Vec<Step>)> {
             ],
         )],
         "automation" => vec![(
-            "a new Handoff document starts a review request",
+            "review each new Handoff yourself",
             vec![
                 (
-                    json!({"argv":["automation","edit","event-source"],"target_id":"handoff-created","options":{"behavior":"worker"},"set":{"source_collection":"Handoff","filter":"{handoff_id: {_ne: \"\"}}"}}),
+                    json!({"argv":["automation","edit","event-source"],"target_id":"handoff-created","set":{"source_collection":"Handoff","filter":"{handoff_id: {_ne: \"\"}}"}}),
                     None,
                 ),
                 (
-                    json!({"argv":["automation","edit","task"],"target_id":"review","options":{"behavior":"worker"},"set":{"prompt_template":"Review handoff {{ doc.handoff_id }}.\n<body>\n{{ doc.body }}\n</body>"}}),
+                    json!({"argv":["automation","edit","task"],"target_id":"review","set":{"prompt_template":"Review handoff {{ doc.handoff_id }}.\n<body>\n{{ doc.body }}\n</body>"}}),
                     None,
                 ),
                 (
-                    json!({"argv":["automation","edit","trigger"],"target_id":"review-on-create","options":{"behavior":"worker"},"set":{"task_id":"review","source":{"kind":"event","event_source_id":"handoff-created"},"concurrency":"queued_serial"}}),
+                    json!({"argv":["automation","edit","trigger"],"target_id":"review-on-create","set":{"task_id":"review","source":{"kind":"event","event_source_id":"handoff-created"}}}),
                     None,
                 ),
             ],

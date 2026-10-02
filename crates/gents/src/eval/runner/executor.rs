@@ -1,9 +1,9 @@
 //! The executor seam: what one trial contains, what running it yields, and the
 //! trait the embedded and scripted executors implement.
 //!
-//! A [`TrialSpec`] is everything a trial may know. It never carries a check
-//! name or parameter, a tier, a split, or another case: those belong to
-//! grading, which runs after execution and reads only the evidence. The one
+//! A serialized [`TrialSpec`] never carries checks, tiers, splits or other cases.
+//! Its host-only review handle can deliver feedback from completed evidence
+//! to a subsequent stage that explicitly opts into assisted review. The one
 //! field that names a case is [`TrialSpec::script_key`], and the loop fills it
 //! only for an executor that asks for it.
 
@@ -31,8 +31,8 @@ pub enum Isolation {
     Process,
 }
 
-/// Everything a trial may contain. Never checks, tiers, splits, case ids or
-/// other cases.
+/// Subject-visible inputs plus non-serialized harness handles. Serialized
+/// inputs contain no checks, tiers, splits, case IDs or other cases.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TrialSpec {
     pub trial_id: String,
@@ -57,6 +57,10 @@ pub struct TrialSpec {
     /// and a no-op unless the loop attached a writer.
     #[serde(skip)]
     pub progress: StageProgress,
+    /// Host-only checks. Only their feedback may cross into an explicitly
+    /// authored review turn; check definitions never serialize with the trial.
+    #[serde(skip)]
+    pub review: super::review::StageReview,
 }
 
 impl TrialSpec {
@@ -83,6 +87,7 @@ impl TrialSpec {
             trial_dir: PathBuf::new(),
             script_key: None,
             progress: StageProgress::default(),
+            review: Default::default(),
         }
     }
 }
@@ -136,6 +141,8 @@ pub struct StageSpec {
     /// See [`crate::document_config::EvalStage::continuation`].
     #[serde(default)]
     pub continuation: Option<crate::document_config::EvalContinuation>,
+    #[serde(default)]
+    pub review_previous: bool,
     /// What to read out of the home when this stage ends: the stage's own
     /// captures, or the run's request-level list when the stage declares none.
     pub captures: Vec<Capture>,

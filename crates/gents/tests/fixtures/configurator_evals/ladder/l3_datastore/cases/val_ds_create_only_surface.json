@@ -11,41 +11,9 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "The EvalAutomationInput and EvalAutomationOutput schemas are already registered on this node. Create a DatastoreToolSurface named \"IngestDocs\" for the EvalAutomationOutput collection with only a create entry \u2014 no query entry, and no unscoped defra_query \u2014 and select that surface in The Engineer's Tools under datastore.datastore_tool_surface_ids. Nothing else.",
+      "prompt": "I need you to keep results for my workflow. The records are EvalAutomationInput { correlation: string, message: string } and EvalAutomationOutput { correlation: string, result: string }. The correlation is a caller-supplied business key: preserve it exactly. The record types already exist. Give yourself a tool to add output records, with no ability to read stored records or access other collections.",
       "deadline_secs": 600,
       "checks": [
-        {
-          "check": "captured_rows_count",
-          "params": {
-            "name": "surfaces",
-            "min": 1,
-            "max": 1
-          },
-          "tier": "acceptance",
-          "weight": 1
-        },
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "surfaces",
-            "expect": [
-              {
-                "field": "display_name",
-                "equals": "IngestDocs"
-              },
-              {
-                "field": "entries",
-                "contains": "EvalAutomationOutput"
-              },
-              {
-                "field": "enabled",
-                "equals": true
-              }
-            ]
-          },
-          "tier": "acceptance",
-          "weight": 1
-        },
         {
           "check": "tool_calls_expected",
           "params": {
@@ -58,9 +26,109 @@
           },
           "tier": "acceptance",
           "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "EvalAutomationOutput"
+                    ],
+                    "query": [],
+                    "lookup_by": "correlation",
+                    "caller_fields": {
+                      "EvalAutomationOutput": [
+                        "correlation",
+                        "result"
+                      ]
+                    }
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    }
+                  ]
+                }
+              ]
+            },
+            "present": [
+              {
+                "capture": "surfaces"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "captured_rows_count",
+          "params": {
+            "name": "surfaces",
+            "min": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
         {
           "kind": "documents",
           "name": "surfaces",
@@ -68,23 +136,21 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "display_name": {
-              "_eq": "IngestDocs"
             }
           },
           "fields": [
             "surface_id",
+            "agent_did",
             "display_name",
-            "entries",
-            "enabled"
+            "enabled",
+            "entries"
           ]
         }
       ]
     },
     {
       "stage_id": "exercise",
-      "prompt": "Using the datastore tool you configured, create one EvalAutomationOutput document with correlation \"val-bravo-003\" and result \"queued\". Change nothing else.",
+      "prompt": "Save one output for correlation \"val-bravo-003\" with result \"queued\". Use your recordkeeping tools; leave configuration alone.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -114,6 +180,58 @@
           },
           "tier": "acceptance",
           "weight": 1
+        },
+        {
+          "check": "tool_calls_expected",
+          "params": {
+            "forbidden": [
+              "config",
+              "bash"
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "agents": {
+              "behaviors": "behaviors",
+              "contexts": "contexts",
+              "tools": "tools",
+              "expect": [
+                {
+                  "behavior_id": "engineer",
+                  "datastore": {
+                    "surfaces": "surfaces",
+                    "create": [
+                      "EvalAutomationOutput"
+                    ],
+                    "query": [],
+                    "lookup_by": "correlation",
+                    "caller_fields": {
+                      "EvalAutomationOutput": [
+                        "correlation",
+                        "result"
+                      ]
+                    },
+                    "called_create": [
+                      "EvalAutomationOutput"
+                    ],
+                    "called_query": []
+                  },
+                  "tools": [
+                    {
+                      "field": "datastore.enable_defra_query",
+                      "matches": "^(null|false)$"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "tier": "acceptance",
+          "weight": 1
         }
       ],
       "capture": [
@@ -129,6 +247,72 @@
           "fields": [
             "correlation",
             "result"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "enabled",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "contexts",
+          "collection": "AgentContext",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "context_id",
+            "tools_id",
+            "system_prompt"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "tools",
+          "collection": "Tools",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "tools_id",
+            "host",
+            "datastore",
+            "subagents",
+            "self_config"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "surfaces",
+          "collection": "DatastoreToolSurface",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "surface_id",
+            "agent_did",
+            "display_name",
+            "enabled",
+            "entries"
           ]
         }
       ]

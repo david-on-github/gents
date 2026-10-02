@@ -18,8 +18,8 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use gents::eval::report::{load_report, report_refused};
 use gents::eval::runner::{
-    read_progress, read_run_view, run_dir, run_finished, run_view, running_elsewhere, slots_owed,
-    RunView, STALE_WINDOW,
+    read_progress, read_run_view, run_dir, run_finished, run_view, slots_owed, RunView,
+    STALE_WINDOW,
 };
 use gents::eval::{load_run, load_trials};
 
@@ -71,6 +71,25 @@ where
     }
 }
 
+/// A delayed heartbeat makes the displayed snapshot stale, not the process
+/// dead. Watching never takes ownership, so it can wait for a live local PID
+/// without changing the runner's freshness rule for admission and cleanup.
+fn runner_alive(dir: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use gents::eval::runner::host_alive;
+        read_progress(dir).is_some_and(|progress| {
+            progress
+                .holder
+                .as_ref()
+                .is_some_and(|holder| host_alive(holder.pid))
+                || progress.slots.values().any(|slot| host_alive(slot.pid))
+        })
+    }
+    #[cfg(not(unix))]
+    gents::eval::runner::running_elsewhere(dir)
+}
+
 /// Render until no live process holds the run, then say whether it finished
 /// or how many slots it still owes. Only `finished` returns `Ok`: a run that
 /// stopped owing slots, or whose report cannot be read, is an error, so the
@@ -94,9 +113,7 @@ where
     loop {
         // While a live process holds the run, the view it leaves beside the
         // run is what the node would say, and the node is left alone.
-        let from_runner = running_elsewhere(&dir)
-            .then(|| read_run_view(&dir))
-            .flatten();
+        let from_runner = runner_alive(&dir).then(|| read_run_view(&dir)).flatten();
         let documents = match from_runner {
             Some(_) => {
                 if !said_held {
@@ -180,21 +197,21 @@ where
         }
         let documents = match documents {
             Some(documents) => documents,
-            None if running_elsewhere(&dir) => {
+            None if runner_alive(&dir) => {
                 tokio::time::sleep(args.interval).await;
                 continue;
             }
             // The runner let go since this frame: its ending needs the node.
             None => open().await?,
         };
-        if !running_elsewhere(&dir) {
+        if !runner_alive(&dir) {
             // The holder can lapse for a moment, as when one call over the
             // run hands it to the next: with the documents open, look once
             // more before ending, after an interval or the stale window,
             // whichever is shorter, and keep watching a run held again.
             if let Documents::Open(_) = &documents {
                 tokio::time::sleep(args.interval.min(STALE_WINDOW)).await;
-                if running_elsewhere(&dir) {
+                if runner_alive(&dir) {
                     continue;
                 }
             }
@@ -213,7 +230,7 @@ where
             let deadline = tokio::time::Instant::now().checked_add(grace);
             let mut held_again = false;
             while let Documents::Locked(reason) = &documents {
-                if running_elsewhere(&dir) {
+                if runner_alive(&dir) {
                     held_again = true;
                     break;
                 }
@@ -539,12 +556,15 @@ mod tests {
             },
         ];
         let live = LiveSnapshot {
+            stages: Default::default(),
             observed_at: now_millis(1),
             elapsed_secs: 400,
             requests: 3,
             model_turns: 57,
             input_tokens: Some(812_345),
             output_tokens: Some(41_234),
+            reported_input_tokens: None,
+            reported_output_tokens: None,
             tool_calls: 149,
             failed_tool_calls: 6,
             tools: [
@@ -766,6 +786,53 @@ mod tests {
             57
         );
         assert_eq!(json["view"]["trials"][&finished]["live"]["requests"], 3);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_delayed_heartbeat_keeps_watching_until_the_live_runner_releases() {
+        let fixture = Fixture::new().await;
+        fixture
+            .scripted_run("r1", &executor(&[]), CancellationToken::new())
+            .await;
+        let run_dir = fixture.ctx.runs_dir().join("r1");
+        let mut host = SimulatedHost::new(run_dir.clone(), 2);
+        let mut progress = hosted();
+        progress.holder.as_mut().unwrap().written_at = "2000-01-01T00:00:00Z".into();
+        for slot in progress.slots.values_mut() {
+            slot.written_at = "2000-01-01T00:00:00Z".into();
+        }
+        write_progress(&run_dir, &progress);
+        assert!(!gents::eval::runner::running_elsewhere(&run_dir));
+        let opens = Cell::new(0);
+        watch(
+            &fixture.ctx.runs_dir(),
+            &watch_args(&["watch", "r1", "--interval", "250ms"]),
+            None,
+            || {
+                opens.set(opens.get() + 1);
+                async { Ok(Documents::Open(&fixture.ctx)) }
+            },
+            &mut host,
+        )
+        .await
+        .unwrap();
+        let output = host.output();
+        assert_eq!(output.matches("--- ").count(), 2, "{output}");
+        assert!(output.contains("has not refreshed it"), "{output}");
+        assert_eq!(output.lines().last(), Some("finished"));
+        assert_eq!(
+            opens.get(),
+            1,
+            "open documents only after the runner releases"
+        );
+
+        progress.holder.as_mut().unwrap().pid = u32::MAX;
+        for slot in progress.slots.values_mut() {
+            slot.pid = u32::MAX;
+        }
+        write_progress(&run_dir, &progress);
+        assert!(!super::runner_alive(&run_dir));
     }
 
     /// A run no live process holds ends the watch, whether or not it owes

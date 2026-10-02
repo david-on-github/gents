@@ -186,6 +186,7 @@ pub(crate) async fn resolve_document_runtime_snapshot_from_view(
                         selected.query_tools = merged.query_tools;
                         // Canonical surfaces own all datastore write declarations.
                         selected.write_tools = merged.write_tools;
+                        selected.surface_of_tool = merged.surface_of_tool;
                         let eth = super::expand_eth_tools(tools, view)?;
                         selected.eth_queries = eth.queries;
                         selected.eth_calls = eth.calls;

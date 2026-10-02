@@ -1,1 +1,0 @@
-This is a fresh session after runtime restart. Create `onboarding-acceptance/after-restart.txt` containing exactly `RECOVERED DEFAULT` followed by one newline, read it back, and report whether it is exact. Use no network access or dependencies.

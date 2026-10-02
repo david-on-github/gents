@@ -13,6 +13,24 @@ use crate::Collection;
 
 use super::*;
 
+/// An ordinary reference to a document absent from the candidate snapshot.
+/// Typed so callers that can stage the target elsewhere (connected preview)
+/// can name that next step instead of only the failure.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{} {id} field {field} references missing {} {target_id:?} within agent_did {agent_did}",
+    collection.graphql_type(),
+    target.graphql_type()
+)]
+pub struct MissingReference {
+    pub collection: Collection,
+    pub id: String,
+    pub field: String,
+    pub target: Collection,
+    pub target_id: String,
+    pub agent_did: String,
+}
+
 /// Canonical configuration visible for one principal. Retained documents and
 /// staged replacements share this snapshot; observations are never selected.
 #[derive(Debug, Clone, Default)]
@@ -204,13 +222,17 @@ impl ConfigReferences {
                 "{} {id} field {field} has a blank reference ID",
                 collection.graphql_type()
             );
-            ensure!(
-                self.documents.contains_key(&(target, target_id.to_owned())),
-                "{} {id} field {field} references missing {} {target_id:?} within agent_did {}",
-                collection.graphql_type(),
-                target.graphql_type(),
-                self.agent_did
-            );
+            if !self.documents.contains_key(&(target, target_id.to_owned())) {
+                return Err(MissingReference {
+                    collection,
+                    id: id.to_owned(),
+                    field: field.to_owned(),
+                    target,
+                    target_id: target_id.to_owned(),
+                    agent_did: self.agent_did.clone(),
+                }
+                .into());
+            }
             Ok(())
         };
         let optional = |target, target_id: Option<&str>, field| -> Result<()> {

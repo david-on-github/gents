@@ -361,7 +361,7 @@ async fn build_registers_gated_family() {
     for core in [
         "native API",
         "\"<DID>:<slug>\"",
-        "preview, apply, then read back",
+        "Preview writes nothing; apply, then read back.",
         "[\"help\"] lists resources",
     ] {
         assert!(definition.description.contains(core), "missing {core}");
@@ -2720,6 +2720,112 @@ async fn connected_plan_preview_validates_pending_references_without_writes() {
     );
 }
 
+/// Errors a model hit in the configurator skill-workflow eval name the call
+/// that can proceed, not only what failed.
+#[tokio::test]
+async fn config_errors_name_the_next_call() {
+    let node = build_persona_node().await;
+    let identity = persona_identity("next-call");
+    let owner = identity.did().to_string();
+    crate::test_support::install_test_behavior(&node, &owner, "beh-test").await;
+    crate::test_support::install_test_behavior(&node, &owner, &format!("{owner}:builder")).await;
+    let mut grants = config(&["persona", "tools"]);
+    grants.preview = true;
+    let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &grants);
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == CONFIG_TOOL_NAME)
+        .unwrap();
+    let failure = |args: Value| async move {
+        let error = tool.call(args.to_string()).await.unwrap_err();
+        let crate::llm::tool::ToolError::ToolCallError(error) = error else {
+            panic!("missing typed config error: {error}");
+        };
+        serde_json::from_str::<Value>(&error.to_string()).unwrap()
+    };
+
+    // A context preview cannot attach a skill that is only proposed.
+    let skill = failure(json!({"argv":["behavior","context","preview"],"options":{"behavior":"builder"},"set":{"skill_ids":["eval-coding-check"]}})).await;
+    let message = skill["error"].as_str().unwrap();
+    assert!(
+        message.starts_with("Skill \"eval-coding-check\" does not exist yet"),
+        "{message}"
+    );
+    assert!(
+        message.contains(r#"After approval: ["skill","import","eval-coding-check",PATH], then ["behavior","context","preview"]"#),
+        "{message}"
+    );
+    assert!(skill["recovery"].is_null(), "{skill}");
+    assert_eq!(skill["config_execution"]["mutation_entered"], false);
+
+    // Plan preview cannot stage a skill either, so it names the same order.
+    let planned = failure(json!({"argv":["plan","preview"],"options":{"documents":[{"collection":"AgentContext","document":{"agent_did":owner,"context_id":"proposed-context","tools_id":"beh-test:tools","skill_ids":["eval-coding-check"]}}]}})).await;
+    assert!(
+        planned["error"]
+            .as_str()
+            .unwrap()
+            .starts_with("Skill \"eval-coding-check\" does not exist yet"),
+        "{planned}"
+    );
+
+    // A missing document plan preview can stage names connected preview.
+    let tools_ref = failure(json!({"argv":["behavior","context","preview"],"options":{"behavior":"builder"},"set":{"tools_id":"proposed-tools"}})).await;
+    let message = tools_ref["error"].as_str().unwrap();
+    assert!(
+        message.starts_with(r#"Tools "proposed-tools" does not exist yet; to preview new documents that reference each other, use a connected plan preview: ["help","plan"]; an existing document can reference it once it is created."#),
+        "{message}"
+    );
+    assert_eq!(
+        tools_ref["recovery"]["preview_argv"],
+        json!(["plan", "preview"])
+    );
+
+    // preview edit is preview; a stray positional gets the whole correct call.
+    let aliased = tool
+        .call(json!({"argv":["behavior","context","preview","edit"],"options":{"behavior":"builder"},"set":{"skill_ids":[]}}).to_string())
+        .await
+        .unwrap();
+    assert!(aliased.contains("\"committed\": false"), "{aliased}");
+    let stray =
+        failure(json!({"argv":["behavior","context","edit","builder"],"set":{"skill_ids":[]}}))
+            .await;
+    let message = stray["error"].as_str().unwrap();
+    assert!(
+        message.contains(r#"behavior context edit takes no positional argument "builder""#)
+            && message.contains(r#"{"argv":["behavior","context","edit"],"options":{"behavior":"BEHAVIOR_ID"},"set":{"FIELD":VALUE}}"#),
+        "{message}"
+    );
+    assert_eq!(stray["config_execution"]["mutation_entered"], false);
+
+    // A display name or differently cased slug suggests the slug.
+    let named = failure(json!({"argv":["behavior","get","Builder"]})).await;
+    assert_eq!(
+        named["error"],
+        "unknown behavior_id \"Builder\"; did you mean \"builder\"?"
+    );
+    let core = SelfConfigCore::new(node.clone(), owner.clone(), "beh-test".into()).unwrap();
+    core.apply(behavior_request(
+        &core,
+        vec![("display_name".into(), Some(json!("Night Shift")))],
+    ))
+    .await
+    .unwrap();
+    let display = failure(json!({"argv":["behavior","get","night shift"]})).await;
+    assert_eq!(
+        display["error"],
+        "unknown behavior_id \"night shift\"; did you mean \"beh-test\"?"
+    );
+    let unknown = failure(json!({"argv":["behavior","get","nobody"]})).await;
+    assert!(
+        unknown["error"]
+            .as_str()
+            .unwrap()
+            .contains(r#"copy an exact ID from ["behavior","list"]"#),
+        "{unknown}"
+    );
+    node.shutdown().await;
+}
+
 #[tokio::test]
 async fn config_execution_receipts_separate_rejected_syntax_from_write_dispatch() {
     let node = build_persona_node().await;
@@ -4751,7 +4857,7 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     let node = build_persona_node().await;
     let identity = persona_identity("engineer-god-mode");
     let owner = identity.did().to_string();
-    for behavior in ["setup", "lead"] {
+    for behavior in ["setup", "lead", "caller"] {
         crate::test_support::install_test_behavior(&node, &owner, behavior).await;
     }
     let setup = SelfConfigCore::new(node.clone(), owner.clone(), "setup".into()).unwrap();
@@ -4861,8 +4967,68 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     )
     .await);
 
-    // Own Tools: select the target, the sessions tool and read-only query.
+    for selection in [
+        r#"subagents={"target_ids":["gatekeeper"]}"#,
+        r#"subagents={"enabled":false,"target_ids":["gatekeeper"]}"#,
+    ] {
+        let receipt = ok(call_config_tool(
+            &tools,
+            command(&["tools", "edit", "--behavior", "caller", "--set", selection]),
+        )
+        .await);
+        assert_eq!(receipt["committed"], true);
+        assert!(receipt["effect"]
+            .as_str()
+            .unwrap()
+            .contains("Selected targets are inactive"));
+        let stored =
+            ok(call_config_tool(&tools, command(&["tools", "get", "--behavior", "caller"])).await);
+        assert_ne!(stored["document"]["subagents"]["enabled"], true);
+        assert_eq!(
+            stored["document"]["subagents"]["target_ids"],
+            json!(["gatekeeper"])
+        );
+    }
+
+    let recovery = ok(call_config_tool(
+        &tools,
+        command(&[
+            "tools",
+            "edit",
+            "--behavior",
+            "caller",
+            "--set",
+            r#"subagents={"enabled":true,"target_ids":["gatekeeper"]}"#,
+        ]),
+    )
+    .await);
+    assert!(!recovery["effect"]
+        .as_str()
+        .unwrap()
+        .contains("Selected targets are inactive"));
+    let recovered =
+        ok(call_config_tool(&tools, command(&["tools", "get", "--behavior", "caller"])).await);
+    assert_eq!(recovered["document"]["subagents"]["enabled"], true);
+    assert_eq!(
+        recovered["document"]["subagents"]["target_ids"],
+        json!(["gatekeeper"])
+    );
+
     ok(call_config_tool(
+        &tools,
+        command(&[
+            "tools",
+            "edit",
+            "--behavior",
+            "caller",
+            "--set",
+            r#"subagents={"enabled":true}"#,
+        ]),
+    )
+    .await);
+
+    // Own Tools: select the target, the sessions tool and read-only query.
+    let enabled = ok(call_config_tool(
         &tools,
         command(&[
             "tools",
@@ -4876,6 +5042,12 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
         ]),
     )
     .await);
+    assert!(!enabled["effect"]
+        .as_str()
+        .unwrap()
+        .contains("Selected targets are inactive"));
+    let stored = ok(call_config_tool(&tools, command(&["tools", "get"])).await);
+    assert_eq!(stored["document"]["subagents"]["enabled"], true);
     for (patch, refusal) in [
         (
             r#"subagents={"enabled":false,"target_ids":["gatekeeper"]}"#,
@@ -4997,6 +5169,28 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     let defaults =
         ok(call_config_tool(&tools, command(&["execution", "get", "default-execution"])).await);
     assert_eq!(defaults["document"]["execution_id"], "default-execution");
+    assert_eq!(
+        defaults["effective"]["max_turns"],
+        crate::config::DEFAULT_MAX_TURNS
+    );
+    assert_eq!(
+        defaults["effective"]["provider_idle_timeout_secs"],
+        crate::config::DEFAULT_PROVIDER_IDLE_TIMEOUT_SECS
+    );
+    assert_eq!(
+        defaults["effective"]["deadline_duration_secs"],
+        crate::config::DEFAULT_DEADLINE_DURATION_SECS
+    );
+    assert!(defaults["effective"]["max_total_tokens"].is_null());
+    assert!(defaults["document"]["max_turns"].is_null());
+    let inventory = ok(call_config_tool(&tools, command(&["execution", "list"])).await);
+    let listed = inventory["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["execution_id"] == "default-execution")
+        .unwrap();
+    assert_eq!(listed["effective"], defaults["effective"]);
     assert!(
         call_config_tool(&tools, command(&["execution", "edit", "default-execution"]))
             .await
@@ -5054,6 +5248,13 @@ async fn engineer_configures_targets_executions_and_itself_but_cannot_lock_out()
     let execution =
         ok(call_config_tool(&tools, command(&["execution", "get", "lead-execution"])).await);
     assert_eq!(execution["document"]["max_turns"], 12);
+    assert_eq!(execution["effective"]["max_turns"], 12);
+    let bound = ok(call_config_tool(
+        &tools,
+        command(&["profile", "get", "execution", "--behavior", "lead"]),
+    )
+    .await);
+    assert_eq!(bound["effective"], execution["effective"]);
 
     // Automation that targets the Engineer itself.
     ok(call_config_tool(

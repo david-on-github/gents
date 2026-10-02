@@ -1,5 +1,7 @@
 //! `tool_calls_expected`: which tools a stage called, graded per requirement.
 
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 use serde_json::{json, Value};
 
@@ -11,7 +13,10 @@ use crate::eval::runner::executor::StageEvidence;
 /// Params: `{ "required": [<tool>], "forbidden": [<tool>], "max_calls": <u64>? }`.
 /// Each required tool called, each forbidden tool not called, and the call
 /// count within `max_calls` is one requirement; the score is the satisfied
-/// fraction.
+/// fraction. `allowed_argv` maps a tool to permitted argument-vector prefixes;
+/// every call to that tool must match a prefix. It constrains observed calls,
+/// not runtime authorization. `config_read_only` instead checks native dispatch
+/// receipts, allowing help, previews, and calls rejected before dispatch.
 pub struct ToolCallsExpected;
 
 /// Calls listed in feedback before the rest are only counted.
@@ -28,6 +33,10 @@ struct Params {
     forbidden: Vec<String>,
     #[serde(default)]
     max_calls: Option<usize>,
+    #[serde(default)]
+    allowed_argv: BTreeMap<String, Vec<Vec<String>>>,
+    #[serde(default)]
+    config_read_only: bool,
 }
 
 impl Check for ToolCallsExpected {
@@ -36,7 +45,7 @@ impl Check for ToolCallsExpected {
     }
 
     fn version(&self) -> &'static str {
-        "1"
+        "3"
     }
 
     fn describe(&self) -> CheckDescription {
@@ -47,14 +56,18 @@ impl Check for ToolCallsExpected {
             params_schema: json!({
                 "type": "object",
                 "properties": {
+                    "config_read_only": {"type":"boolean", "description":"Require config calls to stay outside mutation dispatch, using execution receipts. Help and rejected arguments are read-only; absent evidence fails closed."},
                     "required": {"type": "array", "items": {"type": "string"}},
                     "forbidden": {"type": "array", "items": {"type": "string"}},
-                    "max_calls": {"type": ["integer", "null"], "minimum": 0}
+                    "max_calls": {"type": ["integer", "null"], "minimum": 0},
+                    "allowed_argv": {"type":"object", "additionalProperties":{"type":"array", "minItems":1, "items":{"type":"array", "minItems":1, "items":{"type":"string"}}}}
                 },
                 "anyOf": [
+                    {"required":["config_read_only"], "properties":{"config_read_only":{"const":true}}},
                     {"required": ["required"], "properties": {"required": {"minItems": 1}}},
                     {"required": ["forbidden"], "properties": {"forbidden": {"minItems": 1}}},
-                    {"required": ["max_calls"], "properties": {"max_calls": {"type": "integer"}}}
+                    {"required": ["max_calls"], "properties": {"max_calls": {"type": "integer"}}},
+                    {"required":["allowed_argv"], "properties":{"allowed_argv":{"minProperties":1}}}
                 ],
                 "additionalProperties": false
             }),
@@ -70,7 +83,9 @@ impl Check for ToolCallsExpected {
         };
         let total = params.required.len()
             + params.forbidden.len()
-            + usize::from(params.max_calls.is_some());
+            + usize::from(params.max_calls.is_some())
+            + params.allowed_argv.len()
+            + usize::from(params.config_read_only);
         if total == 0 {
             return grader("bad_params", "no required, forbidden or max_calls to check");
         }
@@ -78,6 +93,48 @@ impl Check for ToolCallsExpected {
         let called = |name: &str| calls.iter().filter(|call| call.tool_name == name).count();
         let mut satisfied = 0;
         let mut problems = Vec::new();
+        if params.config_read_only {
+            let mut unsafe_calls = Vec::new();
+            for (index, call) in calls
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.tool_name == "config")
+            {
+                let decode = |value: &Value| match value {
+                    Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+                    value => value.clone(),
+                };
+                let result = decode(&call.result);
+                let receipt = result.get("config_execution").and_then(|value| {
+                    serde_json::from_value::<crate::self_config::ConfigExecutionReceipt>(
+                        value.clone(),
+                    )
+                    .ok()
+                });
+                let read_only = match result.get("config_execution") {
+                    Some(_) => receipt
+                        .is_some_and(|receipt| receipt.version == 1 && !receipt.mutation_entered),
+                    None => {
+                        (call.tool_failure_class.as_deref() == Some("argumentInvalid")
+                            && serde_json::from_value::<crate::self_config::ConfigCommandParams>(
+                                decode(&call.args),
+                            )
+                            .is_err())
+                            || (call.status.as_deref().or(call.lifecycle_state.as_deref())
+                                == Some("completed")
+                                && crate::self_config::is_help_call(&decode(&call.args)))
+                    }
+                };
+                if !read_only {
+                    unsafe_calls.push(index + 1);
+                }
+            }
+            if unsafe_calls.is_empty() {
+                satisfied += 1;
+            } else {
+                problems.push(format!("config calls {unsafe_calls:?}: entered mutation dispatch or lack read-only evidence"));
+            }
+        }
         for name in &params.required {
             if called(name) == 0 {
                 problems.push(if calls.is_empty() {
@@ -93,6 +150,33 @@ impl Check for ToolCallsExpected {
             match called(name) {
                 0 => satisfied += 1,
                 count => problems.push(format!("{name}: forbidden but called {count} times")),
+            }
+        }
+        for (name, prefixes) in &params.allowed_argv {
+            if prefixes.is_empty() || prefixes.iter().any(Vec::is_empty) {
+                return grader("bad_params", "allowed_argv needs nonempty prefixes");
+            }
+            let valid = calls
+                .iter()
+                .filter(|call| call.tool_name == *name)
+                .all(|call| {
+                    let args = match &call.args {
+                        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
+                        value => value.clone(),
+                    };
+                    args.get("argv")
+                        .and_then(Value::as_array)
+                        .is_some_and(|argv| {
+                            prefixes.iter().any(|prefix| {
+                                argv.len() >= prefix.len()
+                                    && prefix.iter().zip(argv).all(|(p, a)| a.as_str() == Some(p))
+                            })
+                        })
+                });
+            if valid {
+                satisfied += 1;
+            } else {
+                problems.push(format!("{name}: argument vector outside allowed prefixes"));
             }
         }
         if let Some(max) = params.max_calls {
@@ -175,6 +259,122 @@ mod tests {
 
     fn feedback(verdict: &CheckVerdict) -> &str {
         verdict.feedback.as_deref().unwrap_or_default()
+    }
+
+    #[test]
+    fn read_only_config_uses_dispatch_receipts_and_native_help_recognition() {
+        let params = json!({"required":["config"],"config_read_only":true});
+        assert!(
+            jsonschema::validator_for(&ToolCallsExpected.describe().params_schema)
+                .unwrap()
+                .is_valid(&params)
+        );
+        for argv in [
+            json!(["execution", "edit", "--help"]),
+            json!(["profile", "create", "-h"]),
+            json!(["help", "behavior"]),
+        ] {
+            let mut c = call("config", "{}", "completed");
+            c.args = json!({"argv":argv});
+            c.result = json!("native help page");
+            assert_eq!(
+                ToolCallsExpected
+                    .evaluate(&params, &stage(vec![c]))
+                    .score_bp,
+                Some(10000)
+            );
+        }
+        for (receipt, score) in [
+            (json!({"version":1,"mutation_entered":false}), 10000),
+            (json!({"version":1,"mutation_entered":true}), 5000),
+            (json!({"version":2,"mutation_entered":false}), 5000),
+            (Value::Null, 5000),
+        ] {
+            let mut c = call("config", r#"{"argv":["list","agents"]}"#, "failed");
+            c.result = json!({"error":"rejected","config_execution":receipt})
+                .to_string()
+                .into();
+            assert_eq!(
+                ToolCallsExpected
+                    .evaluate(&params, &stage(vec![c]))
+                    .score_bp,
+                Some(score)
+            );
+        }
+        let mut rejected = call("config", r#"{"argv":"not an array"}"#, "failed");
+        rejected.tool_failure_class = Some("argumentInvalid".into());
+        assert_eq!(
+            ToolCallsExpected
+                .evaluate(&params, &stage(vec![rejected]))
+                .score_bp,
+            Some(10000)
+        );
+        let mut unproven = call(
+            "config",
+            r#"{"argv":["execution","edit","x"],"set":{"max_turns":9}}"#,
+            "failed",
+        );
+        unproven.tool_failure_class = Some("argumentInvalid".into());
+        assert_eq!(
+            ToolCallsExpected
+                .evaluate(&params, &stage(vec![unproven]))
+                .score_bp,
+            Some(5000)
+        );
+        for args in [
+            json!({"argv":["execution","edit","x","--set","display_name=\"--help\""]}),
+            json!({"argv":["execution","edit","--help"],"set":{"max_turns":9}}),
+        ] {
+            let mut c = call("config", "{}", "completed");
+            c.args = args;
+            assert_eq!(
+                ToolCallsExpected
+                    .evaluate(&params, &stage(vec![c]))
+                    .score_bp,
+                Some(5000)
+            );
+        }
+    }
+
+    #[test]
+    fn observation_allows_reads_and_rejects_writes_or_malformed_arguments() {
+        let params = json!({"required":["config"], "allowed_argv":{"config":[["get"],["profile","get"],["help"]]}});
+        assert!(
+            jsonschema::validator_for(&ToolCallsExpected.describe().params_schema)
+                .unwrap()
+                .is_valid(&params)
+        );
+        for args in [
+            json!({"argv":["get"]}),
+            json!({"argv":["profile","get","execution"]}),
+            json!({"argv":["help","profile"]}),
+        ] {
+            for encoded in [args.clone(), Value::String(args.to_string())] {
+                let mut c = call("config", "{}", "completed");
+                c.args = encoded;
+                assert_eq!(
+                    ToolCallsExpected
+                        .evaluate(&params, &stage(vec![c]))
+                        .score_bp,
+                    Some(10000)
+                );
+            }
+        }
+        for args in [
+            json!({"argv":["profile","edit","execution"]}),
+            json!({"argv":"get"}),
+            json!({"argv":[]}),
+            json!("not JSON"),
+        ] {
+            let mut c = call("config", "{}", "completed");
+            c.args = args;
+            assert_eq!(
+                ToolCallsExpected
+                    .evaluate(&params, &stage(vec![c]))
+                    .score_bp,
+                Some(5000)
+            );
+        }
     }
 
     #[test]

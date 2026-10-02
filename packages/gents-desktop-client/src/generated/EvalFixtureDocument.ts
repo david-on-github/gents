@@ -2,6 +2,7 @@
 
 export type EvalFixtureDocument = { collection: string,
 /**
- * An app-collection row. Its schema belongs to that collection.
+ * A fixture row. String values equal to `$trial` bind to the trial's DID
+ * when installed; object keys and strings containing it stay literal.
  */
 document: unknown, };

@@ -4,42 +4,207 @@
   "reducer": "all",
   "stages": [
     {
-      "stage_id": "configure",
-      "prompt": "Set up my inference configuration: create an execution exec-basic with max_turns 20, max_total_tokens 150000, and deadline_duration_secs 600. Then create a profile profile-basic that reuses my existing backend and points at exec-basic, and bind the engineer behavior to profile-basic.",
+      "stage_id": "discover",
+      "prompt": "I want to put a sensible spending and time limit on our work together. What model are you using, what limits do we have now, and what would you recommend? Explain your recommendation; do not change anything yet.",
       "deadline_secs": 600,
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "profiles",
+          "collection": "InferenceProfile",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "profile_id",
+            "display_name",
+            "backend_id",
+            "execution_id",
+            "model_name",
+            "reasoning_effort"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "executions",
+          "collection": "InferenceExecution",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "execution_id",
+            "max_turns",
+            "max_total_tokens",
+            "deadline_duration_secs",
+            "stream_batch_ms",
+            "stream_liveness_timeout_secs",
+            "provider_idle_timeout_secs"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "backends",
+          "collection": "InferenceBackend",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "backend_id",
+            "endpoint",
+            "enabled"
+          ]
+        }
+      ],
       "checks": [
         {
-          "check": "captured_rows_count",
+          "check": "tool_calls_expected",
           "params": {
-            "name": "profile_bound",
-            "min": 1,
-            "max": 1
+            "required": [
+              "config"
+            ],
+            "forbidden": [
+              "bash"
+            ],
+            "config_read_only": true
           },
           "tier": "acceptance",
           "weight": 1
         },
         {
-          "check": "captured_fields_match",
+          "check": "crew_spec_match",
           "params": {
-            "name": "exec_limits",
-            "expect": [
+            "links": [
               {
-                "field": "max_turns",
-                "equals": 20
-              },
-              {
-                "field": "max_total_tokens",
-                "equals": 150000
-              },
-              {
-                "field": "deadline_duration_secs",
-                "equals": 600
+                "capture": "behaviors",
+                "key": "behavior_id",
+                "id": "engineer",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [],
+                "reported_fields": [
+                  "model_name"
+                ]
               }
             ]
           },
           "tier": "acceptance",
           "weight": 1
         },
+        {
+          "check": "final_message_matches",
+          "params": {
+            "all": [
+              {
+                "matches": "(?i)(limit|budget|allowance|cap|turn|token|reasoning)"
+              },
+              {
+                "matches": "(?i)(suggest|recommend|could|would|propos|can|change|lower|rais|set|keep)"
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        }
+      ]
+    },
+    {
+      "stage_id": "configure",
+      "prompt": "Yes, use our current model and connection. For your work, allow up to 20 turns, 150,000 total tokens, and 10 minutes per request. Update the existing settings where possible and tell me what changed.",
+      "deadline_secs": 600,
+      "capture": [
+        {
+          "kind": "documents",
+          "name": "behaviors",
+          "collection": "AgentBehavior",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "behavior_id",
+            "display_name",
+            "context_id",
+            "inference_profile_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "profiles",
+          "collection": "InferenceProfile",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "profile_id",
+            "display_name",
+            "backend_id",
+            "execution_id",
+            "model_name",
+            "reasoning_effort"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "executions",
+          "collection": "InferenceExecution",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "execution_id",
+            "max_turns",
+            "max_total_tokens",
+            "deadline_duration_secs",
+            "stream_batch_ms",
+            "stream_liveness_timeout_secs",
+            "provider_idle_timeout_secs"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "backends",
+          "collection": "InferenceBackend",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            }
+          },
+          "fields": [
+            "backend_id",
+            "endpoint",
+            "enabled"
+          ]
+        }
+      ],
+      "checks": [
         {
           "check": "tool_calls_expected",
           "params": {
@@ -52,119 +217,79 @@
           },
           "tier": "acceptance",
           "weight": 1
-        }
-      ],
-      "capture": [
-        {
-          "kind": "documents",
-          "name": "profile_bound",
-          "collection": "InferenceProfile",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "profile_id": {
-              "_eq": "profile-basic"
-            },
-            "execution_id": {
-              "_eq": "exec-basic"
-            }
-          },
-          "fields": [
-            "profile_id",
-            "execution_id",
-            "backend_id"
-          ]
         },
         {
-          "kind": "documents",
-          "name": "exec_limits",
-          "collection": "InferenceExecution",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "execution_id": {
-              "_eq": "exec-basic"
-            }
-          },
-          "fields": [
-            "execution_id",
-            "max_turns",
-            "max_total_tokens",
-            "deadline_duration_secs"
-          ]
-        }
-      ]
-    },
-    {
-      "stage_id": "exercise",
-      "prompt": "Report what you configured; change nothing.",
-      "deadline_secs": 600,
-      "checks": [
-        {
-          "check": "captured_rows_count",
+          "check": "crew_spec_match",
           "params": {
-            "name": "limited_requests",
-            "min": 1
-          },
-          "tier": "acceptance",
-          "weight": 1
-        },
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "behavior_bound",
-            "expect": [
+            "links": [
               {
+                "capture": "behaviors",
+                "key": "behavior_id",
+                "id": "engineer",
                 "field": "inference_profile_id",
-                "equals": "profile-basic"
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": []
+              },
+              {
+                "capture": "behaviors",
+                "key": "behavior_id",
+                "id": "engineer",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [
+                  {
+                    "field": "max_turns",
+                    "equals": 20
+                  },
+                  {
+                    "field": "max_total_tokens",
+                    "equals": 150000
+                  },
+                  {
+                    "field": "deadline_duration_secs",
+                    "equals": 600
+                  }
+                ],
+                "via": [
+                  {
+                    "field": "execution_id",
+                    "target_capture": "executions",
+                    "target_key": "execution_id"
+                  }
+                ]
+              },
+              {
+                "capture": "behaviors",
+                "key": "behavior_id",
+                "id": "engineer",
+                "field": "inference_profile_id",
+                "target_capture": "profiles",
+                "target_key": "profile_id",
+                "expect": [],
+                "via": [
+                  {
+                    "field": "backend_id",
+                    "target_capture": "backends",
+                    "target_key": "backend_id"
+                  }
+                ]
               }
             ]
           },
           "tier": "acceptance",
           "weight": 1
-        }
-      ],
-      "capture": [
-        {
-          "kind": "documents",
-          "name": "limited_requests",
-          "collection": "AgentRequest",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "behavior_id": {
-              "_eq": "engineer"
-            },
-            "max_total_tokens": {
-              "_eq": 150000
-            }
-          },
-          "fields": [
-            "request_id",
-            "behavior_id",
-            "max_total_tokens",
-            "backend_id"
-          ]
         },
         {
-          "kind": "documents",
-          "name": "behavior_bound",
-          "collection": "AgentBehavior",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "behavior_id": {
-              "_eq": "engineer"
-            }
+          "check": "captured_rows_count",
+          "params": {
+            "name": "backends",
+            "min": 1,
+            "max": 1
           },
-          "fields": [
-            "behavior_id",
-            "inference_profile_id"
-          ]
+          "tier": "acceptance",
+          "weight": 1
         }
       ]
     }

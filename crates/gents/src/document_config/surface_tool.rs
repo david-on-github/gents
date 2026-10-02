@@ -25,6 +25,9 @@ use super::write_tool::{
 pub struct MergedSurfaceTools {
     pub write_tools: Vec<WriteToolDecl>,
     pub query_tools: Vec<QueryToolDecl>,
+    /// Tool name to the DatastoreToolSurface that declared it, so a refusal
+    /// can name the document the Engineer edits.
+    pub surface_of_tool: std::collections::BTreeMap<String, String>,
 }
 
 /// Expand the context's explicitly selected datastore surface documents.
@@ -51,6 +54,7 @@ pub fn merge_datastore_tool_surfaces<'a>(
 
     let mut write_tools = Vec::new();
     let mut query_tools = Vec::new();
+    let mut surface_of_tool = std::collections::BTreeMap::new();
     let mut seen = HashSet::new();
     let surface_ids = selection
         .datastore
@@ -102,6 +106,7 @@ pub fn merge_datastore_tool_surfaces<'a>(
                     selection.tools_id
                 );
             }
+            surface_of_tool.insert(entry.tool_name().to_string(), surface_id.to_owned());
             match entry {
                 SurfaceToolDecl::Create(decl) => write_tools.push(decl.clone()),
                 SurfaceToolDecl::Query(decl) => query_tools.push(decl.clone()),
@@ -112,6 +117,7 @@ pub fn merge_datastore_tool_surfaces<'a>(
     Ok(MergedSurfaceTools {
         write_tools,
         query_tools,
+        surface_of_tool,
     })
 }
 

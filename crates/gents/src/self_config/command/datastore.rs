@@ -64,6 +64,11 @@ impl ConfigCommandTool {
             .first()
             .map(String::as_str)
             .context("see [\"help\",\"datastore\"]")?;
+        let listing = !preview && (verb == "list" || verb == "get" && argv.len() == 1);
+        anyhow::ensure!(
+            !listing,
+            "surface IDs are listed in a behavior's Tools: read {{\"argv\":[\"tools\",\"get\"],\"options\":{{\"behavior\":\"BEHAVIOR_ID\"}}}}, then [\"datastore\",\"get\",SURFACE_ID] for one of its datastore.datastore_tool_surface_ids"
+        );
         let id = required_resource_id(argv.get(1), "SURFACE_ID")?;
         let target = SelfConfigTarget::DatastoreToolSurface;
         if verb == "get" && !preview {

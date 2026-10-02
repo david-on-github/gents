@@ -48,11 +48,22 @@ pub struct BoundedWriteParams(pub Map<String, Value>);
 pub struct BoundedWriteTool {
     node: Arc<EmbeddedNode>,
     decl: WriteToolDecl,
+    surface_id: Option<String>,
 }
 
 impl BoundedWriteTool {
     pub fn new(node: Arc<EmbeddedNode>, decl: WriteToolDecl) -> Self {
-        Self { node, decl }
+        Self {
+            node,
+            decl,
+            surface_id: None,
+        }
+    }
+
+    /// The DatastoreToolSurface that declared this tool, named by refusals.
+    pub fn declared_by(mut self, surface_id: Option<String>) -> Self {
+        self.surface_id = surface_id;
+        self
     }
 
     pub fn is_well_formed(&self) -> bool {
@@ -111,14 +122,32 @@ impl BoundedWriteTool {
             let field = self.decl.fields.iter().find(|field| &field.name == key);
             if field.is_none() {
                 bail!(
-                    "field `{key}` not permitted by tool `{}`",
-                    self.decl.tool_name
+                    "{}",
+                    crate::document_config::undeclared_field_refusal(
+                        "field",
+                        key,
+                        &self.decl.tool_name,
+                        self.surface_id.as_deref(),
+                        &self
+                            .decl
+                            .fields
+                            .iter()
+                            .filter(|field| field.fill.is_none())
+                            .map(|field| field.name.as_str())
+                            .collect::<Vec<_>>(),
+                    )
                 );
             }
-            if field.is_some_and(|field| field.fill.is_some()) {
+            if let Some(fill) = field.and_then(|field| field.fill.as_ref()) {
                 bail!(
-                    "field `{key}` is runtime-filled and must not be supplied to tool `{}`",
-                    self.decl.tool_name
+                    "{}",
+                    crate::document_config::runtime_filled_refusal(
+                        "field",
+                        key,
+                        &self.decl.tool_name,
+                        self.surface_id.as_deref(),
+                        fill,
+                    )
                 );
             }
         }
@@ -214,7 +243,10 @@ impl crate::llm::tool::Tool for BoundedWriteTool {
 
         ToolDefinition {
             name: self.decl.tool_name.clone(),
-            description: self.decl.description.clone(),
+            description: format!(
+                "{} Creates a new {} record; this can trigger automation watching that collection.",
+                self.decl.description, self.decl.collection
+            ),
             parameters: json!({
                 "type": "object",
                 "properties": properties,

@@ -10,7 +10,7 @@
   "stages": [
     {
       "stage_id": "configure",
-      "prompt": "On this node, set up document automation for me. A schema for a collection TrainPing (string field 'message') is already published. Configure the following with the config tool, never bash: an EventSource with display_name 'TrainPingWatcher' watching source_collection 'TrainPing' with event_kind 'created'; a Task with display_name 'TrainPingTask' targeting the engineer behavior with prompt_template 'Handle the train ping: {{ doc.message }}' and emit_outcome true; and a Trigger with display_name 'TrainPingTrigger' linking that EventSource to that Task with concurrency 'parallel'. Enable all three. Do not write any document into TrainPing.",
+      "prompt": "Whenever a new TrainPing record arrives, handle its message yourself and acknowledge it. Let separate records run independently. Keep the app's standard run record so I can see whether each run succeeded or failed. The TrainPing records already have a message field. Set this up now; I will send records later.",
       "deadline_secs": 600,
       "checks": [
         {
@@ -30,6 +30,8 @@
           "check": "captured_fields_match",
           "params": {
             "name": "trigger_config",
+            "min_rows": 1,
+            "max_rows": 1,
             "expect": [
               {
                 "field": "task_id",
@@ -41,11 +43,64 @@
               },
               {
                 "field": "concurrency",
-                "equals": "parallel"
+                "matches": "^(parallel|null)$"
               },
               {
                 "field": "enabled",
                 "equals": true
+              }
+            ]
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "links": [
+              {
+                "capture": "trigger_config",
+                "field": "task_id",
+                "target_capture": "task_config",
+                "target_key": "task_id",
+                "expect": [
+                  {
+                    "field": "behavior_id",
+                    "matches": "(^|:)engineer$"
+                  },
+                  {
+                    "field": "emit_outcome",
+                    "equals": true
+                  },
+                  {
+                    "field": "enabled",
+                    "equals": true
+                  }
+                ],
+                "source_match": {
+                  "field": "concurrency",
+                  "matches": "^(parallel|null)$"
+                }
+              },
+              {
+                "capture": "trigger_config",
+                "field": "source.event_source_id",
+                "target_capture": "eventsource_config",
+                "target_key": "event_source_id",
+                "expect": [
+                  {
+                    "field": "source_collection",
+                    "equals": "TrainPing"
+                  },
+                  {
+                    "field": "event_kind",
+                    "matches": "^(created|null)$"
+                  }
+                ],
+                "source_match": {
+                  "field": "concurrency",
+                  "matches": "^(parallel|null)$"
+                }
               }
             ]
           },
@@ -71,9 +126,6 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "display_name": {
-              "_eq": "TrainPingTrigger"
             }
           },
           "fields": [
@@ -92,9 +144,6 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "display_name": {
-              "_eq": "TrainPingWatcher"
             }
           },
           "fields": [
@@ -102,42 +151,7 @@
             "source_collection",
             "event_kind"
           ]
-        }
-      ]
-    },
-    {
-      "stage_id": "task_config_readonly",
-      "prompt": "Report what you configured for the TrainPing automation; change nothing.",
-      "deadline_secs": 600,
-      "checks": [
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "task_config",
-            "expect": [
-              {
-                "field": "task_id",
-                "matches": ".+"
-              },
-              {
-                "field": "prompt_template",
-                "contains": "doc.message"
-              },
-              {
-                "field": "emit_outcome",
-                "equals": true
-              },
-              {
-                "field": "enabled",
-                "equals": true
-              }
-            ]
-          },
-          "tier": "acceptance",
-          "weight": 1
-        }
-      ],
-      "capture": [
+        },
         {
           "kind": "documents",
           "name": "task_config",
@@ -145,13 +159,11 @@
           "filter": {
             "agent_did": {
               "_eq": "$trial"
-            },
-            "display_name": {
-              "_eq": "TrainPingTask"
             }
           },
           "fields": [
             "task_id",
+            "behavior_id",
             "prompt_template",
             "emit_outcome",
             "enabled"
@@ -173,23 +185,17 @@
         {
           "check": "captured_fields_match",
           "params": {
-            "name": "fires",
+            "name": "rendered_request",
+            "min_rows": 1,
+            "max_rows": 1,
             "expect": [
               {
-                "field": "trigger_id",
-                "matches": ".+"
+                "field": "content",
+                "contains": "train-echo-11"
               },
               {
-                "field": "task_id",
-                "matches": ".+"
-              },
-              {
-                "field": "request_id",
-                "matches": ".+"
-              },
-              {
-                "field": "source_doc_id",
-                "matches": ".+"
+                "field": "lifecycle_state",
+                "equals": "completed"
               }
             ]
           },
@@ -199,8 +205,45 @@
         {
           "check": "captured_rows_count",
           "params": {
-            "name": "completed_requests",
-            "min": 1
+            "name": "fire_outcomes",
+            "min": 1,
+            "max": 1
+          },
+          "tier": "acceptance",
+          "weight": 1
+        },
+        {
+          "check": "crew_spec_match",
+          "params": {
+            "links": [
+              {
+                "capture": "fires",
+                "key": "source_collection",
+                "id": "TrainPing",
+                "field": "request_id",
+                "target_capture": "completed_requests",
+                "target_key": "request_id",
+                "expect": [
+                  {
+                    "field": "lifecycle_state",
+                    "equals": "completed"
+                  }
+                ]
+              }
+            ],
+            "rows": [
+              {
+                "capture": "fire_outcomes",
+                "key": "source_collection",
+                "id": "TrainPing",
+                "expect": [
+                  {
+                    "field": "terminal_state",
+                    "matches": "^(complete|completed)$"
+                  }
+                ]
+              }
+            ]
           },
           "tier": "acceptance",
           "weight": 1
@@ -221,71 +264,12 @@
           },
           "fields": [
             "fire_key",
-            "trigger_id",
-            "task_id",
             "request_id",
             "session_id",
+            "source_collection",
             "source_doc_id"
           ]
         },
-        {
-          "kind": "documents",
-          "name": "completed_requests",
-          "collection": "AgentRequest",
-          "filter": {
-            "agent_did": {
-              "_eq": "$trial"
-            },
-            "caused_by_trigger_id": {
-              "_ne": null
-            },
-            "lifecycle_state": {
-              "_eq": "completed"
-            }
-          },
-          "fields": [
-            "request_id",
-            "session_id",
-            "caused_by_trigger_id",
-            "caused_by_source_doc_id",
-            "lifecycle_state"
-          ]
-        }
-      ]
-    },
-    {
-      "stage_id": "outcome_readonly",
-      "prompt": "Read the FireOutcome records for the TrainPing automation and report their ids and states; change nothing.",
-      "deadline_secs": 600,
-      "checks": [
-        {
-          "check": "captured_fields_match",
-          "params": {
-            "name": "fire_outcomes",
-            "expect": [
-              {
-                "field": "fire_key",
-                "matches": ".+"
-              },
-              {
-                "field": "request_id",
-                "matches": ".+"
-              },
-              {
-                "field": "session_id",
-                "matches": ".+"
-              },
-              {
-                "field": "terminal_state",
-                "matches": ".+"
-              }
-            ]
-          },
-          "tier": "acceptance",
-          "weight": 1
-        }
-      ],
-      "capture": [
         {
           "kind": "documents",
           "name": "fire_outcomes",
@@ -302,11 +286,63 @@
             "fire_key",
             "request_id",
             "session_id",
-            "terminal_state",
-            "source_doc_id"
+            "source_collection",
+            "source_doc_id",
+            "terminal_state"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "completed_requests",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "caused_by_trigger_id": {
+              "_ne": null
+            },
+            "lifecycle_state": {
+              "_eq": "completed"
+            },
+            "purpose": {
+              "_eq": "normal"
+            }
+          },
+          "fields": [
+            "request_id",
+            "session_id",
+            "lifecycle_state",
+            "content",
+            "caused_by_source_doc_id"
+          ]
+        },
+        {
+          "kind": "documents",
+          "name": "rendered_request",
+          "collection": "AgentRequest",
+          "filter": {
+            "agent_did": {
+              "_eq": "$trial"
+            },
+            "caused_by_trigger_id": {
+              "_ne": null
+            },
+            "content": {
+              "_like": "%train-echo-11%"
+            },
+            "purpose": {
+              "_eq": "normal"
+            }
+          },
+          "fields": [
+            "content",
+            "lifecycle_state",
+            "session_id"
           ]
         }
-      ]
+      ],
+      "settle": true
     }
   ]
 }

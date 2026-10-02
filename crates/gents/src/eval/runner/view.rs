@@ -15,6 +15,7 @@
 //! the node open derives the same view from them through [`run_view`].
 
 use std::collections::BTreeMap;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -112,8 +113,11 @@ fn write_atomically(path: &Path, value: &impl Serialize) -> Result<()> {
         .with_context(|| format!("{} has a directory", path.display()))?;
     let mut staged = tempfile::NamedTempFile::new_in(dir)
         .with_context(|| format!("staging {}", path.display()))?;
-    serde_json::to_writer_pretty(&mut staged, value)
-        .with_context(|| format!("encoding {}", path.display()))?;
+    let encoded =
+        serde_json::to_vec_pretty(value).with_context(|| format!("encoding {}", path.display()))?;
+    staged
+        .write_all(&encoded)
+        .with_context(|| format!("writing {}", path.display()))?;
     staged
         .persist(path)
         .with_context(|| format!("replacing {}", path.display()))?;

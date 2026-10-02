@@ -166,14 +166,26 @@ pub fn ensure_admissible(target: SelfConfigTarget, patch: &SelfConfigPatch) -> R
     for (field, _) in patch {
         if !target.is_writable(field) {
             if target.all_fields().contains(&field.as_str()) {
+                let recovery = if target == SelfConfigTarget::Task && field == "behavior_id" {
+                    "; choose the task owner with options.behavior when creating it, not set.behavior_id"
+                } else {
+                    ""
+                };
                 bail!(
                     "field {field} on {collection} is protected (identity, runtime-owned, \
-                     secret, or apply-managed) and cannot be patched via self-config",
+                     secret, or apply-managed) and cannot be patched via self-config{recovery}",
                     collection = target.collection_name(),
                 );
             }
+            let recovery = if target == SelfConfigTarget::InferenceProfile
+                && SelfConfigTarget::InferenceSampling.is_writable(field)
+            {
+                "; sampling fields belong to InferenceSampling: use profile edit sampling with options.behavior"
+            } else {
+                ""
+            };
             bail!(
-                "unknown field {field} for {collection}; writable fields: {writable}",
+                "unknown field {field} for {collection}; writable fields: {writable}{recovery}",
                 collection = target.collection_name(),
                 writable = target.writable_fields().join(", "),
             );
