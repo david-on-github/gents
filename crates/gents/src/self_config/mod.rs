@@ -576,13 +576,13 @@ fn automation_request(
                 );
             }
             // Packs may publish an event source before installing its schema;
-            // self-config installs schemas first (["help","schema"]), so a
+            // the schema tool installs schemas first, so a
             // collection it cannot see here is a typo that would never fire.
             if target == SelfConfigTarget::EventSource {
                 if let Some(collection) = merged.get("source_collection").and_then(Value::as_str) {
                     anyhow::ensure!(
                         crate::config_client::collection_is_installed(txn, collection).await?,
-                        "event source source_collection {collection:?} is not an installed collection; install its schema first (see [\"help\",\"schema\"])"
+                        "event source source_collection {collection:?} is not an installed collection; install its schema first with the schema tool (argv:[\"help\",\"collection\"])"
                     );
                 }
             }

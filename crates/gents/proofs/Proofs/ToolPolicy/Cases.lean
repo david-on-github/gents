@@ -17,6 +17,7 @@ structure SurfaceView where
   defraQuery : Bool
   selfConfig : Bool
   memory : Bool
+  schemaManagement : Bool
   sessionHistory : Bool
   contextBudget : Bool
   sessionMessages : Bool
@@ -221,6 +222,7 @@ def surface (file : FileCap) (bash : BashPolicy)
   , defraQuery := defraQuery
   , selfConfig := defraQuery
   , memory := ordinary
+  , schemaManagement := ordinary
   , sessionHistory := ordinary
   , contextBudget := ordinary
   , sessionMessages := sessionMessages
@@ -245,6 +247,7 @@ def view (s : Surface) (mcpProbe : String) (writeProbe : String × String) : Sur
   , defraQuery := s.defraQuery
   , selfConfig := s.selfConfig
   , memory := s.memory
+  , schemaManagement := s.schemaManagement
   , sessionHistory := s.sessionHistory
   , contextBudget := s.contextBudget
   , sessionMessages := s.sessionMessages
@@ -378,6 +381,7 @@ def ceilingClampsEachCategory : Surface :=
   { wideOpen with
     memory := false
   , lsp := false
+  , schemaManagement := false
   , sessionHistory := false
   , contextBudget := false
   , sessionMessages := false
@@ -519,6 +523,12 @@ def cases : List Case :=
       behaviorGoalCreate wideOpen wideOpen "svc-a" probeWrite
   , mkCase "goal_create_clamped_by_ceiling"
       behaviorGoalCreate ceilingDeniesGoalCreate wideOpen "svc-a" probeWrite
+  , mkCase "schema_independent_of_config"
+      { secureMinimal with schemaManagement := true } wideOpen wideOpen "svc-a" probeWrite
+  , mkCase "schema_requires_authored_grant"
+      { wideOpen with schemaManagement := false } wideOpen wideOpen "svc-a" probeWrite
+  , mkCase "schema_clamped_by_runtime"
+      wideOpen wideOpen { wideOpen with schemaManagement := false } "svc-a" probeWrite
   , mkCase "other_capabilities_do_not_enable_goals"
       behaviorWithoutGoals wideOpen wideOpen "svc-a" probeWrite
   ]

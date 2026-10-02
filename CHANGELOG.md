@@ -22,6 +22,12 @@ source consistency checks, not a separate runtime compatibility version.
   name resolves from the store first, then the registry. `gents pack list`
   lists the home's store, so a fresh home lists nothing. The `make maintain`,
   `defend`, `grok-port` and `defend-page` targets moved to gents-ai/packs.
+- Schema administration moves from `config schema` to the independent `schema`
+  tool, explicitly granted by `Tools.built_ins.enable_schema_tool`. It exposes
+  application collection creation and patches, version inspection/activation,
+  inline WASM migrations, views, and materialization through DefraDB. Mutations
+  require a preview digest; configuration and document permissions stay separate.
+  The Engineer receives the schema grant on initialization.
 
 - Every persistent store is encrypted at rest (DefraDB's AES-256-GCM value
   encryption): a gents home's data directory and the desktop client's store.

@@ -1151,6 +1151,7 @@ fn tools_for_package(
             enable_goal_creation: Some(false),
             enable_memory: Some(enable_memory),
             enable_session_history_tool: None,
+            enable_schema_tool: None,
             enable_context_budget: Some(true),
         }),
         datastore: Some(DatastoreTools {
@@ -1205,6 +1206,10 @@ fn engineer_tools(
         .built_ins
         .get_or_insert_with(Default::default)
         .enable_session_history_tool = Some(true);
+    tools
+        .built_ins
+        .get_or_insert_with(Default::default)
+        .enable_schema_tool = Some(true);
     let datastore = tools.datastore.get_or_insert_with(Default::default);
     datastore.enable_defra_query = Some(enable_defra_query);
     datastore.datastore_tool_surface_ids = Some(vec![surface_id.clone()]);
@@ -2143,6 +2148,10 @@ mod tests {
             Vec::new(),
         );
         let surface = engineer_tools(&mut tools, "did:key:z-init", true);
+        assert_eq!(
+            tools.built_ins.as_ref().unwrap().enable_schema_tool,
+            Some(true)
+        );
         assert!(tools.validation_violations().is_empty());
         assert_eq!(tools.subagents.as_ref().unwrap().enabled, Some(true));
         assert_eq!(

@@ -438,6 +438,7 @@ pub(crate) mod runtime_status;
 pub(crate) mod runtime_trace;
 pub mod schedule_cron;
 pub mod schema;
+pub mod schema_tool;
 pub mod self_config;
 pub mod session;
 pub mod session_message;

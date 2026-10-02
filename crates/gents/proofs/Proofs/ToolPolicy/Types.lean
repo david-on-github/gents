@@ -57,6 +57,7 @@ structure Surface where
   defraQuery : Bool
   selfConfig : Bool
   memory : Bool
+  schemaManagement : Bool
   sessionHistory : Bool
   contextBudget : Bool
   /-- The agents tool group (`SubagentTools.enabled`): `agent_new` over the

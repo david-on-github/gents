@@ -37,7 +37,14 @@ async fn event_binding(
         event_source_id,
     )
     .await?
-    .context("arrival source is missing")?;
+    .ok_or_else(|| crate::document_config::MissingReference {
+        collection: crate::Collection::Trigger,
+        id: trigger_id.to_owned(),
+        field: "source.event_source_id".into(),
+        target: crate::Collection::EventSource,
+        target_id: event_source_id.clone(),
+        agent_did: owner.to_owned(),
+    })?;
     Ok((trigger, serde_json::from_value(source)?))
 }
 

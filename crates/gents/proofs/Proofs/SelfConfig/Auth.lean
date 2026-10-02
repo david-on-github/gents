@@ -44,8 +44,8 @@ theorem oauth_reference_patch_allowed (old : BackendAuth) :
 /-- Schema publication is additive, separate from document transactions. The
 shared schema owner supplies compatibility and exact-artifact validation;
 document ACP is unchanged by publishing a schema. -/
-def schemaPublicationAllowed (automationGranted artifactMatches compatible : Bool) : Bool :=
-  automationGranted && artifactMatches && compatible
+def schemaPublicationAllowed (schemaGranted artifactMatches compatible : Bool) : Bool :=
+  schemaGranted && artifactMatches && compatible
 
 theorem schema_publication_requires_grant (digest compatible : Bool) :
     schemaPublicationAllowed false digest compatible = false := by

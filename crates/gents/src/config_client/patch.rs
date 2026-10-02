@@ -183,6 +183,8 @@ pub fn ensure_admissible(target: SelfConfigTarget, patch: &SelfConfigPatch) -> R
                 && matches!(field.as_str(), "system_prompt" | "instructions")
             {
                 "; prompts belong to Context.system_prompt: behavior get shows context_id, then context update that ID with set.system_prompt"
+            } else if target == SelfConfigTarget::EventSource && field == "concurrency" {
+                "; concurrency belongs to Trigger: trigger list then trigger get shows source bindings; update the matching Trigger with set.concurrency"
             } else if target == SelfConfigTarget::Trigger && field == "emit_outcome" {
                 "; emit_outcome belongs to Task: trigger get shows task_id, then task update that ID with set.emit_outcome"
             } else if target == SelfConfigTarget::DatastoreToolSurface

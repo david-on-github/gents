@@ -56,6 +56,7 @@ def surfaceViewJson (v : SurfaceView) : String :=
     ++ "\"defra_query\":" ++ boolJson v.defraQuery ++ ","
     ++ "\"self_config\":" ++ boolJson v.selfConfig ++ ","
     ++ "\"memory\":" ++ boolJson v.memory ++ ","
+    ++ "\"schema_management\":" ++ boolJson v.schemaManagement ++ ","
     ++ "\"session_history\":" ++ boolJson v.sessionHistory ++ ","
     ++ "\"context_budget\":" ++ boolJson v.contextBudget ++ ","
     ++ "\"session_messages\":" ++ boolJson v.sessionMessages ++ ","
