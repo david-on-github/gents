@@ -6,6 +6,12 @@
 //! live process holds the run. It is never evidence, never an anchor or digest input and never a
 //! document. Every write replaces the file atomically, so a reader sees one
 //! whole state or the previous one.
+//!
+//! An entry may carry the trial's [`LiveSnapshot`], which the executor
+//! reports while the trial runs, and the case's [`GoalEntry`] list, so a
+//! watcher sees what the trial's home holds without opening it: a running
+//! trial's store is locked by the process hosting it. Both fields are
+//! optional, so a file written by an older runner still reads.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +21,73 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::eval::runner::goal::GoalEntry;
+
 pub const PROGRESS_FILE: &str = "progress.json";
+
+/// What a trial's home held at one moment: its usage, its tool calls and how
+/// many documents of each observed collection it holds. Observational only:
+/// never evidence, never graded, never part of a digest.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiveSnapshot {
+    /// RFC 3339: when the home was read.
+    pub observed_at: String,
+    /// Since the trial's first stage started.
+    pub elapsed_secs: u64,
+    /// Public requests in the trial's home, the stages' own and every one
+    /// they caused.
+    pub requests: u64,
+    /// Inference calls: one per model turn.
+    pub model_turns: u64,
+    /// Summed as the trial's usage is: `None` once one call did not report.
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub tool_calls: u64,
+    /// Tool calls that ended failed or timed out.
+    pub failed_tool_calls: u64,
+    /// By tool name.
+    #[serde(default)]
+    pub tools: BTreeMap<String, ToolTally>,
+    /// The tool call that started last.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tool: Option<LastToolCall>,
+    /// Rows per collection: the configuration collections, every collection
+    /// a capture reads, and every schema registered during the trial.
+    #[serde(default)]
+    pub documents: BTreeMap<String, u64>,
+    /// Rows each documents capture's filter matches now, by capture name.
+    #[serde(default)]
+    pub captures: BTreeMap<String, u64>,
+    /// Collections registered in the home after the pack and fixtures were
+    /// installed: the schemas the subject registered.
+    #[serde(default)]
+    pub schemas: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LastToolCall {
+    pub tool_name: String,
+    /// The tool call's lifecycle state: `running`, `completed`, `failed`, …
+    pub state: Option<String>,
+    /// The start of its result on one line, cut to
+    /// [`LastToolCall::RESULT_CHARS`].
+    pub result: Option<String>,
+}
+
+impl LastToolCall {
+    pub const RESULT_CHARS: usize = 160;
+
+    /// Whether the call ended failed or timed out.
+    pub fn failed(&self) -> bool {
+        matches!(self.state.as_deref(), Some("failed" | "timedOut"))
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolTally {
+    pub calls: u64,
+    pub failed: u64,
+}
 
 /// One slot a process is running now.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +108,14 @@ pub struct InFlight {
     /// loop refreshes it on its marker timer, so an entry that stops
     /// being refreshed belongs to a process that stopped.
     pub written_at: String,
+    /// The latest snapshot the executor reported; absent before the first
+    /// and from an executor that reports none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<LiveSnapshot>,
+    /// What the case expects the home to hold, derived by
+    /// [`crate::eval::runner::goal::case_goal`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub goal: Vec<GoalEntry>,
 }
 
 /// The process running the loop over a run, whether or not a slot is in
@@ -199,6 +279,21 @@ impl ProgressWriter {
         });
     }
 
+    fn live(&self, trial_id: &str, snapshot: LiveSnapshot) {
+        self.update(|progress| {
+            if let Some(slot) = progress.slots.get_mut(trial_id) {
+                slot.live = Some(snapshot);
+                slot.written_at = now_millis();
+            }
+        });
+    }
+
+    /// The latest snapshot reported for a slot still in flight.
+    pub(crate) fn live_of(&self, trial_id: &str) -> Option<LiveSnapshot> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.slots.get(trial_id).and_then(|slot| slot.live.clone())
+    }
+
     fn stage(&self, trial_id: &str, stage_id: Option<&str>) {
         self.update(|progress| {
             if let Some(slot) = progress.slots.get_mut(trial_id) {
@@ -272,6 +367,20 @@ impl StageProgress {
             writer.stage(trial_id, None);
         }
     }
+
+    /// Whether anything reads what this handle reports, so an executor can
+    /// skip observing a home nobody watches.
+    pub fn attached(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    /// Replace the slot's snapshot. The last one reported before the trial
+    /// ends is kept with its evidence record.
+    pub fn live(&self, snapshot: LiveSnapshot) {
+        if let Some((writer, trial_id)) = &self.sink {
+            writer.live(trial_id, snapshot);
+        }
+    }
 }
 
 impl std::fmt::Debug for StageProgress {
@@ -303,6 +412,8 @@ mod tests {
             started_at: "2026-09-22T00:00:00Z".into(),
             pid: 0,
             written_at: String::new(),
+            live: None,
+            goal: Vec::new(),
         }
     }
 
@@ -338,6 +449,44 @@ mod tests {
             .map(|entry| entry.unwrap().file_name())
             .collect();
         assert_eq!(leftovers, vec![std::ffi::OsString::from(PROGRESS_FILE)]);
+    }
+
+    #[test]
+    fn a_reported_snapshot_replaces_the_last_and_an_older_entry_reads_without_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let writer = ProgressWriter::new(dir.path());
+        writer.slot_started("t1", in_flight(None));
+        let stages = StageProgress::for_trial(&writer, "t1");
+        assert!(stages.attached() && !StageProgress::default().attached());
+        for requests in [1, 2] {
+            stages.live(LiveSnapshot {
+                requests,
+                ..LiveSnapshot::default()
+            });
+        }
+        let slot = read_progress(dir.path()).unwrap().slots["t1"].clone();
+        assert_eq!(slot.live.as_ref().map(|live| live.requests), Some(2));
+        assert_eq!(writer.live_of("t1").map(|live| live.requests), Some(2));
+        stages.stage_started("check");
+        assert!(
+            read_progress(dir.path()).unwrap().slots["t1"]
+                .live
+                .is_some(),
+            "a stage boundary keeps the snapshot"
+        );
+        writer.slot_ended("t1");
+        assert_eq!(writer.live_of("t1"), None);
+
+        // What a runner before snapshots wrote.
+        std::fs::write(
+            dir.path().join(PROGRESS_FILE),
+            br#"{"slots":{"t1":{"cell_id":"base","case_id":"a","trial_index":0,"attempt":1,
+                "stage_id":null,"started_at":"2026-09-22T00:00:00Z","pid":1,
+                "written_at":"2026-09-22T00:00:00.000Z"}}}"#,
+        )
+        .unwrap();
+        let old = read_progress(dir.path()).unwrap().slots["t1"].clone();
+        assert_eq!((old.live, old.goal), (None, Vec::new()));
     }
 
     /// `gents eval rm --force` may remove a run directory under a live

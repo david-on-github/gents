@@ -14,8 +14,20 @@ use crate::eval::OutcomeKind;
 /// when the count satisfies the params, `below_min` under `min`, `above_max`
 /// over `max`. Those three are the only outcomes that say anything about the
 /// subject; everything else this check emits (`missing_capture`,
-/// `bad_params`) is about the grader.
+/// `bad_params`) is about the grader. A verdict about the subject also
+/// carries `capture`, `observed` and `expected: {min, max}`, which
+/// [`crate::eval::checks::verdict_detail`] renders.
 pub struct CapturedRowsCount;
+
+/// The capture a check ref's params name and the row range they require, or
+/// `None` when they do not parse or no count can satisfy them.
+pub fn required_rows(params: &Value) -> Option<(String, u64, Option<u64>)> {
+    let params: Params = serde_json::from_value(params.clone()).ok()?;
+    if params.max.is_some_and(|max| max < params.min) {
+        return None;
+    }
+    Some((params.name, params.min, params.max))
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,6 +116,7 @@ impl Check for CapturedRowsCount {
                     "{name} holds {rows} rows, fewer than the {} required",
                     params.min
                 ),
+                &params,
                 rows,
             );
         }
@@ -111,12 +124,17 @@ impl Check for CapturedRowsCount {
             Some(max) if rows > max => failed(
                 "above_max",
                 format!("{name} holds {rows} rows, more than the {max} allowed"),
+                &params,
                 rows,
             ),
             _ => CheckVerdict {
                 kind: OutcomeKind::Passed,
                 score_bp: Some(10_000),
-                raw: raw("in_range", format!("{name} holds {rows} rows"), Some(rows)),
+                raw: observed(
+                    raw("in_range", format!("{name} holds {rows} rows"), Some(rows)),
+                    &params,
+                    rows,
+                ),
                 feedback: None,
             },
         }
@@ -124,13 +142,26 @@ impl Check for CapturedRowsCount {
 }
 
 /// The subject produced the wrong number of rows.
-fn failed(reason_code: &str, detail: String, rows: u64) -> CheckVerdict {
+fn failed(reason_code: &str, detail: String, params: &Params, rows: u64) -> CheckVerdict {
     CheckVerdict {
         kind: OutcomeKind::ModelAcceptance,
         score_bp: Some(0),
         feedback: Some(detail.clone()),
-        raw: raw(reason_code, detail, Some(rows)),
+        raw: observed(raw(reason_code, detail, Some(rows)), params, rows),
     }
+}
+
+/// A verdict about the subject names what it counted and against what.
+fn observed(mut raw: Value, params: &Params, rows: u64) -> Value {
+    if let Some(object) = raw.as_object_mut() {
+        object.insert("capture".into(), json!(params.name));
+        object.insert("observed".into(), json!(rows));
+        object.insert(
+            "expected".into(),
+            json!({ "min": params.min, "max": params.max }),
+        );
+    }
+    raw
 }
 
 /// The check itself could not reach a verdict, which is no evidence about the
@@ -184,6 +215,23 @@ mod tests {
         );
         assert_eq!(verdict.raw["reason_code"], "below_min");
         assert_eq!(verdict.raw["count"], 1);
+        assert_eq!(
+            crate::eval::checks::verdict_detail(&verdict.raw).as_deref(),
+            Some("items observed 1 expected ≥2")
+        );
+    }
+
+    #[test]
+    fn the_required_range_is_read_from_the_params_the_check_reads() {
+        assert_eq!(
+            required_rows(&json!({"name": "items", "min": 2, "max": 5})),
+            Some(("items".to_owned(), 2, Some(5)))
+        );
+        assert_eq!(
+            required_rows(&json!({"name": "items", "min": 3, "max": 1})),
+            None
+        );
+        assert_eq!(required_rows(&json!({"min": 1})), None);
     }
 
     #[test]

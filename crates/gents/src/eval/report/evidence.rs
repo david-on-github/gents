@@ -182,7 +182,7 @@ pub fn concat_paired(parts: &[PairedEvidence]) -> PairedEvidence {
 }
 
 /// Tokens reported by one cell's counted trials, and how many reported none.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CellUsage {
     pub tokens: u64,
     pub trials: u64,

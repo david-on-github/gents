@@ -2,6 +2,7 @@
 
 pub mod executor;
 pub mod home;
+mod live;
 pub mod observe;
 
 pub use executor::{provider_reason_from_failure, EmbeddedExecutor};

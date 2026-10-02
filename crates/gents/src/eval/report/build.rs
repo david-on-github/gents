@@ -9,7 +9,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::document_config::{EvalDefinition, EvalReducer, EvalSplit, EvalTier};
 use crate::eval::report::evidence::{cell_usage, counted_slots, CellUsage, RunRows};
@@ -24,7 +24,7 @@ use crate::eval::{
 /// Bumped when a field's meaning changes; an added field does not bump it.
 pub const REPORT_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvalReport {
     pub report_version: u32,
     pub run: RunSummary,
@@ -38,7 +38,7 @@ pub struct EvalReport {
     pub definition_changed: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunSummary {
     pub run_id: String,
     pub definition: DefinitionRef,
@@ -55,7 +55,7 @@ pub struct RunSummary {
     pub source_dirty: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CellReport {
     pub cell_id: String,
     pub label: String,
@@ -74,7 +74,7 @@ pub struct CellReport {
     pub counts: SlotCounts,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotReport {
     pub case_id: String,
     pub trial_index: u32,
@@ -92,7 +92,7 @@ pub struct SlotReport {
 
 /// One verdict that counts for a slot: of its counted attempt, after regrade
 /// supersession.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotVerdict {
     pub verdict_id: String,
     pub stage_id: String,
@@ -104,6 +104,10 @@ pub struct SlotVerdict {
     pub weight: u32,
     /// `raw.reason_code`, the check's own contract.
     pub reason_code: Option<String>,
+    /// What the check observed against what it expected, by
+    /// [`crate::eval::checks::verdict_detail`].
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// A verdict's `raw.reason_code`, the check's own contract; `None` when the
@@ -127,10 +131,11 @@ fn slot_verdict(record: &VerdictRecord) -> SlotVerdict {
         score_bp: record.score_bp,
         weight: record.weight,
         reason_code: reason_code(record),
+        detail: crate::eval::checks::verdict_detail(&record.raw),
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SlotClass {
     Pass,
@@ -144,7 +149,7 @@ pub enum SlotClass {
 }
 
 /// A slot's counted case-trial score, or `Absent` when no attempt completed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "bp")]
 pub enum SlotScore {
     Absent,
@@ -174,7 +179,7 @@ impl SlotScore {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptSummary {
     pub trial_id: String,
     pub attempt: u32,
@@ -188,7 +193,7 @@ pub struct AttemptSummary {
     pub usage: TrialUsage,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseReport {
     pub case_id: String,
     pub reducer: EvalReducer,
@@ -196,7 +201,7 @@ pub struct CaseReport {
     pub counts: SlotCounts,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotCounts {
     pub pass: u32,
     pub fail: u32,

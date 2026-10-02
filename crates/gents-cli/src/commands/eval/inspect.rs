@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use gents::document_config::{EvalSplit, EvalTier};
+use gents::eval::checks::verdict_detail;
 use gents::eval::report::build::reason_code;
 use gents::eval::report::{
     load_report, load_report_among, load_runs, report_refused, run_header, SlotCounts, SlotReport,
@@ -153,6 +154,8 @@ pub(crate) struct TrialVerdict {
     pub(crate) score_bp: Option<u32>,
     pub(crate) weight: u32,
     pub(crate) reason_code: Option<String>,
+    /// What the check observed against what it expected.
+    pub(crate) detail: Option<String>,
     pub(crate) regrade_of: Option<String>,
 }
 
@@ -160,6 +163,7 @@ impl From<VerdictRecord> for TrialVerdict {
     fn from(verdict: VerdictRecord) -> Self {
         Self {
             reason_code: reason_code(&verdict),
+            detail: verdict_detail(&verdict.raw),
             verdict_id: verdict.verdict_id,
             stage_id: verdict.stage_id,
             check: verdict.check,

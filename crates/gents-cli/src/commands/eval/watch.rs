@@ -3,9 +3,13 @@
 //! without writing; no daemon, and the trial homes are never opened. No interrupt handler is
 //! installed: Ctrl-C ends it.
 //!
-//! The process running the loop may hold the home's embedded node, which
-//! opens exclusively. Then the watch reads `progress.json` alone, tries the
-//! node again at every render, and shows the report whenever it opens.
+//! The process running the loop holds the home's embedded node, which opens
+//! exclusively, so while a live process holds the run the watch reads the
+//! files it leaves beside the run: `progress.json` for the slots in flight
+//! with their live snapshots, and `report.json` for the report and the
+//! finished slots (`gents::eval::runner::view`). The node is opened only
+//! when no live process holds the run, or when a runner too old to write
+//! `report.json` does; then it is tried again at every render.
 
 use std::future::Future;
 use std::io::Write;
@@ -14,10 +18,12 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use gents::eval::report::{load_report, report_refused};
 use gents::eval::runner::{
-    read_progress, run_dir, run_finished, running_elsewhere, slots_owed, STALE_WINDOW,
+    read_progress, read_run_view, run_dir, run_finished, run_view, running_elsewhere, slots_owed,
+    RunView, STALE_WINDOW,
 };
 use gents::eval::{load_run, load_trials};
 
+use super::frame::{self, Heading, Screen};
 use super::{render, EvalContext};
 use crate::cli::EvalWatchArgs;
 
@@ -74,6 +80,7 @@ where
 pub(crate) async fn watch<'a, F, Fut>(
     runs_dir: &Path,
     args: &EvalWatchArgs,
+    screen: Option<Screen>,
     mut open: F,
     out: &mut dyn Write,
 ) -> Result<()>
@@ -82,9 +89,25 @@ where
     Fut: Future<Output = Result<Documents<'a>>>,
 {
     let dir = run_dir(runs_dir, &args.run_id)?;
+    let mut said_unavailable = false;
+    let mut said_held = false;
     loop {
-        let documents = open().await?;
-        if let Documents::Locked(reason) = &documents {
+        // While a live process holds the run, the view it leaves beside the
+        // run is what the node would say, and the node is left alone.
+        let from_runner = running_elsewhere(&dir)
+            .then(|| read_run_view(&dir))
+            .flatten();
+        let documents = match from_runner {
+            Some(_) => {
+                if !said_held {
+                    tracing::debug!(run_id = %args.run_id, "node held, reading runner files");
+                    said_held = true;
+                }
+                None
+            }
+            None => Some(open().await?),
+        };
+        if let Some(Documents::Locked(reason)) = &documents {
             anyhow::ensure!(
                 dir.is_dir(),
                 "run {} has no directory {} and the home's documents cannot be read: {reason}",
@@ -94,27 +117,76 @@ where
         }
         let progress = read_progress(&dir);
         let now = chrono::Utc::now();
-        writeln!(
-            out,
-            "--- {}",
-            now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        )?;
-        let unavailable = match &documents {
-            Documents::Locked(reason) => Some(reason.clone()),
-            Documents::Open(ctx) => report(ctx, runs_dir, &args.run_id, out).await?,
-            Documents::Reopened(ctx) => report(ctx, runs_dir, &args.run_id, out).await?,
+        let (view, unavailable) = match (&from_runner, &documents) {
+            (Some(view), _) => (Some(view.clone()), None),
+            (None, Some(Documents::Open(ctx))) => view(ctx, runs_dir, &args.run_id, &dir).await?,
+            (None, Some(Documents::Reopened(ctx))) => {
+                view(ctx, runs_dir, &args.run_id, &dir).await?
+            }
+            (None, Some(Documents::Locked(reason))) => (None, Some(reason.clone())),
+            (None, None) => (None, None),
         };
-        if let Some(reason) = unavailable {
+        if let Some(screen) = screen {
+            let heading = Heading {
+                run_id: args.run_id.clone(),
+                definition: frozen_definition(&dir),
+                note: unavailable
+                    .as_ref()
+                    .map(|_| "report unavailable while the runner holds the home".to_owned()),
+            };
+            let lines = frame::frame(&heading, view.as_ref(), progress.as_ref(), now, screen);
+            frame::draw(&lines, out)?;
+        } else if args.json {
+            let frame = serde_json::json!({
+                "at": now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                "source": if from_runner.is_some() { "runner" } else if view.is_some() { "node" } else { "progress" },
+                "report_unavailable": unavailable,
+                "progress": progress,
+                "view": view,
+            });
+            writeln!(out, "{frame}")?;
+        } else {
             writeln!(
                 out,
-                "report unavailable: {reason}; showing in-flight slots only"
+                "--- {}",
+                now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
             )?;
+            if let Some(runner) = &from_runner {
+                writeln!(out, "live from runner pid {}", runner.pid)?;
+            }
+            if let Some(view) = &view {
+                render::report_table(&view.report, out)?;
+            }
+            if let Some(reason) = &unavailable {
+                // The reason is said once: every later frame would repeat it.
+                if said_unavailable {
+                    writeln!(out, "report unavailable; showing in-flight slots only")?;
+                } else {
+                    writeln!(
+                        out,
+                        "report unavailable: {reason}; showing in-flight slots only"
+                    )?;
+                    said_unavailable = true;
+                }
+            }
+            render::in_flight(progress.as_ref(), now, out)?;
+            if let Some(view) = &view {
+                render::finished(view, FINISHED_SHOWN, out)?;
+            }
         }
-        render::in_flight(progress.as_ref(), now, out)?;
         out.flush()?;
         if args.once {
             return Ok(());
         }
+        let documents = match documents {
+            Some(documents) => documents,
+            None if running_elsewhere(&dir) => {
+                tokio::time::sleep(args.interval).await;
+                continue;
+            }
+            // The runner let go since this frame: its ending needs the node.
+            None => open().await?,
+        };
         if !running_elsewhere(&dir) {
             // The holder can lapse for a moment, as when one call over the
             // run hands it to the next: with the documents open, look once
@@ -161,35 +233,58 @@ where
                     anyhow::bail!("stopped: report unavailable: {reason}")
                 }
             };
-            return ending(ctx, &args.run_id, &dir, out).await;
+            return ending(ctx, &args.run_id, &dir, args.json, out).await;
         }
         drop(documents);
         tokio::time::sleep(args.interval).await;
     }
 }
 
-/// Render the run's report, or say why it cannot be built: a refusal is
-/// shown, not fatal, since the in-flight slots are still worth watching.
-async fn report(
+/// The screen a terminal watch draws on.
+pub(crate) fn frame_screen() -> Screen {
+    Screen::of_stdout()
+}
+
+/// The definition id and version the run directory froze, read for its
+/// heading only: the report verifies it, a frame does not need to.
+fn frozen_definition(dir: &Path) -> Option<(String, i64)> {
+    let bytes = std::fs::read(dir.join(gents::eval::runner::DEFINITION_FILE)).ok()?;
+    let definition: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some((
+        definition.get("definition_id")?.as_str()?.to_owned(),
+        definition.get("comparability_version")?.as_i64()?,
+    ))
+}
+
+/// How many finished slots a frame shows, latest first.
+const FINISHED_SHOWN: usize = 10;
+
+/// The run's view from the documents, or why its report cannot be built: a
+/// refusal is shown, not fatal, since the in-flight slots are still worth
+/// watching.
+async fn view(
     ctx: &EvalContext,
     runs_dir: &Path,
     run_id: &str,
-    out: &mut dyn Write,
-) -> Result<Option<String>> {
+    dir: &Path,
+) -> Result<(Option<RunView>, Option<String>)> {
     match load_report(&ctx.access, &ctx.owner, runs_dir, run_id).await {
-        Ok(report) => {
-            render::report_table(&report, out)?;
-            Ok(None)
-        }
+        Ok(report) => Ok((Some(run_view(report, dir)), None)),
         Err(error) => match report_refused(&error) {
-            Some(refusal) => Ok(Some(refusal.to_string())),
+            Some(refusal) => Ok((None, Some(refusal.to_string()))),
             None => Err(error),
         },
     }
 }
 
 /// `finished`, or the error `stopped: N slots owed (…)`.
-async fn ending(ctx: &EvalContext, run_id: &str, dir: &Path, out: &mut dyn Write) -> Result<()> {
+async fn ending(
+    ctx: &EvalContext,
+    run_id: &str,
+    dir: &Path,
+    json: bool,
+    out: &mut dyn Write,
+) -> Result<()> {
     let record = load_run(&ctx.access, &ctx.owner, run_id)
         .await?
         .with_context(|| format!("no eval run {run_id:?} for {}", ctx.owner))?;
@@ -199,7 +294,9 @@ async fn ending(ctx: &EvalContext, run_id: &str, dir: &Path, out: &mut dyn Write
         "stopped: {} slots owed (gents eval resume {run_id})",
         slots_owed(&record, &trials)
     );
-    writeln!(out, "finished")?;
+    if !json {
+        writeln!(out, "finished")?;
+    }
     Ok(())
 }
 
@@ -213,7 +310,7 @@ mod tests {
     use gents::eval::runner::{Holder, InFlight, Progress, PROGRESS_FILE};
     use tokio_util::sync::CancellationToken;
 
-    use super::super::testing::{eval, eval_command, executor, row, Fixture};
+    use super::super::testing::{eval, eval_command, executor, row, Fixture, VALIDATION_CASES};
     use super::{reopen, store_locked, watch, Documents};
     use crate::cli::EvalWatchArgs;
 
@@ -234,7 +331,19 @@ mod tests {
             started_at: now_millis(5),
             pid,
             written_at,
+            live: None,
+            goal: Vec::new(),
         }
+    }
+
+    fn read_progress_file(run_dir: &std::path::Path) -> Option<Progress> {
+        gents::eval::runner::read_progress(run_dir)
+    }
+
+    /// A run a runner too old to write `report.json` left: the watch has
+    /// only the node to build the report from.
+    fn without_report_file(run_dir: &std::path::Path) {
+        std::fs::remove_file(run_dir.join(gents::eval::runner::REPORT_FILE)).unwrap();
     }
 
     /// What a live loop in this process would have written just now: it
@@ -356,7 +465,7 @@ mod tests {
             .unwrap_or_else(|| panic!("{live}"));
         assert!(stale.contains("(trial-2) stale: pid 4242 "), "{stale}");
         assert!(
-            !live.contains("finished") && !live.contains("stopped"),
+            !live.lines().any(|line| line == "finished") && !live.contains("stopped"),
             "--once renders and returns: {live}"
         );
 
@@ -366,6 +475,7 @@ mod tests {
         watch(
             &fixture.ctx.runs_dir(),
             &watch_args(&["watch", "r1", "--interval", "250ms"]),
+            None,
             || async { Ok(Documents::Open(&fixture.ctx)) },
             &mut host,
         )
@@ -380,6 +490,282 @@ mod tests {
             absent.contains("no progress file: showing finished slots only"),
             "{absent}"
         );
+    }
+
+    /// A live runner holds the home's node: the watch never opens it, and
+    /// renders the whole frame from the files the runner leaves, with each
+    /// slot's live snapshot against its goal and each finished slot's final
+    /// snapshot and verdict detail.
+    #[tokio::test]
+    async fn a_held_home_still_renders_the_full_frame_from_the_runners_files() {
+        use gents::eval::runner::{
+            read_evidence_record, read_run_view, run_view, GoalEntry, LiveSnapshot, ToolTally,
+            EVIDENCE_FILE, REPORT_FILE,
+        };
+
+        let fixture = Fixture::new().await;
+        fixture
+            .scripted_run(
+                "r1",
+                &executor(&VALIDATION_CASES[..1]),
+                CancellationToken::new(),
+            )
+            .await;
+        let run_dir = fixture.ctx.runs_dir().join("r1");
+        let goal = vec![
+            GoalEntry {
+                collection: "AgentBehavior".into(),
+                capture: None,
+                min: 9,
+                max: None,
+            },
+            GoalEntry {
+                collection: "Task".into(),
+                capture: Some("tasks".into()),
+                min: 20,
+                max: Some(22),
+            },
+            GoalEntry {
+                collection: "SubagentTarget".into(),
+                capture: None,
+                min: 2,
+                max: None,
+            },
+            GoalEntry {
+                collection: gents::eval::runner::SCHEMAS_GOAL.into(),
+                capture: None,
+                min: 9,
+                max: None,
+            },
+        ];
+        let live = LiveSnapshot {
+            observed_at: now_millis(1),
+            elapsed_secs: 400,
+            requests: 3,
+            model_turns: 57,
+            input_tokens: Some(812_345),
+            output_tokens: Some(41_234),
+            tool_calls: 149,
+            failed_tool_calls: 6,
+            tools: [
+                ("config", 98, 4),
+                ("read_file", 20, 0),
+                ("file_mailbox_item", 12, 2),
+                ("write_file", 8, 0),
+                ("shell", 6, 0),
+                ("agent_message", 5, 0),
+            ]
+            .into_iter()
+            .map(|(name, calls, failed)| (name.to_owned(), ToolTally { calls, failed }))
+            .collect(),
+            last_tool: Some(gents::eval::runner::LastToolCall {
+                tool_name: "config".into(),
+                state: Some("failed".into()),
+                result: Some("task create refused: trigger review-shard names no Task".into()),
+            }),
+            documents: [
+                ("AgentBehavior", 7),
+                ("AgentContext", 7),
+                ("Tools", 7),
+                ("Task", 12),
+                ("Trigger", 9),
+                ("EventSource", 9),
+                ("SubagentTarget", 2),
+            ]
+            .into_iter()
+            .map(|(collection, rows)| (collection.to_owned(), rows))
+            .collect(),
+            captures: BTreeMap::from([("tasks".to_owned(), 12)]),
+            schemas: ["RunStart", "ShardResult", "GateResult"]
+                .map(str::to_owned)
+                .to_vec(),
+        };
+
+        // A finished slot ended on this snapshot; the runner refreshed its
+        // view after it.
+        let report = gents::eval::report::load_report(
+            &fixture.ctx.access,
+            &fixture.ctx.owner,
+            &fixture.ctx.runs_dir(),
+            "r1",
+        )
+        .await
+        .unwrap();
+        let finished = report.cells[0].slots[0].latest.clone().unwrap().trial_id;
+        let trial_dir = run_dir.join("trials").join(&finished);
+        let mut record = read_evidence_record(&trial_dir).expect("an evidence record");
+        record.live = Some(live.clone());
+        record.goal = goal.clone();
+        // The latest to finish, so it heads the finished list.
+        record.ended_at = Some("2099-01-01T00:00:00Z".into());
+        std::fs::write(
+            trial_dir.join(EVIDENCE_FILE),
+            serde_json::to_vec(&record).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join(REPORT_FILE),
+            serde_json::to_vec(&run_view(report, &run_dir)).unwrap(),
+        )
+        .unwrap();
+        let runner = read_run_view(&run_dir).expect("the view reads back");
+
+        let mut progress = hosted();
+        let slot = progress.slots.get_mut("trial-1").unwrap();
+        slot.live = Some(live);
+        slot.goal = goal;
+        write_progress(&run_dir, &progress);
+
+        let mut out = Vec::new();
+        watch(
+            &fixture.ctx.runs_dir(),
+            &watch_args(&["watch", "r1", "--once"]),
+            None,
+            || async { panic!("a held home's node is never opened") },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let frame = String::from_utf8(out).unwrap();
+        println!("{frame}");
+        let lines: Vec<&str> = frame.lines().collect();
+        assert!(
+            lines.contains(&format!("live from runner pid {}", runner.pid).as_str()),
+            "{frame}"
+        );
+        assert_eq!(row(&frame, "baseline", 10)[1], "10", "the summary: {frame}");
+        assert!(!frame.contains("report unavailable"), "{frame}");
+        for said in [
+            "in flight: 1",
+            "    6m40s tokens 812.3k/41.2k requests 3 turns 57 tools 143 ok 6 failed",
+            "    top tools config 98 (4 failed)  read_file 20  file_mailbox_item 12 (2 failed)  write_file 8  shell 6  +1 more",
+            "    goal AgentBehavior 7/9  Task 12/20..22  SubagentTarget 2/2 ✓  schemas 3/9",
+            "    docs AgentContext 7  EventSource 9  Tools 7  Trigger 9",
+        ] {
+            assert!(lines.contains(&said), "{said:?} in\n{frame}");
+        }
+        assert!(lines.contains(&"finished: 24 (latest 10 shown)"), "{frame}");
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("    check/captured_rows_count ")
+                    && line.contains("findings observed ")),
+            "verdict detail: {frame}"
+        );
+        assert_eq!(
+            frame.matches("    goal ").count(),
+            2,
+            "in flight and finished: {frame}"
+        );
+        let held_at = lines
+            .iter()
+            .position(|line| line.starts_with("held by pid "))
+            .unwrap();
+        assert!(
+            lines[held_at..]
+                .iter()
+                .all(|line| line.chars().count() <= 120),
+            "the live sections fit 120 columns: {frame}"
+        );
+
+        // On a terminal the same files make one compact frame, redrawn in
+        // place: at most 40 rows of 120 columns, no color under NO_COLOR.
+        let screen = super::frame::Screen {
+            width: 120,
+            height: 40,
+            color: false,
+        };
+        let heading = super::frame::Heading {
+            run_id: "r1".into(),
+            ..Default::default()
+        };
+        let lines = super::frame::frame(
+            &heading,
+            Some(&runner),
+            read_progress_file(&run_dir).as_ref(),
+            chrono::Utc::now(),
+            screen,
+        );
+        println!("{}", lines.join("\n"));
+        assert!(lines.len() <= 40, "{lines:#?}");
+        assert!(
+            lines.iter().all(|line| line.chars().count() <= 120),
+            "{lines:#?}"
+        );
+        assert!(
+            lines[0].starts_with("r1  cli-def v1  elapsed "),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].ends_with(&format!("runner pid {}", std::process::id())));
+        assert!(
+            lines[1].contains(" 24/24 trials done  1 running  0 queued"),
+            "{}",
+            lines[1]
+        );
+        let flight = lines
+            .iter()
+            .find(|line| line.starts_with("  baseline   val-a"))
+            .unwrap_or_else(|| panic!("{lines:#?}"));
+        assert!(
+            flight.contains("6m40s")
+                && flight.contains("812.3k/41.2k")
+                && flight.contains("143/6")
+                && flight.ends_with("beh 7/9 task 12/20..22 sub 2/2 schema 3/9"),
+            "{flight}"
+        );
+        assert!(
+            lines.contains(
+                &"    └ config err: task create refused: trigger review-shard names no Task"
+                    .to_owned()
+            ),
+            "{lines:#?}"
+        );
+        assert!(
+            lines.contains(&"finished (latest 4 of 24)".to_owned()),
+            "{lines:#?}"
+        );
+        let latest = lines
+            .iter()
+            .position(|line| line.contains(" FAIL "))
+            .unwrap_or_else(|| panic!("{lines:#?}"));
+        assert!(lines[latest].ends_with("1 failing"), "{}", lines[latest]);
+        assert_eq!(
+            lines[latest + 1],
+            "    └ captured_rows_count findings observed 0 expected ≥1"
+        );
+        let colored = super::frame::frame(
+            &heading,
+            Some(&runner),
+            read_progress_file(&run_dir).as_ref(),
+            chrono::Utc::now(),
+            super::frame::Screen {
+                color: true,
+                ..screen
+            },
+        );
+        assert!(colored
+            .iter()
+            .any(|line| line.contains("\x1b[31mFAIL\x1b[0m")));
+
+        // `--json` is one object per render with the same view.
+        let mut out = Vec::new();
+        watch(
+            &fixture.ctx.runs_dir(),
+            &watch_args(&["watch", "r1", "--once", "--json"]),
+            None,
+            || async { panic!("a held home's node is never opened") },
+            &mut out,
+        )
+        .await
+        .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(json["source"], "runner");
+        assert_eq!(
+            json["progress"]["slots"]["trial-1"]["live"]["model_turns"],
+            57
+        );
+        assert_eq!(json["view"]["trials"][&finished]["live"]["requests"], 3);
     }
 
     /// A run no live process holds ends the watch, whether or not it owes
@@ -397,6 +783,7 @@ mod tests {
         let error = watch(
             &fixture.ctx.runs_dir(),
             &watch_args(&["watch", "r-stopped", "--interval", "250ms"]),
+            None,
             || async { Ok(Documents::Open(&fixture.ctx)) },
             &mut out,
         )
@@ -408,7 +795,7 @@ mod tests {
         );
         let stopped = String::from_utf8(out).unwrap();
         assert_eq!(stopped.matches("--- ").count(), 1, "{stopped}");
-        assert!(!stopped.contains("finished"), "{stopped}");
+        assert!(!stopped.lines().any(|line| line == "finished"), "{stopped}");
     }
 
     #[test]
@@ -440,6 +827,7 @@ mod tests {
             .scripted_run("r1", &executor(&[]), CancellationToken::new())
             .await;
         let run_dir = fixture.ctx.runs_dir().join("r1");
+        without_report_file(&run_dir);
         let args = watch_args(&["watch", "r1", "--interval", "250ms"]);
 
         // Locked for both renders; open at the ending.
@@ -448,6 +836,7 @@ mod tests {
         watch(
             &fixture.ctx.runs_dir(),
             &args,
+            None,
             || {
                 opens.set(opens.get() + 1);
                 let locked = opens.get() <= 2;
@@ -471,7 +860,14 @@ mod tests {
                     "report unavailable: {LOCKED}; showing in-flight slots only"
                 ))
                 .count(),
-            2,
+            1,
+            "the reason is said once: {degraded}"
+        );
+        assert_eq!(
+            degraded
+                .matches("report unavailable; showing in-flight slots only")
+                .count(),
+            1,
             "{degraded}"
         );
         assert!(!degraded.contains("exposure"), "no report: {degraded}");
@@ -486,6 +882,7 @@ mod tests {
         let error = watch(
             &fixture.ctx.runs_dir(),
             &args,
+            None,
             || {
                 opens.set(opens.get() + 1);
                 async { Ok(Documents::Locked(LOCKED.to_owned())) }
@@ -504,6 +901,7 @@ mod tests {
         let error = watch(
             &fixture.ctx.runs_dir(),
             &watch_args(&["watch", "absent", "--once"]),
+            None,
             || async { Ok(Documents::Locked(LOCKED.to_owned())) },
             &mut Vec::new(),
         )
@@ -527,6 +925,7 @@ mod tests {
             .scripted_run("r1", &executor(&[]), CancellationToken::new())
             .await;
         let run_dir = fixture.ctx.runs_dir().join("r1");
+        without_report_file(&run_dir);
         let args = watch_args(&["watch", "r1", "--interval", "250ms"]);
 
         // One render; the holder is gone after it; three more tries find
@@ -536,6 +935,7 @@ mod tests {
         watch(
             &fixture.ctx.runs_dir(),
             &args,
+            None,
             || {
                 opens.set(opens.get() + 1);
                 let locked = opens.get() <= 4;
@@ -565,6 +965,7 @@ mod tests {
         watch(
             &fixture.ctx.runs_dir(),
             &args,
+            None,
             || {
                 opens.set(opens.get() + 1);
                 match opens.get() {
@@ -637,6 +1038,7 @@ mod tests {
         watch(
             &fixture.ctx.runs_dir(),
             &watch_args(&["watch", "r1", "--interval", "1s"]),
+            None,
             || async { Ok(Documents::Open(&fixture.ctx)) },
             &mut host,
         )
@@ -669,6 +1071,7 @@ mod tests {
             .await;
         let run_dir = fixture.ctx.runs_dir().join("r1");
         std::fs::write(run_dir.join("definition.json"), "not a definition").unwrap();
+        without_report_file(&run_dir);
         write_progress(&run_dir, &hosted());
         let degraded = eval(&fixture, &["watch", "r1", "--once"]).await.unwrap();
         let line = degraded
