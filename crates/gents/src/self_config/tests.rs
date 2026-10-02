@@ -2731,7 +2731,13 @@ async fn config_errors_name_the_next_call() {
     crate::test_support::install_test_behavior(&node, &owner, &format!("{owner}:builder")).await;
     let mut grants = config(&["persona", "tools"]);
     grants.preview = true;
-    let tools = build_self_config_tools(node.clone(), owner.clone(), Some(identity), &grants);
+    let tools = build_self_config_tools(
+        node.clone(),
+        owner.clone(),
+        Some(identity),
+        &grants,
+        test_plugins(),
+    );
     let tool = tools
         .iter()
         .find(|tool| tool.name() == CONFIG_TOOL_NAME)

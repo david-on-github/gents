@@ -2699,6 +2699,7 @@ mod tests {
             deadline_secs: 600,
             settle: false,
             continuation: None,
+            review_previous: false,
             captures: Vec::new(),
         };
         let runtime = exited_runtime();
@@ -2851,6 +2852,7 @@ mod tests {
             deadline_secs: 600,
             settle: false,
             continuation: None,
+            review_previous: false,
             captures: Vec::new(),
         };
         // Completes the request once it is written, pauses the clock, exits.
